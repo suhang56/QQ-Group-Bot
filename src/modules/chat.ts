@@ -15,6 +15,7 @@ import type { VisionService } from './vision.js';
 export interface IChatModule {
   generateReply(groupId: string, triggerMessage: GroupMessage, recentMessages: GroupMessage[]): Promise<string | null>;
   recordOutgoingMessage(groupId: string, msgId: number): void;
+  markReplyToUser(groupId: string, userId: string): void;
   invalidateLore(groupId: string): void;
   tickStickerRefresh(groupId: string): void;
   getMoodTracker(): MoodTracker;
@@ -60,6 +61,8 @@ interface ChatOptions {
   deflectCacheRefreshMinThreshold?: number;
   deflectCacheEnabled?: boolean;
   visionService?: VisionService;
+  chatContinuityWindowMs?: number;
+  chatContinuityBoost?: number;
 }
 
 interface ScoreFactors {
@@ -73,6 +76,7 @@ interface ScoreFactors {
   burst: number;
   replyToOther: number;
   implicitBotRef: number;
+  continuity: number;
 }
 
 // Signal A: bot alias keywords — always indicate a reference to the bot
@@ -322,6 +326,10 @@ export class ChatModule implements IChatModule {
   private readonly deflectRefilling = new Set<DeflectCategory>();
   private readonly deflectCacheEnabled: boolean;
   private readonly visionService: VisionService | null;
+  private readonly chatContinuityWindowMs: number;
+  private readonly chatContinuityBoost: number;
+  // groupId:userId → timestamp of bot's last reply to this user
+  private readonly lastReplyToUser = new Map<string, number>();
 
   private readonly loreDirPath: string;
   private readonly loreSizeCapBytes: number;
@@ -364,6 +372,8 @@ export class ChatModule implements IChatModule {
     this.deflectCacheRefreshMinThreshold = options.deflectCacheRefreshMinThreshold ?? 3;
     this.deflectCacheEnabled = options.deflectCacheEnabled ?? false;
     this.visionService = options.visionService ?? null;
+    this.chatContinuityWindowMs = options.chatContinuityWindowMs ?? 90_000;
+    this.chatContinuityBoost = options.chatContinuityBoost ?? 0.6;
 
     if (this.moodProactiveEnabled) {
       this.moodProactiveTimer = setInterval(
@@ -415,6 +425,17 @@ export class ChatModule implements IChatModule {
         ids.delete(id);
         if (++removed >= toRemove) break;
       }
+    }
+  }
+
+  /** Record that the bot just replied to a specific user; enables continuity boost within the window. */
+  markReplyToUser(groupId: string, userId: string): void {
+    const key = `${groupId}:${userId}`;
+    this.lastReplyToUser.set(key, Date.now());
+    // Cap map at 500 entries: evict oldest
+    if (this.lastReplyToUser.size > 500) {
+      const oldest = this.lastReplyToUser.keys().next().value;
+      if (oldest !== undefined) this.lastReplyToUser.delete(oldest);
     }
   }
 
@@ -627,6 +648,7 @@ export class ChatModule implements IChatModule {
       burst: 0,
       replyToOther: 0,
       implicitBotRef: 0,
+      continuity: 0,
     };
 
     // +1.0 @-mention of bot
@@ -696,6 +718,14 @@ export class ChatModule implements IChatModule {
     if (this._isImplicitBotRef(content, nowMs, lastProactiveMs)) {
       factors.implicitBotRef = 0.8;
       this.logger.debug({ groupId, content }, 'implicit bot reference detected');
+    }
+
+    // +chatContinuityBoost if bot replied to this user within continuityWindowMs
+    const lastReply = this.lastReplyToUser.get(`${groupId}:${msg.userId}`) ?? 0;
+    const replyAgeMs = nowMs - lastReply;
+    if (lastReply > 0 && replyAgeMs <= this.chatContinuityWindowMs) {
+      factors.continuity = this.chatContinuityBoost;
+      this.logger.debug({ groupId, userId: msg.userId, ageMs: replyAgeMs }, `continuity +${this.chatContinuityBoost}`);
     }
 
     const score = Object.values(factors).reduce((s, f) => s + f, 0);

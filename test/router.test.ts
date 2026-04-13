@@ -553,6 +553,7 @@ describe('Router — multi-line chat reply dispatch', () => {
     router.setChat({
       generateReply: vi.fn().mockResolvedValue('一句话'),
       recordOutgoingMessage: vi.fn(),
+      markReplyToUser: vi.fn(),
       invalidateLore: vi.fn(),
       tickStickerRefresh: vi.fn(),
     });
@@ -566,6 +567,7 @@ describe('Router — multi-line chat reply dispatch', () => {
     router.setChat({
       generateReply: vi.fn().mockResolvedValue('第一句\n第二句'),
       recordOutgoingMessage: vi.fn(),
+      markReplyToUser: vi.fn(),
       invalidateLore: vi.fn(),
       tickStickerRefresh: vi.fn(),
     });
@@ -580,6 +582,7 @@ describe('Router — multi-line chat reply dispatch', () => {
     router.setChat({
       generateReply: vi.fn().mockResolvedValue('a\nb\nc\nd'),
       recordOutgoingMessage: vi.fn(),
+      markReplyToUser: vi.fn(),
       invalidateLore: vi.fn(),
       tickStickerRefresh: vi.fn(),
     });
@@ -589,7 +592,7 @@ describe('Router — multi-line chat reply dispatch', () => {
 
   it('null chat reply → adapter.send not called', async () => {
     const router = new Router(db, adapter, new RateLimiter());
-    router.setChat({ generateReply: vi.fn().mockResolvedValue(null), recordOutgoingMessage: vi.fn(), invalidateLore: vi.fn(), tickStickerRefresh: vi.fn() });
+    router.setChat({ generateReply: vi.fn().mockResolvedValue(null), recordOutgoingMessage: vi.fn(), markReplyToUser: vi.fn(), invalidateLore: vi.fn(), tickStickerRefresh: vi.fn() });
     await router.dispatch(makeMsg({ content: 'hello', rawContent: 'hello' }));
     expect(adapter.send).not.toHaveBeenCalled();
   });
@@ -824,6 +827,7 @@ describe('Router — @-mention queue with quote-reply', () => {
     return {
       generateReply: vi.fn().mockResolvedValue(reply),
       recordOutgoingMessage: vi.fn(),
+      markReplyToUser: vi.fn(),
       invalidateLore: vi.fn(),
       tickStickerRefresh: vi.fn(),
     };
@@ -872,6 +876,7 @@ describe('Router — @-mention queue with quote-reply', () => {
         () => new Promise(r => setTimeout(() => r('ok'), 100))
       ),
       recordOutgoingMessage: vi.fn(),
+      markReplyToUser: vi.fn(),
       invalidateLore: vi.fn(),
       tickStickerRefresh: vi.fn(),
     };

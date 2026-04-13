@@ -264,6 +264,7 @@ export class Router implements IRouter {
             await this._sendReply(msg.groupId, result.text, undefined, {
               module: 'mimic',
               triggerMsgId: msg.messageId,
+              triggerUserId: msg.userId,
               triggerUserNickname: msg.nickname,
               triggerContent: msg.content,
             });
@@ -285,6 +286,7 @@ export class Router implements IRouter {
             await this._sendReply(msg.groupId, reply, undefined, {
               module: 'chat',
               triggerMsgId: msg.messageId,
+              triggerUserId: msg.userId,
               triggerUserNickname: msg.nickname,
               triggerContent: msg.content,
             });
@@ -299,12 +301,12 @@ export class Router implements IRouter {
 
   /** Send a reply as one or more messages (split on newlines), with typing delay between lines.
    *  replyToMsgId is only prepended to the FIRST send (quote-reply), continuation lines go plain.
-   *  logCtx, when provided, logs the reply to bot_replies for the rating portal. */
+   *  logCtx, when provided, logs the reply to bot_replies and marks continuity for the trigger user. */
   private async _sendReply(
     groupId: string,
     text: string,
     replyToMsgId?: number,
-    logCtx?: { module: string; triggerMsgId?: string; triggerUserNickname?: string; triggerContent: string },
+    logCtx?: { module: string; triggerMsgId?: string; triggerUserId?: string; triggerUserNickname?: string; triggerContent: string },
   ): Promise<void> {
     const lines = splitReply(text);
     if (lines.length === 0) return;
@@ -321,6 +323,9 @@ export class Router implements IRouter {
       }
     }
     if (logCtx) {
+      if (logCtx.triggerUserId && this.chatModule) {
+        this.chatModule.markReplyToUser(groupId, logCtx.triggerUserId);
+      }
       try {
         this.db.botReplies.insert({
           groupId,
@@ -387,6 +392,7 @@ export class Router implements IRouter {
           await this._sendReply(groupId, reply, item.sourceMsgId, {
             module: 'chat',
             triggerMsgId: item.msg.messageId,
+            triggerUserId: item.msg.userId,
             triggerUserNickname: item.msg.nickname,
             triggerContent: item.msg.content,
           });

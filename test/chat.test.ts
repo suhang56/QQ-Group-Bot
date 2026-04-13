@@ -1417,6 +1417,86 @@ describe('ChatModule — curse escalation for repeat teasers', () => {
   });
 });
 
+// ── Conversational continuity ─────────────────────────────────────────────────
+
+describe('ChatModule — conversational continuity boost', () => {
+  let db: Database;
+  let claude: IClaudeClient;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    claude = makeMockClaude();
+  });
+
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  function makeContinuityChat(overrides: Record<string, unknown> = {}): ChatModule {
+    return new ChatModule(claude, db, {
+      botUserId: BOT_ID,
+      debounceMs: 0,
+      chatMinScore: 0.5,
+      chatSilenceBonusSec: 300,
+      chatBurstWindowMs: 10_000,
+      chatBurstCount: 5,
+      chatContinuityWindowMs: 90_000,
+      chatContinuityBoost: 0.6,
+      ...overrides,
+    });
+  }
+
+  // 1. Bot replies to user, user sends follow-up within window → continuity boost → bot replies
+  it('follow-up within continuity window gets +0.6 boost and crosses threshold', async () => {
+    const chat = makeContinuityChat();
+    // Mark that bot replied to u1 in g1 just now
+    chat.markReplyToUser('g1', 'u1');
+    // u1 sends a short plain message (no question, no keywords, no @)
+    // Without continuity: score=0 (silence bonus requires 300s gap, not set here)
+    // With continuity: 0.6 >= 0.5 → responds
+    const msg = makeMsg({ userId: 'u1', content: '在干什么', rawContent: '在干什么' });
+    const result = await chat.generateReply('g1', msg, []);
+    expect(result).toBe('bot reply');
+  });
+
+  // 2. Follow-up after window expires → no boost → bot skips
+  it('follow-up after continuity window expires → no boost → skip', async () => {
+    const chat = makeContinuityChat({ chatContinuityWindowMs: 1 }); // 1ms window
+    chat.markReplyToUser('g1', 'u1');
+    await new Promise(r => setTimeout(r, 5)); // wait for window to expire
+    const msg = makeMsg({ userId: 'u1', content: '在干什么', rawContent: '在干什么' });
+    const result = await chat.generateReply('g1', msg, []);
+    expect(result).toBeNull();
+  });
+
+  // 3. Cross-user: only user B gets continuity boost, not user A
+  it('continuity boost is per-user: only the replied-to user gets it', async () => {
+    const chat = makeContinuityChat();
+    // Bot replied to u2, not u1
+    chat.markReplyToUser('g1', 'u2');
+    // u1 sends a plain follow-up — no continuity boost for u1
+    const msgA = makeMsg({ userId: 'u1', content: '也想知道', rawContent: '也想知道' });
+    const resultA = await chat.generateReply('g1', msgA, []);
+    expect(resultA).toBeNull(); // u1 gets no boost
+  });
+
+  // 4. Cross-group: continuity in group A doesn't bleed into group B
+  it('continuity is per-group: boost in g1 does not apply in g2', async () => {
+    const chat = makeContinuityChat();
+    chat.markReplyToUser('g1', 'u1'); // boost in g1
+    const msgG2 = makeMsg({ groupId: 'g2', userId: 'u1', content: '在干什么', rawContent: '在干什么' });
+    const result = await chat.generateReply('g2', msgG2, []);
+    expect(result).toBeNull(); // no boost in g2
+  });
+
+  // 5. Proactive/silence-breaker replies do NOT mark user continuity
+  it('markReplyToUser is not called for proactive sends → no continuity from those', async () => {
+    const chat = makeContinuityChat();
+    // Simulate no markReplyToUser call (proactive path skips it)
+    const msg = makeMsg({ userId: 'u1', content: '哈哈', rawContent: '哈哈' });
+    const result = await chat.generateReply('g1', msg, []);
+    expect(result).toBeNull(); // no continuity boost, score 0 < 0.5
+  });
+});
+
 // ── Deflection cache ──────────────────────────────────────────────────────────
 
 describe('ChatModule — deflection cache', () => {
