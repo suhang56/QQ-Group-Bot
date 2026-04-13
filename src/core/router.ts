@@ -11,8 +11,8 @@ import { defaultGroupConfig } from '../config.js';
 import { resolveAtTarget } from '../utils/cqcode.js';
 
 const MAX_SPLIT_LINES = 3;
-const SPLIT_DELAY_MIN_MS = 300;
-const SPLIT_DELAY_MAX_MS = 800;
+const SPLIT_DELAY_MIN_MS = 100;
+const SPLIT_DELAY_MAX_MS = 300;
 
 /** Split a reply on newlines, cap at MAX_SPLIT_LINES, drop empty lines. */
 export function splitReply(text: string): string[] {
@@ -374,14 +374,13 @@ export class Router implements IRouter {
       (recent5[0]!.timestamp - recent5[recent5.length - 1]!.timestamp) * 1000 <= 10_000;
     if (isBurst) return false;
 
-    // Last N non-bot messages that match the content
-    const recent = this.db.messages.getRecent(msg.groupId, 20)
-      .filter(m => m.userId !== (this.botUserId ?? '') && m.content.trim() === content)
-      .slice(0, config.repeaterMinCount);
-
+    // Strict: the last N messages in the group must ALL equal content AND come from N distinct non-bot users
+    const recent = this.db.messages.getRecent(msg.groupId, config.repeaterMinCount);
     if (recent.length < config.repeaterMinCount) return false;
+    if (!recent.every(m => m.content.trim() === content)) return false;
     const distinctUsers = new Set(recent.map(m => m.userId));
     if (distinctUsers.size < config.repeaterMinCount) return false;
+    if (distinctUsers.has(this.botUserId ?? '')) return false;
 
     // Cooldown
     const key = `${msg.groupId}:${content}`;

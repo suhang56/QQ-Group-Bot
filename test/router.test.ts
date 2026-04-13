@@ -945,19 +945,8 @@ describe('Router — 复读机 repeater', () => {
     insertMsg(db, 'u1', 'hello');
     insertMsg(db, 'u2', 'world'); // breaks the run
     insertMsg(db, 'u3', 'hello');
-    // Only 1 consecutive match at top before "world" break
+    // Last 3 messages are: u3=hello, u2=world, u1=hello — not all equal → no trigger
     await router.dispatch(makeRepeaterMsg({ userId: 'u4', content: 'hello', rawContent: 'hello' }));
-    // The filter gets 3 hellos but they aren't truly consecutive — however our
-    // implementation checks last 20 msgs filtered to matching content, so this
-    // will actually find u1, u3, u4 = 3 distinct. Let's verify the actual behavior:
-    // According to spec, interleaved should NOT trigger. But our implementation
-    // uses filter-then-slice, not strict consecutive check.
-    // This test documents the current (permissive) behavior — if spec changes, update here.
-    // For now: 3 distinct users with "hello" in last 20 msgs DOES trigger.
-    // The team-lead's spec says "last 3 non-bot messages all match" — our impl is more lenient.
-    // This is acceptable per team-lead note: "decide: yes vote for consecutive".
-    // TODO: tighten to consecutive-only if user feedback requires it.
-    // For now just assert it ran without throwing.
-    expect(true).toBe(true);
+    expect(adapter.send).not.toHaveBeenCalledWith('g1', 'hello');
   });
 });
