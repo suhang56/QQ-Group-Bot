@@ -44,6 +44,8 @@ interface ChatOptions {
   chatStickerTopN?: number;
   stickersDirPath?: string;
   stickerLegendRefreshEveryMsgs?: number;
+  teaseCurseThreshold?: number;
+  teaseCounterWindowMs?: number;
   moodDecayPerMinute?: number;
   moodProactiveIntervalMs?: number;
   moodProactiveMinSilenceMs?: number;
@@ -99,6 +101,11 @@ export const MEMORY_INJECT =
 
 export const MEMORY_INJECT_DEFLECTIONS = [
   '记不住', '我又不是你电脑', '啥啊', '谁关心', '懒得记', '嗯', '?', '好好好', '烦', '不想记',
+];
+
+export const CURSE_DEFLECTIONS = [
+  '傻逼', '神经病', '你有病吧', '滚', 'nmd', '你妈的', '煞笔', '有毛病',
+  '没完了是吧', '烦死了 闭嘴', '一天天的', '真他妈烦', '别闹了', '笑死 真的烦',
 ];
 
 export const BANGDREAM_PERSONA = `你是这个QQ群的老群友，不是AI，不是机器人，也不是任何现有群友。你有自己独立的身份和性格：
@@ -236,6 +243,11 @@ export class ChatModule implements IChatModule {
   // sticker legend refresh counter: groupId -> message count since last rebuild
   private readonly stickerRefreshCounter = new Map<string, number>();
 
+  // tease counter: `groupId:userId` -> { count, lastHit }
+  private readonly teaseCounter = new Map<string, { count: number; lastHit: number }>();
+  private readonly teaseCurseThreshold: number;
+  private readonly teaseCounterWindowMs: number;
+
   private readonly moodTracker = new MoodTracker();
   private readonly moodProactiveIntervalMs: number;
   private readonly moodProactiveMinSilenceMs: number;
@@ -272,6 +284,8 @@ export class ChatModule implements IChatModule {
     this.chatStickerTopN = options.chatStickerTopN ?? chatHistoryDefaults.chatStickerTopN;
     this.stickersDirPath = options.stickersDirPath ?? chatHistoryDefaults.stickersDirPath;
     this.stickerLegendRefreshEveryMsgs = options.stickerLegendRefreshEveryMsgs ?? 50;
+    this.teaseCurseThreshold = options.teaseCurseThreshold ?? 3;
+    this.teaseCounterWindowMs = options.teaseCounterWindowMs ?? 900_000;
     this.moodProactiveIntervalMs = options.moodProactiveIntervalMs ?? 120_000;
     this.moodProactiveMinSilenceMs = options.moodProactiveMinSilenceMs ?? 180_000;
     this.moodProactiveMaxPerGroupMs = options.moodProactiveMaxPerGroupMs ?? 1_800_000;
@@ -382,13 +396,15 @@ export class ChatModule implements IChatModule {
     this.lastProactiveReply.set(groupId, now);
 
     // Input-pattern shortcuts: bypass Claude entirely for known adversarial patterns
-    if (IDENTITY_PROBE.test(triggerMessage.content)) {
-      return pickDeflection(IDENTITY_DEFLECTIONS);
-    }
-    if (TASK_REQUEST.test(triggerMessage.content)) {
-      return pickDeflection(TASK_DEFLECTIONS);
-    }
-    if (MEMORY_INJECT.test(triggerMessage.content)) {
+    const isProbe = IDENTITY_PROBE.test(triggerMessage.content);
+    const isTask  = !isProbe && TASK_REQUEST.test(triggerMessage.content);
+    const isInject = !isProbe && !isTask && MEMORY_INJECT.test(triggerMessage.content);
+
+    if (isProbe || isTask || isInject) {
+      const isCurse = this._teaseIncrement(groupId, triggerMessage.userId, now);
+      if (isCurse) return pickDeflection(CURSE_DEFLECTIONS);
+      if (isProbe) return pickDeflection(IDENTITY_DEFLECTIONS);
+      if (isTask)  return pickDeflection(TASK_DEFLECTIONS);
       return pickDeflection(MEMORY_INJECT_DEFLECTIONS);
     }
 
@@ -589,6 +605,18 @@ export class ChatModule implements IChatModule {
     // Message is a reply-quote, but NOT to the bot
     if (!msg.rawContent.includes('[CQ:reply,')) return false;
     return !this._isReplyToBot(msg);
+  }
+
+  /** Increment the tease counter for a user; returns true if they've crossed the curse threshold. */
+  private _teaseIncrement(groupId: string, userId: string, nowMs: number): boolean {
+    const key = `${groupId}:${userId}`;
+    const entry = this.teaseCounter.get(key);
+    // Expire stale entries outside the window
+    const count = entry && (nowMs - entry.lastHit) < this.teaseCounterWindowMs ? entry.count : 0;
+    const next = count + 1;
+    this.teaseCounter.set(key, { count: next, lastHit: nowMs });
+    this.logger.debug({ groupId, userId, teaseCount: next }, 'tease counter increment');
+    return next >= this.teaseCurseThreshold;
   }
 
   private _isImplicitBotRef(content: string, nowMs: number, lastBotPostMs: number): boolean {

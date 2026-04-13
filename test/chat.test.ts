@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ChatModule, extractKeywords, extractTopFaces, tokenizeLore, IDENTITY_PROBE, IDENTITY_DEFLECTIONS, TASK_REQUEST, TASK_DEFLECTIONS, MEMORY_INJECT, MEMORY_INJECT_DEFLECTIONS, pickDeflection, BANGDREAM_PERSONA } from '../src/modules/chat.js';
+import { ChatModule, extractKeywords, extractTopFaces, tokenizeLore, IDENTITY_PROBE, IDENTITY_DEFLECTIONS, TASK_REQUEST, TASK_DEFLECTIONS, MEMORY_INJECT, MEMORY_INJECT_DEFLECTIONS, pickDeflection, BANGDREAM_PERSONA, CURSE_DEFLECTIONS } from '../src/modules/chat.js';
 import { lurkerDefaults, defaultGroupConfig } from '../src/config.js';
 import type { IClaudeClient, ClaudeResponse } from '../src/ai/claude.js';
 import type { GroupMessage } from '../src/adapter/napcat.js';
@@ -1279,5 +1279,102 @@ describe('ChatModule — 邦批 persona', () => {
     const systemText = call?.system?.[0]?.text as string;
     expect(systemText).toContain('摸鱼');
     expect(systemText).not.toContain('Roselia');
+  });
+});
+
+// ── Tease counter / curse escalation ─────────────────────────────────────────
+
+describe('ChatModule — curse escalation for repeat teasers', () => {
+  let db: Database;
+  let claude: IClaudeClient;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    claude = makeMockClaude();
+  });
+
+  function makeChat(overrides: Record<string, unknown> = {}): ChatModule {
+    return new ChatModule(claude, db, {
+      botUserId: BOT_ID,
+      debounceMs: 0,
+      chatMinScore: -999,
+      moodProactiveEnabled: false,
+      teaseCurseThreshold: 3,
+      teaseCounterWindowMs: 900_000, // 15 min
+      ...overrides,
+    });
+  }
+
+  const probeMsg = makeMsg({ content: '你是机器人吗', userId: 'u1' });
+  const taskMsg  = makeMsg({ content: '帮我写首诗',    userId: 'u1' });
+  const normalMsg = makeMsg({ content: '今天天气好',   userId: 'u1' });
+  const userBProbe = makeMsg({ content: '你是机器人吗', userId: 'u2' });
+
+  // 1. Single probe → polite deflection
+  it('single identity probe → polite deflection, NOT curse', async () => {
+    const chat = makeChat();
+    const result = await chat.generateReply('g1', probeMsg, []);
+    expect(IDENTITY_DEFLECTIONS).toContain(result);
+    expect(CURSE_DEFLECTIONS).not.toContain(result);
+  });
+
+  // 2. Three probes in 5 min → 3rd triggers curse pool
+  it('third probe within window → curse pool', async () => {
+    const chat = makeChat();
+    await chat.generateReply('g1', probeMsg, []);
+    await chat.generateReply('g1', probeMsg, []);
+    const result = await chat.generateReply('g1', probeMsg, []);
+    expect(CURSE_DEFLECTIONS).toContain(result);
+  });
+
+  // 3. Probes spread over 20 min → decay resets count, stays polite
+  it('probes separated by >15 min each → counter resets, still polite', async () => {
+    const chat = makeChat({ teaseCounterWindowMs: 900_000 });
+    const now = Date.now();
+    // Simulate first hit 20 min ago via direct counter manipulation
+    chat['teaseCounter'].set('g1:u1', { count: 2, lastHit: now - 20 * 60_000 });
+    // Next hit: entry is expired → count resets to 1, below threshold
+    const result = await chat.generateReply('g1', probeMsg, []);
+    expect(IDENTITY_DEFLECTIONS).toContain(result);
+    expect(CURSE_DEFLECTIONS).not.toContain(result);
+  });
+
+  // 4. User A teased 3x → curse; User B single probe → polite
+  it('user A curses independent of user B', async () => {
+    const chat = makeChat();
+    await chat.generateReply('g1', probeMsg, []);
+    await chat.generateReply('g1', probeMsg, []);
+    const resultA = await chat.generateReply('g1', probeMsg, []);
+    expect(CURSE_DEFLECTIONS).toContain(resultA);
+
+    const resultB = await chat.generateReply('g1', userBProbe, []);
+    expect(IDENTITY_DEFLECTIONS).toContain(resultB);
+    expect(CURSE_DEFLECTIONS).not.toContain(resultB);
+  });
+
+  // 5. 3 hits in 14 min → curse; if expired → polite
+  it('3 hits within window → curse; same user after window expires → polite', async () => {
+    const chat = makeChat({ teaseCounterWindowMs: 14 * 60_000 }); // 14 min window
+    const now = Date.now();
+    // Set 2 prior hits 13 min ago (within 14 min window)
+    chat['teaseCounter'].set('g1:u1', { count: 2, lastHit: now - 13 * 60_000 });
+    const resultCurse = await chat.generateReply('g1', probeMsg, []);
+    expect(CURSE_DEFLECTIONS).toContain(resultCurse);
+
+    // Now reset and set hits 15 min ago (outside 14 min window)
+    chat['teaseCounter'].set('g1:u1', { count: 2, lastHit: now - 15 * 60_000 });
+    const resultPolite = await chat.generateReply('g1', probeMsg, []);
+    expect(IDENTITY_DEFLECTIONS).toContain(resultPolite);
+  });
+
+  // 6. Normal chat from same user does NOT increment counter
+  it('normal chat message does not increment tease counter', async () => {
+    const chat = makeChat();
+    // Set count to 2 (one below threshold)
+    chat['teaseCounter'].set('g1:u1', { count: 2, lastHit: Date.now() });
+    // Send a normal message — should NOT trigger deflection, should pass to Claude
+    await chat.generateReply('g1', normalMsg, []);
+    // Counter should still be 2 (unchanged)
+    expect(chat['teaseCounter'].get('g1:u1')?.count).toBe(2);
   });
 });
