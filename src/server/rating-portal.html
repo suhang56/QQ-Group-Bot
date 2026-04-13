@@ -125,19 +125,32 @@ function render() {
         <span style="font-size:13px;color:#555;margin-left:8px">${rated ? 'rated' : 'unrated'}</span>
       </div>
       <div class="comment-box" id="cbox-${r.id}">
-        <input type="text" placeholder="Comment (optional) — press Enter to save" id="cinput-${r.id}" value="${esc(r.ratingComment ?? '')}">
+        <input type="text" placeholder="Comment (autosaves)" id="cinput-${r.id}" value="${esc(r.ratingComment ?? '')}">
       </div>
     </div>
   `;
 
-  // bind comment input enter
+  // bind comment input: autosave on blur, debounced on input, immediate on Enter
   const cinput = document.getElementById(`cinput-${r.id}`);
   if (cinput) {
+    let saveTimer = null;
+    const doSave = () => {
+      const rating = replies[current]?.rating ?? pendingRating;
+      if (rating) saveRating(r.id, rating, cinput.value.trim() || null);
+    };
+    cinput.addEventListener('input', () => {
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(doSave, 500);
+    });
+    cinput.addEventListener('blur', () => {
+      clearTimeout(saveTimer);
+      doSave();
+    });
     cinput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
-        const rating = replies[current].rating ?? pendingRating;
-        if (rating) saveRating(r.id, rating, cinput.value.trim() || null);
+        clearTimeout(saveTimer);
+        doSave();
       }
     });
   }
@@ -186,8 +199,16 @@ function esc(s) {
   return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-document.getElementById('prevBtn').addEventListener('click', () => { if (current > 0) { current--; render(); } });
-document.getElementById('nextBtn').addEventListener('click', () => { if (current < replies.length - 1) { current++; render(); } });
+// Flush any in-progress comment for the current card before navigating away.
+function flushCurrentComment() {
+  const r = replies[current];
+  if (!r) return;
+  const cinput = document.getElementById(`cinput-${r.id}`);
+  if (cinput) cinput.blur(); // triggers blur handler which calls doSave
+}
+
+document.getElementById('prevBtn').addEventListener('click', () => { if (current > 0) { flushCurrentComment(); current--; render(); } });
+document.getElementById('nextBtn').addEventListener('click', () => { if (current < replies.length - 1) { flushCurrentComment(); current++; render(); } });
 document.getElementById('refreshBtn').addEventListener('click', load);
 document.getElementById('modeSelect').addEventListener('change', load);
 
@@ -197,9 +218,9 @@ document.addEventListener('keydown', (e) => {
     const r = replies[current];
     if (r) rate(r.id, parseInt(e.key));
   } else if (e.key === 'ArrowRight' || e.key === 'Enter') {
-    if (current < replies.length - 1) { current++; render(); }
+    if (current < replies.length - 1) { flushCurrentComment(); current++; render(); }
   } else if (e.key === 'ArrowLeft') {
-    if (current > 0) { current--; render(); }
+    if (current > 0) { flushCurrentComment(); current--; render(); }
   } else if (e.key === 'c') {
     const r = replies[current];
     if (r) {
