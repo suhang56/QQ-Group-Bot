@@ -52,11 +52,15 @@ function makeAdapter(): INapCatAdapter {
   };
 }
 
-function makeMessageRepo(msgs: { content: string }[] = []): IMessageRepository {
+function makeMessageRepo(msgs: { content: string; userId?: string; nickname?: string; timestamp?: number }[] = []): IMessageRepository {
+  const fullMsgs = msgs.map((m, i) => ({ id: i + 1, groupId: 'g1', userId: m.userId ?? 'u1', nickname: m.nickname ?? 'A', content: m.content, timestamp: m.timestamp ?? 0, deleted: false }));
   return {
     insert: vi.fn().mockReturnValue({ id: 1, groupId: 'g1', userId: 'u1', nickname: 'A', content: '', timestamp: 0, deleted: false }),
-    getRecent: vi.fn().mockReturnValue(msgs),
+    getRecent: vi.fn().mockReturnValue(fullMsgs),
     getByUser: vi.fn().mockReturnValue([]),
+    sampleRandomHistorical: vi.fn().mockReturnValue([]),
+    searchByKeywords: vi.fn().mockReturnValue([]),
+    getTopUsers: vi.fn().mockReturnValue([]),
     softDelete: vi.fn(),
   };
 }
@@ -217,49 +221,53 @@ describe('ModeratorModule.assess — safety rails', () => {
 });
 
 describe('ModeratorModule.assess — punishment ladder', () => {
-  // Severity 1 → delete + warn
-  it('sev 1: deletes message and sends warning', async () => {
+  // Severity 1-2 → log only (no delete, no ban, no send)
+  it('sev 1: log only — no delete, no send, no ban', async () => {
     const claude = makeClaudeVerdict(true, 1);
     const adapter = makeAdapter();
     const modRepo = makeModerationRepo();
     const configRepo = makeConfigRepo(makeConfig());
     const mod = makeModule(claude, adapter, makeConfig(), { moderation: modRepo, configs: configRepo });
     await mod.assess(makeMsg({ messageId: 'msg-sev1' }), makeConfig());
-    expect(adapter.deleteMsg).toHaveBeenCalledWith('msg-sev1');
-    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('已被删除'));
-    expect(configRepo.incrementPunishments).toHaveBeenCalledWith('g1');
-    expect(modRepo.insert).toHaveBeenCalledWith(expect.objectContaining({ action: 'warn', violation: true }));
+    expect(adapter.deleteMsg).not.toHaveBeenCalled();
+    expect(adapter.send).not.toHaveBeenCalled();
+    expect(adapter.ban).not.toHaveBeenCalled();
+    expect(configRepo.incrementPunishments).not.toHaveBeenCalled();
+    expect(modRepo.insert).toHaveBeenCalledWith(expect.objectContaining({ action: 'none', violation: true }));
   });
 
-  // Severity 2 → delete + warn
-  it('sev 2: deletes message and sends warning', async () => {
+  it('sev 2: log only — no delete, no send, no ban', async () => {
     const claude = makeClaudeVerdict(true, 2);
     const adapter = makeAdapter();
-    const mod = makeModule(claude, adapter, makeConfig());
+    const modRepo = makeModerationRepo();
+    const mod = makeModule(claude, adapter, makeConfig(), { moderation: modRepo });
     await mod.assess(makeMsg({ messageId: 'msg-sev2' }), makeConfig());
-    expect(adapter.deleteMsg).toHaveBeenCalledWith('msg-sev2');
-    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('已被删除'));
+    expect(adapter.deleteMsg).not.toHaveBeenCalled();
+    expect(adapter.send).not.toHaveBeenCalled();
+    expect(adapter.ban).not.toHaveBeenCalled();
+    expect(modRepo.insert).toHaveBeenCalledWith(expect.objectContaining({ action: 'none', violation: true }));
   });
 
-  // Severity 3 → mute 10 min
-  it('sev 3: bans user for 600 seconds', async () => {
+  // Severity 3 → delete + warn (no ban)
+  it('sev 3: deletes message and sends warning, no ban', async () => {
     const claude = makeClaudeVerdict(true, 3);
     const adapter = makeAdapter();
     const modRepo = makeModerationRepo();
     const mod = makeModule(claude, adapter, makeConfig(), { moderation: modRepo });
-    await mod.assess(makeMsg(), makeConfig());
-    expect(adapter.deleteMsg).toHaveBeenCalled();
-    expect(adapter.ban).toHaveBeenCalledWith('g1', 'u1', 600);
-    expect(modRepo.insert).toHaveBeenCalledWith(expect.objectContaining({ action: 'ban' }));
+    await mod.assess(makeMsg({ messageId: 'msg-sev3' }), makeConfig());
+    expect(adapter.deleteMsg).toHaveBeenCalledWith('msg-sev3');
+    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('已被删除'));
+    expect(adapter.ban).not.toHaveBeenCalled();
+    expect(modRepo.insert).toHaveBeenCalledWith(expect.objectContaining({ action: 'warn' }));
   });
 
-  // Severity 4 → mute 1 hour
-  it('sev 4: bans user for 3600 seconds', async () => {
+  // Severity 4 → mute 10 min
+  it('sev 4: bans user for 600 seconds', async () => {
     const claude = makeClaudeVerdict(true, 4);
     const adapter = makeAdapter();
     const mod = makeModule(claude, adapter, makeConfig());
     await mod.assess(makeMsg(), makeConfig());
-    expect(adapter.ban).toHaveBeenCalledWith('g1', 'u1', 3600);
+    expect(adapter.ban).toHaveBeenCalledWith('g1', 'u1', 600);
   });
 
   // Edge case 7: sev 5 but Opus returns sev 3 → no kick, degrade to ban
@@ -630,5 +638,68 @@ describe('extractJson', () => {
     const fenced = '```json\n{"violation":false,"severity":null,"reason":"ok","confidence":0.1}\n```';
     const obj = JSON.parse(extractJson(fenced)) as { violation: boolean };
     expect(obj.violation).toBe(false);
+  });
+});
+
+describe('ModeratorModule.assess — banter whitelist, confidence gate, context window', () => {
+  function makeClaudeVerdictWith(violation: boolean, severity: number | null, confidence: number): IClaudeClient {
+    const text = JSON.stringify({ violation, severity, reason: 'test', confidence });
+    return { complete: vi.fn().mockResolvedValue({ text, inputTokens: 50, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 }) };
+  }
+
+  it('"操" single word → banter whitelist, no Claude call', async () => {
+    const claude = makeClaudeVerdictWith(true, 3, 0.9);
+    const adapter = makeAdapter();
+    const mod = makeModule(claude, adapter, makeConfig());
+    const verdict = await mod.assess(makeMsg({ content: '操', rawContent: '操' }), makeConfig());
+    expect(claude.complete).not.toHaveBeenCalled();
+    expect(verdict.violation).toBe(false);
+    expect(adapter.deleteMsg).not.toHaveBeenCalled();
+  });
+
+  it('"哈哈哈" → banter whitelist, no Claude call', async () => {
+    const claude = makeClaudeVerdictWith(true, 2, 0.9);
+    const adapter = makeAdapter();
+    const mod = makeModule(claude, adapter, makeConfig());
+    const verdict = await mod.assess(makeMsg({ content: '哈哈哈', rawContent: '哈哈哈' }), makeConfig());
+    expect(claude.complete).not.toHaveBeenCalled();
+    expect(verdict.violation).toBe(false);
+  });
+
+  it('message length ≤ 3 → banter whitelist skip', async () => {
+    const claude = makeClaudeVerdictWith(true, 3, 0.9);
+    const adapter = makeAdapter();
+    const mod = makeModule(claude, adapter, makeConfig());
+    await mod.assess(makeMsg({ content: 'ok', rawContent: 'ok' }), makeConfig());
+    expect(claude.complete).not.toHaveBeenCalled();
+  });
+
+  it('low-confidence violation (0.6) → log only, no action', async () => {
+    const claude = makeClaudeVerdictWith(true, 4, 0.6);
+    const adapter = makeAdapter();
+    const modRepo = makeModerationRepo();
+    const mod = makeModule(claude, adapter, makeConfig(), { moderation: modRepo });
+    const verdict = await mod.assess(makeMsg({ content: 'you are a terrible person with bad words' }), makeConfig());
+    expect(adapter.ban).not.toHaveBeenCalled();
+    expect(adapter.deleteMsg).not.toHaveBeenCalled();
+    expect(verdict.violation).toBe(true);
+    expect(modRepo.insert).toHaveBeenCalledWith(expect.objectContaining({ action: 'none', violation: true }));
+  });
+
+  it('high-confidence violation sev 4 (0.9) → ban 600s', async () => {
+    const claude = makeClaudeVerdictWith(true, 4, 0.9);
+    const adapter = makeAdapter();
+    const mod = makeModule(claude, adapter, makeConfig());
+    await mod.assess(makeMsg({ content: 'direct targeted slur against specific person seriously bad content here' }), makeConfig());
+    expect(adapter.ban).toHaveBeenCalledWith('g1', 'u1', 600);
+  });
+
+  it('context window: getRecent called with 5 to build context', async () => {
+    const claude = makeClaudeVerdictWith(false, null, 0.3);
+    const adapter = makeAdapter();
+    const msgRepo = makeMessageRepo([{ content: 'prev msg' }]);
+    const mod = makeModule(claude, adapter, makeConfig(), { messages: msgRepo });
+    await mod.assess(makeMsg({ content: 'today what did you eat for lunch long enough message' }), makeConfig());
+    expect(msgRepo.getRecent).toHaveBeenCalledWith('g1', 5);
   });
 });

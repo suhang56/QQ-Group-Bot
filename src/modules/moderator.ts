@@ -8,6 +8,15 @@ import type { ILearnerModule } from './learner.js';
 import { BotErrorCode, ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
 
+// Short banter words/patterns that are normal Chinese group chat — skip moderation entirely
+const BANTER_WHITELIST = new Set([
+  '操', '草', '艹', '卧槽', '牛逼', '傻逼', '垃圾', '脑子有病',
+  '啊', '啊?', '什么', '哈哈', '哈哈哈', 'tmd', 'mmp', 'wcnm', 'nmsl',
+]);
+
+const CONFIDENCE_THRESHOLD = 0.75;
+const ACTION_SEVERITY_THRESHOLD = 3; // sev 1-2 → log only, sev 3+ → action
+
 export interface ModerationVerdict {
   violation: boolean;
   severity: 1 | 2 | 3 | 4 | 5 | null;
@@ -70,12 +79,12 @@ export class ModeratorModule implements IModeratorModule {
   constructor(
     private readonly claude: IClaudeClient,
     private readonly adapter: INapCatAdapter,
-    _messages: IMessageRepository,
+    private readonly messages: IMessageRepository,
     private readonly moderation: IModerationRepository,
     private readonly configs: IGroupConfigRepository,
     private readonly rules: IRuleRepository,
     private readonly learner: ILearnerModule | null = null,
-  ) { void _messages; }
+  ) {}
 
   async assess(msg: GroupMessage, config: GroupConfig): Promise<ModerationVerdict> {
     // Safety rail 1: skip admins/owners and whitelisted users
@@ -94,6 +103,12 @@ export class ModeratorModule implements IModeratorModule {
       return SKIP_VERDICT;
     }
 
+    // Safety rail 7: banter whitelist — short common words are normal group chat, skip Claude
+    if (trimmed.length <= 3 || BANTER_WHITELIST.has(trimmed.toLowerCase())) {
+      this.logger.debug({ groupId: msg.groupId, content: trimmed }, 'mod skip — banter whitelist');
+      return SKIP_VERDICT;
+    }
+
     // Build context
     const allRules = this.rules.getAll(msg.groupId);
     const rulesText = allRules.length > 0
@@ -104,6 +119,13 @@ export class ModeratorModule implements IModeratorModule {
     const offenseHistory = recentOffenses.length > 0
       ? recentOffenses.map(r => `- ${r.reason} (severity ${r.severity}, action: ${r.action})`).join('\n')
       : '（无近期违规记录）';
+
+    // Conversation context: last 5 messages including the trigger
+    const recentMsgs = this.messages.getRecent(msg.groupId, 5);
+    // getRecent returns newest-first; reverse for chronological display
+    const contextLines = [...recentMsgs].reverse()
+      .map(m => `[${m.nickname}]: ${m.content}`)
+      .join('\n');
 
     // Retrieve RAG examples from learner (fail-safe: empty if disabled or not ready)
     let ragExamples: string[] = [];
@@ -121,18 +143,27 @@ export class ModeratorModule implements IModeratorModule {
       : '';
 
     // Build prompt — user content ONLY in user-role message (never system)
-    const systemText = `你是一个群管理AI。请根据以下群规判断用户发送的消息是否违规。
+    const systemText = `你是一个群管理AI。请根据群规判断最后一条消息是否违规。
 
 【群规】
 ${rulesText}
+
+注意：
+- 日常玩笑、粗口、互怼都是正常的中文群聊方式，不算违规
+- 严重侮辱性攻击、人身攻击特定人、发布违禁内容、明显恶意才算违规
+- 如果不确定，倾向于判定非违规（confidence < ${CONFIDENCE_THRESHOLD}）
+- 群友之间熟悉的调侃、梗、自嘲都是正常的
 
 请仅返回JSON，格式如下（不要添加任何其他文字）：
 {"violation": true/false, "severity": 1-5 或 null, "reason": "原因", "confidence": 0-1}
 
 severity说明：1=轻微, 2=一般, 3=严重, 4=很严重, 5=极严重（踢出）。violation=false时severity为null。`;
 
-    const userText = `用户 ${msg.nickname}（${msg.userId}）发送的消息：
-${msg.content}
+    const userText = `以下是最近的聊天记录（最后一条是需要判定的消息）：
+
+${contextLines}
+
+需要判定的消息：${msg.nickname}（${msg.userId}）说：${msg.content}
 
 该用户近期违规记录：
 ${offenseHistory}${ragSection}`;
@@ -171,6 +202,30 @@ ${offenseHistory}${ragSection}`;
       this.moderation.insert({
         msgId: msg.messageId, groupId: msg.groupId, userId: msg.userId,
         violation: false, severity: null, action: 'none',
+        reason: parsed.reason, appealed: 0, reversed: false,
+        timestamp: msg.timestamp,
+      });
+      return verdict;
+    }
+
+    // Confidence gate: low-confidence violations are logged only, no action
+    if (parsed.confidence < CONFIDENCE_THRESHOLD) {
+      this.logger.info({ groupId: msg.groupId, userId: msg.userId, confidence: parsed.confidence, severity: parsed.severity }, 'mod low-confidence violation — log only');
+      this.moderation.insert({
+        msgId: msg.messageId, groupId: msg.groupId, userId: msg.userId,
+        violation: true, severity: parsed.severity, action: 'none',
+        reason: `[low-confidence ${parsed.confidence.toFixed(2)}] ${parsed.reason}`, appealed: 0, reversed: false,
+        timestamp: msg.timestamp,
+      });
+      return verdict;
+    }
+
+    // Severity gate: sev 1-2 → log only, no user-visible action
+    if (parsed.severity < ACTION_SEVERITY_THRESHOLD) {
+      this.logger.info({ groupId: msg.groupId, userId: msg.userId, severity: parsed.severity, reason: parsed.reason }, 'mod sev 1-2 — log only, no action');
+      this.moderation.insert({
+        msgId: msg.messageId, groupId: msg.groupId, userId: msg.userId,
+        violation: true, severity: parsed.severity, action: 'none',
         reason: parsed.reason, appealed: 0, reversed: false,
         timestamp: msg.timestamp,
       });
@@ -217,7 +272,8 @@ ${offenseHistory}${ragSection}`;
       this.logger.error({ groupId: msg.groupId, messageId: msg.messageId }, 'deleteMsg failed');
     }
 
-    if (severity <= 2) {
+    // sev 3: delete + warn (no ban)
+    if (severity === 3) {
       await this.adapter.send(msg.groupId,
         `@${msg.nickname} 你的消息因违反群规已被删除，请注意言行。\n原因：${reason}`);
       this.moderation.insert({
@@ -230,7 +286,8 @@ ${offenseHistory}${ragSection}`;
       return;
     }
 
-    if (severity === 3) {
+    // sev 4: mute 10 minutes
+    if (severity === 4) {
       await this.adapter.ban(msg.groupId, msg.userId, 600);
       await this.adapter.send(msg.groupId,
         `@${msg.nickname} 因违规已禁言10分钟。\n原因：${reason}\n如认为有误，可在24小时内发送 /appeal 申诉。`);
@@ -241,20 +298,6 @@ ${offenseHistory}${ragSection}`;
       });
       this.configs.incrementPunishments(msg.groupId);
       this.logger.info({ groupId: msg.groupId, userId: msg.userId, severity, action: 'ban', durationSeconds: 600, reason }, 'punishment executed');
-      return;
-    }
-
-    if (severity === 4) {
-      await this.adapter.ban(msg.groupId, msg.userId, 3600);
-      await this.adapter.send(msg.groupId,
-        `@${msg.nickname} 因严重违规已禁言1小时。\n原因：${reason}\n如认为有误，可在24小时内发送 /appeal 申诉。`);
-      this.moderation.insert({
-        msgId: msg.messageId, groupId: msg.groupId, userId: msg.userId,
-        violation: true, severity, action: 'ban', reason,
-        appealed: 0, reversed: false, timestamp: msg.timestamp,
-      });
-      this.configs.incrementPunishments(msg.groupId);
-      this.logger.info({ groupId: msg.groupId, userId: msg.userId, severity, action: 'ban', durationSeconds: 3600, reason }, 'punishment executed');
       return;
     }
 
