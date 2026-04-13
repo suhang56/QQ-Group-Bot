@@ -14,6 +14,7 @@ import { LearnerModule } from './modules/learner.js';
 import { AnnouncementSyncModule } from './modules/announcement-sync.js';
 import { NameImagesModule } from './modules/name-images.js';
 import { LoreUpdater } from './modules/lore-updater.js';
+import { VisionService } from './modules/vision.js';
 
 // 1. Bootstrap logger
 const logLevel = process.env['LOG_LEVEL'] ?? 'info';
@@ -54,7 +55,8 @@ const adapter = new NapCatAdapter(NAPCAT_WS_URL, process.env['NAPCAT_ACCESS_TOKE
 const claude = new ClaudeClient();
 const rateLimiter = new RateLimiter();
 const router = new Router(db, adapter, rateLimiter, botUserId);
-const chat = new ChatModule(claude, db, { botUserId, deflectCacheEnabled: true });
+const vision = new VisionService(claude, adapter, db.imageDescriptions);
+const chat = new ChatModule(claude, db, { botUserId, deflectCacheEnabled: true, visionService: vision });
 router.setChat(chat);
 
 // Embedding service: fire-and-forget init — bot must not block on model load

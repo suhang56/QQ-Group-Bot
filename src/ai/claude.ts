@@ -1,4 +1,5 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
+import Anthropic from '@anthropic-ai/sdk';
 import { ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
 
@@ -31,10 +32,13 @@ export interface ClaudeResponse {
 
 export interface IClaudeClient {
   complete(req: ClaudeRequest): Promise<ClaudeResponse>;
+  /** Describe an image via Claude vision. Returns a short Chinese description. */
+  describeImage(imageBytes: Buffer, model: ClaudeModel): Promise<string>;
 }
 
 export class ClaudeClient implements IClaudeClient {
   private readonly logger = createLogger('claude');
+  private readonly anthropic = new Anthropic();
 
   async complete(req: ClaudeRequest): Promise<ClaudeResponse> {
     const start = Date.now();
@@ -106,5 +110,37 @@ export class ClaudeClient implements IClaudeClient {
       if (err instanceof ClaudeParseError) throw err;
       throw new ClaudeApiError(err);
     }
+  }
+
+  async describeImage(imageBytes: Buffer, model: ClaudeModel): Promise<string> {
+    const base64 = imageBytes.toString('base64');
+    const mediaType = this._detectMediaType(imageBytes);
+    try {
+      const response = await this.anthropic.messages.create({
+        model,
+        max_tokens: 100,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } },
+            { type: 'text', text: '用一句话简短描述这张图的内容和情绪氛围，10-30 字。只输出描述本身，不要解释或前缀。' },
+          ],
+        }],
+      });
+      const text = response.content.find(b => b.type === 'text')?.text?.trim() ?? '';
+      if (!text) throw new ClaudeParseError('No text in vision response');
+      return text;
+    } catch (err) {
+      if (err instanceof ClaudeParseError) throw err;
+      throw new ClaudeApiError(err);
+    }
+  }
+
+  private _detectMediaType(buf: Buffer): 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp' {
+    if (buf[0] === 0xff && buf[1] === 0xd8) return 'image/jpeg';
+    if (buf[0] === 0x89 && buf[1] === 0x50) return 'image/png';
+    if (buf[0] === 0x47 && buf[1] === 0x49) return 'image/gif';
+    // Default to jpeg for QQ images (most are JPEG)
+    return 'image/jpeg';
   }
 }

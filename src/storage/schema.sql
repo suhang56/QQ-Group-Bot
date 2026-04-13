@@ -83,9 +83,30 @@ CREATE TABLE IF NOT EXISTS group_config (
   name_images_collection_max            INTEGER NOT NULL DEFAULT 20,
   name_images_cooldown_ms               INTEGER NOT NULL DEFAULT 300000,
   name_images_max_per_name              INTEGER NOT NULL DEFAULT 50,
+  chat_at_mention_queue_max             INTEGER NOT NULL DEFAULT 5,
+  chat_at_mention_burst_window_ms       INTEGER NOT NULL DEFAULT 30000,
+  chat_at_mention_burst_threshold       INTEGER NOT NULL DEFAULT 3,
+  name_images_blocklist                 TEXT    NOT NULL DEFAULT '[]',
+  live_sticker_capture_enabled          INTEGER NOT NULL DEFAULT 1,
+  sticker_legend_refresh_every_msgs     INTEGER NOT NULL DEFAULT 50,
+  chat_persona_text                     TEXT,
   created_at                            TEXT    NOT NULL DEFAULT '',
   updated_at                            TEXT    NOT NULL DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS live_stickers (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id    TEXT    NOT NULL,
+  key         TEXT    NOT NULL,
+  type        TEXT    NOT NULL,
+  cq_code     TEXT    NOT NULL,
+  summary     TEXT,
+  count       INTEGER NOT NULL DEFAULT 1,
+  first_seen  INTEGER NOT NULL,
+  last_seen   INTEGER NOT NULL,
+  UNIQUE(group_id, key)
+);
+CREATE INDEX IF NOT EXISTS idx_live_stickers_group_count ON live_stickers(group_id, count DESC);
 
 CREATE TABLE IF NOT EXISTS name_images (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -99,3 +120,11 @@ CREATE TABLE IF NOT EXISTS name_images (
 
 CREATE INDEX IF NOT EXISTS idx_name_images_group_name ON name_images(group_id, name);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_name_images_source ON name_images(group_id, name, source_file) WHERE source_file IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS image_descriptions (
+  file_key    TEXT    PRIMARY KEY,
+  description TEXT    NOT NULL,
+  created_at  INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_image_desc_created ON image_descriptions(created_at);

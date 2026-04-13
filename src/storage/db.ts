@@ -188,6 +188,12 @@ export interface ILiveStickerRepository {
   getTopByGroup(groupId: string, limit: number): LiveSticker[];
 }
 
+export interface IImageDescriptionRepository {
+  get(fileKey: string): string | null;
+  set(fileKey: string, description: string, now: number): void;
+  purgeOlderThan(cutoffTs: number): number;
+}
+
 // ---- Raw row types from SQLite ----
 
 interface MessageRow {
@@ -777,6 +783,30 @@ class LiveStickerRepository implements ILiveStickerRepository {
   }
 }
 
+class ImageDescriptionRepository implements IImageDescriptionRepository {
+  constructor(private readonly db: DatabaseSync) {}
+
+  get(fileKey: string): string | null {
+    const row = this.db.prepare(
+      'SELECT description FROM image_descriptions WHERE file_key = ?'
+    ).get(fileKey) as unknown as { description: string } | undefined;
+    return row?.description ?? null;
+  }
+
+  set(fileKey: string, description: string, now: number): void {
+    this.db.prepare(
+      'INSERT OR REPLACE INTO image_descriptions (file_key, description, created_at) VALUES (?, ?, ?)'
+    ).run(fileKey, description, now);
+  }
+
+  purgeOlderThan(cutoffTs: number): number {
+    const result = this.db.prepare(
+      'DELETE FROM image_descriptions WHERE created_at < ?'
+    ).run(cutoffTs) as { changes: number };
+    return result.changes;
+  }
+}
+
 // ---- Main Database class ----
 
 export class Database {
@@ -788,6 +818,7 @@ export class Database {
   readonly announcements: IAnnouncementRepository;
   readonly nameImages: INameImageRepository;
   readonly liveStickers: ILiveStickerRepository;
+  readonly imageDescriptions: IImageDescriptionRepository;
 
   private readonly _db: DatabaseSync;
 
@@ -805,6 +836,7 @@ export class Database {
     this.announcements = new AnnouncementRepository(this._db);
     this.nameImages = new NameImageRepository(this._db);
     this.liveStickers = new LiveStickerRepository(this._db);
+    this.imageDescriptions = new ImageDescriptionRepository(this._db);
   }
 
   /** Execute arbitrary SQL — intended for bulk-import scripts and migrations only. */

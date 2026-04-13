@@ -10,6 +10,7 @@ import { FACE_LEGEND, parseFaces, renderFace } from '../utils/qqface.js';
 import { sentinelCheck, postProcess, HARDENED_SYSTEM } from '../utils/sentinel.js';
 import { buildStickerSection, type LiveStickerEntry } from '../utils/stickers.js';
 import { MoodTracker, PROACTIVE_POOLS, type MoodDescription } from './mood.js';
+import type { VisionService } from './vision.js';
 
 export interface IChatModule {
   generateReply(groupId: string, triggerMessage: GroupMessage, recentMessages: GroupMessage[]): Promise<string | null>;
@@ -58,6 +59,7 @@ interface ChatOptions {
   deflectCacheRefreshIntervalMs?: number;
   deflectCacheRefreshMinThreshold?: number;
   deflectCacheEnabled?: boolean;
+  visionService?: VisionService;
 }
 
 interface ScoreFactors {
@@ -319,6 +321,7 @@ export class ChatModule implements IChatModule {
   private deflectRefillTimer: ReturnType<typeof setInterval> | null = null;
   private readonly deflectRefilling = new Set<DeflectCategory>();
   private readonly deflectCacheEnabled: boolean;
+  private readonly visionService: VisionService | null;
 
   private readonly loreDirPath: string;
   private readonly loreSizeCapBytes: number;
@@ -360,6 +363,7 @@ export class ChatModule implements IChatModule {
     this.deflectCacheRefreshIntervalMs = options.deflectCacheRefreshIntervalMs ?? 1_800_000;
     this.deflectCacheRefreshMinThreshold = options.deflectCacheRefreshMinThreshold ?? 3;
     this.deflectCacheEnabled = options.deflectCacheEnabled ?? false;
+    this.visionService = options.visionService ?? null;
 
     if (this.moodProactiveEnabled) {
       this.moodProactiveTimer = setInterval(
@@ -475,6 +479,16 @@ export class ChatModule implements IChatModule {
     if (isPureAtMention) {
       this.lastProactiveReply.set(groupId, now);
       return this._generateDeflection('at_only', triggerMessage);
+    }
+
+    // Vision: if message contains an image CQ, describe it and enrich content
+    if (this.visionService) {
+      const imageDesc = await this.visionService.describeFromMessage(
+        groupId, triggerMessage.rawContent, triggerMessage.userId, this.botUserId,
+      );
+      if (imageDesc) {
+        triggerMessage = { ...triggerMessage, content: `${imageDesc} ${triggerMessage.content}`.trim() };
+      }
     }
 
     // ── Weighted participation scoring ───────────────────────────────────
@@ -1042,7 +1056,11 @@ export class ChatModule implements IChatModule {
       ? `\n\n# 关于这个群\n${lore}`
       : '';
 
-    const text = `${personaBase}${loreSection}\n\n---\n简短自然（1-3句话）。群友提到群里的人名、梗、黑话，基于上面资料回答；不知道的就"啥来的"，不要装懂。${faceLine}${stickerSection}${outputRules}`;
+    const imageAwarenessLine = this.visionService
+      ? '\n\n如果消息里有 [图片: XXX] 的描述，这是群友发的图片内容。你可以基于描述做出反应（夸图、吐槽、问是谁、表情包互怼等），就像真的看到图一样，但不要说"我看到一张图"这种话。'
+      : '';
+
+    const text = `${personaBase}${loreSection}${imageAwarenessLine}\n\n---\n简短自然（1-3句话）。群友提到群里的人名、梗、黑话，基于上面资料回答；不知道的就"啥来的"，不要装懂。${faceLine}${stickerSection}${outputRules}`;
 
     this.groupIdentityCache.set(groupId, { text, expiresAt: Date.now() + this.groupIdentityCacheTtlMs });
     this.logger.debug({ groupId, hasLore: !!lore, hasStickerSection: stickerSection.length > 0 }, 'Group identity prompt cached');
