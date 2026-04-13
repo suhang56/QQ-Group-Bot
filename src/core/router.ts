@@ -156,7 +156,7 @@ export class Router implements IRouter {
       }
 
       // Tick sticker legend refresh counter (rebuilds sticker section every N messages)
-      this.chat?.tickStickerRefresh(msg.groupId);
+      this.chatModule?.tickStickerRefresh(msg.groupId);
 
       // Command routing — admin/owner only at router level; /appeal is open to all roles
       const trimmed = msg.content.trim();
@@ -758,15 +758,32 @@ export class Router implements IRouter {
       }
       if (args[0] === 'reset') {
         this.db.groupConfig.upsert({ ...config, chatPersonaText: null });
-        this.chat?.invalidateLore(msg.groupId);
+        this.chatModule?.invalidateLore(msg.groupId);
         await this.adapter.send(msg.groupId, '已重置为默认邦批人格。');
         return;
       }
       // Set custom persona text (rest of args joined as the text)
       const personaText = args.join(' ');
       this.db.groupConfig.upsert({ ...config, chatPersonaText: personaText });
-      this.chat?.invalidateLore(msg.groupId);
+      this.chatModule?.invalidateLore(msg.groupId);
       await this.adapter.send(msg.groupId, '人格已更新。');
+    });
+
+    this.commands.set('mood', async (msg, _args, _config) => {
+      if (msg.role !== 'admin' && msg.role !== 'owner') {
+        await this.adapter.send(msg.groupId, '没有权限。只有管理员可以操作此指令。');
+        return;
+      }
+      if (!this.chatModule) {
+        await this.adapter.send(msg.groupId, '聊天模块未启用。');
+        return;
+      }
+      const tracker = this.chatModule.getMoodTracker();
+      const mood = tracker.getMood(msg.groupId);
+      const desc = tracker.describe(msg.groupId);
+      await this.adapter.send(msg.groupId,
+        `当前心情状态：${desc.label}\nvalence: ${mood.valence.toFixed(3)}  arousal: ${mood.arousal.toFixed(3)}\n语气倾向: ${desc.hints.join('、') || '（无）'}`
+      );
     });
 
     this.commands.set('rule_false_positive', async (msg, args, _config) => {

@@ -9,12 +9,14 @@ import { lurkerDefaults, chatHistoryDefaults } from '../config.js';
 import { FACE_LEGEND, parseFaces, renderFace } from '../utils/qqface.js';
 import { sentinelCheck, postProcess, HARDENED_SYSTEM } from '../utils/sentinel.js';
 import { buildStickerSection, type LiveStickerEntry } from '../utils/stickers.js';
+import { MoodTracker, PROACTIVE_POOLS, type MoodDescription } from './mood.js';
 
 export interface IChatModule {
   generateReply(groupId: string, triggerMessage: GroupMessage, recentMessages: GroupMessage[]): Promise<string | null>;
   recordOutgoingMessage(groupId: string, msgId: number): void;
   invalidateLore(groupId: string): void;
   tickStickerRefresh(groupId: string): void;
+  getMoodTracker(): MoodTracker;
 }
 
 interface ChatOptions {
@@ -42,6 +44,11 @@ interface ChatOptions {
   chatStickerTopN?: number;
   stickersDirPath?: string;
   stickerLegendRefreshEveryMsgs?: number;
+  moodDecayPerMinute?: number;
+  moodProactiveIntervalMs?: number;
+  moodProactiveMinSilenceMs?: number;
+  moodProactiveMaxPerGroupMs?: number;
+  moodProactiveEnabled?: boolean;
 }
 
 interface ScoreFactors {
@@ -229,6 +236,15 @@ export class ChatModule implements IChatModule {
   // sticker legend refresh counter: groupId -> message count since last rebuild
   private readonly stickerRefreshCounter = new Map<string, number>();
 
+  private readonly moodTracker = new MoodTracker();
+  private readonly moodProactiveIntervalMs: number;
+  private readonly moodProactiveMinSilenceMs: number;
+  private readonly moodProactiveMaxPerGroupMs: number;
+  private readonly moodProactiveEnabled: boolean;
+  // last proactive mood send: groupId -> timestamp
+  private readonly lastMoodProactive = new Map<string, number>();
+  private moodProactiveTimer: ReturnType<typeof setInterval> | null = null;
+
   private readonly loreDirPath: string;
   private readonly loreSizeCapBytes: number;
 
@@ -256,6 +272,29 @@ export class ChatModule implements IChatModule {
     this.chatStickerTopN = options.chatStickerTopN ?? chatHistoryDefaults.chatStickerTopN;
     this.stickersDirPath = options.stickersDirPath ?? chatHistoryDefaults.stickersDirPath;
     this.stickerLegendRefreshEveryMsgs = options.stickerLegendRefreshEveryMsgs ?? 50;
+    this.moodProactiveIntervalMs = options.moodProactiveIntervalMs ?? 120_000;
+    this.moodProactiveMinSilenceMs = options.moodProactiveMinSilenceMs ?? 180_000;
+    this.moodProactiveMaxPerGroupMs = options.moodProactiveMaxPerGroupMs ?? 1_800_000;
+    this.moodProactiveEnabled = options.moodProactiveEnabled ?? true;
+
+    if (this.moodProactiveEnabled) {
+      this.moodProactiveTimer = setInterval(
+        () => void this._moodProactiveTick(),
+        this.moodProactiveIntervalMs,
+      );
+      this.moodProactiveTimer.unref?.(); // don't block process exit in tests
+    }
+  }
+
+  destroy(): void {
+    if (this.moodProactiveTimer) {
+      clearInterval(this.moodProactiveTimer);
+      this.moodProactiveTimer = null;
+    }
+  }
+
+  getMoodTracker(): MoodTracker {
+    return this.moodTracker;
   }
 
   /** Called by router after each successful send — tracks outgoing message IDs for reply-to-bot detection. */
@@ -353,6 +392,9 @@ export class ChatModule implements IChatModule {
       return pickDeflection(MEMORY_INJECT_DEFLECTIONS);
     }
 
+    // ── Mood update ───────────────────────────────────────────────────────
+    this.moodTracker.updateFromMessage(groupId, triggerMessage);
+
     // ── Retrieve context ──────────────────────────────────────────────────
 
     const keywords = extractKeywords(triggerMessage.content);
@@ -394,12 +436,16 @@ export class ChatModule implements IChatModule {
     const historyText = keywordSection + historicalSection + recentSection;
 
     const systemPrompt = this._getGroupIdentityPrompt(groupId);
+    const moodSection = this._buildMoodSection(groupId);
     const userContent = `${historyText}${triggerMessage.nickname}说："${triggerMessage.content}"，你会怎么接？直接写出那句话。`;
 
     const chatRequest = (hardened = false) => this.claude.complete({
       model: 'claude-haiku-4-5-20251001',
       maxTokens: 300,
-      system: [{ text: hardened ? HARDENED_SYSTEM : systemPrompt, cache: true }],
+      // identity prompt is cached; mood section appended (cache:true required by type, API ignores dups)
+      system: hardened
+        ? [{ text: HARDENED_SYSTEM, cache: true }]
+        : [{ text: systemPrompt, cache: true }, ...(moodSection ? [{ text: moodSection, cache: true as const }] : [])],
       messages: [{ role: 'user', content: userContent }],
     });
 
@@ -557,6 +603,68 @@ export class ChatModule implements IChatModule {
       msSinceBot < IMPLICIT_BOT_REF_REACTION_WINDOW_MS
     ) return true;
     return false;
+  }
+
+  private _buildMoodSection(groupId: string): string {
+    const desc: MoodDescription = this.moodTracker.describe(groupId);
+    if (desc.label === '普通' && desc.hints.length === 0) return '';
+    const hintsStr = desc.hints.length > 0 ? `（${desc.hints.join('/')}）` : '';
+    return `# 你的当前心情\n${desc.label}\n说话时可以带一点这个情绪倾向${hintsStr}\n但不要刻意，自然流露就行`;
+  }
+
+  private async _moodProactiveTick(): Promise<void> {
+    const now = Date.now();
+    // Iterate over all groups that have known mood state
+    for (const [groupId] of this.lastProactiveReply) {
+      const botSilenceMs = now - (this.lastProactiveReply.get(groupId) ?? 0);
+      if (botSilenceMs < this.moodProactiveMinSilenceMs) continue;
+
+      const lastProactive = this.lastMoodProactive.get(groupId) ?? 0;
+      if (now - lastProactive < this.moodProactiveMaxPerGroupMs) continue;
+
+      // Check group has had activity in last 10 min
+      const recent = this.db.messages.getRecent(groupId, 1);
+      if (recent.length === 0) continue;
+      const lastMsgAge = now - recent[0]!.timestamp * 1000;
+      if (lastMsgAge > 10 * 60_000) continue;
+
+      const mood = this.moodTracker.getMood(groupId);
+
+      // High anger → no proactive
+      if (mood.valence <= -0.5) continue;
+
+      let pool: string[] | null = null;
+      let chance = 0;
+
+      if (mood.valence >= 0.5 && mood.arousal >= 0.5) {
+        pool = PROACTIVE_POOLS['激动爽'] ?? null;
+        chance = 0.2;
+      } else if (mood.arousal <= -0.3) {
+        pool = PROACTIVE_POOLS['无聊低气压'] ?? null;
+        chance = 0.1;
+      }
+
+      if (!pool || Math.random() > chance) continue;
+
+      const text = pool[Math.floor(Math.random() * pool.length)]!;
+      this.lastMoodProactive.set(groupId, now);
+      this.lastProactiveReply.set(groupId, now);
+      this.logger.info({ groupId, text, mood }, 'mood proactive message');
+
+      // Fire-and-forget; caller (router) not available here, so we store result for adapter
+      // In practice the adapter is injected via setAdapter; skip send if not set
+      if (this._proactiveAdapter) {
+        const msgId = await this._proactiveAdapter(groupId, text);
+        if (msgId !== null) this.recordOutgoingMessage(groupId, msgId);
+      }
+    }
+  }
+
+  private _proactiveAdapter: ((groupId: string, text: string) => Promise<number | null>) | null = null;
+
+  /** Called by router to enable proactive mood messages. */
+  setProactiveAdapter(fn: (groupId: string, text: string) => Promise<number | null>): void {
+    this._proactiveAdapter = fn;
   }
 
   private _hasLoreKeyword(groupId: string, content: string): boolean {
