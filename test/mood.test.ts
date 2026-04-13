@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MoodTracker, describeMood, PROACTIVE_POOLS } from '../src/modules/mood.js';
-import { ChatModule, TASK_DEFLECTIONS } from '../src/modules/chat.js';
+import { ChatModule, TASK_DEFLECTIONS, SILENCE_BREAKER_POOL } from '../src/modules/chat.js';
 import { Database } from '../src/storage/db.js';
 import type { IClaudeClient, ClaudeResponse } from '../src/ai/claude.js';
 import type { GroupMessage } from '../src/adapter/napcat.js';
@@ -196,10 +196,11 @@ describe('ChatModule — mood system integration', () => {
     });
 
     // Prime: bot posted 5 min ago (above silence threshold of 3 min)
+    chat['knownGroups'].add('g1');
     chat['lastProactiveReply'].set('g1', Date.now() - 5 * 60_000);
     // No recent mood proactive
     chat['lastMoodProactive'].delete('g1');
-    // Recent group activity (within 10 min)
+    // Recent group activity (within 10 min) — message 30s ago so silence-breaker doesn't fire
     db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'hi', timestamp: Math.floor(Date.now() / 1000) - 30, deleted: false });
     // Set mood to 激动爽 (chance 20%)
     chat.getMoodTracker()['moods'].set('g1', { valence: 0.9, arousal: 0.9, lastUpdate: Date.now() });
@@ -220,6 +221,7 @@ describe('ChatModule — mood system integration', () => {
     const chat = makeChat({ moodProactiveEnabled: false });
     chat.setProactiveAdapter(async (groupId, text) => { sentMessages.push({ groupId, text }); return 42; });
 
+    chat['knownGroups'].add('g1');
     chat['lastProactiveReply'].set('g1', Date.now() - 5 * 60_000);
     // Set lastMoodProactive to recent (within 30 min cap)
     chat['lastMoodProactive'].set('g1', Date.now() - 5 * 60_000);
@@ -239,6 +241,7 @@ describe('ChatModule — mood system integration', () => {
     const chat = makeChat({ moodProactiveEnabled: false });
     chat.setProactiveAdapter(async (groupId, text) => { sentMessages.push({ groupId, text }); return 42; });
 
+    chat['knownGroups'].add('g1');
     chat['lastProactiveReply'].set('g1', Date.now() - 5 * 60_000);
     chat['lastMoodProactive'].delete('g1');
     db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'hi', timestamp: Math.floor(Date.now() / 1000) - 30, deleted: false });
@@ -250,5 +253,144 @@ describe('ChatModule — mood system integration', () => {
     vi.restoreAllMocks();
 
     expect(sentMessages.length).toBe(0);
+  });
+});
+
+// ── Silence-breaker ───────────────────────────────────────────────────────────
+
+describe('ChatModule — silence-breaker proactive', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+  });
+
+  function makeChat(opts: Record<string, unknown> = {}): ChatModule {
+    return new ChatModule(
+      { complete: vi.fn() } as unknown as IClaudeClient,
+      db,
+      {
+        botUserId: 'bot-123',
+        debounceMs: 0,
+        chatMinScore: -999,
+        moodProactiveEnabled: false,
+        moodProactiveMaxPerGroupMs: 1_800_000, // 30 min shared cooldown
+        silenceBreakerActiveWindowMs: 600_000,    // 10 min
+        silenceBreakerSilentThresholdMs: 300_000, // 5 min
+        silenceBreakerMinRecentMsgs: 3,
+        ...opts,
+      },
+    );
+  }
+
+  const nowSec = () => Math.floor(Date.now() / 1000);
+
+  function insertMsg(groupId: string, userId: string, secondsAgo: number) {
+    db.messages.insert({
+      groupId, userId, nickname: userId, content: 'hi',
+      timestamp: nowSec() - secondsAgo, deleted: false,
+    });
+  }
+
+  // 1. Active group (3+ non-bot msgs in 5-10 min window) then silent 5 min → fires
+  it('active then 5-min silent → silence breaker fires', async () => {
+    const sent: string[] = [];
+    const chat = makeChat();
+    chat.setProactiveAdapter(async (_g, text) => { sent.push(text); return 42; });
+    chat['knownGroups'].add('g1');
+
+    // 3 messages 6-9 min ago (in 5-10 min active window)
+    insertMsg('g1', 'u1', 6 * 60);
+    insertMsg('g1', 'u2', 7 * 60);
+    insertMsg('g1', 'u3', 8 * 60);
+    // No messages in last 5 min
+
+    await chat['_moodProactiveTick']();
+    expect(sent.length).toBe(1);
+    expect(SILENCE_BREAKER_POOL).toContain(sent[0]);
+  });
+
+  // 2. Only 2 msgs in active window → no trigger
+  it('only 2 msgs in active window → no silence breaker', async () => {
+    const sent: string[] = [];
+    const chat = makeChat();
+    chat.setProactiveAdapter(async (_g, text) => { sent.push(text); return 42; });
+    chat['knownGroups'].add('g1');
+
+    insertMsg('g1', 'u1', 6 * 60);
+    insertMsg('g1', 'u2', 7 * 60);
+    // only 2 messages — below threshold of 3
+
+    await chat['_moodProactiveTick']();
+    expect(sent.length).toBe(0);
+  });
+
+  // 3. Silent only 4 min (not yet 5 min threshold) → no trigger
+  it('silent only 4 min → no trigger', async () => {
+    const sent: string[] = [];
+    const chat = makeChat();
+    chat.setProactiveAdapter(async (_g, text) => { sent.push(text); return 42; });
+    chat['knownGroups'].add('g1');
+
+    // 3 active messages 6-9 min ago
+    insertMsg('g1', 'u1', 6 * 60);
+    insertMsg('g1', 'u2', 7 * 60);
+    insertMsg('g1', 'u3', 8 * 60);
+    // 1 message 4 min ago (still within silent threshold — not yet silent)
+    insertMsg('g1', 'u1', 4 * 60);
+
+    await chat['_moodProactiveTick']();
+    expect(sent.length).toBe(0);
+  });
+
+  // 4. Silence breaker fires → cooldown blocks next tick
+  it('after silence breaker fires → cooldown blocks next 30 min', async () => {
+    const sent: string[] = [];
+    const chat = makeChat();
+    chat.setProactiveAdapter(async (_g, text) => { sent.push(text); return 42; });
+    chat['knownGroups'].add('g1');
+
+    insertMsg('g1', 'u1', 6 * 60);
+    insertMsg('g1', 'u2', 7 * 60);
+    insertMsg('g1', 'u3', 8 * 60);
+
+    await chat['_moodProactiveTick']();
+    expect(sent.length).toBe(1);
+
+    // Second tick immediately — cooldown active
+    await chat['_moodProactiveTick']();
+    expect(sent.length).toBe(1); // still 1, not 2
+  });
+
+  // 5. Permanently dead group (zero messages) → no trigger
+  it('group with zero messages → no trigger', async () => {
+    const sent: string[] = [];
+    const chat = makeChat();
+    chat.setProactiveAdapter(async (_g, text) => { sent.push(text); return 42; });
+    chat['knownGroups'].add('g1');
+    // no messages inserted
+
+    await chat['_moodProactiveTick']();
+    expect(sent.length).toBe(0);
+  });
+
+  // 6. Bot messages don't count — only non-bot silence matters
+  it("bot's own messages don't count as recent non-bot activity", async () => {
+    const sent: string[] = [];
+    const chat = makeChat();
+    chat.setProactiveAdapter(async (_g, text) => { sent.push(text); return 42; });
+    chat['knownGroups'].add('g1');
+
+    // 3 non-bot messages in active window
+    insertMsg('g1', 'u1', 6 * 60);
+    insertMsg('g1', 'u2', 7 * 60);
+    insertMsg('g1', 'u3', 8 * 60);
+    // Bot message 2 min ago — should NOT count as "recent activity" from humans
+    insertMsg('g1', 'bot-123', 2 * 60);
+
+    await chat['_moodProactiveTick']();
+    // Silence breaker should still fire (humans haven't spoken in 5+ min)
+    expect(sent.length).toBe(1);
+    expect(SILENCE_BREAKER_POOL).toContain(sent[0]);
   });
 });

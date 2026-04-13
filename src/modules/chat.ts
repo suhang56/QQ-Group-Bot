@@ -51,6 +51,9 @@ interface ChatOptions {
   moodProactiveMinSilenceMs?: number;
   moodProactiveMaxPerGroupMs?: number;
   moodProactiveEnabled?: boolean;
+  silenceBreakerActiveWindowMs?: number;
+  silenceBreakerSilentThresholdMs?: number;
+  silenceBreakerMinRecentMsgs?: number;
 }
 
 interface ScoreFactors {
@@ -106,6 +109,12 @@ export const MEMORY_INJECT_DEFLECTIONS = [
 export const CURSE_DEFLECTIONS = [
   '傻逼', '神经病', '你有病吧', '滚', 'nmd', '你妈的', '煞笔', '有毛病',
   '没完了是吧', '烦死了 闭嘴', '一天天的', '真他妈烦', '别闹了', '笑死 真的烦',
+];
+
+export const SILENCE_BREAKER_POOL = [
+  '你们怎么不说话了', '干吊去了', '都死了？', '怎么都不吱声了',
+  '人呢', '群人呢', '这群死群', '睡了吗', '...在不?', '开场了哈',
+  '说话啊', '全员潜水?', '???',
 ];
 
 export const BANGDREAM_PERSONA = `你是这个QQ群的老群友，不是AI，不是机器人，也不是任何现有群友。你有自己独立的身份和性格：
@@ -243,6 +252,9 @@ export class ChatModule implements IChatModule {
   // sticker legend refresh counter: groupId -> message count since last rebuild
   private readonly stickerRefreshCounter = new Map<string, number>();
 
+  // all groups the bot has seen activity in (for silence-breaker iteration)
+  private readonly knownGroups = new Set<string>();
+
   // tease counter: `groupId:userId` -> { count, lastHit }
   private readonly teaseCounter = new Map<string, { count: number; lastHit: number }>();
   private readonly teaseCurseThreshold: number;
@@ -253,6 +265,9 @@ export class ChatModule implements IChatModule {
   private readonly moodProactiveMinSilenceMs: number;
   private readonly moodProactiveMaxPerGroupMs: number;
   private readonly moodProactiveEnabled: boolean;
+  private readonly silenceBreakerActiveWindowMs: number;
+  private readonly silenceBreakerSilentThresholdMs: number;
+  private readonly silenceBreakerMinRecentMsgs: number;
   // last proactive mood send: groupId -> timestamp
   private readonly lastMoodProactive = new Map<string, number>();
   private moodProactiveTimer: ReturnType<typeof setInterval> | null = null;
@@ -290,6 +305,9 @@ export class ChatModule implements IChatModule {
     this.moodProactiveMinSilenceMs = options.moodProactiveMinSilenceMs ?? 180_000;
     this.moodProactiveMaxPerGroupMs = options.moodProactiveMaxPerGroupMs ?? 1_800_000;
     this.moodProactiveEnabled = options.moodProactiveEnabled ?? true;
+    this.silenceBreakerActiveWindowMs = options.silenceBreakerActiveWindowMs ?? 600_000;
+    this.silenceBreakerSilentThresholdMs = options.silenceBreakerSilentThresholdMs ?? 300_000;
+    this.silenceBreakerMinRecentMsgs = options.silenceBreakerMinRecentMsgs ?? 3;
 
     if (this.moodProactiveEnabled) {
       this.moodProactiveTimer = setInterval(
@@ -355,6 +373,8 @@ export class ChatModule implements IChatModule {
     triggerMessage: GroupMessage,
     recentMessages: GroupMessage[]
   ): Promise<string | null> {
+    this.knownGroups.add(groupId);
+
     // Empty content after CQ stripping
     if (!triggerMessage.content.trim()) {
       return null;
@@ -642,13 +662,22 @@ export class ChatModule implements IChatModule {
 
   private async _moodProactiveTick(): Promise<void> {
     const now = Date.now();
-    // Iterate over all groups that have known mood state
-    for (const [groupId] of this.lastProactiveReply) {
+
+    for (const groupId of this.knownGroups) {
+      const lastProactive = this.lastMoodProactive.get(groupId) ?? 0;
+      // Shared 30-min cooldown for all proactive reasons
+      if (now - lastProactive < this.moodProactiveMaxPerGroupMs) continue;
+
+      // ── Silence-breaker check ─────────────────────────────────────────
+      const silenceText = this._checkSilenceBreaker(groupId, now);
+      if (silenceText !== null) {
+        await this._sendProactive(groupId, silenceText, now, 'silence-breaker');
+        continue;
+      }
+
+      // ── Mood-driven proactive ─────────────────────────────────────────
       const botSilenceMs = now - (this.lastProactiveReply.get(groupId) ?? 0);
       if (botSilenceMs < this.moodProactiveMinSilenceMs) continue;
-
-      const lastProactive = this.lastMoodProactive.get(groupId) ?? 0;
-      if (now - lastProactive < this.moodProactiveMaxPerGroupMs) continue;
 
       // Check group has had activity in last 10 min
       const recent = this.db.messages.getRecent(groupId, 1);
@@ -657,9 +686,7 @@ export class ChatModule implements IChatModule {
       if (lastMsgAge > 10 * 60_000) continue;
 
       const mood = this.moodTracker.getMood(groupId);
-
-      // High anger → no proactive
-      if (mood.valence <= -0.5) continue;
+      if (mood.valence <= -0.5) continue; // high anger → no proactive
 
       let pool: string[] | null = null;
       let chance = 0;
@@ -675,16 +702,41 @@ export class ChatModule implements IChatModule {
       if (!pool || Math.random() > chance) continue;
 
       const text = pool[Math.floor(Math.random() * pool.length)]!;
-      this.lastMoodProactive.set(groupId, now);
-      this.lastProactiveReply.set(groupId, now);
-      this.logger.info({ groupId, text, mood }, 'mood proactive message');
+      await this._sendProactive(groupId, text, now, 'mood');
+    }
+  }
 
-      // Fire-and-forget; caller (router) not available here, so we store result for adapter
-      // In practice the adapter is injected via setAdapter; skip send if not set
-      if (this._proactiveAdapter) {
-        const msgId = await this._proactiveAdapter(groupId, text);
-        if (msgId !== null) this.recordOutgoingMessage(groupId, msgId);
-      }
+  /** Returns a silence-breaker message if conditions are met, else null. */
+  private _checkSilenceBreaker(groupId: string, nowMs: number): string | null {
+    const silentThreshSec = this.silenceBreakerSilentThresholdMs / 1000;
+    const activeWindowSec = this.silenceBreakerActiveWindowMs / 1000;
+
+    // Fetch enough recent messages to cover the full active window
+    const msgs = this.db.messages.getRecent(groupId, 50);
+    if (msgs.length === 0) return null;
+
+    const nowSec = nowMs / 1000;
+    const silentCutoff = nowSec - silentThreshSec;         // 5 min ago
+    const activeCutoff = nowSec - activeWindowSec;         // 10 min ago
+
+    // Check silent: no messages (from non-bot users) in last 5 min
+    const recentNonBot = msgs.filter(m => m.userId !== this.botUserId && m.timestamp >= silentCutoff);
+    if (recentNonBot.length > 0) return null; // still active
+
+    // Check was active: ≥ N non-bot messages in the 10-min window before the silent period
+    const activeWindowMsgs = msgs.filter(m => m.userId !== this.botUserId && m.timestamp >= activeCutoff && m.timestamp < silentCutoff);
+    if (activeWindowMsgs.length < this.silenceBreakerMinRecentMsgs) return null;
+
+    return SILENCE_BREAKER_POOL[Math.floor(Math.random() * SILENCE_BREAKER_POOL.length)]!;
+  }
+
+  private async _sendProactive(groupId: string, text: string, nowMs: number, reason: string): Promise<void> {
+    this.lastMoodProactive.set(groupId, nowMs);
+    this.lastProactiveReply.set(groupId, nowMs);
+    this.logger.info({ groupId, text, reason }, 'proactive message');
+    if (this._proactiveAdapter) {
+      const msgId = await this._proactiveAdapter(groupId, text);
+      if (msgId !== null) this.recordOutgoingMessage(groupId, msgId);
     }
   }
 
