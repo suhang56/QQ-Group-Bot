@@ -154,6 +154,37 @@ describe('Database / ModerationRepository', () => {
     const recent = db.moderation.findRecentByUser('u6', 'g1', 5000 * 1000);
     expect(recent).toHaveLength(1);
   });
+
+  it('findRecentByGroup returns empty array for unknown group', () => {
+    const result = db.moderation.findRecentByGroup('no-such-group', 999999 * 1000);
+    expect(result).toEqual([]);
+  });
+
+  it('findRecentByGroup returns all records within wide window', () => {
+    const ts = nowSec();
+    db.moderation.insert({ msgId: 'fg1', groupId: 'g7', userId: 'u1', violation: true, severity: 1, action: 'warn', reason: '', appealed: 0, reversed: false, timestamp: ts });
+    db.moderation.insert({ msgId: 'fg2', groupId: 'g7', userId: 'u2', violation: true, severity: 2, action: 'ban', reason: '', appealed: 0, reversed: false, timestamp: ts - 100 });
+    const result = db.moderation.findRecentByGroup('g7', 999999 * 1000);
+    expect(result).toHaveLength(2);
+  });
+
+  it('findRecentByGroup excludes records outside window', () => {
+    const ts = nowSec();
+    db.moderation.insert({ msgId: 'fg3', groupId: 'g8', userId: 'u1', violation: true, severity: 1, action: 'warn', reason: '', appealed: 0, reversed: false, timestamp: ts });
+    db.moderation.insert({ msgId: 'fg4', groupId: 'g8', userId: 'u1', violation: true, severity: 1, action: 'warn', reason: '', appealed: 0, reversed: false, timestamp: ts - 10000 });
+    const result = db.moderation.findRecentByGroup('g8', 5000 * 1000);
+    expect(result).toHaveLength(1);
+    expect(result[0]!.msgId).toBe('fg3');
+  });
+
+  it('findRecentByGroup does not return records from other groups', () => {
+    const ts = nowSec();
+    db.moderation.insert({ msgId: 'fg5', groupId: 'g9', userId: 'u1', violation: true, severity: 1, action: 'warn', reason: '', appealed: 0, reversed: false, timestamp: ts });
+    db.moderation.insert({ msgId: 'fg6', groupId: 'g10', userId: 'u1', violation: true, severity: 1, action: 'warn', reason: '', appealed: 0, reversed: false, timestamp: ts });
+    const result = db.moderation.findRecentByGroup('g9', 999999 * 1000);
+    expect(result).toHaveLength(1);
+    expect(result[0]!.msgId).toBe('fg5');
+  });
 });
 
 describe('Database / GroupConfigRepository', () => {

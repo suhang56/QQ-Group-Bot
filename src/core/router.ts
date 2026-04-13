@@ -177,11 +177,8 @@ export class Router implements IRouter {
     });
 
     this.commands.set('stats', async (msg, _args, config) => {
-      // NOTE: Bug 1 (pending architect approval) — findRecentByGroup not yet available.
-      // findRecentByUser requires a specific userId; passing empty string returns no results.
-      // Will be fixed once IModerationRepository.findRecentByGroup is approved + implemented.
       const sevenDays = 7 * 24 * 3600;
-      const recent = this.db.moderation.findRecentByUser('', msg.groupId, sevenDays * 1000);
+      const recent = this.db.moderation.findRecentByGroup(msg.groupId, sevenDays * 1000);
 
       const cap = config.dailyPunishmentLimit;
       const punishmentsToday = config.punishmentsToday;

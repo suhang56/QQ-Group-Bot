@@ -84,6 +84,7 @@ export interface IModerationRepository {
   findById(id: number): ModerationRecord | null;
   findByMsgId(msgId: string): ModerationRecord | null;
   findRecentByUser(userId: string, groupId: string, windowMs: number): ModerationRecord[];
+  findRecentByGroup(groupId: string, windowMs: number): ModerationRecord[];
   findPendingAppeal(userId: string, groupId: string): ModerationRecord | null;
   update(id: number, patch: Partial<Pick<ModerationRecord, 'appealed' | 'reversed'>>): void;
   countWarnsByUser(userId: string, groupId: string, withinMs: number): number;
@@ -286,6 +287,14 @@ class ModerationRepository implements IModerationRepository {
     const rows = this.db.prepare(
       'SELECT * FROM moderation_log WHERE user_id = ? AND group_id = ? AND timestamp >= ? ORDER BY timestamp DESC'
     ).all(userId, groupId, since) as unknown as ModerationRow[];
+    return rows.map(modFromRow);
+  }
+
+  findRecentByGroup(groupId: string, windowMs: number): ModerationRecord[] {
+    const since = Math.floor(Date.now() / 1000) - Math.floor(windowMs / 1000);
+    const rows = this.db.prepare(
+      'SELECT * FROM moderation_log WHERE group_id = ? AND timestamp >= ? ORDER BY timestamp DESC'
+    ).all(groupId, since) as unknown as ModerationRow[];
     return rows.map(modFromRow);
   }
 
