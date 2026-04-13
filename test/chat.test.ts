@@ -1128,6 +1128,30 @@ describe('ChatModule — 邦批 persona', () => {
     expect(BANGDREAM_PERSONA).toContain('女');
   });
 
+  it('BANGDREAM_PERSONA has independent attitude section with 独立 and 反怼', () => {
+    expect(BANGDREAM_PERSONA).toContain('独立');
+    expect(BANGDREAM_PERSONA).toContain('反怼');
+  });
+
+  it('BANGDREAM_PERSONA has attitude phrases: 关我屁事, 想屁吃, 自己玩', () => {
+    expect(BANGDREAM_PERSONA).toContain('关我屁事');
+    expect(BANGDREAM_PERSONA).toContain('想屁吃');
+    expect(BANGDREAM_PERSONA).toContain('自己玩');
+  });
+
+  it('BANGDREAM_PERSONA bans sycophantic phrases via 不讨好 instruction', () => {
+    expect(BANGDREAM_PERSONA).toContain('不讨好');
+  });
+
+  it('system prompt contains attitude phrases when injected', async () => {
+    const { chat, claude } = makeChat();
+    await chat.generateReply('g1', makeMsg({ content: '你好' }), []);
+    const call = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+    const systemText = call?.system?.[0]?.text as string;
+    expect(systemText).toContain('关我屁事');
+    expect(systemText).toContain('不讨好');
+  });
+
   it('system prompt contains "邦批" by default (no lore file)', async () => {
     const { chat, claude } = makeChat();
     await chat.generateReply('g1', makeMsg({ content: '你好' }), []);
