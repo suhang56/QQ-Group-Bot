@@ -163,6 +163,20 @@ describe('NameImagesModule — saveImage', () => {
       mod.saveImage('g1', '西瓜', 'http://example.com/html', 'src-html', 'u1', 50)
     ).rejects.toThrow('Non-image content-type');
   });
+
+  // Image over 5 MB → throws
+  it('throws when image exceeds 5 MB size limit', async () => {
+    const oversized = Buffer.alloc(5 * 1024 * 1024 + 1, 0x00);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      headers: { get: () => 'image/jpeg' },
+      arrayBuffer: () => Promise.resolve(oversized.buffer),
+    }));
+    await expect(
+      mod.saveImage('g1', '西瓜', 'http://example.com/big.jpg', 'src-big', 'u1', 50)
+    ).rejects.toThrow('Image too large');
+    expect(db.nameImages.countByName('g1', '西瓜')).toBe(0);
+  });
 });
 
 describe('NameImagesModule — name detection and cooldown', () => {

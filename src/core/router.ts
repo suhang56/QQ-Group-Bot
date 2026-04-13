@@ -471,7 +471,7 @@ export class Router implements IRouter {
         await this.adapter.send(msg.groupId, '图片库功能已禁用。');
         return;
       }
-      const name = args.join(' ').trim();
+      const name = args.join(' ').trim().replace(/[/\\..]+/g, '');
       if (!name) {
         await this.adapter.send(msg.groupId, '用法：/add <人名>\n例如：/add 西瓜');
         return;

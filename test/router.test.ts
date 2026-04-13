@@ -1,12 +1,16 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Router, splitReply } from '../src/core/router.js';
 import { RateLimiter } from '../src/core/rateLimiter.js';
 import { MimicModule } from '../src/modules/mimic.js';
 import { ModeratorModule } from '../src/modules/moderator.js';
+import { NameImagesModule } from '../src/modules/name-images.js';
 import { Database } from '../src/storage/db.js';
 import type { GroupMessage, INapCatAdapter } from '../src/adapter/napcat.js';
 import type { IClaudeClient } from '../src/ai/claude.js';
 import { initLogger } from '../src/utils/logger.js';
+import * as os from 'node:os';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 
 initLogger({ level: 'silent' });
 
@@ -522,5 +526,61 @@ describe('Router — multi-line chat reply dispatch', () => {
     router.setChat({ generateReply: vi.fn().mockResolvedValue(null), recordOutgoingMessage: vi.fn() });
     await router.dispatch(makeMsg({ content: 'hello', rawContent: 'hello' }));
     expect(adapter.send).not.toHaveBeenCalled();
+  });
+});
+
+describe('Router — /add name-images integration', () => {
+  let db: Database;
+  let adapter: INapCatAdapter;
+  let router: Router;
+  let tmpDir: string;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    adapter = makeMockAdapter();
+    router = new Router(db, adapter, new RateLimiter());
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'router-ni-test-'));
+    router.setNameImages(new NameImagesModule(db.nameImages, tmpDir));
+    vi.unstubAllGlobals();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('/add <name> by admin → enters collection mode and replies with confirmation', async () => {
+    await router.dispatch(makeMsg({ content: '/add 西瓜', role: 'admin' }));
+    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('西瓜'));
+  });
+
+  it('/add without name → replies with usage hint', async () => {
+    await router.dispatch(makeMsg({ content: '/add', role: 'admin' }));
+    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('用法'));
+  });
+
+  it('/add by member → silently ignored (admin gate)', async () => {
+    await router.dispatch(makeMsg({ content: '/add 西瓜', role: 'member' }));
+    expect(adapter.send).not.toHaveBeenCalled();
+  });
+
+  it('/add then image message → saves image and replies with count', async () => {
+    // Enter collection mode
+    await router.dispatch(makeMsg({ content: '/add 西瓜', role: 'admin' }));
+    vi.mocked(adapter.send).mockClear();
+
+    // Stub fetch for image download
+    const fakeJpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, ...new Array(50).fill(0x00)]);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      headers: { get: () => 'image/jpeg' },
+      arrayBuffer: () => Promise.resolve(fakeJpeg.buffer),
+    }));
+
+    const imageRaw = '[CQ:image,file=abc123,url=https://example.com/img.jpg]';
+    await router.dispatch(makeMsg({ content: imageRaw, rawContent: imageRaw, role: 'admin' }));
+
+    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringMatching(/西瓜|1\s*张/));
+    expect(db.nameImages.countByName('g1', '西瓜')).toBe(1);
   });
 });

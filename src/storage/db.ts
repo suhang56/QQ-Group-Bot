@@ -618,20 +618,23 @@ class NameImageRepository implements INameImageRepository {
     // Enforce cap at the repository layer — single-row count check before insert
     const current = this.countByName(groupId, name);
     if (current >= maxPerName) return null;
+    let lastId: number;
     if (sourceFile !== null) {
       // Use INSERT OR IGNORE — returns 0 changes on dedup
       const result = this.db.prepare(
         'INSERT OR IGNORE INTO name_images (group_id, name, file_path, source_file, added_by, added_at) VALUES (?, ?, ?, ?, ?, ?)'
-      ).run(groupId, name, filePath, sourceFile, addedBy, addedAt);
-      if ((result as { changes: number }).changes === 0) return null;
+      ).run(groupId, name, filePath, sourceFile, addedBy, addedAt) as { changes: number; lastInsertRowid: number };
+      if (result.changes === 0) return null;
+      lastId = result.lastInsertRowid;
     } else {
-      this.db.prepare(
+      const result = this.db.prepare(
         'INSERT INTO name_images (group_id, name, file_path, source_file, added_by, added_at) VALUES (?, ?, ?, ?, ?, ?)'
-      ).run(groupId, name, filePath, null, addedBy, addedAt);
+      ).run(groupId, name, filePath, null, addedBy, addedAt) as { lastInsertRowid: number };
+      lastId = result.lastInsertRowid;
     }
     const row = this.db.prepare(
-      'SELECT * FROM name_images WHERE group_id = ? AND file_path = ? ORDER BY id DESC LIMIT 1'
-    ).get(groupId, filePath) as unknown as NameImageRow;
+      'SELECT * FROM name_images WHERE id = ?'
+    ).get(lastId) as unknown as NameImageRow;
     return nameImageFromRow(row);
   }
 
@@ -705,5 +708,22 @@ export class Database {
     const schemaPath = fileURLToPath(new URL('./schema.sql', import.meta.url));
     const sql = readFileSync(schemaPath, 'utf8');
     this._db.exec(sql);
+    this._runMigrations();
+  }
+
+  private _runMigrations(): void {
+    // Each ALTER is wrapped in try/catch — SQLite throws if the column already exists,
+    // which is the correct idempotency behaviour for ADD COLUMN on existing DBs.
+    const alters = [
+      "ALTER TABLE group_config ADD COLUMN chat_lore_enabled INTEGER NOT NULL DEFAULT 1",
+      "ALTER TABLE group_config ADD COLUMN name_images_enabled INTEGER NOT NULL DEFAULT 1",
+      "ALTER TABLE group_config ADD COLUMN name_images_collection_timeout_ms INTEGER NOT NULL DEFAULT 120000",
+      "ALTER TABLE group_config ADD COLUMN name_images_collection_max INTEGER NOT NULL DEFAULT 20",
+      "ALTER TABLE group_config ADD COLUMN name_images_cooldown_ms INTEGER NOT NULL DEFAULT 300000",
+      "ALTER TABLE group_config ADD COLUMN name_images_max_per_name INTEGER NOT NULL DEFAULT 50",
+    ];
+    for (const sql of alters) {
+      try { this._db.exec(sql); } catch { /* column already exists — safe to ignore */ }
+    }
   }
 }
