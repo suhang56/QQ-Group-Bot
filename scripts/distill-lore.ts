@@ -32,7 +32,10 @@ interface Args {
   groupId: string;
   dbPath: string;
   outputPath: string;
-  model: ClaudeModel;
+  /** @deprecated use chunkModel / metaModel */
+  model?: ClaudeModel;
+  chunkModel: ClaudeModel;
+  metaModel: ClaudeModel;
   maxMessages: number;
   chunkSize: number;
 }
@@ -42,7 +45,8 @@ function parseArgs(argv: string[]): Args {
   let groupId = '';
   let dbPath = process.env['DB_PATH'] ?? 'data/bot.db';
   let outputPath = '';
-  let model: ClaudeModel = 'claude-opus-4-6';
+  let chunkModel: ClaudeModel = 'claude-sonnet-4-6';
+  let metaModel: ClaudeModel = 'claude-opus-4-6';
   let maxMessages = 200_000;
   let chunkSize = 40_000;
 
@@ -50,13 +54,20 @@ function parseArgs(argv: string[]): Args {
     if (args[i] === '--group-id' && args[i + 1]) { groupId = args[++i]!; }
     else if (args[i] === '--db' && args[i + 1]) { dbPath = args[++i]!; }
     else if (args[i] === '--output' && args[i + 1]) { outputPath = args[++i]!; }
-    else if (args[i] === '--model' && args[i + 1]) { model = args[++i]! as ClaudeModel; }
+    else if (args[i] === '--chunk-model' && args[i + 1]) { chunkModel = args[++i]! as ClaudeModel; }
+    else if (args[i] === '--meta-model' && args[i + 1]) { metaModel = args[++i]! as ClaudeModel; }
+    else if (args[i] === '--model' && args[i + 1]) {
+      // Legacy: --model sets both chunk and meta to same model
+      const m = args[++i]! as ClaudeModel;
+      chunkModel = m;
+      metaModel = m;
+    }
     else if (args[i] === '--max-messages' && args[i + 1]) { maxMessages = parseInt(args[++i]!, 10); }
     else if (args[i] === '--chunk-size' && args[i + 1]) { chunkSize = parseInt(args[++i]!, 10); }
   }
 
   if (!groupId) {
-    console.error('Usage: distill-lore.ts --group-id <id> [--db <path>] [--output <path>] [--model claude-opus-4-6] [--max-messages 200000] [--chunk-size 40000]');
+    console.error('Usage: distill-lore.ts --group-id <id> [--db <path>] [--output <path>] [--chunk-model claude-sonnet-4-6] [--meta-model claude-opus-4-6] [--max-messages 200000] [--chunk-size 40000]');
     process.exit(1);
   }
 
@@ -64,7 +75,7 @@ function parseArgs(argv: string[]): Args {
     outputPath = `data/lore/${groupId}.md`;
   }
 
-  return { groupId, dbPath, outputPath, model, maxMessages, chunkSize };
+  return { groupId, dbPath, outputPath, chunkModel, metaModel, maxMessages, chunkSize };
 }
 
 // ---- Message sampling ----
@@ -168,7 +179,8 @@ ${joined}`;
 
 // ---- Token estimation (rough: ~4 chars per token for Chinese) ----
 
-const MAX_CONTEXT_TOKENS = 900_000; // leave headroom in 1M context
+// Agent SDK subscription mode caps at ~200k; leave headroom for system prompt + output
+const MAX_CONTEXT_TOKENS = 150_000;
 const CHARS_PER_TOKEN = 4;
 
 function estimateTokens(text: string): number {
@@ -182,13 +194,18 @@ export async function runDistillation(args: Args, claude: ClaudeClient): Promise
 
   const msgs = sampleMessages(db, args.groupId, args.maxMessages);
 
-  // Split into chunks — shrink chunk if a single chunk would overflow context
+  // Halve chunk size until a sample chunk fits within context budget
   let effectiveChunkSize = args.chunkSize;
-  const sampleChunk = formatMessagesBlock(msgs.slice(0, args.chunkSize));
-  const sampleTokens = estimateTokens(sampleChunk);
-  if (sampleTokens > MAX_CONTEXT_TOKENS * 0.7) {
-    effectiveChunkSize = Math.floor(args.chunkSize * (MAX_CONTEXT_TOKENS * 0.7 / sampleTokens));
-    console.warn(`[WARN] Chunk too large (~${sampleTokens} tokens); shrinking chunk to ${effectiveChunkSize} messages`);
+  while (effectiveChunkSize > 1) {
+    const sampleChunk = formatMessagesBlock(msgs.slice(0, effectiveChunkSize));
+    const sampleTokens = estimateTokens(sampleChunk);
+    if (sampleTokens <= MAX_CONTEXT_TOKENS * 0.7) break;
+    const next = Math.floor(effectiveChunkSize / 2);
+    console.warn(`[WARN] Chunk of ${effectiveChunkSize} msgs ~${sampleTokens} tokens; halving to ${next}`);
+    effectiveChunkSize = next;
+  }
+  if (effectiveChunkSize !== args.chunkSize) {
+    console.log(`[INFO] Effective chunk size after auto-shrink: ${effectiveChunkSize} messages`);
   }
 
   const chunks = chunkMessages(msgs, effectiveChunkSize);
@@ -214,7 +231,7 @@ export async function runDistillation(args: Args, claude: ClaudeClient): Promise
 
     try {
       const response = await claude.complete({
-        model: args.model,
+        model: args.chunkModel,
         maxTokens: 4000,
         system: [{ text: '你是一个群聊分析助手，任务是提炼群聊记录的文化特征，输出结构化中文 markdown。', cache: true }],
         messages: [{ role: 'user', content: chunkSummaryPrompt(args.groupId, msgsBlock) }],
@@ -252,7 +269,7 @@ export async function runDistillation(args: Args, claude: ClaudeClient): Promise
     console.log(`[INFO] meta-synthesis prompt ~${metaTokens} estimated tokens`);
 
     const metaResponse = await claude.complete({
-      model: args.model,
+      model: args.metaModel,
       maxTokens: 8000,
       system: [{ text: '你是一个群聊分析助手，任务是将多段群聊分析合并成一份完整准确的群志，输出结构化中文 markdown。', cache: true }],
       messages: [{ role: 'user', content: metaPrompt }],
@@ -295,7 +312,7 @@ async function main() {
   console.log(`[INFO] Group: ${args.groupId}`);
   console.log(`[INFO] DB: ${args.dbPath}`);
   console.log(`[INFO] Output: ${args.outputPath}`);
-  console.log(`[INFO] Model: ${args.model}`);
+  console.log(`[INFO] Chunk model: ${args.chunkModel}, Meta model: ${args.metaModel}`);
   console.log(`[INFO] Max messages: ${args.maxMessages}, Chunk size: ${args.chunkSize}`);
 
   const lore = await runDistillation(args, claude);

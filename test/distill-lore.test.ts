@@ -52,7 +52,7 @@ describe('distill-lore: runDistillation', () => {
 
     const claude = makeFakeClaudeClient(['# 群志\n## 常驻群友\nUser0 — 活跃用户\n## 梗辞典\n无']);
     const lore = await runDistillation(
-      { groupId: 'g1', dbPath: tmpDb, outputPath: '/tmp/out.md', model: 'claude-opus-4-6', maxMessages: 200_000, chunkSize: 40_000 },
+      { groupId: 'g1', dbPath: tmpDb, outputPath: '/tmp/out.md', chunkModel: 'claude-sonnet-4-6', metaModel: 'claude-opus-4-6', maxMessages: 200_000, chunkSize: 40_000 },
       claude
     );
 
@@ -75,7 +75,7 @@ describe('distill-lore: runDistillation', () => {
     ]);
 
     const lore = await runDistillation(
-      { groupId: 'g1', dbPath: tmpDb, outputPath: '/tmp/out.md', model: 'claude-opus-4-6', maxMessages: 200_000, chunkSize: 100 },
+      { groupId: 'g1', dbPath: tmpDb, outputPath: '/tmp/out.md', chunkModel: 'claude-sonnet-4-6', metaModel: 'claude-opus-4-6', maxMessages: 200_000, chunkSize: 100 },
       claude
     );
 
@@ -105,7 +105,7 @@ describe('distill-lore: runDistillation', () => {
 
     await expect(
       runDistillation(
-        { groupId: 'g1', dbPath: tmpDb, outputPath: partialOutputPath, model: 'claude-opus-4-6', maxMessages: 200_000, chunkSize: 100 },
+        { groupId: 'g1', dbPath: tmpDb, outputPath: partialOutputPath, chunkModel: 'claude-sonnet-4-6', metaModel: 'claude-opus-4-6', maxMessages: 200_000, chunkSize: 100 },
         failingClaude
       )
     ).rejects.toThrow();
@@ -124,7 +124,7 @@ describe('distill-lore: runDistillation', () => {
 
     await expect(
       runDistillation(
-        { groupId: 'g-empty', dbPath: tmpDb, outputPath: '/tmp/out.md', model: 'claude-opus-4-6', maxMessages: 200_000, chunkSize: 40_000 },
+        { groupId: 'g-empty', dbPath: tmpDb, outputPath: '/tmp/out.md', chunkModel: 'claude-sonnet-4-6', metaModel: 'claude-opus-4-6', maxMessages: 200_000, chunkSize: 40_000 },
         claude
       )
     ).rejects.toThrow(/No messages found/);
