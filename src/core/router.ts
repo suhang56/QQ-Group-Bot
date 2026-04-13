@@ -169,24 +169,22 @@ export class Router implements IRouter {
         }
       }
 
-      // Name-mention hook: independent of chat reply — fires on known-name mention
+      // Name-image trigger: fires only when the entire message IS a known name (exact match after trim)
       if (this.nameImagesModule && config.nameImagesEnabled) {
+        const trimmedContent = msg.content.trim();
         const names = this.nameImagesModule.getAllNames(msg.groupId);
-        if (names.length > 0) {
-          const matched = this.nameImagesModule.findLongestMatch(msg.content, names);
-          if (matched) {
-            // Burst guard: skip if last 5 messages arrived within 10s
-            const recent5 = this.db.messages.getRecent(msg.groupId, 5);
-            const isBurst = recent5.length >= 5 &&
-              (recent5[0]!.timestamp - recent5[recent5.length - 1]!.timestamp) * 1000 <= 10_000;
-            if (!isBurst) {
-              const ok = this.nameImagesModule.checkAndSetCooldown(msg.groupId, matched, config.nameImagesCooldownMs);
-              if (ok) {
-                const image = this.nameImagesModule.pickRandom(msg.groupId, matched);
-                if (image) {
-                  const cq = `[CQ:image,file=file:///${image.filePath.replace(/\\/g, '/')}]`;
-                  await this.adapter.send(msg.groupId, cq);
-                }
+        const exactName = names.find(n => n.toLowerCase() === trimmedContent.toLowerCase());
+        if (exactName) {
+          // Burst guard: skip if last 5 messages arrived within 10s
+          const recent5 = this.db.messages.getRecent(msg.groupId, 5);
+          const isBurst = recent5.length >= 5 &&
+            (recent5[0]!.timestamp - recent5[recent5.length - 1]!.timestamp) * 1000 <= 10_000;
+          if (!isBurst) {
+            const ok = this.nameImagesModule.checkAndSetCooldown(msg.groupId, exactName, config.nameImagesCooldownMs);
+            if (ok) {
+              const image = this.nameImagesModule.pickRandom(msg.groupId, exactName);
+              if (image) {
+                await this.adapter.send(msg.groupId, `[CQ:image,file=file:///${image.filePath.replace(/\\/g, '/')}]`);
               }
             }
           }
@@ -495,7 +493,7 @@ export class Router implements IRouter {
       const minutes = Math.round(timeoutMs / 60_000);
       const count = this.nameImagesModule.countByName(msg.groupId, name);
       await this.adapter.send(msg.groupId,
-        `好的，接下来 ${minutes} 分钟内你发的图片会存到 ${name} 的图片库（当前${count}张）。发 /add_stop 可提前结束。`);
+        `好的，接下来 ${minutes} 分钟内你发的图片会存到 ${name} 的图片库（当前${count}张）。之后群里有人单独发 "${name}" 就会触发回图。发 /add_stop 可提前结束。`);
     });
 
     this.commands.set('add_stop', async (msg, _args, _config) => {
