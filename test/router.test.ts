@@ -293,6 +293,64 @@ describe('Router — mimic commands', () => {
     await router.dispatch(makeMsg({ content: 'just a regular chat message', userId: 'u-other' }));
     expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('[模仿'));
   });
+
+  // CQ:at mention parsing — the real QQ bug: user sent /mimic_on @nickname but
+  // QQ delivers it as [CQ:at,qq=<UID>] in rawContent, stripping the @text entirely
+  it('/mimic_on with CQ:at code in rawContent resolves target correctly', async () => {
+    db.messages.insert({ groupId: 'g1', userId: '1301931012', nickname: '常山养牛',
+      content: 'hi', timestamp: Math.floor(Date.now() / 1000), deleted: false });
+    await router.dispatch(makeMsg({
+      content: '/mimic_on',  // stripped content — @mention gone
+      rawContent: '/mimic_on [CQ:at,qq=1301931012]',
+      role: 'admin',
+    }));
+    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('模仿模式已开启'));
+  });
+
+  it('/mimic_on with plain numeric UID fallback resolves target correctly', async () => {
+    db.messages.insert({ groupId: 'g1', userId: '1301931012', nickname: '常山养牛',
+      content: 'hi', timestamp: Math.floor(Date.now() / 1000), deleted: false });
+    await router.dispatch(makeMsg({
+      content: '/mimic_on 1301931012',
+      rawContent: '/mimic_on 1301931012',
+      role: 'admin',
+    }));
+    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('模仿模式已开启'));
+  });
+
+  it('/mimic_on with no mention and no UID shows usage error', async () => {
+    await router.dispatch(makeMsg({
+      content: '/mimic_on',
+      rawContent: '/mimic_on',
+      role: 'admin',
+    }));
+    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('用法'));
+  });
+
+  it('/mimic_on with multiple CQ:at codes uses first match', async () => {
+    db.messages.insert({ groupId: 'g1', userId: '1301931012', nickname: '常山养牛',
+      content: 'hi', timestamp: Math.floor(Date.now() / 1000), deleted: false });
+    await router.dispatch(makeMsg({
+      content: '/mimic_on',
+      rawContent: '/mimic_on [CQ:at,qq=1301931012][CQ:at,qq=9999]',
+      role: 'admin',
+    }));
+    // First match (1301931012) has history; 9999 does not
+    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('模仿模式已开启'));
+  });
+
+  it('/mimic with CQ:at code resolves target, topic parsed from remaining text', async () => {
+    for (let i = 0; i < 5; i++) {
+      db.messages.insert({ groupId: 'g1', userId: '1301931012', nickname: '常山养牛',
+        content: `msg${i}`, timestamp: Math.floor(Date.now() / 1000) - i, deleted: false });
+    }
+    await router.dispatch(makeMsg({
+      content: '/mimic 你今天吃啥',  // stripped — @mention gone, topic remains
+      rawContent: '/mimic [CQ:at,qq=1301931012] 你今天吃啥',
+      role: 'admin',
+    }));
+    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('[模仿'));
+  });
 });
 
 describe('Router — moderator commands (appeal, rule_add, rule_false_positive)', () => {

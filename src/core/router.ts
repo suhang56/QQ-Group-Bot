@@ -7,6 +7,7 @@ import type { ModeratorModule } from '../modules/moderator.js';
 import { BotErrorCode } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
 import { defaultGroupConfig } from '../config.js';
+import { resolveAtTarget } from '../utils/cqcode.js';
 
 export interface IRouter {
   dispatch(msg: GroupMessage): Promise<void>;
@@ -224,15 +225,16 @@ export class Router implements IRouter {
         return;
       }
 
-      // Parse @user from args[0]
-      const atArg = args[0];
-      if (!atArg || !atArg.startsWith('@')) {
+      // Resolve @target from CQ:at code in rawContent (QQ sends mentions as CQ
+      // codes, not plain text — stripped content loses them entirely)
+      const targetUserId = resolveAtTarget(msg.rawContent, args);
+      if (!targetUserId) {
         await this.adapter.send(msg.groupId, '用法：/mimic @群友 [话题]\n例如：/mimic @小明 今天吃了什么');
         return;
       }
 
-      const targetUserId = atArg.slice(1);
-      const topic = args.slice(1).join(' ') || null;
+      // Topic is everything after the command that isn't a CQ code or UID
+      const topic = args.filter(a => !a.startsWith('@') && !/^\d{5,}$/.test(a)).join(' ') || null;
 
       const recentMsgs = this.db.messages.getRecent(msg.groupId, 20).map(m => ({
         messageId: String(m.id), groupId: m.groupId, userId: m.userId,
@@ -267,13 +269,12 @@ export class Router implements IRouter {
         return;
       }
 
-      const atArg = args[0];
-      if (!atArg || !atArg.startsWith('@')) {
+      // Resolve @target from CQ:at code in rawContent
+      const targetUserId = resolveAtTarget(msg.rawContent, args);
+      if (!targetUserId) {
         await this.adapter.send(msg.groupId, '用法：/mimic_on @群友');
         return;
       }
-
-      const targetUserId = atArg.slice(1);
 
       // Check target has history
       const userMsgs = this.db.messages.getByUser(msg.groupId, targetUserId, 1);
@@ -314,9 +315,9 @@ export class Router implements IRouter {
         return;
       }
 
-      // Parse optional @target: /appeal or /appeal @userId
-      const atArg = args[0];
-      const targetUserId = atArg?.startsWith('@') ? atArg.slice(1) : undefined;
+      // Parse optional @target from CQ:at code or plain UID
+      const targetUserId = resolveAtTarget(msg.rawContent, args) ?? undefined;
+      // resolveAtTarget falls back to plain UID or @-text; undefined means self-appeal
       const isAdmin = msg.role === 'admin' || msg.role === 'owner';
 
       // Members may only appeal their own punishment; only admins may target others
