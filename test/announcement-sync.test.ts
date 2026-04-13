@@ -175,15 +175,15 @@ describe('AnnouncementSyncModule', () => {
     expect(learner.addRuleWithSource).not.toHaveBeenCalled();
   });
 
-  // 5. Claude prompt includes dedup instruction
-  it('Claude prompt includes dedup instruction', async () => {
+  // 5. Claude prompt requires NONE output and rule extraction
+  it('Claude prompt requires NONE output for empty notices', async () => {
     vi.mocked(adapter.getGroupNotices).mockResolvedValue([makeNotice()]);
     const mod = new AnnouncementSyncModule(adapter, annRepo, rulesRepo, claude, learner);
     await mod.syncGroup('g1');
     const call = vi.mocked(claude.complete).mock.calls[0]![0];
     const userMsg = call.messages[0]!.content;
-    expect(userMsg).toContain('语义去重');
-    expect(userMsg).toContain('提取所有群规');
+    expect(userMsg).toContain('NONE');
+    expect(userMsg).toContain('提取群规');
   });
 
   // NEW: notice with real rules → 3 rules stored

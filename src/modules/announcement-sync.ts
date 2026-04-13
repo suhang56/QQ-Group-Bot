@@ -120,8 +120,8 @@ export class AnnouncementSyncModule {
     const response = await this.claude.complete({
       model: 'claude-haiku-4-5-20251001',
       maxTokens: 1000,
-      system: [{ text: '你是一个群规提取助手。从群公告中提取所有明确的群规，输出纯文本列表，每条规则单独一行，无序号无前缀，语义去重，只保留规则本身不要解释。如果没有任何群规，只输出字面量 NONE，不要输出任何其他内容。', cache: true }],
-      messages: [{ role: 'user', content: `以下是群公告，提取所有群规（每条一行，语义去重）:\n\n${announcementText}` }],
+      system: [{ text: '你是一个群规提取助手。', cache: true }],
+      messages: [{ role: 'user', content: `从以下公告提取群规。每条规则一行，简短陈述。\n如果公告中完全没有群规（例如活动通知、抢票信息），只输出一行：NONE\n禁止输出任何解释、meta 注释、"该公告不含群规"之类的文字。\n\n${announcementText}` }],
     });
 
     const raw = response.text.trim();
@@ -140,8 +140,8 @@ export class AnnouncementSyncModule {
 /** Return false for Claude meta-responses that aren't real rules. */
 export function _isRealRule(line: string): boolean {
   if (line.length === 0 || line.length > 500) return false;
-  // Starts with block-quote, parenthetical, or dash-parenthetical
-  if (/^[>（(]/.test(line)) return false;
+  // Starts with block-quote, parenthetical, asterisk, or dash-parenthetical
+  if (/^[>（(*]/.test(line)) return false;
   if (/^-\s*[（(]/.test(line)) return false;
   // Contains "no rules" language
   if (/不含|不包含|无任何|不包括|不存在|没有.*群规|无.*群规/.test(line)) return false;
