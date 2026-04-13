@@ -3,8 +3,8 @@ import * as os from 'node:os';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Database } from '../src/storage/db.js';
-import { NameImagesModule } from '../src/modules/name-images.js';
-import { _extractImageUrl } from '../src/core/router.js';
+import { NameImagesModule, type IImageAdapter } from '../src/modules/name-images.js';
+import { _extractImageUrl, _extractImageFile } from '../src/core/router.js';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -177,6 +177,50 @@ describe('NameImagesModule — saveImage', () => {
     ).rejects.toThrow('Image too large');
     expect(db.nameImages.countByName('g1', '西瓜')).toBe(0);
   });
+
+  // adapter.getImage base64 → save succeeds
+  it('adapter.getImage returning base64 → file written and DB row inserted', async () => {
+    const fakeAdapter: IImageAdapter = {
+      getImage: vi.fn().mockResolvedValue({
+        filename: 'img.jpg', url: '', size: fakeJpeg().length,
+        base64: fakeJpeg().toString('base64'),
+      }),
+    };
+    const modWithAdapter = new NameImagesModule(db.nameImages, tmpDir, fakeAdapter);
+    const result = await modWithAdapter.saveImage('g1', '西瓜', '', 'file-unique-1', 'u1', 50, 'abc123.image');
+    expect(result).not.toBe('dedup');
+    expect(result).not.toBe('cap_reached');
+    if (typeof result === 'object') expect(fs.existsSync(result.filePath)).toBe(true);
+    expect(db.nameImages.countByName('g1', '西瓜')).toBe(1);
+    expect(fakeAdapter.getImage).toHaveBeenCalledWith('abc123.image');
+  });
+
+  // adapter.getImage throws → fallback to URL fetch
+  it('adapter.getImage throwing → falls back to URL fetch', async () => {
+    const fakeAdapter: IImageAdapter = {
+      getImage: vi.fn().mockRejectedValue(new Error('NapCat timeout')),
+    };
+    stubFetch(fakeJpeg());
+    const modWithAdapter = new NameImagesModule(db.nameImages, tmpDir, fakeAdapter);
+    const result = await modWithAdapter.saveImage('g1', '西瓜', 'http://example.com/a.jpg', 'file-unique-2', 'u1', 50, 'abc123.image');
+    expect(result).not.toBe('dedup');
+    expect(db.nameImages.countByName('g1', '西瓜')).toBe(1);
+  });
+
+  // Same source_file (cqFile) → dedup on second save
+  it('same cqFile twice → second insert is dedup', async () => {
+    const fakeAdapter: IImageAdapter = {
+      getImage: vi.fn().mockResolvedValue({
+        filename: 'img.jpg', url: '', size: fakeJpeg().length,
+        base64: fakeJpeg().toString('base64'),
+      }),
+    };
+    const modWithAdapter = new NameImagesModule(db.nameImages, tmpDir, fakeAdapter);
+    await modWithAdapter.saveImage('g1', '西瓜', '', 'src-dedup', 'u1', 50, 'src-dedup');
+    const second = await modWithAdapter.saveImage('g1', '西瓜', '', 'src-dedup', 'u1', 50, 'src-dedup');
+    expect(second).toBe('dedup');
+    expect(db.nameImages.countByName('g1', '西瓜')).toBe(1);
+  });
 });
 
 describe('NameImagesModule — name detection and cooldown', () => {
@@ -272,6 +316,17 @@ describe('NameImagesModule — getAllNames cache', () => {
     db.nameImages.insert('g1', '新名字', '/fake/path2.jpg', null, 'u1');
     const names3 = mod.getAllNames('g1');
     expect(names3).toContain('新名字');
+  });
+});
+
+describe('_extractImageFile', () => {
+  it('extracts file field from CQ:image', () => {
+    const raw = '[CQ:image,file=abc123.image,url=https://example.com/img.jpg]';
+    expect(_extractImageFile(raw)).toBe('abc123.image');
+  });
+
+  it('returns null when no file field', () => {
+    expect(_extractImageFile('[CQ:at,qq=123]')).toBeNull();
   });
 });
 

@@ -34,6 +34,11 @@ export function _extractImageUrl(rawContent: string): string | null {
   return url.startsWith('http') ? url : null;
 }
 
+export function _extractImageFile(rawContent: string): string | null {
+  const m = rawContent.match(/\[CQ:image,[^\]]*file=([^,\]]+)/);
+  return m?.[1] ?? null;
+}
+
 export interface IRouter {
   dispatch(msg: GroupMessage): Promise<void>;
 }
@@ -137,12 +142,14 @@ export class Router implements IRouter {
       if (this.nameImagesModule && config.nameImagesEnabled) {
         const target = this.nameImagesModule.getCollectionTarget(msg.groupId, msg.userId);
         if (target !== null && msg.rawContent.includes('[CQ:image,')) {
-          const imageUrl = _extractImageUrl(msg.rawContent);
-          if (imageUrl) {
+          const imageUrl = _extractImageUrl(msg.rawContent) ?? '';
+          const cqFile = _extractImageFile(msg.rawContent) ?? '';
+          const sourceFile = cqFile || imageUrl;
+          if (cqFile || imageUrl) {
             try {
               const result = await this.nameImagesModule.saveImage(
-                msg.groupId, target, imageUrl, imageUrl,
-                msg.userId, config.nameImagesMaxPerName,
+                msg.groupId, target, imageUrl, sourceFile,
+                msg.userId, config.nameImagesMaxPerName, cqFile,
               );
               if (result === 'cap_reached') {
                 await this.adapter.send(msg.groupId, `${target} 的图片库已满（${config.nameImagesMaxPerName}张），请先清理再添加。`);

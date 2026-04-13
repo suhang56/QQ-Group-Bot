@@ -40,6 +40,8 @@ export interface INapCatAdapter {
   deleteMsg(messageId: string): Promise<void>;
   sendPrivate(userId: string, text: string): Promise<void>;
   getGroupNotices(groupId: string): Promise<GroupNotice[]>;
+  /** Resolve a CQ image file token via OneBot get_image — bypasses QQ CDN auth restrictions. */
+  getImage(file: string): Promise<{ filename: string; url: string; size: number; base64?: string }>;
 }
 
 interface OneBotFrame {
@@ -186,6 +188,17 @@ export class NapCatAdapter extends EventEmitter implements INapCatAdapter {
       user_id: Number(userId),
       message: text,
     });
+  }
+
+  async getImage(file: string): Promise<{ filename: string; url: string; size: number; base64?: string }> {
+    const resp = await this.action('get_image', { file });
+    const data = resp.data as { filename?: string; url?: string; size?: number; base64?: string } | undefined;
+    return {
+      filename: data?.filename ?? '',
+      url: data?.url ?? '',
+      size: data?.size ?? 0,
+      base64: data?.base64,
+    };
   }
 
   async getGroupNotices(groupId: string): Promise<GroupNotice[]> {
