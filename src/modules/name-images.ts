@@ -169,7 +169,7 @@ function _sniffExt(buf: Buffer): string {
   // GIF: 47 49 46
   if (buf[0] === 0x47 && buf[1] === 0x49) return '.gif';
   // WEBP: 52 49 46 46 ... 57 45 42 50
-  if (buf[0] === 0x52 && buf[1] === 0x49 && buf[8] === 0x57 && buf[9] === 0x45) return '.webp';
+  if (buf.length >= 10 && buf[0] === 0x52 && buf[1] === 0x49 && buf[8] === 0x57 && buf[9] === 0x45) return '.webp';
   // Default JPEG
   return '.jpg';
 }
