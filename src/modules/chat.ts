@@ -7,7 +7,7 @@ import { ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
 import { lurkerDefaults, chatHistoryDefaults } from '../config.js';
 import { FACE_LEGEND } from '../utils/qqface.js';
-import { sentinelCheck } from '../utils/sentinel.js';
+import { sentinelCheck, HARDENED_SYSTEM } from '../utils/sentinel.js';
 
 export interface IChatModule {
   generateReply(groupId: string, triggerMessage: GroupMessage, recentMessages: GroupMessage[]): Promise<string | null>;
@@ -208,16 +208,13 @@ export class ChatModule implements IChatModule {
     // ── Group identity system prompt (cached per group, TTL 1h) ──────────
     const systemPrompt = this._getGroupIdentityPrompt(groupId);
 
-    const chatRequest = () => this.claude.complete({
+    const userContent = `${historyText}${triggerMessage.nickname}说："${triggerMessage.content}"，你会怎么接？直接写出那句话。`;
+
+    const chatRequest = (hardened = false) => this.claude.complete({
       model: 'claude-sonnet-4-6',
       maxTokens: 300,
-      system: [{ text: systemPrompt, cache: true }],
-      messages: [
-        {
-          role: 'user',
-          content: `${historyText}${triggerMessage.nickname}说："${triggerMessage.content}"，你会怎么接？直接写出那句话。`,
-        },
-      ],
+      system: [{ text: hardened ? HARDENED_SYSTEM : systemPrompt, cache: true }],
+      messages: [{ role: 'user', content: userContent }],
     });
 
     this.inFlightGroups.add(groupId);
@@ -225,8 +222,9 @@ export class ChatModule implements IChatModule {
       const response = await chatRequest();
       const text = await sentinelCheck(
         response.text,
+        triggerMessage.content,
         { groupId, userId: triggerMessage.userId },
-        async () => (await chatRequest()).text,
+        async () => (await chatRequest(true)).text,
       );
       return text;
     } catch (err) {

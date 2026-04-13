@@ -2,24 +2,23 @@ import { createLogger } from './logger.js';
 
 const logger = createLogger('sentinel');
 
-// Terms that must match as whole ASCII words (case-insensitive) to avoid false positives
-// on substrings (e.g. "bot" in "robot" or "ai" in Chinese characters).
+// Terms that must match as whole ASCII words (case-insensitive)
 const WORD_FORBIDDEN = [
   'claude', 'chatgpt', 'gpt', 'anthropic', 'openai', 'llm',
 ];
 
-// Chinese/multi-char phrases that are always forbidden as substrings
+// Chinese/multi-char phrases always forbidden as substrings
 const SUBSTR_FORBIDDEN = [
   '克劳德', '机器人', '助手', 'a.i.',
   'ai模型', '语言模型', '大模型',
   '我是一个', '作为一个',
   '模仿', '尝试模仿',
   '根据您', '历史发言', '不当内容', '无法提供',
-  // "bot" and "ai" only as self-referential Chinese compound words
+  '请问您', '您可以提供', '我来模仿', '风格生成', '您希望', '我可以', '需要我帮', '需要我',
   '我是ai', '我是bot', '一个ai', '一个bot',
 ];
 
-// Soft-forbidden: if reply STARTS with these, it's assistant meta-framing → regenerate.
+// Soft-forbidden: reply STARTS with these → assistant meta-framing
 const SOFT_FORBIDDEN_STARTS = [
   '好的，', '当然，', '我来', '让我', '这是', '以下是',
 ];
@@ -32,6 +31,8 @@ const WORD_RE = new RegExp(
 export function hasForbiddenContent(text: string): string | null {
   const m = WORD_RE.exec(text);
   if (m) return m[0]!;
+
+  if (text.includes('---')) return '---';
 
   const lower = text.toLowerCase();
   for (const phrase of SUBSTR_FORBIDDEN) {
@@ -46,20 +47,55 @@ export function hasForbiddenContent(text: string): string | null {
 }
 
 /**
- * Run a sentinel check on a generated reply. If it contains forbidden content,
- * call `regenerate()` once. If the second attempt also fails, return '...'.
- * Logs every trigger at info level.
+ * Strip echo prefix: if reply starts with the last user message AND contains more content
+ * after it (meaning it's a quote-then-continue pattern), strip the echo prefix.
+ * Short replies that happen to match the trigger (e.g. a one-word echo as a valid reply)
+ * are left alone.
+ */
+export function stripEcho(reply: string, lastUserMessage: string): string {
+  const trimmedReply = reply.trim();
+  const trimmedUser = lastUserMessage.trim();
+  // Only strip if the user message is substantial and the reply has additional content after it
+  if (trimmedUser.length >= 5 && trimmedReply.startsWith(trimmedUser)) {
+    const remainder = trimmedReply.slice(trimmedUser.length).replace(/^[\s\n\-]+/, '');
+    return remainder;
+  }
+  return reply;
+}
+
+/** Hardened system prompt used for sentinel regen calls. */
+export const HARDENED_SYSTEM =
+  '你是群里的一个成员。绝不说"AI"、"claude"、"模型"、"助手"、"模仿"、"风格"、"请问您"、"我来帮"。直接说一句话，不要解释，不要提示，不要格式化，就像真人在群里打字。如果你生成不出来，就输出"..."。';
+
+/**
+ * Run sentinel check:
+ * 1. Strip echo prefix (reply starts with the trigger message).
+ * 2. If forbidden content found → regenerate once with hardened prompt.
+ * 3. If second attempt also forbidden or empty → return '...'.
+ * Logs every trigger.
  */
 export async function sentinelCheck(
   text: string,
+  lastUserMessage: string,
   context: Record<string, unknown>,
   regenerate: () => Promise<string>,
 ): Promise<string> {
-  const offender = hasForbiddenContent(text);
-  if (!offender) return text;
+  // Step 1: strip echo prefix
+  const deechoed = stripEcho(text, lastUserMessage);
+  if (!deechoed.trim()) {
+    logger.info({ ...context, firstAttempt: text }, 'sentinel: reply was pure echo — regenerating');
+    return _runRegen(context, regenerate);
+  }
 
-  logger.info({ ...context, offendingPhrase: offender, firstAttempt: text }, 'sentinel: forbidden content detected — regenerating');
+  // Step 2: forbidden content check
+  const offender = hasForbiddenContent(deechoed);
+  if (!offender) return deechoed;
 
+  logger.info({ ...context, offendingPhrase: offender, firstAttempt: deechoed }, 'sentinel: forbidden content — regenerating');
+  return _runRegen(context, regenerate);
+}
+
+async function _runRegen(context: Record<string, unknown>, regenerate: () => Promise<string>): Promise<string> {
   let second: string;
   try {
     second = await regenerate();
@@ -68,8 +104,8 @@ export async function sentinelCheck(
     return '...';
   }
 
-  const offender2 = hasForbiddenContent(second);
-  if (offender2) {
+  const offender2 = hasForbiddenContent(second.trim());
+  if (offender2 || !second.trim()) {
     logger.info({ ...context, offendingPhrase: offender2, secondAttempt: second }, 'sentinel: second attempt still forbidden — falling back to "..."');
     return '...';
   }
