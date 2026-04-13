@@ -68,6 +68,22 @@ export const TASK_DEFLECTIONS = [
   '写不出来', '不擅长这个', '？', '我又不是工具人', '想得美', '哈哈你自己搞',
 ];
 
+// Matches memory-injection / persona-override exploit attempts.
+// Note: intentionally loose — false positives ("记得带伞") are acceptable because
+// deflecting a casual reminder with "啥啊" is harmless, and preventing real
+// memory-injection exploits is worth it.
+export const MEMORY_INJECT =
+  /(记住|记下来|记一下|记录一下|记得|背下来|以后叫|以后要|注意一下|听好|听着|告诉你|我告诉你|你要知道|你要记住|从现在起|从今天起|以后的|从此以后|设定你是|假设你是|扮演|角色扮演)/;
+
+export const MEMORY_INJECT_DEFLECTIONS = [
+  '记不住', '我又不是你电脑', '啥啊', '谁关心', '懒得记', '嗯', '?', '好好好', '烦', '不想记',
+];
+
+/** Pick a random entry from a deflection pool. */
+export function pickDeflection(pool: string[]): string {
+  return pool[Math.floor(Math.random() * pool.length)]!;
+}
+
 // Chinese stopwords that add no retrieval signal
 const STOPWORDS = new Set([
   '我','你','他','她','它','我们','你们','他们','的','了','是','不','啥','什么',
@@ -250,15 +266,15 @@ export class ChatModule implements IChatModule {
     // Record last-reply timestamp for silence factor (applies to all replies)
     this.lastProactiveReply.set(groupId, now);
 
-    // Identity probe: bypass Claude entirely with a canned deflection
+    // Input-pattern shortcuts: bypass Claude entirely for known adversarial patterns
     if (IDENTITY_PROBE.test(triggerMessage.content)) {
-      const pool = IDENTITY_DEFLECTIONS;
-      return pool[Math.floor(Math.random() * pool.length)]!;
+      return pickDeflection(IDENTITY_DEFLECTIONS);
     }
-
-    // Task-request exploitation: bypass Claude with a canned refusal
     if (TASK_REQUEST.test(triggerMessage.content)) {
-      return TASK_DEFLECTIONS[Math.floor(Math.random() * TASK_DEFLECTIONS.length)]!;
+      return pickDeflection(TASK_DEFLECTIONS);
+    }
+    if (MEMORY_INJECT.test(triggerMessage.content)) {
+      return pickDeflection(MEMORY_INJECT_DEFLECTIONS);
     }
 
     // ── Retrieve context ──────────────────────────────────────────────────
