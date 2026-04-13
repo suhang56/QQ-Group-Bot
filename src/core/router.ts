@@ -56,6 +56,11 @@ export type CommandHandler = (
   config: GroupConfig,
 ) => Promise<void>;
 
+interface QueuedMention {
+  msg: GroupMessage;
+  sourceMsgId: number; // OneBot message_id of the @-mention, for quote-reply
+}
+
 export class Router implements IRouter {
   private readonly logger = createLogger('router');
   private readonly commands = new Map<string, CommandHandler>();
@@ -64,10 +69,18 @@ export class Router implements IRouter {
   private moderatorModule: ModeratorModule | null = null;
   private nameImagesModule: NameImagesModule | null = null;
 
+  // @-mention queue: per-group list of pending mentions waiting for in-flight to complete
+  private readonly atMentionQueue = new Map<string, QueuedMention[]>();
+  // @-mention burst tracking: per-group timestamps of recent @-mention replies
+  private readonly atReplyTimestamps = new Map<string, number[]>();
+  // in-flight lock for @-mention queue processing (separate from ChatModule's lock)
+  private readonly atInFlight = new Set<string>();
+
   constructor(
     private readonly db: Database,
     private readonly adapter: INapCatAdapter,
     private readonly rateLimiter: RateLimiter,
+    private readonly botUserId?: string,
   ) {
     this._registerCommands();
   }
@@ -222,9 +235,17 @@ export class Router implements IRouter {
       }
 
       if (this.chatModule) {
-        const reply = await this.chatModule.generateReply(msg.groupId, msg, recentMsgs);
-        if (reply) {
-          await this._sendReply(msg.groupId, reply);
+        const isAtMention = this.botUserId
+          ? msg.rawContent.includes(`[CQ:at,qq=${this.botUserId}]`)
+          : false;
+
+        if (isAtMention) {
+          await this._enqueueAtMention(msg, config);
+        } else {
+          const reply = await this.chatModule.generateReply(msg.groupId, msg, recentMsgs);
+          if (reply) {
+            await this._sendReply(msg.groupId, reply);
+          }
         }
       }
 
@@ -233,20 +254,93 @@ export class Router implements IRouter {
     }
   }
 
-  /** Send a reply as one or more messages (split on newlines), with typing delay between lines. */
-  private async _sendReply(groupId: string, text: string): Promise<void> {
+  /** Send a reply as one or more messages (split on newlines), with typing delay between lines.
+   *  replyToMsgId is only prepended to the FIRST send (quote-reply), continuation lines go plain. */
+  private async _sendReply(groupId: string, text: string, replyToMsgId?: number): Promise<void> {
     const lines = splitReply(text);
     if (lines.length === 0) return;
     if (lines.length > MAX_SPLIT_LINES) {
       this.logger.info({ groupId, totalLines: text.split('\n').length }, 'reply truncated to 3 lines');
     }
     for (let i = 0; i < lines.length; i++) {
-      const msgId = await this.adapter.send(groupId, lines[i]!);
+      const msgId = await this.adapter.send(groupId, lines[i]!, i === 0 ? replyToMsgId : undefined);
       if (msgId !== null && this.chatModule) {
         this.chatModule.recordOutgoingMessage(groupId, msgId);
       }
       if (i < lines.length - 1) {
         await new Promise(r => setTimeout(r, randomDelay()));
+      }
+    }
+  }
+
+  /** Enqueue an @-mention for serial processing, enforcing queue cap and burst skip. */
+  private async _enqueueAtMention(msg: GroupMessage, config: GroupConfig): Promise<void> {
+    const { groupId } = msg;
+    const sourceMsgId = Number(msg.messageId);
+    if (!sourceMsgId) return; // no valid msg id to quote
+
+    const queue = this.atMentionQueue.get(groupId) ?? [];
+
+    if (this.atInFlight.has(groupId)) {
+      // In-flight — try to queue
+      if (queue.length >= config.chatAtMentionQueueMax) {
+        this.logger.debug({ groupId, queueLen: queue.length }, '@-mention dropped (queue full — play dead)');
+        return;
+      }
+      queue.push({ msg, sourceMsgId });
+      this.atMentionQueue.set(groupId, queue);
+      return;
+    }
+
+    // No in-flight — process immediately
+    await this._processAtMention({ msg, sourceMsgId }, config);
+  }
+
+  /** Process a single queued @-mention, then drain the queue. */
+  private async _processAtMention(item: QueuedMention, config: GroupConfig): Promise<void> {
+    const { groupId } = item.msg;
+    this.atInFlight.add(groupId);
+    try {
+      // Burst skip: if we've replied to >= threshold @-mentions within the burst window,
+      // skip every other one (alternating) to simulate can't-keep-up
+      const now = Date.now();
+      const timestamps = (this.atReplyTimestamps.get(groupId) ?? [])
+        .filter(t => now - t < config.chatAtMentionBurstWindowMs);
+
+      let shouldSkip = false;
+      if (timestamps.length >= config.chatAtMentionBurstThreshold) {
+        // Skip if the timestamps count is odd (alternate skip/process)
+        shouldSkip = timestamps.length % 2 === 1;
+        this.logger.debug({ groupId, recentReplies: timestamps.length }, shouldSkip ? 'burst mode — skipping @-mention' : 'burst mode — processing @-mention');
+      }
+
+      if (!shouldSkip && this.chatModule) {
+        const recentMsgs = this.db.messages.getRecent(groupId, 20).map(m => ({
+          messageId: String(m.id), groupId: m.groupId, userId: m.userId,
+          nickname: m.nickname, role: 'member' as const,
+          content: m.content, rawContent: m.content, timestamp: m.timestamp,
+        }));
+        const reply = await this.chatModule.generateReply(groupId, item.msg, recentMsgs);
+        if (reply) {
+          await this._sendReply(groupId, reply, item.sourceMsgId);
+          timestamps.push(Date.now());
+          this.atReplyTimestamps.set(groupId, timestamps);
+        }
+      }
+    } finally {
+      this.atInFlight.delete(groupId);
+
+      // Drain queue: process next item if any
+      const queue = this.atMentionQueue.get(groupId) ?? [];
+      const next = queue.shift();
+      if (queue.length === 0) {
+        this.atMentionQueue.delete(groupId);
+      } else {
+        this.atMentionQueue.set(groupId, queue);
+      }
+      if (next) {
+        const config = this.db.groupConfig.get(groupId) ?? this._defaultConfig(groupId);
+        void this._processAtMention(next, config);
       }
     }
   }

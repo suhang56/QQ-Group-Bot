@@ -48,6 +48,9 @@ export function defaultGroupConfig(groupId: string): GroupConfig {
     nameImagesCollectionMax: 20,
     nameImagesCooldownMs: 300_000,
     nameImagesMaxPerName: 50,
+    chatAtMentionQueueMax: 5,
+    chatAtMentionBurstWindowMs: 30_000,
+    chatAtMentionBurstThreshold: 3,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };

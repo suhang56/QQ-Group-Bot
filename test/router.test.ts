@@ -536,7 +536,7 @@ describe('Router — multi-line chat reply dispatch', () => {
     });
     await router.dispatch(makeMsg({ content: 'hello', rawContent: 'hello' }));
     expect(adapter.send).toHaveBeenCalledTimes(1);
-    expect(adapter.send).toHaveBeenCalledWith('g1', '一句话');
+    expect(adapter.send).toHaveBeenCalledWith('g1', '一句话', undefined);
   });
 
   it('two-line chat reply → adapter.send called twice', async () => {
@@ -547,8 +547,8 @@ describe('Router — multi-line chat reply dispatch', () => {
     });
     await router.dispatch(makeMsg({ content: 'hello', rawContent: 'hello' }));
     expect(adapter.send).toHaveBeenCalledTimes(2);
-    expect(adapter.send).toHaveBeenNthCalledWith(1, 'g1', '第一句');
-    expect(adapter.send).toHaveBeenNthCalledWith(2, 'g1', '第二句');
+    expect(adapter.send).toHaveBeenNthCalledWith(1, 'g1', '第一句', undefined);
+    expect(adapter.send).toHaveBeenNthCalledWith(2, 'g1', '第二句', undefined);
   });
 
   it('four-line reply capped at three sends', async () => {
@@ -699,5 +699,120 @@ describe('Router — /add name-images integration', () => {
 
     expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringMatching(/西瓜|1\s*张/));
     expect(db.nameImages.countByName('g1', '西瓜')).toBe(1);
+  });
+});
+
+describe('Router — @-mention queue with quote-reply', () => {
+  const BOT_ID = 'bot-42';
+
+  function makeAtMsg(overrides: Partial<GroupMessage> = {}): GroupMessage {
+    return {
+      messageId: '100',
+      groupId: 'g1',
+      userId: 'u1',
+      nickname: 'Alice',
+      role: 'member',
+      content: 'hello bot',
+      rawContent: `[CQ:at,qq=${BOT_ID}] hello bot`,
+      timestamp: Math.floor(Date.now() / 1000),
+      ...overrides,
+    };
+  }
+
+  function makeChat(reply = '你好啊') {
+    return {
+      generateReply: vi.fn().mockResolvedValue(reply),
+      recordOutgoingMessage: vi.fn(),
+    };
+  }
+
+  let db: Database;
+  let adapter: INapCatAdapter;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    adapter = makeMockAdapter();
+    // send returns a numeric message_id so quote-reply has something to attach to
+    vi.mocked(adapter.send).mockResolvedValue(101);
+  });
+
+  it('single @-mention → reply with quote CQ prefix', async () => {
+    const router = new Router(db, adapter, new RateLimiter(), BOT_ID);
+    router.setChat(makeChat('你好'));
+    await router.dispatch(makeAtMsg({ messageId: '55' }));
+    expect(adapter.send).toHaveBeenCalledWith('g1', '你好', 55);
+  });
+
+  it('two @-mentions 0ms apart → both get replies with their own quote', async () => {
+    const chat = makeChat('回复');
+    const router = new Router(db, adapter, new RateLimiter(), BOT_ID);
+    router.setChat(chat);
+
+    const p1 = router.dispatch(makeAtMsg({ messageId: '10', userId: 'u1' }));
+    const p2 = router.dispatch(makeAtMsg({ messageId: '11', userId: 'u2' }));
+    await Promise.all([p1, p2]);
+    // Allow async queue drain
+    await new Promise(r => setTimeout(r, 50));
+
+    const calls = vi.mocked(adapter.send).mock.calls;
+    // Both messages replied to (at least 2 send calls)
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+    const quoteIds = calls.map(c => c[2]).filter(id => id != null);
+    expect(quoteIds).toContain(10);
+    expect(quoteIds).toContain(11);
+  });
+
+  it('6 @-mentions → 5th and 6th: 5th queued, 6th dropped (queue max=5)', async () => {
+    const chat = {
+      // slow reply to keep first one in-flight
+      generateReply: vi.fn().mockImplementation(
+        () => new Promise(r => setTimeout(() => r('ok'), 100))
+      ),
+      recordOutgoingMessage: vi.fn(),
+    };
+    const router = new Router(db, adapter, new RateLimiter(), BOT_ID);
+    router.setChat(chat);
+
+    const dispatches = [];
+    for (let i = 0; i < 6; i++) {
+      dispatches.push(router.dispatch(makeAtMsg({ messageId: String(10 + i), userId: `u${i}` })));
+    }
+    await dispatches[0]; // first finishes dispatch synchronously
+
+    // Queue should have at most 5 items — 6th was dropped
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const queue = (router as unknown as { atMentionQueue: Map<string, unknown[]> }).atMentionQueue;
+    const qLen = queue.get('g1')?.length ?? 0;
+    expect(qLen).toBeLessThanOrEqual(4); // in-flight + 4 queued = 5 total
+  });
+
+  it('non-@-mention message → no queue, goes through normal lurker path', async () => {
+    const chat = makeChat('普通回复');
+    const router = new Router(db, adapter, new RateLimiter(), BOT_ID);
+    router.setChat(chat);
+
+    await router.dispatch(makeMsg({ content: 'just chatting', rawContent: 'just chatting' }));
+
+    // send called, but NOT with a replyToMsgId
+    const calls = vi.mocked(adapter.send).mock.calls;
+    if (calls.length > 0) {
+      expect(calls[0]![2]).toBeUndefined();
+    }
+  });
+
+  it('quote-reply format: send called with numeric msgId as 3rd arg', async () => {
+    const router = new Router(db, adapter, new RateLimiter(), BOT_ID);
+    router.setChat(makeChat('hi'));
+    await router.dispatch(makeAtMsg({ messageId: '999' }));
+    expect(adapter.send).toHaveBeenCalledWith('g1', 'hi', 999);
+  });
+
+  it('multi-line @-mention reply: only first line gets replyToMsgId', async () => {
+    const router = new Router(db, adapter, new RateLimiter(), BOT_ID);
+    router.setChat(makeChat('line1\nline2'));
+    await router.dispatch(makeAtMsg({ messageId: '77' }));
+    const calls = vi.mocked(adapter.send).mock.calls;
+    expect(calls[0]![2]).toBe(77);    // first line quoted
+    expect(calls[1]![2]).toBeUndefined(); // second line plain
   });
 });

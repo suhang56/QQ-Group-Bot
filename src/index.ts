@@ -52,7 +52,7 @@ const botUserId = process.env['BOT_QQ_ID'] ?? '';
 const adapter = new NapCatAdapter(NAPCAT_WS_URL, process.env['NAPCAT_ACCESS_TOKEN']);
 const claude = new ClaudeClient();
 const rateLimiter = new RateLimiter();
-const router = new Router(db, adapter, rateLimiter);
+const router = new Router(db, adapter, rateLimiter, botUserId);
 const chat = new ChatModule(claude, db, { botUserId });
 router.setChat(chat);
 

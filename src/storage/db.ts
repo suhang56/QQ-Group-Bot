@@ -59,6 +59,9 @@ export interface GroupConfig {
   nameImagesCollectionMax: number;
   nameImagesCooldownMs: number;
   nameImagesMaxPerName: number;
+  chatAtMentionQueueMax: number;
+  chatAtMentionBurstWindowMs: number;
+  chatAtMentionBurstThreshold: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -185,6 +188,9 @@ interface GroupConfigRow {
   name_images_enabled: number; name_images_collection_timeout_ms: number;
   name_images_collection_max: number; name_images_cooldown_ms: number;
   name_images_max_per_name: number;
+  chat_at_mention_queue_max: number;
+  chat_at_mention_burst_window_ms: number;
+  chat_at_mention_burst_threshold: number;
   created_at: string; updated_at: string;
 }
 
@@ -257,6 +263,9 @@ function configFromRow(row: GroupConfigRow): GroupConfig {
     nameImagesCollectionMax: row.name_images_collection_max ?? 20,
     nameImagesCooldownMs: row.name_images_cooldown_ms ?? 300_000,
     nameImagesMaxPerName: row.name_images_max_per_name ?? 50,
+    chatAtMentionQueueMax: row.chat_at_mention_queue_max ?? 5,
+    chatAtMentionBurstWindowMs: row.chat_at_mention_burst_window_ms ?? 30_000,
+    chatAtMentionBurstThreshold: row.chat_at_mention_burst_threshold ?? 3,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -721,6 +730,9 @@ export class Database {
       'name_images_collection_max INTEGER NOT NULL DEFAULT 20',
       'name_images_cooldown_ms INTEGER NOT NULL DEFAULT 300000',
       'name_images_max_per_name INTEGER NOT NULL DEFAULT 50',
+      'chat_at_mention_queue_max INTEGER NOT NULL DEFAULT 5',
+      'chat_at_mention_burst_window_ms INTEGER NOT NULL DEFAULT 30000',
+      'chat_at_mention_burst_threshold INTEGER NOT NULL DEFAULT 3',
     ]) {
       try { this._db.exec(`ALTER TABLE group_config ADD COLUMN ${col}`); } catch { /* already exists */ }
     }
