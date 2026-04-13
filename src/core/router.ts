@@ -261,7 +261,12 @@ export class Router implements IRouter {
         if (activeUserId) {
           const result = await this.mimicModule.generateMimic(msg.groupId, activeUserId, msg.content, recentMsgs);
           if (result.ok) {
-            await this._sendReply(msg.groupId, result.text);
+            await this._sendReply(msg.groupId, result.text, undefined, {
+              module: 'mimic',
+              triggerMsgId: msg.messageId,
+              triggerUserNickname: msg.nickname,
+              triggerContent: msg.content,
+            });
           }
           return;
         }
@@ -277,7 +282,12 @@ export class Router implements IRouter {
         } else {
           const reply = await this.chatModule.generateReply(msg.groupId, msg, recentMsgs);
           if (reply) {
-            await this._sendReply(msg.groupId, reply);
+            await this._sendReply(msg.groupId, reply, undefined, {
+              module: 'chat',
+              triggerMsgId: msg.messageId,
+              triggerUserNickname: msg.nickname,
+              triggerContent: msg.content,
+            });
           }
         }
       }
@@ -288,8 +298,14 @@ export class Router implements IRouter {
   }
 
   /** Send a reply as one or more messages (split on newlines), with typing delay between lines.
-   *  replyToMsgId is only prepended to the FIRST send (quote-reply), continuation lines go plain. */
-  private async _sendReply(groupId: string, text: string, replyToMsgId?: number): Promise<void> {
+   *  replyToMsgId is only prepended to the FIRST send (quote-reply), continuation lines go plain.
+   *  logCtx, when provided, logs the reply to bot_replies for the rating portal. */
+  private async _sendReply(
+    groupId: string,
+    text: string,
+    replyToMsgId?: number,
+    logCtx?: { module: string; triggerMsgId?: string; triggerUserNickname?: string; triggerContent: string },
+  ): Promise<void> {
     const lines = splitReply(text);
     if (lines.length === 0) return;
     if (lines.length > MAX_SPLIT_LINES) {
@@ -303,6 +319,19 @@ export class Router implements IRouter {
       if (i < lines.length - 1) {
         await new Promise(r => setTimeout(r, randomDelay()));
       }
+    }
+    if (logCtx) {
+      try {
+        this.db.botReplies.insert({
+          groupId,
+          triggerMsgId: logCtx.triggerMsgId ?? null,
+          triggerUserNickname: logCtx.triggerUserNickname ?? null,
+          triggerContent: logCtx.triggerContent,
+          botReply: lines.join('\n'),
+          module: logCtx.module,
+          sentAt: Math.floor(Date.now() / 1000),
+        });
+      } catch { /* non-fatal */ }
     }
   }
 
@@ -355,7 +384,12 @@ export class Router implements IRouter {
         }));
         const reply = await this.chatModule.generateReply(groupId, item.msg, recentMsgs);
         if (reply) {
-          await this._sendReply(groupId, reply, item.sourceMsgId);
+          await this._sendReply(groupId, reply, item.sourceMsgId, {
+            module: 'chat',
+            triggerMsgId: item.msg.messageId,
+            triggerUserNickname: item.msg.nickname,
+            triggerContent: item.msg.content,
+          });
           timestamps.push(Date.now());
           this.atReplyTimestamps.set(groupId, timestamps);
         }
