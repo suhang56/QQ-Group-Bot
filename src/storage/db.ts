@@ -532,9 +532,10 @@ class GroupConfigRepository implements IGroupConfigRepository {
         name_images_collection_max, name_images_cooldown_ms, name_images_max_per_name,
         name_images_blocklist,
         lore_update_enabled, lore_update_threshold, lore_update_cooldown_ms,
+        live_sticker_capture_enabled, sticker_legend_refresh_every_msgs,
         chat_persona_text,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(group_id) DO UPDATE SET
         enabled_modules = excluded.enabled_modules,
         auto_mod = excluded.auto_mod,
@@ -559,6 +560,8 @@ class GroupConfigRepository implements IGroupConfigRepository {
         lore_update_enabled = excluded.lore_update_enabled,
         lore_update_threshold = excluded.lore_update_threshold,
         lore_update_cooldown_ms = excluded.lore_update_cooldown_ms,
+        live_sticker_capture_enabled = excluded.live_sticker_capture_enabled,
+        sticker_legend_refresh_every_msgs = excluded.sticker_legend_refresh_every_msgs,
         chat_persona_text = excluded.chat_persona_text,
         updated_at = excluded.updated_at
     `).run(
@@ -586,6 +589,8 @@ class GroupConfigRepository implements IGroupConfigRepository {
       (config.loreUpdateEnabled ?? true) ? 1 : 0,
       config.loreUpdateThreshold ?? 200,
       config.loreUpdateCooldownMs ?? 1_800_000,
+      (config.liveStickerCaptureEnabled ?? true) ? 1 : 0,
+      config.stickerLegendRefreshEveryMsgs ?? 50,
       config.chatPersonaText ?? null,
       config.createdAt,
       config.updatedAt,
@@ -742,6 +747,36 @@ class NameImageRepository implements INameImageRepository {
   }
 }
 
+class LiveStickerRepository implements ILiveStickerRepository {
+  constructor(private readonly db: DatabaseSync) {}
+
+  upsert(groupId: string, key: string, type: LiveSticker['type'], cqCode: string, summary: string | null, now: number): void {
+    this.db.prepare(`
+      INSERT INTO live_stickers (group_id, key, type, cq_code, summary, count, first_seen, last_seen)
+      VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+      ON CONFLICT(group_id, key) DO UPDATE SET
+        count = count + 1,
+        last_seen = excluded.last_seen
+    `).run(groupId, key, type, cqCode, summary, now, now);
+  }
+
+  getTopByGroup(groupId: string, limit: number): LiveSticker[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM live_stickers WHERE group_id = ? ORDER BY count DESC LIMIT ?'
+    ).all(groupId, limit) as unknown as Array<{
+      id: number; group_id: string; key: string; type: string;
+      cq_code: string; summary: string | null; count: number;
+      first_seen: number; last_seen: number;
+    }>;
+    return rows.map(r => ({
+      id: r.id, groupId: r.group_id, key: r.key,
+      type: r.type as LiveSticker['type'], cqCode: r.cq_code,
+      summary: r.summary, count: r.count,
+      firstSeen: r.first_seen, lastSeen: r.last_seen,
+    }));
+  }
+}
+
 // ---- Main Database class ----
 
 export class Database {
@@ -752,6 +787,7 @@ export class Database {
   readonly rules: IRuleRepository;
   readonly announcements: IAnnouncementRepository;
   readonly nameImages: INameImageRepository;
+  readonly liveStickers: ILiveStickerRepository;
 
   private readonly _db: DatabaseSync;
 
@@ -768,6 +804,7 @@ export class Database {
     this.rules = new RuleRepository(this._db);
     this.announcements = new AnnouncementRepository(this._db);
     this.nameImages = new NameImageRepository(this._db);
+    this.liveStickers = new LiveStickerRepository(this._db);
   }
 
   /** Execute arbitrary SQL — intended for bulk-import scripts and migrations only. */

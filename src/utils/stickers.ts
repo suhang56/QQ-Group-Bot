@@ -23,8 +23,17 @@ export interface LabeledSticker {
 // In-memory cache: groupId -> formatted section string
 const sectionCache = new Map<string, string>();
 
+export interface LiveStickerEntry {
+  key: string;
+  type: 'mface' | 'image';
+  cqCode: string;
+  summary: string | null;
+  count: number;
+}
+
 /**
- * Load top-N market_face stickers for a group and build a system prompt section.
+ * Load top-N stickers for a group and build a system prompt section.
+ * Merges static imported stickers (from .jsonl) with live-observed stickers (from DB).
  * Labels are generated once by Claude and cached to disk.
  */
 export async function buildStickerSection(
@@ -32,23 +41,49 @@ export async function buildStickerSection(
   stickersDirPath: string,
   topN: number,
   claude: IClaudeClient,
+  liveStickers: LiveStickerEntry[] = [],
 ): Promise<string> {
   const cached = sectionCache.get(groupId);
   if (cached !== undefined) return cached;
 
+  // Load static imported stickers from .jsonl
   const stickersFile = path.join(stickersDirPath, `${groupId}.jsonl`);
-  if (!existsSync(stickersFile)) {
-    sectionCache.set(groupId, '');
-    return '';
+  const staticEntries: StickerEntry[] = [];
+  if (existsSync(stickersFile)) {
+    const fileLines = readFileSync(stickersFile, 'utf8').split('\n').filter(Boolean);
+    for (const l of fileLines) {
+      try {
+        const e = JSON.parse(l) as StickerEntry;
+        if (e.type === 'market_face') staticEntries.push(e);
+      } catch { /* skip malformed */ }
+    }
   }
 
-  // Load sticker records (already sorted by count desc)
-  const lines = readFileSync(stickersFile, 'utf8').split('\n').filter(Boolean);
-  const all: StickerEntry[] = lines
-    .map(l => { try { return JSON.parse(l) as StickerEntry; } catch { return null; } })
-    .filter((x): x is StickerEntry => x !== null && x.type === 'market_face');
+  // Merge: combine static + live, deduplicate by key, sort by count desc, take top N
+  const byKey = new Map<string, StickerEntry>();
+  for (const s of staticEntries) byKey.set(s.key, s);
+  for (const l of liveStickers) {
+    const existing = byKey.get(l.key);
+    if (existing) {
+      // Bump count (live observations are additive)
+      byKey.set(l.key, { ...existing, count: existing.count + l.count });
+    } else {
+      byKey.set(l.key, {
+        key: l.key,
+        type: l.type === 'mface' ? 'market_face' : 'image',
+        cqCode: l.cqCode,
+        summary: l.summary ?? l.key,
+        count: l.count,
+        lastSeen: 0,
+        samples: [],
+      });
+    }
+  }
 
-  const top = all.slice(0, topN);
+  const top = [...byKey.values()]
+    .sort((a, b) => b.count - a.count)
+    .slice(0, topN);
+
   if (top.length === 0) {
     sectionCache.set(groupId, '');
     return '';
@@ -59,7 +94,7 @@ export async function buildStickerSection(
   const section = `\n这个群常用的表情包（当语境合适时直接用CQ码发送，就像群友一样）：\n${lines2}`;
 
   sectionCache.set(groupId, section);
-  logger.info({ groupId, count: labels.length }, 'Sticker section built');
+  logger.info({ groupId, count: labels.length, liveCount: liveStickers.length }, 'Sticker section built');
   return section;
 }
 

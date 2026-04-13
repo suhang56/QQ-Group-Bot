@@ -147,6 +147,14 @@ export class Router implements IRouter {
         lastSeen: msg.timestamp,
       });
 
+      // Live sticker capture: record mface + image stickers (sub_type=1) seen in the wild
+      if (config.liveStickerCaptureEnabled) {
+        this._captureLiveStickers(msg);
+      }
+
+      // Tick sticker legend refresh counter (rebuilds sticker section every N messages)
+      this.chat?.tickStickerRefresh(msg.groupId);
+
       // Command routing — admin/owner only at router level; /appeal is open to all roles
       const trimmed = msg.content.trim();
       const isAdmin = msg.role === 'admin' || msg.role === 'owner';
@@ -404,6 +412,36 @@ export class Router implements IRouter {
     await this.adapter.send(msg.groupId, content);
     this.logger.info({ groupId: msg.groupId, content }, '复读');
     return true;
+  }
+
+  private _captureLiveStickers(msg: GroupMessage): void {
+    const now = Math.floor(Date.now() / 1000);
+    const raw = msg.rawContent;
+
+    // Match all [CQ:mface,...] segments
+    for (const match of raw.matchAll(/\[CQ:mface,([^\]]+)\]/g)) {
+      const attrs = Object.fromEntries(
+        match[1]!.split(',').map(p => p.split('=') as [string, string])
+      );
+      const pkg = attrs['package_id'] ?? attrs['pkg'] ?? '';
+      const id = attrs['emoji_id'] ?? attrs['id'] ?? '';
+      if (!pkg || !id) continue;
+      const key = `mface:${pkg}:${id}`;
+      const summary = attrs['summary'] ?? attrs['text'] ?? null;
+      this.db.liveStickers.upsert(msg.groupId, key, 'mface', match[0]!, summary, now);
+    }
+
+    // Match [CQ:image,...] with sub_type=1 (sticker subtype only)
+    for (const match of raw.matchAll(/\[CQ:image,([^\]]+)\]/g)) {
+      const attrs = Object.fromEntries(
+        match[1]!.split(',').map(p => p.split('=') as [string, string])
+      );
+      if (attrs['sub_type'] !== '1') continue;
+      const fileUnique = attrs['file_unique'] ?? attrs['file'] ?? '';
+      if (!fileUnique) continue;
+      const key = `image:${fileUnique}`;
+      this.db.liveStickers.upsert(msg.groupId, key, 'image', match[0]!, null, now);
+    }
   }
 
   private _registerCommands(): void {

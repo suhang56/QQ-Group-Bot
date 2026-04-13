@@ -8,12 +8,13 @@ import { createLogger } from '../utils/logger.js';
 import { lurkerDefaults, chatHistoryDefaults } from '../config.js';
 import { FACE_LEGEND, parseFaces, renderFace } from '../utils/qqface.js';
 import { sentinelCheck, postProcess, HARDENED_SYSTEM } from '../utils/sentinel.js';
-import { buildStickerSection } from '../utils/stickers.js';
+import { buildStickerSection, type LiveStickerEntry } from '../utils/stickers.js';
 
 export interface IChatModule {
   generateReply(groupId: string, triggerMessage: GroupMessage, recentMessages: GroupMessage[]): Promise<string | null>;
   recordOutgoingMessage(groupId: string, msgId: number): void;
   invalidateLore(groupId: string): void;
+  tickStickerRefresh(groupId: string): void;
 }
 
 interface ChatOptions {
@@ -40,6 +41,7 @@ interface ChatOptions {
   chatEmojiSampleSize?: number;
   chatStickerTopN?: number;
   stickersDirPath?: string;
+  stickerLegendRefreshEveryMsgs?: number;
 }
 
 interface ScoreFactors {
@@ -180,6 +182,7 @@ export class ChatModule implements IChatModule {
   private readonly groupIdentityTopUsers: number;
   private readonly chatStickerTopN: number;
   private readonly stickersDirPath: string;
+  private readonly stickerLegendRefreshEveryMsgs: number;
 
   // debounce: groupId -> last trigger timestamp
   private readonly debounceMap = new Map<string, number>();
@@ -199,6 +202,8 @@ export class ChatModule implements IChatModule {
   private readonly outgoingMsgIds = new Map<string, Set<number>>();
   // last proactive reply timestamp per group (for silence factor)
   private readonly lastProactiveReply = new Map<string, number>();
+  // sticker legend refresh counter: groupId -> message count since last rebuild
+  private readonly stickerRefreshCounter = new Map<string, number>();
 
   private readonly loreDirPath: string;
   private readonly loreSizeCapBytes: number;
@@ -226,6 +231,7 @@ export class ChatModule implements IChatModule {
     this.loreSizeCapBytes = options.loreSizeCapBytes ?? chatHistoryDefaults.loreSizeCapBytes;
     this.chatStickerTopN = options.chatStickerTopN ?? chatHistoryDefaults.chatStickerTopN;
     this.stickersDirPath = options.stickersDirPath ?? chatHistoryDefaults.stickersDirPath;
+    this.stickerLegendRefreshEveryMsgs = options.stickerLegendRefreshEveryMsgs ?? 50;
   }
 
   /** Called by router after each successful send — tracks outgoing message IDs for reply-to-bot detection. */
@@ -252,6 +258,19 @@ export class ChatModule implements IChatModule {
     this.loreCache.delete(groupId);
     this.loreKeywordsCache.delete(groupId);
     this.groupIdentityCache.delete(groupId);
+    this.stickerSectionCache.delete(groupId);
+    this.stickerRefreshCounter.set(groupId, 0);
+  }
+
+  /** Increment per-group sticker legend counter; evicts sticker section cache when threshold hit. */
+  tickStickerRefresh(groupId: string): void {
+    const count = (this.stickerRefreshCounter.get(groupId) ?? 0) + 1;
+    this.stickerRefreshCounter.set(groupId, count);
+    if (count >= this.stickerLegendRefreshEveryMsgs) {
+      this.stickerSectionCache.delete(groupId);
+      this.groupIdentityCache.delete(groupId);
+      this.stickerRefreshCounter.set(groupId, 0);
+    }
   }
 
   async generateReply(
@@ -561,7 +580,8 @@ export class ChatModule implements IChatModule {
     // Kick off async sticker warm-up if not yet loaded; invalidates identity cache when done
     if (!this.stickerSectionCache.has(groupId)) {
       this.stickerSectionCache.set(groupId, ''); // placeholder to prevent re-entry
-      void buildStickerSection(groupId, this.stickersDirPath, this.chatStickerTopN, this.claude)
+      const liveEntries = this._getLiveStickers(groupId);
+      void buildStickerSection(groupId, this.stickersDirPath, this.chatStickerTopN, this.claude, liveEntries)
         .then(section => {
           this.stickerSectionCache.set(groupId, section);
           // Only invalidate identity cache if stickers actually loaded (worth rebuilding)
@@ -610,5 +630,19 @@ export class ChatModule implements IChatModule {
     }
     this.groupReplyCount.set(groupId, { count: state.count + 1, windowStart: state.windowStart });
     return true;
+  }
+
+  private _getLiveStickers(groupId: string): LiveStickerEntry[] {
+    try {
+      return this.db.liveStickers.getTopByGroup(groupId, this.chatStickerTopN).map(s => ({
+        key: s.key,
+        type: s.type,
+        cqCode: s.cqCode,
+        summary: s.summary,
+        count: s.count,
+      }));
+    } catch {
+      return [];
+    }
   }
 }

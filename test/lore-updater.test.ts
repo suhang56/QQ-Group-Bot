@@ -92,6 +92,7 @@ function makeChatModule(): IChatModule {
     generateReply: vi.fn().mockResolvedValue(null),
     recordOutgoingMessage: vi.fn(),
     invalidateLore: vi.fn(),
+    tickStickerRefresh: vi.fn(),
   };
 }
 
