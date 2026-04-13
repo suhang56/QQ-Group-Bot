@@ -3,6 +3,7 @@ import type { IMessageRepository, IGroupConfigRepository, GroupConfig } from '..
 import type { GroupMessage } from '../adapter/napcat.js';
 import { BotErrorCode, ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
+import { defaultGroupConfig } from '../config.js';
 
 export interface IMimicModule {
   generateMimic(
@@ -79,10 +80,10 @@ export class MimicModule implements IMimicModule {
         model: 'claude-sonnet-4-6',
         maxTokens: 200,
         system: [{
-          text: `你是一个模仿专家。下面是某群友的历史发言（每行一条）：\n\n${fewShot}\n\n请完全模仿这位群友的语气、用词习惯、句式风格，用中文回复一句话（1-2句）。不要加任何解释或前缀。`,
+          text: `你是一个模仿专家。请完全模仿用户提供的历史发言中的语气、用词习惯、句式风格，用中文回复一句话（1-2句）。不要加任何解释或前缀。`,
           cache: true,
         }],
-        messages: [{ role: 'user', content: topicLine }],
+        messages: [{ role: 'user', content: `以下是该群友的历史发言（每行一条）：\n${fewShot}\n\n${topicLine}` }],
       });
 
       const nickname = userMsgs[0]!.nickname;
@@ -110,7 +111,7 @@ export class MimicModule implements IMimicModule {
     targetNickname: string,
     startedBy: string,
   ): Promise<StartMimicResult> {
-    const config = this.configs.get(groupId) ?? this._defaultConfig(groupId);
+    const config = this.configs.get(groupId) ?? defaultGroupConfig(groupId);
     const previousUserId = config.mimicActiveUserId;
     const replaced = previousUserId !== null;
 
@@ -135,7 +136,7 @@ export class MimicModule implements IMimicModule {
     }
 
     const updated: GroupConfig = {
-      ...(config ?? this._defaultConfig(groupId)),
+      ...(config ?? defaultGroupConfig(groupId)),
       mimicActiveUserId: null,
       mimicStartedBy: null,
       updatedAt: new Date().toISOString(),
@@ -150,25 +151,4 @@ export class MimicModule implements IMimicModule {
     return count > 0 && count < INSUFFICIENT_THRESHOLD;
   }
 
-  private _defaultConfig(groupId: string): GroupConfig {
-    return {
-      groupId,
-      enabledModules: ['chat', 'mimic'],
-      autoMod: false,
-      dailyPunishmentLimit: 10,
-      punishmentsToday: 0,
-      punishmentsResetDate: new Date().toISOString().slice(0, 10),
-      mimicActiveUserId: null,
-      mimicStartedBy: null,
-      chatTriggerKeywords: [],
-      chatTriggerAtOnly: false,
-      chatDebounceMs: 2000,
-      modConfidenceThreshold: 0.7,
-      modWhitelist: [],
-      appealWindowHours: 24,
-      kickConfirmModel: 'claude-sonnet-4-6',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-  }
 }
