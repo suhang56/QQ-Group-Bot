@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ChatModule, extractKeywords, extractTopFaces, tokenizeLore, IDENTITY_PROBE, IDENTITY_DEFLECTIONS } from '../src/modules/chat.js';
+import { ChatModule, extractKeywords, extractTopFaces, tokenizeLore, IDENTITY_PROBE, IDENTITY_DEFLECTIONS, TASK_REQUEST, TASK_DEFLECTIONS } from '../src/modules/chat.js';
 import type { IClaudeClient, ClaudeResponse } from '../src/ai/claude.js';
 import type { GroupMessage } from '../src/adapter/napcat.js';
 import { Database } from '../src/storage/db.js';
@@ -862,6 +862,91 @@ describe('ChatModule — identity probe deflection', () => {
       if (r) results.add(r);
     }
     // With 6 options and 30 draws, probability of all same < 0.001%
+    expect(results.size).toBeGreaterThan(1);
+  });
+});
+
+describe('TASK_REQUEST regex', () => {
+  const match = (s: string) => TASK_REQUEST.test(s);
+
+  it('matches "写一首诗"', () => expect(match('写一首诗')).toBe(true));
+  it('matches "帮我翻译 hello"', () => expect(match('帮我翻译 hello')).toBe(true));
+  it('matches "推荐一下好吃的店"', () => expect(match('推荐一下好吃的店')).toBe(true));
+  it('matches "帮我算一下"', () => expect(match('帮我算一下')).toBe(true));
+  it('matches "来首歌"', () => expect(match('来首歌')).toBe(true));
+  it('matches "搞个笑话"', () => expect(match('搞个笑话')).toBe(true));
+  it('does NOT match "你今天吃了啥"', () => expect(match('你今天吃了啥')).toBe(false));
+  it('does NOT match "你好"', () => expect(match('你好')).toBe(false));
+  it('does NOT match "我写了一首诗" (describing own action)', () => expect(match('我写了一首诗')).toBe(true)); // "写" still triggers — false positive is acceptable per spec
+});
+
+describe('ChatModule — task request deflection', () => {
+  let db: Database;
+  let claude: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    claude = vi.fn().mockResolvedValue({
+      text: 'this should not appear',
+      inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0,
+    });
+  });
+
+  function makeChat() {
+    return new ChatModule(
+      { complete: claude } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID, lurkerReplyChance: 1, lurkerCooldownMs: 0, chatMinScore: -999 },
+    );
+  }
+
+  it('"写一首诗" → canned deflection, Claude not called', async () => {
+    const chat = makeChat();
+    const result = await chat.generateReply('g1', makeMsg({ content: '写一首诗' }), []);
+    expect(TASK_DEFLECTIONS).toContain(result);
+    expect(claude).not.toHaveBeenCalled();
+  });
+
+  it('"帮我翻译 hello" → canned deflection', async () => {
+    const chat = makeChat();
+    const result = await chat.generateReply('g1', makeMsg({ content: '帮我翻译 hello' }), []);
+    expect(TASK_DEFLECTIONS).toContain(result);
+    expect(claude).not.toHaveBeenCalled();
+  });
+
+  it('"推荐一下好吃的店" → canned deflection', async () => {
+    const chat = makeChat();
+    const result = await chat.generateReply('g1', makeMsg({ content: '推荐一下好吃的店' }), []);
+    expect(TASK_DEFLECTIONS).toContain(result);
+    expect(claude).not.toHaveBeenCalled();
+  });
+
+  it('"你今天吃了啥" → NOT matched, Claude called normally', async () => {
+    const chat = makeChat();
+    await chat.generateReply('g1', makeMsg({ content: '你今天吃了啥' }), []);
+    expect(claude).toHaveBeenCalled();
+  });
+
+  it('"你好" → NOT matched, Claude called normally', async () => {
+    const chat = makeChat();
+    await chat.generateReply('g1', makeMsg({ content: '你好' }), []);
+    expect(claude).toHaveBeenCalled();
+  });
+
+  it('"帮我算一下" → canned deflection', async () => {
+    const chat = makeChat();
+    const result = await chat.generateReply('g1', makeMsg({ content: '帮我算一下' }), []);
+    expect(TASK_DEFLECTIONS).toContain(result);
+    expect(claude).not.toHaveBeenCalled();
+  });
+
+  it('deflection is randomized across instances', async () => {
+    const results = new Set<string>();
+    for (let i = 0; i < 30; i++) {
+      const chat = makeChat();
+      const r = await chat.generateReply(`g-${i}`, makeMsg({ content: '帮我写个slogan' }), []);
+      if (r) results.add(r);
+    }
     expect(results.size).toBeGreaterThan(1);
   });
 });

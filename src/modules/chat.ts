@@ -57,7 +57,16 @@ interface ScoreFactors {
 export const IDENTITY_PROBE =
   /(是.{0,3}机器人|你.{0,4}是.{0,4}(ai|bot)|是.{0,4}(ai|bot).{0,4}吗|bot\s*吧|真人吗?|是真的.{0,3}人|are\s+you\s+(a\s+)?bot|are\s+you\s+(an\s+)?ai|are\s+you\s+human)/i;
 
-export const IDENTITY_DEFLECTIONS = ['啊？', '什么', '？？', '?', '我不明白', '啥'];
+export const IDENTITY_DEFLECTIONS = ['啊？', '什么', '？？', '?', '我不明白', '啧'];
+
+// Matches task-request exploitation attempts ("write me X", "translate Y", etc.)
+export const TASK_REQUEST =
+  /(写[个一]?|编[个一]?|出[个一]?|帮我|给我|替我|来[个一段首]|生成|翻译|算一下|算算|推荐|讲个|说个|念一?段|背一段|作一首|搞一个|搞个|整一个|整个|做一个|画[个一]?|总结|解释一下)/;
+
+export const TASK_DEFLECTIONS = [
+  '我不会', '你自己写', '想屁吃', '懒得', '不想',
+  '写不出来', '不擅长这个', '？', '我又不是工具人', '想得美', '哈哈你自己搞',
+];
 
 // Chinese stopwords that add no retrieval signal
 const STOPWORDS = new Set([
@@ -245,6 +254,11 @@ export class ChatModule implements IChatModule {
     if (IDENTITY_PROBE.test(triggerMessage.content)) {
       const pool = IDENTITY_DEFLECTIONS;
       return pool[Math.floor(Math.random() * pool.length)]!;
+    }
+
+    // Task-request exploitation: bypass Claude with a canned refusal
+    if (TASK_REQUEST.test(triggerMessage.content)) {
+      return TASK_DEFLECTIONS[Math.floor(Math.random() * TASK_DEFLECTIONS.length)]!;
     }
 
     // ── Retrieve context ──────────────────────────────────────────────────
