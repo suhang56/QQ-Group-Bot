@@ -2,9 +2,13 @@
 
 ## 1. Command List
 
+> **Global rule**: All slash commands (`/...`) are restricted to group admins and owner at the router level. Messages starting with `/` sent by `member`-role users are silently ignored — they fall through to the normal chat/mimic pipeline. Individual command handlers may add further permission checks (e.g. `rule_add`, `rule_false_positive`) as defense-in-depth.
+>
+> **`/appeal` caveat**: Even though `/appeal` is intended for regular members to appeal their own punishments, it is currently subject to the same admin-only gate. Punished members who are not admins cannot invoke `/appeal` via the slash command. This is a known limitation — the workaround is to contact an admin who can trigger the appeal flow or use `/rule_false_positive` directly.
+
 ### `/help`
 - **Syntax**: `/help`
-- **Permission**: all members
+- **Permission**: admins and owner only (router gate)
 - **Response**: plain-text menu listing all commands with one-line descriptions
 - **Edge cases**:
   1. Sent in private message → reply "This bot only works in group chats."
@@ -15,7 +19,7 @@
 
 ### `/mimic @user [topic]`
 - **Syntax**: `/mimic @<QQ_ID> [optional topic text]`
-- **Permission**: all members
+- **Permission**: admins and owner only (router gate)
 - **Response**: `[模仿 @Nickname] <generated reply in target's style>`
 - **Edge cases**:
   1. Target user has 0 messages in DB → reply "No message history found for @Nickname. Cannot mimic."
@@ -27,7 +31,7 @@
 
 ### `/mimic_on @user`
 - **Syntax**: `/mimic_on @<QQ_ID>`
-- **Permission**: all members (one active mimic session per group at a time)
+- **Permission**: admins and owner only (router gate); one active mimic session per group at a time
 - **Response**: "Mimic mode ON: all my replies in this group will imitate @Nickname. Use /mimic_off to stop."
 - **Edge cases**:
   1. Another mimic session already active → reply "Mimic mode already active for @OtherUser. Use /mimic_off first."
@@ -39,7 +43,7 @@
 
 ### `/mimic_off`
 - **Syntax**: `/mimic_off`
-- **Permission**: all members (any member can cancel)
+- **Permission**: admins and owner only (router gate)
 - **Response**: "Mimic mode OFF. Back to normal chat mode."
 - **Edge cases**:
   1. No active mimic session → reply "Mimic mode is not currently active."
@@ -76,7 +80,7 @@
 
 ### `/appeal`
 - **Syntax**: `/appeal` (must be sent by the punished user, within 24h of punishment)
-- **Permission**: punished user only (matched by QQ ID in moderation_log)
+- **Permission**: admins and owner only (router gate — see caveat above)
 - **Response**: "Appeal submitted for your most recent punishment. An admin will review. Punishment suspended pending review."
 - **Edge cases**:
   1. No recent punishment for this user → "No recent punishment found for your account."
@@ -89,7 +93,7 @@
 
 ### `/rules`
 - **Syntax**: `/rules`
-- **Permission**: all members
+- **Permission**: admins and owner only (router gate)
 - **Response**: numbered list of all active rules for this group (truncated to 20 shown; "... and N more. Use /rules page 2")
 - **Edge cases**:
   1. No rules configured → "No rules have been set for this group yet. Admins can use /rule_add."
@@ -100,7 +104,7 @@
 
 ### `/stats`
 - **Syntax**: `/stats`
-- **Permission**: all members
+- **Permission**: admins and owner only (router gate)
 - **Response**:
   ```
   📊 Group Stats (last 7 days):

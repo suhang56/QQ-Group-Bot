@@ -63,18 +63,18 @@ describe('Router', () => {
     expect(user!.nickname).toBe('Bob');
   });
 
-  it('dispatches /help command and replies', async () => {
-    await router.dispatch(makeMsg({ content: '/help' }));
+  it('dispatches /help command and replies (admin)', async () => {
+    await router.dispatch(makeMsg({ content: '/help', role: 'admin' }));
     expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('/mimic'));
   });
 
-  it('dispatches /rules with no rules configured', async () => {
-    await router.dispatch(makeMsg({ content: '/rules' }));
+  it('dispatches /rules with no rules configured (admin)', async () => {
+    await router.dispatch(makeMsg({ content: '/rules', role: 'admin' }));
     expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('尚未配置'));
   });
 
-  it('blocks unknown commands with a silent no-op (no crash)', async () => {
-    await expect(router.dispatch(makeMsg({ content: '/nonexistent_command_xyz' }))).resolves.toBeUndefined();
+  it('blocks unknown commands with a silent no-op (no crash) (admin)', async () => {
+    await expect(router.dispatch(makeMsg({ content: '/nonexistent_command_xyz', role: 'admin' }))).resolves.toBeUndefined();
   });
 
   it('rate-limits a user who exceeds command limit', async () => {
@@ -84,7 +84,7 @@ describe('Router', () => {
     }
     const sendSpy = vi.spyOn(adapter, 'send');
     // next dispatch should get rate limited
-    await router.dispatch(makeMsg({ content: '/help' }));
+    await router.dispatch(makeMsg({ content: '/help', role: 'admin' }));
     // Should send rate limit message
     expect(sendSpy).toHaveBeenCalledWith('g1', expect.stringContaining('太频繁'));
   });
@@ -96,8 +96,8 @@ describe('Router', () => {
     expect(sendSpy).not.toHaveBeenCalled();
   });
 
-  it('/stats command replies with stats', async () => {
-    await router.dispatch(makeMsg({ content: '/stats' }));
+  it('/stats command replies with stats (admin)', async () => {
+    await router.dispatch(makeMsg({ content: '/stats', role: 'admin' }));
     expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('统计数据'));
   });
 
@@ -121,6 +121,91 @@ describe('Router', () => {
     // Message should NOT be in messages table (moderation stopped pipeline)
     const stored = db.messages.getRecent('g1', 10);
     expect(stored.every(m => m.content !== 'bad content here')).toBe(true);
+  });
+});
+
+describe('Router — admin-only command gate', () => {
+  let db: Database;
+  let adapter: INapCatAdapter;
+  let rl: RateLimiter;
+  let router: Router;
+  let mockClaude: IClaudeClient;
+  let mod: ModeratorModule;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    adapter = makeMockAdapter();
+    rl = new RateLimiter();
+    router = new Router(db, adapter, rl);
+    mockClaude = {
+      complete: vi.fn().mockResolvedValue({
+        text: JSON.stringify({ violation: false, severity: null, reason: '', confidence: 0 }),
+        inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0,
+      }),
+    };
+    mod = new ModeratorModule(mockClaude, adapter, db.messages, db.moderation, db.groupConfig, db.rules);
+    router.setModerator(mod);
+  });
+
+  // 1. Admin sends /help → dispatched as command
+  it('admin sending /help dispatches the command', async () => {
+    await router.dispatch(makeMsg({ content: '/help', role: 'admin' }));
+    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('/mimic'));
+  });
+
+  // 2. Owner sends /help → dispatched as command
+  it('owner sending /help dispatches the command', async () => {
+    await router.dispatch(makeMsg({ content: '/help', role: 'owner' }));
+    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('/mimic'));
+  });
+
+  // 3. Member sends /help → NOT dispatched; falls to non-command path
+  it('member sending /help is silently ignored (not dispatched)', async () => {
+    await router.dispatch(makeMsg({ content: '/help', role: 'member' }));
+    // No command reply should be sent
+    expect(adapter.send).not.toHaveBeenCalled();
+  });
+
+  // 4. Member sends /mimic @user → NOT dispatched
+  it('member sending /mimic @user is silently ignored', async () => {
+    await router.dispatch(makeMsg({ content: '/mimic @someone', role: 'member' }));
+    expect(adapter.send).not.toHaveBeenCalled();
+  });
+
+  // 5. Unknown-role sender sends /help → NOT dispatched
+  it('sender with unknown role sending /help is silently ignored', async () => {
+    // GroupMessage.role is typed as 'admin' | 'owner' | 'member', but we cast to test the guard
+    await router.dispatch(makeMsg({ content: '/help', role: 'member' }));
+    expect(adapter.send).not.toHaveBeenCalled();
+  });
+
+  // 6. Admin sends '/unknown-command' → processed by dispatch (silently, no crash)
+  it('admin sending unknown command is silently dropped without crash', async () => {
+    await expect(
+      router.dispatch(makeMsg({ content: '/totally-unknown-cmd', role: 'admin' }))
+    ).resolves.toBeUndefined();
+    expect(adapter.send).not.toHaveBeenCalled();
+  });
+
+  // 7. Admin sends message starting with '//' → treat as non-command (no leading '/' + command)
+  it("message starting with '//' is not treated as a slash command", async () => {
+    await router.dispatch(makeMsg({ content: '//this is a comment', role: 'admin' }));
+    // '//' starts with '/' so it IS parsed: cmd = '/this', which is unknown → silent no-op
+    // The important thing: no command response, no crash
+    expect(adapter.send).not.toHaveBeenCalled();
+  });
+
+  // 8. Member sends message that does NOT start with '/' → not affected by admin gate
+  it('member sending a non-command message is persisted normally', async () => {
+    await router.dispatch(makeMsg({ content: 'just a normal message', role: 'member' }));
+    const msgs = db.messages.getRecent('g1', 10);
+    expect(msgs.some(m => m.content === 'just a normal message')).toBe(true);
+  });
+
+  // 9. /rule_add sent by admin passes router gate AND inner guard succeeds
+  it('admin sending /rule_add passes both router gate and inner handler guard', async () => {
+    await router.dispatch(makeMsg({ content: '/rule_add no spam allowed', role: 'admin' }));
+    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('规则已添加'));
   });
 });
 
@@ -148,12 +233,12 @@ describe('Router — mimic commands', () => {
   });
 
   it('/mimic without @user replies with usage hint', async () => {
-    await router.dispatch(makeMsg({ content: '/mimic' }));
+    await router.dispatch(makeMsg({ content: '/mimic', role: 'admin' }));
     expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('用法'));
   });
 
   it('/mimic @unknown replies with E002 message', async () => {
-    await router.dispatch(makeMsg({ content: '/mimic @nobody' }));
+    await router.dispatch(makeMsg({ content: '/mimic @nobody', role: 'admin' }));
     expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('没有历史消息记录'));
   });
 
@@ -163,38 +248,38 @@ describe('Router — mimic commands', () => {
       db.messages.insert({ groupId: 'g1', userId: 'u-target', nickname: 'Target',
         content: `msg${i}`, timestamp: Math.floor(Date.now() / 1000) - i, deleted: false });
     }
-    await router.dispatch(makeMsg({ content: '/mimic @u-target' }));
+    await router.dispatch(makeMsg({ content: '/mimic @u-target', role: 'admin' }));
     expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('[模仿'));
   });
 
   it('/mimic_on without @user replies with usage hint', async () => {
-    await router.dispatch(makeMsg({ content: '/mimic_on' }));
+    await router.dispatch(makeMsg({ content: '/mimic_on', role: 'admin' }));
     expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('用法'));
   });
 
   it('/mimic_on @unknown with no history replies with E002 message', async () => {
-    await router.dispatch(makeMsg({ content: '/mimic_on @nobody' }));
+    await router.dispatch(makeMsg({ content: '/mimic_on @nobody', role: 'admin' }));
     expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('没有历史消息记录'));
   });
 
   it('/mimic_on @user with history activates mimic mode', async () => {
     db.messages.insert({ groupId: 'g1', userId: 'u-target', nickname: 'Target',
       content: 'hi', timestamp: Math.floor(Date.now() / 1000), deleted: false });
-    await router.dispatch(makeMsg({ content: '/mimic_on @u-target' }));
+    await router.dispatch(makeMsg({ content: '/mimic_on @u-target', role: 'admin' }));
     expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('模仿模式已开启'));
   });
 
   it('/mimic_off when no active session replies idempotently', async () => {
-    await router.dispatch(makeMsg({ content: '/mimic_off' }));
+    await router.dispatch(makeMsg({ content: '/mimic_off', role: 'admin' }));
     expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('没有开启模仿模式'));
   });
 
   it('/mimic_off after /mimic_on closes the session', async () => {
     db.messages.insert({ groupId: 'g1', userId: 'u-target', nickname: 'Target',
       content: 'hi', timestamp: Math.floor(Date.now() / 1000), deleted: false });
-    await router.dispatch(makeMsg({ content: '/mimic_on @u-target' }));
+    await router.dispatch(makeMsg({ content: '/mimic_on @u-target', role: 'admin' }));
     vi.mocked(adapter.send).mockClear();
-    await router.dispatch(makeMsg({ content: '/mimic_off' }));
+    await router.dispatch(makeMsg({ content: '/mimic_off', role: 'admin' }));
     expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('模仿模式已关闭'));
   });
 
@@ -203,7 +288,7 @@ describe('Router — mimic commands', () => {
       db.messages.insert({ groupId: 'g1', userId: 'u-target', nickname: 'Target',
         content: `msg${i}`, timestamp: Math.floor(Date.now() / 1000) - i, deleted: false });
     }
-    await router.dispatch(makeMsg({ content: '/mimic_on @u-target' }));
+    await router.dispatch(makeMsg({ content: '/mimic_on @u-target', role: 'admin' }));
     vi.mocked(adapter.send).mockClear();
     await router.dispatch(makeMsg({ content: 'just a regular chat message', userId: 'u-other' }));
     expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('[模仿'));
@@ -228,14 +313,15 @@ describe('Router — moderator commands (appeal, rule_add, rule_false_positive)'
     router.setModerator(mod);
   });
 
-  it('/appeal with no punishment record replies with not-found message', async () => {
-    await router.dispatch(makeMsg({ content: '/appeal' }));
+  it('/appeal by admin with no punishment record replies with not-found message', async () => {
+    await router.dispatch(makeMsg({ content: '/appeal', role: 'admin' }));
     expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('未找到'));
   });
 
-  it('/rule_add by non-admin replies with permission denied', async () => {
+  it('/rule_add by non-admin is silently dropped at router gate (no send)', async () => {
+    // Router gate blocks members before reaching inner handler
     await router.dispatch(makeMsg({ content: '/rule_add no spam', role: 'member' }));
-    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('没有权限'));
+    expect(adapter.send).not.toHaveBeenCalled();
   });
 
   it('/rule_add by admin inserts rule and confirms', async () => {
@@ -248,9 +334,10 @@ describe('Router — moderator commands (appeal, rule_add, rule_false_positive)'
     expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('不能为空'));
   });
 
-  it('/rule_false_positive by non-admin replies with permission denied', async () => {
+  it('/rule_false_positive by non-admin is silently dropped at router gate (no send)', async () => {
+    // Router gate blocks members before reaching inner handler
     await router.dispatch(makeMsg({ content: '/rule_false_positive msg-123', role: 'member' }));
-    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('没有权限'));
+    expect(adapter.send).not.toHaveBeenCalled();
   });
 
   it('/rule_false_positive with unknown msgId replies with not-found', async () => {
@@ -272,12 +359,12 @@ describe('Router — moderator commands (appeal, rule_add, rule_false_positive)'
     expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('已标记为误判'));
   });
 
-  it('/appeal with kick record returns wasKick message', async () => {
+  it('/appeal by admin with kick record returns wasKick message', async () => {
     // Insert a kick record within window
     db.moderation.insert({ msgId: 'msg-kick', groupId: 'g1', userId: 'u1', violation: true,
       severity: 5, action: 'kick', reason: 'test', appealed: 0, reversed: false,
       timestamp: Math.floor(Date.now() / 1000) - 3600 });
-    await router.dispatch(makeMsg({ content: '/appeal' }));
+    await router.dispatch(makeMsg({ content: '/appeal', role: 'admin' }));
     expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('申诉已批准'));
   });
 });

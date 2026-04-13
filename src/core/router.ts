@@ -83,9 +83,9 @@ export class Router implements IRouter {
         lastSeen: msg.timestamp,
       });
 
-      // Command routing
+      // Command routing — admin/owner only at router level
       const trimmed = msg.content.trim();
-      if (trimmed.startsWith('/')) {
+      if (trimmed.startsWith('/') && (msg.role === 'admin' || msg.role === 'owner')) {
         const parts = trimmed.slice(1).split(/\s+/);
         const cmd = parts[0]?.toLowerCase() ?? '';
         const args = parts.slice(1);
