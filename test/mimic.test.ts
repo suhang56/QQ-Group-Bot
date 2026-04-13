@@ -101,7 +101,8 @@ describe('MimicModule.generateMimic', () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.historyCount).toBe(2);
-      expect(result.text).toContain('[模仿');
+      expect(result.text).toBe('随便说一句'); // raw text, no prefix
+      expect(result.text).not.toContain('[模仿');
     }
   });
 
@@ -129,8 +130,8 @@ describe('MimicModule.generateMimic', () => {
     }
   });
 
-  // Happy path: enough history → ok result with [模仿] prefix
-  it('returns ok result with [模仿] prefix for sufficient history', async () => {
+  // Happy path: enough history → ok result with raw text (no prefix)
+  it('returns ok result with raw mimicked text (no prefix) for sufficient history', async () => {
     const msgs = Array.from({ length: 10 }, (_, i) => makeMsg({ id: i + 1, content: `msg${i}` }));
     vi.mocked(messages.getByUser).mockReturnValue(msgs);
     vi.mocked(claude.complete).mockResolvedValue({
@@ -142,7 +143,8 @@ describe('MimicModule.generateMimic', () => {
     const result = await mod.generateMimic('g1', 'u1', '天气', []);
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.text).toMatch(/^\[模仿 @/);
+      expect(result.text).toBe('哈哈今天天气不错啊');
+      expect(result.text).not.toContain('[模仿');
       expect(result.historyCount).toBe(10);
     }
   });

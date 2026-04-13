@@ -89,13 +89,6 @@ describe('Router', () => {
     expect(sendSpy).toHaveBeenCalledWith('g1', expect.stringContaining('太频繁'));
   });
 
-  it('does not reply to messages from other bots (content starts with [模仿])', async () => {
-    const sendSpy = vi.spyOn(adapter, 'send');
-    await router.dispatch(makeMsg({ content: '[模仿 @Alice] some mimic reply', userId: 'bot-self' }));
-    // No send for non-command bot content
-    expect(sendSpy).not.toHaveBeenCalled();
-  });
-
   it('/stats command replies with stats (admin)', async () => {
     await router.dispatch(makeMsg({ content: '/stats', role: 'admin' }));
     expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('统计数据'));
@@ -249,7 +242,8 @@ describe('Router — mimic commands', () => {
         content: `msg${i}`, timestamp: Math.floor(Date.now() / 1000) - i, deleted: false });
     }
     await router.dispatch(makeMsg({ content: '/mimic @u-target', role: 'admin' }));
-    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('[模仿'));
+    // Reply is the raw mimicked text (no prefix)
+    expect(adapter.send).toHaveBeenCalled();
   });
 
   it('/mimic_on without @user replies with usage hint', async () => {
@@ -291,7 +285,8 @@ describe('Router — mimic commands', () => {
     await router.dispatch(makeMsg({ content: '/mimic_on @u-target', role: 'admin' }));
     vi.mocked(adapter.send).mockClear();
     await router.dispatch(makeMsg({ content: 'just a regular chat message', userId: 'u-other' }));
-    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('[模仿'));
+    // Reply is raw mimicked text — no prefix, but a reply was sent
+    expect(adapter.send).toHaveBeenCalled();
   });
 
   // CQ:at mention parsing — the real QQ bug: user sent /mimic_on @nickname but
@@ -349,7 +344,8 @@ describe('Router — mimic commands', () => {
       rawContent: '/mimic [CQ:at,qq=1301931012] 你今天吃啥',
       role: 'admin',
     }));
-    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('[模仿'));
+    // Reply is raw mimicked text — no prefix
+    expect(adapter.send).toHaveBeenCalled();
   });
 });
 

@@ -50,11 +50,6 @@ export class Router implements IRouter {
     try {
       this.logger.trace({ messageId: msg.messageId, groupId: msg.groupId, userId: msg.userId }, 'dispatching message');
 
-      // Bot mimic output — skip to prevent loop
-      if (msg.content.startsWith('[模仿')) {
-        return;
-      }
-
       const config = this.db.groupConfig.get(msg.groupId) ?? this._defaultConfig(msg.groupId);
 
       // Moderator runs FIRST, before persistence

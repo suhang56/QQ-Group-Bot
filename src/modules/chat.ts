@@ -104,11 +104,6 @@ export class ChatModule implements IChatModule {
     triggerMessage: GroupMessage,
     recentMessages: GroupMessage[]
   ): Promise<string | null> {
-    // Don't reply to bot's own mimic output
-    if (triggerMessage.content.startsWith('[模仿')) {
-      return null;
-    }
-
     // Empty content after CQ stripping
     if (!triggerMessage.content.trim()) {
       return null;

@@ -37,7 +37,7 @@ Tone: friendly 群友 for chat; strict but respectful for moderation.
 
 **成功：**
 ```
-[模仿 @{nickname}] {generated_reply}
+{generated_reply}
 ```
 
 **错误 — 无历史记录（E002）：**
@@ -49,7 +49,7 @@ Tone: friendly 群友 for chat; strict but respectful for moderation.
 ```
 ⚠️ @{nickname} 目前只有 {count} 条历史消息，模仿效果可能不准确。
 
-[模仿 @{nickname}] {generated_reply}
+{generated_reply}
 ```
 
 **错误 — 模仿自己（E017）：**
@@ -297,26 +297,9 @@ Tone: friendly 群友 for chat; strict but respectful for moderation.
 
 ---
 
-## 5. [模仿] 前缀格式与免责声明
+## 5. 模仿回复格式
 
-### 前缀格式
-
-所有模仿回复必须以如下前缀开头：
-
-```
-[模仿 @{nickname}]
-```
-
-示例：
-```
-[模仿 @小明] 哈哈这个梗我看了三遍还是觉得好笑
-```
-
-### 免责声明（/mimic_on 开启时附加一次）
-
-```
-模仿模式已开启：接下来的发言将模仿 @{nickname} 的说话风格，内容由 AI 生成，不代表其本人真实观点，仅供娱乐。
-```
+模仿回复直接输出生成的文本，不添加任何前缀。`[模仿 @{nickname}]` 标记仅保留在服务端日志中（pino info 级别），不出现在群内消息里。
 
 ---
 

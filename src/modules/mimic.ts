@@ -87,9 +87,9 @@ export class MimicModule implements IMimicModule {
       });
 
       const nickname = userMsgs[0]!.nickname;
-      const text = `[模仿 @${nickname}] ${response.text}`;
+      const text = response.text;
 
-      this.logger.info({ groupId, targetUserId, historyCount }, 'mimic generated');
+      this.logger.info({ groupId, targetUserId, targetNickname: nickname, historyCount, mimicPrefix: `[模仿 @${nickname}]` }, 'mimic generated');
       return { ok: true, text, historyCount };
     } catch (err) {
       if (err instanceof ClaudeApiError || err instanceof ClaudeParseError) {

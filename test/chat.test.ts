@@ -113,9 +113,10 @@ describe('ChatModule', () => {
     vi.useRealTimers();
   });
 
-  it('does not reply when trigger message is from bot itself ([模仿] prefix)', async () => {
-    const result = await chat.generateReply('g1', makeMsg({ content: '[模仿 @Bob] some text' }), []);
-    expect(result).toBeNull();
+  it('replies to messages without the old [模仿] prefix guard (prefix removed)', async () => {
+    // Prefix guard removed — chat module no longer filters on [模仿] content
+    const result = await chat.generateReply('g1', makeMsg({ content: 'some text' }), []);
+    expect(result).toBe('bot reply');
   });
 
   it('handles empty recent messages gracefully', async () => {
