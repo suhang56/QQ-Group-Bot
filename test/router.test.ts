@@ -477,6 +477,25 @@ describe('splitReply', () => {
   it('all-empty input returns empty array', () => {
     expect(splitReply('\n\n\n')).toEqual([]);
   });
+
+  it('CQ code on own line is preserved as atomic token', () => {
+    const input = '老婆\n[CQ:mface,emoji_id=abc,emoji_package_id=123,key=foo,summary=G]';
+    const output = splitReply(input);
+    expect(output).toEqual(['老婆', '[CQ:mface,emoji_id=abc,emoji_package_id=123,key=foo,summary=G]']);
+    expect(output.some(l => l === ']')).toBe(false);
+  });
+
+  it('multi-line CQ code is collapsed into single token, no stray ]', () => {
+    const input = '老婆\n[CQ:mface,\nemoji_id=abc,\nsummary=G\n]';
+    const output = splitReply(input);
+    expect(output.some(l => l === ']')).toBe(false);
+    expect(output.some(l => /^\[CQ:mface.*\]$/.test(l))).toBe(true);
+  });
+
+  it('stray ] and [ lines are filtered out', () => {
+    expect(splitReply('hello\n]\nworld')).toEqual(['hello', 'world']);
+    expect(splitReply('[\nhello')).toEqual(['hello']);
+  });
 });
 
 describe('Router — multi-line chat reply dispatch', () => {

@@ -16,7 +16,9 @@ const SPLIT_DELAY_MAX_MS = 800;
 
 /** Split a reply on newlines, cap at MAX_SPLIT_LINES, drop empty lines. */
 export function splitReply(text: string): string[] {
-  const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  // Collapse any \n inside [CQ:...] blocks so multi-line CQ codes become atomic tokens
+  const flattened = text.replace(/\[CQ:[^\]]*\]/gs, (cq) => cq.replace(/\s*\n\s*/g, ''));
+  const lines = flattened.split('\n').map(l => l.trim()).filter(l => l.length > 0 && l !== ']' && l !== '[');
   return lines.slice(0, MAX_SPLIT_LINES);
 }
 
