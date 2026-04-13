@@ -791,17 +791,26 @@ describe('ChatModule — sentinel: AI self-disclosure prevention', () => {
 describe('IDENTITY_PROBE regex', () => {
   const match = (s: string) => IDENTITY_PROBE.test(s);
 
-  it('matches "这不是机器人吗"', () => expect(match('这不是机器人吗')).toBe(true));
+  // Direct second-person identity questions → must match
+  it('matches "你是不是 bot"', () => expect(match('你是不是 bot')).toBe(true));
   it('matches "你是 AI 吗"', () => expect(match('你是 AI 吗')).toBe(true));
+  it('matches "你是机器人吗"', () => expect(match('你是机器人吗')).toBe(true));
+  it('matches "你是真人"', () => expect(match('你是真人')).toBe(true));
+  it('matches "你是人吗"', () => expect(match('你是人吗')).toBe(true));
   it('matches "bot 吧"', () => expect(match('bot 吧')).toBe(true));
+  it('matches "是不是机器人吧"', () => expect(match('是不是机器人吧')).toBe(true));
+  it('matches "真人吗"', () => expect(match('真人吗')).toBe(true));
+  it('matches "这不是机器人"', () => expect(match('这不是机器人')).toBe(true));
   it('matches "are you a bot"', () => expect(match('are you a bot')).toBe(true));
   it('matches "are you an AI"', () => expect(match('are you an AI')).toBe(true));
   it('matches "are you human"', () => expect(match('are you human')).toBe(true));
   it('matches "Are You A Bot?" (mixed case)', () => expect(match('Are You A Bot?')).toBe(true));
   it('matches "你是bot吗"', () => expect(match('你是bot吗')).toBe(true));
-  it('matches "真人吗"', () => expect(match('真人吗')).toBe(true));
-  it('matches "是真的人吗"', () => expect(match('是真的人吗')).toBe(true));
 
+  // Third-person observational mentions → must NOT match (go to chat flow)
+  it('does NOT match "这AI为啥有时候秒回" (observational)', () => expect(match('这AI为啥有时候秒回')).toBe(false));
+  it('does NOT match "那个机器人牛逼" (compliment, no 你是)', () => expect(match('那个机器人牛逼')).toBe(false));
+  it('does NOT match "AI真聪明" (third-person, no 你)', () => expect(match('AI真聪明')).toBe(false));
   it('does NOT match "那个 AI 工具挺好" (incidental AI mention)', () => expect(match('那个 AI 工具挺好')).toBe(false));
   it('does NOT match "机器人大战" (topic, no verb)', () => expect(match('机器人大战')).toBe(false));
   it('does NOT match "AI 画图真好用"', () => expect(match('AI 画图真好用')).toBe(false));
@@ -828,25 +837,52 @@ describe('ChatModule — identity probe deflection', () => {
     );
   }
 
-  it('probe message → returns canned deflection, Claude not called', async () => {
+  // 1. Direct second-person identity questions → deflected, Claude not called
+  it('"你是不是 bot" → identity deflection', async () => {
     const chat = makeChat();
-    const result = await chat.generateReply('g1', makeMsg({ content: '这不是机器人吗' }), []);
+    const result = await chat.generateReply('g1', makeMsg({ content: '你是不是 bot' }), []);
     expect(IDENTITY_DEFLECTIONS).toContain(result);
     expect(claude).not.toHaveBeenCalled();
   });
 
-  it('"你是AI吗" → canned deflection', async () => {
+  it('"你是真人吗" → identity deflection', async () => {
+    const chat = makeChat();
+    const result = await chat.generateReply('g1', makeMsg({ content: '你是真人吗' }), []);
+    expect(IDENTITY_DEFLECTIONS).toContain(result);
+    expect(claude).not.toHaveBeenCalled();
+  });
+
+  it('"你是AI吗" → identity deflection', async () => {
     const chat = makeChat();
     const result = await chat.generateReply('g1', makeMsg({ content: '你是AI吗' }), []);
     expect(IDENTITY_DEFLECTIONS).toContain(result);
     expect(claude).not.toHaveBeenCalled();
   });
 
-  it('"bot 吧" → canned deflection', async () => {
+  it('"bot 吧" → identity deflection', async () => {
     const chat = makeChat();
     const result = await chat.generateReply('g1', makeMsg({ content: 'bot 吧' }), []);
     expect(IDENTITY_DEFLECTIONS).toContain(result);
     expect(claude).not.toHaveBeenCalled();
+  });
+
+  // 2. Third-person observational mentions → NOT deflected, Claude called (chat flow)
+  it('"这AI为啥有时秒回" → NOT deflected, goes to chat', async () => {
+    const chat = makeChat();
+    await chat.generateReply('g1', makeMsg({ content: '这AI为啥有时候秒回，有时候等半天都不回呢' }), []);
+    expect(claude).toHaveBeenCalled();
+  });
+
+  it('"那个机器人牛逼" → NOT deflected, goes to chat', async () => {
+    const chat = makeChat();
+    await chat.generateReply('g1', makeMsg({ content: '那个机器人牛逼' }), []);
+    expect(claude).toHaveBeenCalled();
+  });
+
+  it('"AI真聪明" (no 你) → NOT deflected, goes to chat', async () => {
+    const chat = makeChat();
+    await chat.generateReply('g1', makeMsg({ content: 'AI真聪明' }), []);
+    expect(claude).toHaveBeenCalled();
   });
 
   it('"那个 AI 工具挺好" → NOT a probe, Claude called normally', async () => {

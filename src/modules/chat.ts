@@ -83,9 +83,11 @@ const IMPLICIT_BOT_REF_ALIAS_WINDOW_MS = 60_000;
 const IMPLICIT_BOT_REF_REACTION_WINDOW_MS = 30_000;
 const IMPLICIT_BOT_REF_REACTION_MAX_CHARS = 15;
 
-// Matches direct identity probes directed at the bot (not incidental keyword mentions)
+// Matches DIRECT second-person identity questions only.
+// Patterns: 你是...bot/ai/机器人, bot吧, 真人吗, 这不是机器人, are you a/an bot/ai/human.
+// Deliberately excludes third-person observational mentions: "这AI为啥..."/"机器人真快"/"AI 真聪明".
 export const IDENTITY_PROBE =
-  /(是.{0,3}机器人|你.{0,4}是.{0,4}(ai|bot)|是.{0,4}(ai|bot).{0,4}吗|bot\s*吧|真人吗?|是真的.{0,3}人|are\s+you\s+(a\s+)?bot|are\s+you\s+(an\s+)?ai|are\s+you\s+human)/i;
+  /(你\s*是\s*(不是\s*)?(一个?\s*)?(bot|ai|机器人|真人)|你\s*是\s*人\s*吗|是\s*(不是\s*)?(bot|ai|机器人)\s*吧|(bot|ai)\s*吧|真人吗|这\s*不\s*是\s*(bot|ai|机器人)|are\s+you\s+(an?\s+)?(bot|ai|human))/i;
 
 export const IDENTITY_DEFLECTIONS = ['啊？', '什么', '？？', '?', '我不明白', '啧'];
 
