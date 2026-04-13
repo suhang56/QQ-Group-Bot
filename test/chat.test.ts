@@ -1121,10 +1121,11 @@ describe('ChatModule — 邦批 persona', () => {
     return { chat: new ChatModule(claude, db, { botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999 }), claude };
   }
 
-  it('BANGDREAM_PERSONA constant contains "邦批", "Roselia", "ykn"', () => {
+  it('BANGDREAM_PERSONA constant contains "邦批", "Roselia", "ykn", and "女"', () => {
     expect(BANGDREAM_PERSONA).toContain('邦批');
     expect(BANGDREAM_PERSONA).toContain('Roselia');
     expect(BANGDREAM_PERSONA).toContain('ykn');
+    expect(BANGDREAM_PERSONA).toContain('女');
   });
 
   it('system prompt contains "邦批" by default (no lore file)', async () => {
