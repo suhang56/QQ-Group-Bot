@@ -15,6 +15,8 @@ import { AnnouncementSyncModule } from './modules/announcement-sync.js';
 import { NameImagesModule } from './modules/name-images.js';
 import { LoreUpdater } from './modules/lore-updater.js';
 import { VisionService } from './modules/vision.js';
+import { RatingPortalServer } from './server/rating-portal.js';
+import { TuningGenerator } from './server/tuning-generator.js';
 
 // 1. Bootstrap logger
 const logLevel = process.env['LOG_LEVEL'] ?? 'info';
@@ -105,10 +107,26 @@ try {
   process.exit(1);
 }
 
-// 7. Graceful shutdown
+// 7. Rating portal (optional — only if RATING_PORT configured, defaults to 4000)
+const ratingPortGroup = ACTIVE_GROUPS[0] ?? '';
+let ratingPortal: RatingPortalServer | null = null;
+if (ratingPortGroup) {
+  const ratingPort = parseInt(process.env['RATING_PORT'] ?? '4000', 10);
+  ratingPortal = new RatingPortalServer(db.botReplies, ratingPortGroup);
+  ratingPortal.start(ratingPort);
+
+  // Generate tuning report on SIGUSR1
+  const tuningPath = path.join(process.cwd(), 'data', 'tuning.md');
+  const tuner = new TuningGenerator(db.botReplies, claude, ratingPortGroup, tuningPath);
+  process.on('SIGUSR1', () => { void tuner.generate(); });
+  logger.info({ tuningPath }, 'send SIGUSR1 to generate tuning report');
+}
+
+// 8. Graceful shutdown
 const shutdown = async () => {
   logger.info('Shutting down...');
   announcementSync.stop();
+  ratingPortal?.stop();
   await adapter.disconnect();
   db.close();
   process.exit(0);
