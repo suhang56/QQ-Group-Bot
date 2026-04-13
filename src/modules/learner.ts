@@ -16,6 +16,7 @@ export type FalsePositiveResult =
 
 export interface ILearnerModule {
   addRule(groupId: string, text: string, type: 'positive' | 'negative'): Promise<AddRuleResult>;
+  addRuleWithSource(groupId: string, text: string, type: 'positive' | 'negative', source: Rule['source']): Promise<AddRuleResult>;
   markFalsePositive(msgId: string): Promise<FalsePositiveResult>;
   retrieveExamples(groupId: string, currentMessage: string, topK?: number): Promise<Rule[]>;
 }
@@ -30,11 +31,15 @@ export class LearnerModule implements ILearnerModule {
   ) {}
 
   async addRule(groupId: string, text: string, type: 'positive' | 'negative'): Promise<AddRuleResult> {
+    return this.addRuleWithSource(groupId, text, type, 'manual');
+  }
+
+  async addRuleWithSource(groupId: string, text: string, type: 'positive' | 'negative', source: Rule['source']): Promise<AddRuleResult> {
     if (text.length > MAX_RULE_LENGTH) {
       return { ok: false, errorCode: BotErrorCode.RULE_TOO_LONG };
     }
 
-    // Idempotent: check for duplicate in same group
+    // Idempotent: check for duplicate content in same group
     const existing = this.rules.getAll(groupId).find(r => r.content === text);
     if (existing) {
       this.logger.debug({ groupId, ruleId: existing.id }, 'duplicate rule — returning existing');
@@ -50,8 +55,8 @@ export class LearnerModule implements ILearnerModule {
       this.logger.warn({ groupId }, 'embedder unavailable — storing rule without embedding');
     }
 
-    const rule = this.rules.insert({ groupId, content: text, type, embedding });
-    this.logger.info({ groupId, ruleId: rule.id, type }, 'rule added');
+    const rule = this.rules.insert({ groupId, content: text, type, source, embedding });
+    this.logger.info({ groupId, ruleId: rule.id, type, source }, 'rule added');
     return { ok: true, ruleId: rule.id };
   }
 

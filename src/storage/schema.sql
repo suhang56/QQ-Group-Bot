@@ -44,10 +44,23 @@ CREATE TABLE IF NOT EXISTS rules (
   group_id      TEXT    NOT NULL,
   content       TEXT    NOT NULL,
   type          TEXT    NOT NULL DEFAULT 'positive',
+  source        TEXT    NOT NULL DEFAULT 'manual',
   embedding_vec BLOB
 );
 
 CREATE INDEX IF NOT EXISTS idx_rules_group ON rules(group_id);
+
+CREATE TABLE IF NOT EXISTS group_announcements (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id      TEXT    NOT NULL,
+  notice_id     TEXT    NOT NULL,
+  content       TEXT    NOT NULL,
+  content_hash  TEXT    NOT NULL,
+  fetched_at    INTEGER NOT NULL,
+  parsed_rules  TEXT    NOT NULL DEFAULT '[]'
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_announcements_notice ON group_announcements(group_id, notice_id);
 
 CREATE TABLE IF NOT EXISTS group_config (
   group_id                 TEXT    PRIMARY KEY,

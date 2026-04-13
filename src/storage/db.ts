@@ -63,7 +63,18 @@ export interface Rule {
   groupId: string;
   content: string;
   type: 'positive' | 'negative';
+  source: 'manual' | 'announcement';
   embedding: Float32Array | null;
+}
+
+export interface GroupAnnouncement {
+  id: number;
+  groupId: string;
+  noticeId: string;
+  content: string;
+  contentHash: string;
+  fetchedAt: number;
+  parsedRules: string[];
 }
 
 // ---- Repository interfaces ----
@@ -112,6 +123,13 @@ export interface IRuleRepository {
   findById(id: number): Rule | null;
   getAll(groupId: string): Rule[];
   getPage(groupId: string, offset: number, limit: number): { rules: Rule[]; total: number };
+  deleteBySource(groupId: string, source: Rule['source']): number;
+}
+
+export interface IAnnouncementRepository {
+  upsert(ann: Omit<GroupAnnouncement, 'id'>): GroupAnnouncement;
+  getByNoticeId(groupId: string, noticeId: string): GroupAnnouncement | null;
+  getLatest(groupId: string): GroupAnnouncement | null;
 }
 
 // ---- Raw row types from SQLite ----
@@ -144,7 +162,12 @@ interface GroupConfigRow {
 }
 
 interface RuleRow {
-  id: number; group_id: string; content: string; type: string; embedding_vec: Buffer | null;
+  id: number; group_id: string; content: string; type: string; source: string; embedding_vec: Buffer | null;
+}
+
+interface AnnouncementRow {
+  id: number; group_id: string; notice_id: string; content: string;
+  content_hash: string; fetched_at: number; parsed_rules: string;
 }
 
 interface CountRow { count: number }
@@ -209,7 +232,18 @@ function ruleFromRow(row: RuleRow): Rule {
   }
   return {
     id: row.id, groupId: row.group_id, content: row.content,
-    type: row.type as 'positive' | 'negative', embedding,
+    type: row.type as 'positive' | 'negative',
+    source: (row.source ?? 'manual') as Rule['source'],
+    embedding,
+  };
+}
+
+function announcementFromRow(row: AnnouncementRow): GroupAnnouncement {
+  return {
+    id: row.id, groupId: row.group_id, noticeId: row.notice_id,
+    content: row.content, contentHash: row.content_hash,
+    fetchedAt: row.fetched_at,
+    parsedRules: JSON.parse(row.parsed_rules) as string[],
   };
 }
 
@@ -449,10 +483,18 @@ class RuleRepository implements IRuleRepository {
       // buffer when `f` is a view (e.g. produced by ruleFromRow after a DB read-back).
       embBuf = Buffer.from(new Uint8Array(f.buffer, f.byteOffset, f.byteLength));
     }
+    const source = rule.source ?? 'manual';
     const result = this.db.prepare(
-      'INSERT INTO rules (group_id, content, type, embedding_vec) VALUES (?, ?, ?, ?)'
-    ).run(rule.groupId, rule.content, rule.type, embBuf);
-    return { ...rule, id: Number(result.lastInsertRowid) };
+      'INSERT INTO rules (group_id, content, type, source, embedding_vec) VALUES (?, ?, ?, ?, ?)'
+    ).run(rule.groupId, rule.content, rule.type, source, embBuf);
+    return { ...rule, source, id: Number(result.lastInsertRowid) };
+  }
+
+  deleteBySource(groupId: string, source: Rule['source']): number {
+    const result = this.db.prepare(
+      'DELETE FROM rules WHERE group_id = ? AND source = ?'
+    ).run(groupId, source);
+    return (result as { changes: number }).changes;
   }
 
   findById(id: number): Rule | null {
@@ -472,6 +514,44 @@ class RuleRepository implements IRuleRepository {
   }
 }
 
+class AnnouncementRepository implements IAnnouncementRepository {
+  constructor(private readonly db: DatabaseSync) {}
+
+  upsert(ann: Omit<GroupAnnouncement, 'id'>): GroupAnnouncement {
+    const result = this.db.prepare(`
+      INSERT INTO group_announcements (group_id, notice_id, content, content_hash, fetched_at, parsed_rules)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(group_id, notice_id) DO UPDATE SET
+        content = excluded.content,
+        content_hash = excluded.content_hash,
+        fetched_at = excluded.fetched_at,
+        parsed_rules = excluded.parsed_rules
+    `).run(
+      ann.groupId, ann.noticeId, ann.content, ann.contentHash,
+      ann.fetchedAt, JSON.stringify(ann.parsedRules)
+    );
+    const id = Number(result.lastInsertRowid) || (
+      (this.db.prepare('SELECT id FROM group_announcements WHERE group_id = ? AND notice_id = ?')
+        .get(ann.groupId, ann.noticeId) as { id: number }).id
+    );
+    return { ...ann, id };
+  }
+
+  getByNoticeId(groupId: string, noticeId: string): GroupAnnouncement | null {
+    const row = this.db.prepare(
+      'SELECT * FROM group_announcements WHERE group_id = ? AND notice_id = ?'
+    ).get(groupId, noticeId) as unknown as AnnouncementRow | undefined;
+    return row ? announcementFromRow(row) : null;
+  }
+
+  getLatest(groupId: string): GroupAnnouncement | null {
+    const row = this.db.prepare(
+      'SELECT * FROM group_announcements WHERE group_id = ? ORDER BY fetched_at DESC LIMIT 1'
+    ).get(groupId) as unknown as AnnouncementRow | undefined;
+    return row ? announcementFromRow(row) : null;
+  }
+}
+
 // ---- Main Database class ----
 
 export class Database {
@@ -480,6 +560,7 @@ export class Database {
   readonly moderation: IModerationRepository;
   readonly groupConfig: IGroupConfigRepository;
   readonly rules: IRuleRepository;
+  readonly announcements: IAnnouncementRepository;
 
   private readonly _db: DatabaseSync;
 
@@ -494,6 +575,7 @@ export class Database {
     this.moderation = new ModerationRepository(this._db);
     this.groupConfig = new GroupConfigRepository(this._db);
     this.rules = new RuleRepository(this._db);
+    this.announcements = new AnnouncementRepository(this._db);
   }
 
   /** Execute arbitrary SQL — intended for bulk-import scripts and migrations only. */

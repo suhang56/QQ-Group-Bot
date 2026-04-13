@@ -22,6 +22,13 @@ export interface AdapterEvents {
   'close': () => void;
 }
 
+export interface GroupNotice {
+  noticeId: string;
+  senderId: string;
+  publishTime: number;
+  message: string;
+}
+
 export interface INapCatAdapter {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
@@ -31,6 +38,7 @@ export interface INapCatAdapter {
   kick(groupId: string, userId: string): Promise<void>;
   deleteMsg(messageId: string): Promise<void>;
   sendPrivate(userId: string, text: string): Promise<void>;
+  getGroupNotices(groupId: string): Promise<GroupNotice[]>;
 }
 
 interface OneBotFrame {
@@ -175,6 +183,25 @@ export class NapCatAdapter extends EventEmitter implements INapCatAdapter {
       user_id: Number(userId),
       message: text,
     });
+  }
+
+  async getGroupNotices(groupId: string): Promise<GroupNotice[]> {
+    const resp = await this.action('_get_group_notice', { group_id: Number(groupId) });
+    const data = resp.data as Array<{
+      notice_id?: string;
+      sender_id?: number;
+      publish_time?: number;
+      message?: { text?: string } | string;
+    }> | undefined;
+    if (!Array.isArray(data)) return [];
+    return data.map(n => ({
+      noticeId: String(n.notice_id ?? ''),
+      senderId: String(n.sender_id ?? ''),
+      publishTime: n.publish_time ?? 0,
+      message: typeof n.message === 'string'
+        ? n.message
+        : (n.message?.text ?? ''),
+    })).filter(n => n.noticeId && n.message);
   }
 
   private handleFrame(frame: OneBotFrame | OneBotActionResponse): void {

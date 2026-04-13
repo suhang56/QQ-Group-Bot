@@ -339,7 +339,7 @@ ${offenseHistory}${ragSection}`;
     if (role !== 'admin' && role !== 'owner') {
       return { ok: false, errorCode: BotErrorCode.PERMISSION_DENIED };
     }
-    const rule = this.rules.insert({ groupId, content, type: 'positive', embedding: null });
+    const rule = this.rules.insert({ groupId, content, type: 'positive', source: 'manual', embedding: null });
     this.logger.info({ groupId, ruleId: rule.id }, 'rule added');
     return { ok: true, ruleId: rule.id };
   }
