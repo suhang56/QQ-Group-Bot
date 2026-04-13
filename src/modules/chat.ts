@@ -11,6 +11,7 @@ import { sentinelCheck, postProcess, HARDENED_SYSTEM } from '../utils/sentinel.j
 
 export interface IChatModule {
   generateReply(groupId: string, triggerMessage: GroupMessage, recentMessages: GroupMessage[]): Promise<string | null>;
+  recordOutgoingMessage(groupId: string, msgId: number): void;
 }
 
 interface ChatOptions {
@@ -27,6 +28,8 @@ interface ChatOptions {
   burstMinMessages?: number;
   chatSilenceBonusSec?: number;
   chatMinScore?: number;
+  chatBurstWindowMs?: number;
+  chatBurstCount?: number;
   groupIdentityCacheTtlMs?: number;
   groupIdentityTopUsers?: number;
   loreDirPath?: string;
@@ -35,12 +38,26 @@ interface ChatOptions {
   chatEmojiSampleSize?: number;
 }
 
+interface ScoreFactors {
+  mention: number;
+  replyToBot: number;
+  question: number;
+  silence: number;
+  loreKw: number;
+  length: number;
+  twoUser: number;
+  burst: number;
+  replyToOther: number;
+}
+
 // Chinese stopwords that add no retrieval signal
 const STOPWORDS = new Set([
   '我','你','他','她','它','我们','你们','他们','的','了','是','不','啥','什么',
   '怎么','一个','这个','那个','就','也','都','在','有','和','吧','嗯','哦','哈',
   '吗','呢','啊','呀','么','这','那','为','以','到','从','但','所以','因为',
 ]);
+
+const QUESTION_ENDINGS = ['?', '？', '吗', '嘛', '呢', '不'];
 
 /** Count [CQ:face,id=N] usage across messages and return top-N face IDs. */
 export function extractTopFaces(messages: Array<{ content: string }>, topN: number): number[] {
@@ -68,6 +85,23 @@ export function extractKeywords(text: string): string[] {
   return [...new Set(tokens)].slice(0, 5);
 }
 
+/**
+ * Tokenize lore text into a Set of meaningful tokens (length ≥ 2).
+ * Splits on whitespace/punctuation; includes CJK character runs individually.
+ */
+export function tokenizeLore(text: string): Set<string> {
+  const stripped = text.replace(/\[CQ:[^\]]+\]/g, ' ');
+  const tokens = new Set<string>();
+  // Split on whitespace and common punctuation
+  for (const chunk of stripped.split(/[\s\p{P}！？。，、；：""''【】《》（）…—\-_/\\|]+/u)) {
+    const t = chunk.trim();
+    if (t.length >= 2) tokens.add(t);
+  }
+  return tokens;
+}
+
+const MAX_OUTGOING_IDS = 50;
+
 export class ChatModule implements IChatModule {
   private readonly logger = createLogger('chat');
   private readonly debounceMs: number;
@@ -76,12 +110,10 @@ export class ChatModule implements IChatModule {
   private readonly historicalSampleCount: number;
   private readonly keywordMatchCount: number;
   private readonly botUserId: string;
-  private readonly lurkerReplyChance: number;
-  private readonly lurkerCooldownMs: number;
-  private readonly burstWindowMs: number;
-  private readonly burstMinMessages: number;
   private readonly chatSilenceBonusSec: number;
   private readonly chatMinScore: number;
+  private readonly chatBurstWindowMs: number;
+  private readonly chatBurstCount: number;
   private readonly chatEmojiTopN: number;
   private readonly chatEmojiSampleSize: number;
   private readonly groupIdentityCacheTtlMs: number;
@@ -91,14 +123,19 @@ export class ChatModule implements IChatModule {
   private readonly debounceMap = new Map<string, number>();
   // group reply counter: groupId -> { count, windowStart }
   private readonly groupReplyCount = new Map<string, { count: number; windowStart: number }>();
-  // last proactive (non-mention) reply timestamp per group
-  private readonly lastProactiveReply = new Map<string, number>();
-  // in-flight lock: groups currently awaiting a Claude reply — prevents concurrent duplicate sends
+  // in-flight lock: groups currently awaiting a Claude reply
   private readonly inFlightGroups = new Set<string>();
   // group identity cache: groupId -> { text, expiresAt }
   private readonly groupIdentityCache = new Map<string, { text: string; expiresAt: number }>();
   // lore cache: groupId -> lore markdown (loaded once at first access)
   private readonly loreCache = new Map<string, string | null>();
+  // lore keyword token sets: groupId -> Set<string>
+  private readonly loreKeywordsCache = new Map<string, Set<string>>();
+  // outgoing message IDs per group (capped at MAX_OUTGOING_IDS)
+  private readonly outgoingMsgIds = new Map<string, Set<number>>();
+  // last proactive reply timestamp per group (for silence factor)
+  private readonly lastProactiveReply = new Map<string, number>();
+
   private readonly loreDirPath: string;
   private readonly loreSizeCapBytes: number;
 
@@ -113,18 +150,35 @@ export class ChatModule implements IChatModule {
     this.historicalSampleCount = options.chatHistoricalSampleCount ?? chatHistoryDefaults.chatHistoricalSampleCount;
     this.keywordMatchCount = options.chatKeywordMatchCount ?? chatHistoryDefaults.chatKeywordMatchCount;
     this.botUserId = options.botUserId ?? '';
-    this.lurkerReplyChance = options.lurkerReplyChance ?? lurkerDefaults.lurkerReplyChance;
-    this.lurkerCooldownMs = options.lurkerCooldownMs ?? lurkerDefaults.lurkerCooldownMs;
-    this.burstWindowMs = options.burstWindowMs ?? lurkerDefaults.burstWindowMs;
-    this.burstMinMessages = options.burstMinMessages ?? lurkerDefaults.burstMinMessages;
     this.chatSilenceBonusSec = options.chatSilenceBonusSec ?? lurkerDefaults.chatSilenceBonusSec;
     this.chatMinScore = options.chatMinScore ?? lurkerDefaults.chatMinScore;
+    this.chatBurstWindowMs = options.chatBurstWindowMs ?? lurkerDefaults.chatBurstWindowMs;
+    this.chatBurstCount = options.chatBurstCount ?? lurkerDefaults.chatBurstCount;
     this.chatEmojiTopN = options.chatEmojiTopN ?? chatHistoryDefaults.chatEmojiTopN;
     this.chatEmojiSampleSize = options.chatEmojiSampleSize ?? chatHistoryDefaults.chatEmojiSampleSize;
     this.groupIdentityCacheTtlMs = options.groupIdentityCacheTtlMs ?? chatHistoryDefaults.groupIdentityCacheTtlMs;
     this.groupIdentityTopUsers = options.groupIdentityTopUsers ?? chatHistoryDefaults.groupIdentityTopUsers;
     this.loreDirPath = options.loreDirPath ?? chatHistoryDefaults.loreDirPath;
     this.loreSizeCapBytes = options.loreSizeCapBytes ?? chatHistoryDefaults.loreSizeCapBytes;
+  }
+
+  /** Called by router after each successful send — tracks outgoing message IDs for reply-to-bot detection. */
+  recordOutgoingMessage(groupId: string, msgId: number): void {
+    let ids = this.outgoingMsgIds.get(groupId);
+    if (!ids) {
+      ids = new Set();
+      this.outgoingMsgIds.set(groupId, ids);
+    }
+    ids.add(msgId);
+    // Trim to cap: remove oldest entries when over limit
+    if (ids.size > MAX_OUTGOING_IDS) {
+      const toRemove = ids.size - MAX_OUTGOING_IDS;
+      let removed = 0;
+      for (const id of ids) {
+        ids.delete(id);
+        if (++removed >= toRemove) break;
+      }
+    }
   }
 
   async generateReply(
@@ -151,57 +205,36 @@ export class ChatModule implements IChatModule {
       return null;
     }
 
-    // In-flight lock: if a Claude reply is already being generated for this group,
-    // drop this trigger. Prevents duplicate sends when two concurrent dispatches
-    // (e.g. rapid @-mentions or NapCat retry) both pass the timestamp-based debounce
-    // before either has set it (read-then-write race on the Map).
+    // In-flight lock
     if (this.inFlightGroups.has(groupId)) {
       this.logger.debug({ groupId }, 'Reply in-flight — dropping duplicate trigger');
       return null;
     }
 
-    // Determine if this is a direct trigger (@mention or reply-to-bot)
-    const isDirect = this._isMention(triggerMessage) || this._isReplyToBot(triggerMessage);
+    // ── Weighted participation scoring ───────────────────────────────────
+    const recent3 = this.db.messages.getRecent(groupId, 3);
+    const recent5 = this.db.messages.getRecent(groupId, this.chatBurstCount);
+    const { score, factors, isDirect } = this._computeWeightedScore(groupId, triggerMessage, now, recent3, recent5);
 
-    if (!isDirect) {
-      // Burst detection: if last N messages arrived within burstWindowMs, stay quiet
-      if (this._isBurst(groupId)) {
-        this.logger.debug({ groupId }, 'Burst detected — lurker skipping');
-        return null;
-      }
+    const decision = isDirect || score >= this.chatMinScore ? 'respond' : 'skip';
+    this.logger.debug({ groupId, score: +score.toFixed(3), factors, chatMinScore: this.chatMinScore, decision }, 'participation score');
 
-      // Cooldown: must be at least lurkerCooldownMs since last proactive reply
-      const lastProactive = this.lastProactiveReply.get(groupId) ?? 0;
-      if (now - lastProactive < this.lurkerCooldownMs) {
-        this.logger.debug({ groupId, msSinceLast: now - lastProactive }, 'Lurker cooldown active — skipping');
-        return null;
-      }
-
-      // Score-based participation gate: longer silence → higher chance
-      const score = this._computeParticipationScore(groupId, now);
-      if (score < this.chatMinScore) {
-        this.logger.debug({ groupId, score }, 'Participation score below minimum — skipping');
-        return null;
-      }
-      if (Math.random() >= score * this.lurkerReplyChance) {
-        return null;
-      }
-
-      this.lastProactiveReply.set(groupId, now);
+    if (decision === 'skip') {
+      return null;
     }
+
+    // Record last-reply timestamp for silence factor (applies to all replies)
+    this.lastProactiveReply.set(groupId, now);
 
     // ── Retrieve context ──────────────────────────────────────────────────
 
-    // 1. Keyword matches: find messages mentioning what the trigger talks about
     const keywords = extractKeywords(triggerMessage.content);
     const keywordMsgs = keywords.length > 0
       ? this.db.messages.searchByKeywords(groupId, keywords, this.keywordMatchCount)
       : [];
 
-    // 2. Random historical sample for group vibe
     const historical = this.db.messages.sampleRandomHistorical(groupId, this.recentMessageCount, this.historicalSampleCount);
 
-    // 3. Recent messages (passed in or fetched from DB)
     const recentSlice = recentMessages.length > 0
       ? recentMessages.slice(0, this.recentMessageCount)
       : this.db.messages.getRecent(groupId, this.recentMessageCount).map(m => ({
@@ -217,18 +250,15 @@ export class ChatModule implements IChatModule {
 
     // ── Build prompt ──────────────────────────────────────────────────────
 
-    // Keyword matches — most relevant, shown first as "related history"
     const keywordSection = keywordMsgs.length > 0
       ? `【相关历史消息】\n${keywordMsgs.map(m => `${m.nickname}: ${m.content}`).join('\n')}\n\n`
       : '';
 
-    // Historical sample — group vibe, sorted oldest→newest
     const historicalSorted = [...historical].sort((a, b) => a.timestamp - b.timestamp);
     const historicalSection = historicalSorted.length > 0
       ? `【群氛围参考】\n${historicalSorted.map(m => `${m.nickname}: ${m.content}`).join('\n')}\n\n`
       : '';
 
-    // Recent — chronological (DB returns newest-first, reverse for oldest→newest)
     const recentChron = [...recentSlice].reverse();
     const recentSection = recentChron.length > 0
       ? `【最近聊天】\n${recentChron.map(m => `${m.nickname}: ${m.content}`).join('\n')}\n\n`
@@ -236,9 +266,7 @@ export class ChatModule implements IChatModule {
 
     const historyText = keywordSection + historicalSection + recentSection;
 
-    // ── Group identity system prompt (cached per group, TTL 1h) ──────────
     const systemPrompt = this._getGroupIdentityPrompt(groupId);
-
     const userContent = `${historyText}${triggerMessage.nickname}说："${triggerMessage.content}"，你会怎么接？直接写出那句话。`;
 
     const chatRequest = (hardened = false) => this.claude.complete({
@@ -269,6 +297,127 @@ export class ChatModule implements IChatModule {
     }
   }
 
+  // ── Private helpers ───────────────────────────────────────────────────
+
+  private _computeWeightedScore(
+    groupId: string,
+    msg: GroupMessage,
+    nowMs: number,
+    recent3: Array<{ userId: string; timestamp: number }>,
+    recent5: Array<{ timestamp: number }>,
+  ): { score: number; factors: ScoreFactors; isDirect: boolean } {
+    const factors: ScoreFactors = {
+      mention: 0,
+      replyToBot: 0,
+      question: 0,
+      silence: 0,
+      loreKw: 0,
+      length: 0,
+      twoUser: 0,
+      burst: 0,
+      replyToOther: 0,
+    };
+
+    // +1.0 @-mention of bot
+    if (this._isMention(msg)) {
+      factors.mention = 1.0;
+    }
+
+    // +1.0 reply-quote to a message the bot sent
+    if (this._isReplyToBot(msg)) {
+      factors.replyToBot = 1.0;
+    }
+
+    // Short-circuit: direct triggers always respond (bypass chatMinScore)
+    if (factors.mention > 0 || factors.replyToBot > 0) {
+      const score = factors.mention + factors.replyToBot;
+      return { score, factors, isDirect: true };
+    }
+
+    // +0.6 message ends with a question marker
+    const content = msg.content.trim();
+    if (QUESTION_ENDINGS.some(e => content.endsWith(e))) {
+      factors.question = 0.6;
+    }
+
+    // +0.4 last bot proactive reply was > chatSilenceBonusSec ago
+    const lastProactive = this.lastProactiveReply.get(groupId) ?? 0;
+    const silenceSec = (nowMs - lastProactive) / 1000;
+    if (silenceSec > this.chatSilenceBonusSec) {
+      factors.silence = 0.4;
+    }
+
+    // +0.4 trigger contains a lore keyword
+    if (this._hasLoreKeyword(groupId, content)) {
+      factors.loreKw = 0.4;
+    }
+
+    // +0.3 message is > 20 chars
+    if (content.length > 20) {
+      factors.length = 0.3;
+    }
+
+    // -0.3 last 3 messages were between exactly 2 non-bot users (private conversation)
+    if (recent3.length === 3) {
+      const userIds = new Set(recent3.map(m => m.userId));
+      userIds.delete(this.botUserId);
+      if (userIds.size === 2) {
+        factors.twoUser = -0.3;
+      }
+    }
+
+    // -0.5 burst: last N messages arrived within chatBurstWindowMs
+    if (recent5.length >= this.chatBurstCount) {
+      const newest = recent5[0]!.timestamp;
+      const oldest = recent5[recent5.length - 1]!.timestamp;
+      if ((newest - oldest) * 1000 < this.chatBurstWindowMs) {
+        factors.burst = -0.5;
+      }
+    }
+
+    // -0.4 current message is a reply-quote to another user (not the bot)
+    if (this._isReplyToOther(msg)) {
+      factors.replyToOther = -0.4;
+    }
+
+    const score = Object.values(factors).reduce((s, f) => s + f, 0);
+    return { score: Math.max(0, score), factors, isDirect: false };
+  }
+
+  private _isMention(msg: GroupMessage): boolean {
+    if (!this.botUserId) return false;
+    return msg.rawContent.includes(`[CQ:at,qq=${this.botUserId}]`);
+  }
+
+  private _isReplyToBot(msg: GroupMessage): boolean {
+    // Extract the reply target message ID from [CQ:reply,id=N]
+    const m = msg.rawContent.match(/\[CQ:reply,id=(\d+)[^\]]*\]/);
+    if (!m) return false;
+    const replyMsgId = Number(m[1]);
+    const ids = this.outgoingMsgIds.get(msg.groupId);
+    return ids ? ids.has(replyMsgId) : false;
+  }
+
+  private _isReplyToOther(msg: GroupMessage): boolean {
+    // Message is a reply-quote, but NOT to the bot
+    if (!msg.rawContent.includes('[CQ:reply,')) return false;
+    return !this._isReplyToBot(msg);
+  }
+
+  private _hasLoreKeyword(groupId: string, content: string): boolean {
+    // Ensure lore is loaded (triggers cache if needed)
+    this._loadLore(groupId);
+    const loreTokens = this.loreKeywordsCache.get(groupId);
+    if (!loreTokens || loreTokens.size === 0) return false;
+
+    // Tokenize the trigger message and check for intersection
+    const msgTokens = tokenizeLore(content);
+    for (const token of msgTokens) {
+      if (loreTokens.has(token)) return true;
+    }
+    return false;
+  }
+
   private _loadLore(groupId: string): string | null {
     if (this.loreCache.has(groupId)) {
       return this.loreCache.get(groupId) ?? null;
@@ -277,6 +426,7 @@ export class ChatModule implements IChatModule {
     const lorePath = path.join(this.loreDirPath, `${groupId}.md`);
     if (!existsSync(lorePath)) {
       this.loreCache.set(groupId, null);
+      this.loreKeywordsCache.set(groupId, new Set());
       return null;
     }
 
@@ -286,24 +436,26 @@ export class ChatModule implements IChatModule {
     } catch {
       this.logger.warn({ groupId, lorePath }, 'Failed to read lore file — falling back to generic prompt');
       this.loreCache.set(groupId, null);
+      this.loreKeywordsCache.set(groupId, new Set());
       return null;
     }
 
     if (!content.trim()) {
       this.logger.warn({ groupId, lorePath }, 'Lore file is empty — treating as missing');
       this.loreCache.set(groupId, null);
+      this.loreKeywordsCache.set(groupId, new Set());
       return null;
     }
 
     if (Buffer.byteLength(content, 'utf8') > this.loreSizeCapBytes) {
       const capKb = (this.loreSizeCapBytes / 1024).toFixed(0);
       this.logger.warn({ groupId, lorePath, capKb }, `Lore file exceeds ${capKb}KB cap — truncating`);
-      // Truncate to cap at a UTF-8 boundary (slice by chars approximates well enough)
-      const capChars = this.loreSizeCapBytes; // bytes ≈ chars for UTF-8 heavy Chinese is safe overcount
+      const capChars = this.loreSizeCapBytes;
       content = content.slice(0, capChars);
     }
 
     this.loreCache.set(groupId, content);
+    this.loreKeywordsCache.set(groupId, tokenizeLore(content));
     this.logger.debug({ groupId, lorePath, sizeKb: (content.length / 1024).toFixed(1) }, 'Lore file loaded');
     return content;
   }
@@ -341,38 +493,6 @@ export class ChatModule implements IChatModule {
     this.groupIdentityCache.set(groupId, { text, expiresAt: Date.now() + this.groupIdentityCacheTtlMs });
     this.logger.debug({ groupId, hasLore: !!lore }, 'Group identity prompt cached');
     return text;
-  }
-
-  /**
-   * Compute a 0–1 participation score based on how long ago the group was active.
-   * At silenceBonusSec or more of silence → score = 1.0 (maximum chance).
-   * Fresh burst → score near 0.
-   */
-  private _computeParticipationScore(groupId: string, nowMs: number): number {
-    const recent = this.db.messages.getRecent(groupId, 1);
-    if (recent.length === 0) return 1.0; // brand-new group → full score
-    const lastMsgTimeSec = recent[0]!.timestamp; // unix seconds
-    const silenceSec = nowMs / 1000 - lastMsgTimeSec;
-    const score = silenceSec / this.chatSilenceBonusSec;
-    return Math.min(1.0, Math.max(0, score));
-  }
-
-  private _isMention(msg: GroupMessage): boolean {
-    if (!this.botUserId) return false;
-    return msg.rawContent.includes(`[CQ:at,qq=${this.botUserId}]`);
-  }
-
-  private _isReplyToBot(msg: GroupMessage): boolean {
-    return msg.rawContent.startsWith('[CQ:reply,');
-  }
-
-  private _isBurst(groupId: string): boolean {
-    const recent = this.db.messages.getRecent(groupId, this.burstMinMessages);
-    if (recent.length < this.burstMinMessages) return false;
-    const newest = recent[0]!.timestamp;
-    const oldest = recent[recent.length - 1]!.timestamp;
-    // timestamps are unix seconds; burstWindowMs is ms
-    return (newest - oldest) * 1000 < this.burstWindowMs;
   }
 
   private _checkGroupLimit(groupId: string): boolean {

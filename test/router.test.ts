@@ -488,6 +488,7 @@ describe('Router — multi-line chat reply dispatch', () => {
     const router = new Router(db, adapter, new RateLimiter());
     router.setChat({
       generateReply: vi.fn().mockResolvedValue('一句话'),
+      recordOutgoingMessage: vi.fn(),
     });
     await router.dispatch(makeMsg({ content: 'hello', rawContent: 'hello' }));
     expect(adapter.send).toHaveBeenCalledTimes(1);
@@ -498,6 +499,7 @@ describe('Router — multi-line chat reply dispatch', () => {
     const router = new Router(db, adapter, new RateLimiter());
     router.setChat({
       generateReply: vi.fn().mockResolvedValue('第一句\n第二句'),
+      recordOutgoingMessage: vi.fn(),
     });
     await router.dispatch(makeMsg({ content: 'hello', rawContent: 'hello' }));
     expect(adapter.send).toHaveBeenCalledTimes(2);
@@ -509,6 +511,7 @@ describe('Router — multi-line chat reply dispatch', () => {
     const router = new Router(db, adapter, new RateLimiter());
     router.setChat({
       generateReply: vi.fn().mockResolvedValue('a\nb\nc\nd'),
+      recordOutgoingMessage: vi.fn(),
     });
     await router.dispatch(makeMsg({ content: 'hello', rawContent: 'hello' }));
     expect(adapter.send).toHaveBeenCalledTimes(3);
@@ -516,7 +519,7 @@ describe('Router — multi-line chat reply dispatch', () => {
 
   it('null chat reply → adapter.send not called', async () => {
     const router = new Router(db, adapter, new RateLimiter());
-    router.setChat({ generateReply: vi.fn().mockResolvedValue(null) });
+    router.setChat({ generateReply: vi.fn().mockResolvedValue(null), recordOutgoingMessage: vi.fn() });
     await router.dispatch(makeMsg({ content: 'hello', rawContent: 'hello' }));
     expect(adapter.send).not.toHaveBeenCalled();
   });

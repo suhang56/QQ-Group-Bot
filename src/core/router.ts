@@ -159,7 +159,10 @@ export class Router implements IRouter {
       this.logger.info({ groupId, totalLines: text.split('\n').length }, 'reply truncated to 3 lines');
     }
     for (let i = 0; i < lines.length; i++) {
-      await this.adapter.send(groupId, lines[i]!);
+      const msgId = await this.adapter.send(groupId, lines[i]!);
+      if (msgId !== null && this.chatModule) {
+        this.chatModule.recordOutgoingMessage(groupId, msgId);
+      }
       if (i < lines.length - 1) {
         await new Promise(r => setTimeout(r, randomDelay()));
       }

@@ -33,7 +33,8 @@ export interface INapCatAdapter {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
   on<K extends keyof AdapterEvents>(event: K, handler: AdapterEvents[K]): void;
-  send(groupId: string, text: string): Promise<void>;
+  /** Send a group message. Returns the OneBot message_id, or null if unavailable. */
+  send(groupId: string, text: string): Promise<number | null>;
   ban(groupId: string, userId: string, durationSeconds: number): Promise<void>;
   kick(groupId: string, userId: string): Promise<void>;
   deleteMsg(messageId: string): Promise<void>;
@@ -150,11 +151,13 @@ export class NapCatAdapter extends EventEmitter implements INapCatAdapter {
     this.logger.info('NapCat adapter disconnected');
   }
 
-  async send(groupId: string, text: string): Promise<void> {
-    await this.action('send_group_msg', {
+  async send(groupId: string, text: string): Promise<number | null> {
+    const resp = await this.action('send_group_msg', {
       group_id: Number(groupId),
       message: text,
     });
+    const data = resp.data as { message_id?: number } | undefined;
+    return data?.message_id ?? null;
   }
 
   async ban(groupId: string, userId: string, durationSeconds: number): Promise<void> {

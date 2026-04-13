@@ -5,8 +5,10 @@ export const lurkerDefaults = {
   lurkerCooldownMs: 90_000,
   burstWindowMs: 10_000,
   burstMinMessages: 5,
-  chatSilenceBonusSec: 120,
-  chatMinScore: 0.1,
+  chatSilenceBonusSec: 300,
+  chatMinScore: 0.5,
+  chatBurstWindowMs: 10_000,
+  chatBurstCount: 5,
 } as const;
 
 export const chatHistoryDefaults = {
