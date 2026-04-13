@@ -279,7 +279,7 @@ export class ChatModule implements IChatModule {
     const userContent = `${historyText}${triggerMessage.nickname}说："${triggerMessage.content}"，你会怎么接？直接写出那句话。`;
 
     const chatRequest = (hardened = false) => this.claude.complete({
-      model: 'claude-sonnet-4-6',
+      model: 'claude-haiku-4-5-20251001',
       maxTokens: 300,
       system: [{ text: hardened ? HARDENED_SYSTEM : systemPrompt, cache: true }],
       messages: [{ role: 'user', content: userContent }],

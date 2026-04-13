@@ -110,7 +110,7 @@ export class AnnouncementSyncModule {
 
   private async _parseRules(groupId: string, announcementText: string): Promise<string[]> {
     const response = await this.claude.complete({
-      model: 'claude-sonnet-4-6',
+      model: 'claude-haiku-4-5-20251001',
       maxTokens: 1000,
       system: [{ text: '你是一个群规提取助手。从群公告中提取所有明确的群规，输出纯文本列表，每条规则单独一行，无序号无前缀。语义去重，只保留规则本身，不要解释。如果没有群规，输出空行。', cache: true }],
       messages: [{ role: 'user', content: `以下是群公告，提取所有群规（每条一行，语义去重）:\n\n${announcementText}` }],

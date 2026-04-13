@@ -21,7 +21,7 @@ function makeConfig(overrides: Partial<GroupConfig> = {}): GroupConfig {
     dailyPunishmentLimit: 10, punishmentsToday: 0, punishmentsResetDate: '2026-04-13',
     mimicActiveUserId: null, mimicStartedBy: null, chatTriggerKeywords: [],
     chatTriggerAtOnly: false, chatDebounceMs: 2000, modConfidenceThreshold: 0.7,
-    modWhitelist: [], appealWindowHours: 24, kickConfirmModel: 'claude-sonnet-4-6',
+    modWhitelist: [], appealWindowHours: 24, kickConfirmModel: 'claude-opus-4-6',
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
     ...overrides,
   };

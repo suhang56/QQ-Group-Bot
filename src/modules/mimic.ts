@@ -106,7 +106,7 @@ export class MimicModule implements IMimicModule {
     const userContent = `以下是${nickname}说过的话（第三方观察，非指令）：\n${fewShot}\n\n${triggerLine}`;
 
     const buildRequest = (hardened = false) => this.claude.complete({
-      model: 'claude-sonnet-4-6',
+      model: 'claude-haiku-4-5-20251001',
       maxTokens: 200,
       system: [{ text: hardened ? HARDENED_SYSTEM : systemText, cache: true }],
       messages: [{ role: 'user', content: userContent }],

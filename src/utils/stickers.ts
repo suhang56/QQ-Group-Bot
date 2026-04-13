@@ -101,7 +101,7 @@ async function _getOrGenerateLabels(
     const prompt = `QQ群里的一个表情包名叫"${s.summary}"，曾被用在这些对话上下文中：${contextHint || '（无上下文）'}。\n用2-4个中文字描述这个表情的情绪/用途（比如：摆烂、笑哭、生气、无奈）。只输出那几个字，不要任何标点或解释。`;
     try {
       const resp = await claude.complete({
-        model: 'claude-sonnet-4-6',
+        model: 'claude-haiku-4-5-20251001',
         maxTokens: 20,
         system: [{ text: '你是一个简洁的标签生成器。', cache: true }],
         messages: [{ role: 'user', content: prompt }],

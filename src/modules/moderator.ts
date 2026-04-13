@@ -132,7 +132,7 @@ ${offenseHistory}${ragSection}`;
 
     try {
       const resp = await this.claude.complete({
-        model: 'claude-sonnet-4-6',
+        model: 'claude-haiku-4-5-20251001',
         maxTokens: 200,
         system: [{ text: systemText, cache: true }],
         messages: [{ role: 'user', content: userText }],
