@@ -177,6 +177,72 @@ describe('MimicModule.generateMimic', () => {
     expect(systemText).not.toContain(injectionPayload);
     expect(userText).toContain(injectionPayload);
   });
+
+  // System prompt uses identity framing, not "mimic" framing
+  it('system prompt uses identity framing and contains strict output rules', async () => {
+    const msgs = Array.from({ length: 10 }, (_, i) => makeMsg({ id: i + 1, content: `msg${i}` }));
+    vi.mocked(messages.getByUser).mockReturnValue(msgs);
+    const mod = makeModule(claude, messages, configs);
+    await mod.generateMimic('g1', 'u1', null, []);
+    const call = vi.mocked(claude.complete).mock.calls[0]![0] as ClaudeRequest;
+    const systemText = call.system.map(b => b.text).join('');
+    expect(systemText).toContain('你就是群友');
+    expect(systemText).toContain('输出规则');
+    expect(systemText).not.toContain('模仿专家');
+    expect(systemText).not.toContain('请完全模仿');
+  });
+
+  // User-role message uses observational framing, not "请模仿" framing
+  it('user-role message uses observational framing, not "请模仿" language', async () => {
+    const msgs = Array.from({ length: 10 }, (_, i) => makeMsg({ id: i + 1, content: `msg${i}` }));
+    vi.mocked(messages.getByUser).mockReturnValue(msgs);
+    const mod = makeModule(claude, messages, configs);
+    await mod.generateMimic('g1', 'u1', null, []);
+    const call = vi.mocked(claude.complete).mock.calls[0]![0] as ClaudeRequest;
+    const userText = call.messages[0]!.content;
+    expect(userText).toContain('第三方观察');
+    expect(userText).not.toContain('请模仿');
+  });
+
+  // Sentinel: Claude returns AI-disclosure text → regenerates, returns clean second reply
+  it('sentinel strips AI self-disclosure and returns clean regenerated reply', async () => {
+    const msgs = Array.from({ length: 10 }, (_, i) => makeMsg({ id: i + 1, content: `msg${i}` }));
+    vi.mocked(messages.getByUser).mockReturnValue(msgs);
+    let call = 0;
+    vi.mocked(claude.complete).mockImplementation(async () => {
+      call++;
+      const text = call === 1
+        ? '我只是一个模仿人类语言风格的AI，根据您提供的历史发言：不行了笑死我了'
+        : '不行了笑死我了';
+      return { text, inputTokens: 100, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    });
+    const mod = makeModule(claude, messages, configs);
+    const result = await mod.generateMimic('g1', 'u1', null, []);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.text).toBe('不行了笑死我了');
+      expect(result.text).not.toContain('AI');
+      expect(result.text).not.toContain('模仿');
+    }
+    expect(vi.mocked(claude.complete).mock.calls.length).toBe(2);
+  });
+
+  // Sentinel: both attempts return forbidden content → falls back to '...'
+  it('sentinel falls back to "..." when both attempts contain forbidden content', async () => {
+    const msgs = Array.from({ length: 10 }, (_, i) => makeMsg({ id: i + 1, content: `msg${i}` }));
+    vi.mocked(messages.getByUser).mockReturnValue(msgs);
+    vi.mocked(claude.complete).mockResolvedValue({
+      text: '我是一个AI助手，claude很有个性',
+      inputTokens: 100, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0,
+    });
+    const mod = makeModule(claude, messages, configs);
+    const result = await mod.generateMimic('g1', 'u1', null, []);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.text).toBe('...');
+    }
+    expect(vi.mocked(claude.complete).mock.calls.length).toBe(2);
+  });
 });
 
 describe('MimicModule — /mimic_on / /mimic_off', () => {

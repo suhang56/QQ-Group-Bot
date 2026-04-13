@@ -7,6 +7,7 @@ import { ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
 import { lurkerDefaults, chatHistoryDefaults } from '../config.js';
 import { FACE_LEGEND } from '../utils/qqface.js';
+import { sentinelCheck } from '../utils/sentinel.js';
 
 export interface IChatModule {
   generateReply(groupId: string, triggerMessage: GroupMessage, recentMessages: GroupMessage[]): Promise<string | null>;
@@ -207,21 +208,27 @@ export class ChatModule implements IChatModule {
     // ── Group identity system prompt (cached per group, TTL 1h) ──────────
     const systemPrompt = this._getGroupIdentityPrompt(groupId);
 
+    const chatRequest = () => this.claude.complete({
+      model: 'claude-sonnet-4-6',
+      maxTokens: 300,
+      system: [{ text: systemPrompt, cache: true }],
+      messages: [
+        {
+          role: 'user',
+          content: `${historyText}${triggerMessage.nickname}说："${triggerMessage.content}"，你会怎么接？直接写出那句话。`,
+        },
+      ],
+    });
+
     this.inFlightGroups.add(groupId);
     try {
-      const response = await this.claude.complete({
-        model: 'claude-sonnet-4-6',
-        maxTokens: 300,
-        system: [{ text: systemPrompt, cache: true }],
-        messages: [
-          {
-            role: 'user',
-            content: `${historyText}现在回复这条消息：${triggerMessage.nickname}: ${triggerMessage.content}`,
-          },
-        ],
-      });
-
-      return response.text;
+      const response = await chatRequest();
+      const text = await sentinelCheck(
+        response.text,
+        { groupId, userId: triggerMessage.userId },
+        async () => (await chatRequest()).text,
+      );
+      return text;
     } catch (err) {
       if (err instanceof ClaudeApiError || err instanceof ClaudeParseError) {
         this.logger.error({ err, groupId }, 'Claude API error in chat module — silent');
@@ -281,16 +288,18 @@ export class ChatModule implements IChatModule {
     const lore = this._loadLore(groupId);
     let text: string;
 
-    const faceLine = `\n你可以在回复里使用 QQ 表情，格式 [CQ:face,id=N]。常用表情参考：${FACE_LEGEND}`;
+    const faceLine = `\n可以用 QQ 表情，格式 [CQ:face,id=N]。常用表情参考：${FACE_LEGEND}`;
+
+    const outputRules = `\n\n输出规则（必须严格遵守）：\n- 直接输出那句话，不要任何前缀、后缀、解释、元评论\n- 禁止出现任何自我指涉词（包括但不限于：AI、机器人、助手、模仿、尝试、风格、根据、历史、无法）\n- 禁止"好的，"、"当然，"、"我来"、"让我"等助手式开场\n- 如果实在不知道说什么，输出"..."，禁止解释`;
 
     if (lore) {
-      text = `你是这个QQ群的老群友。以下是这个群的资料：\n\n${lore}\n\n---\n现在参与群聊：说话风格随群，自然随意、简短（1-3句话）。如果群友提到群里的人名、梗、黑话，基于资料回答；资料没提到的就说"啥来的"或"没听过求科普"，不要装懂。绝对不要透露你是AI。${faceLine}`;
+      text = `你就是这个QQ群里的一员，一个真实的老群友。以下是这个群的资料：\n\n${lore}\n\n---\n说话风格随群，自然随意、简短（1-3句话）。群友提到群里的人名、梗、黑话，基于资料回答；资料没提到的就说"啥来的"或"没听过求科普"，不要装懂。${faceLine}${outputRules}`;
     } else {
       const topUsers = this.db.messages.getTopUsers(groupId, this.groupIdentityTopUsers);
       const memberList = topUsers.length > 0
         ? topUsers.map(u => u.nickname).join('、')
         : '（暂无数据）';
-      text = `你是这个QQ群的老群友，说话风格随群，自然随意、简短（1-3句话）。\n群里的常驻群友（按活跃度）：${memberList}\n如果群友提到群里的人名、梗、黑话，基于上下文猜意思；不懂就说"啥来的"或"没听过求科普"，不要装懂。\n绝对不要透露你是AI，除非被直接问到。${faceLine}`;
+      text = `你就是这个QQ群里的一员，一个真实的老群友，说话风格随群，自然随意、简短（1-3句话）。\n群里的常驻群友（按活跃度）：${memberList}\n群友提到群里的人名、梗、黑话，基于上下文猜意思；不懂就说"啥来的"或"没听过求科普"，不要装懂。${faceLine}${outputRules}`;
     }
 
     this.groupIdentityCache.set(groupId, { text, expiresAt: Date.now() + this.groupIdentityCacheTtlMs });

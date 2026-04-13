@@ -552,7 +552,7 @@ describe('ChatModule — keyword retrieval and group identity', () => {
 
     const call = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { messages: Array<{ content: string }> };
     const promptText = call.messages.map((m: { content: string }) => m.content).join(' ');
-    expect(promptText).toContain('现在回复这条消息');
+    expect(promptText).toContain('邦多利是什么');
   });
 });
 
@@ -647,5 +647,86 @@ describe('ChatModule — group lore loading', () => {
     expect(systemText).toContain('群志');
     // System text should not contain 2000 x's (it was truncated)
     expect(systemText.length).toBeLessThan(bigContent.length + 500);
+  });
+});
+
+describe('ChatModule — sentinel: AI self-disclosure prevention', () => {
+  let claude: ReturnType<typeof vi.fn>;
+  let db: Database;
+
+  beforeEach(() => {
+    claude = vi.fn();
+    db = new Database(':memory:');
+  });
+
+  function makeSentinelChat() {
+    return new ChatModule(
+      { complete: claude } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID, debounceMs: 0, lurkerReplyChance: 1, lurkerCooldownMs: 0 }
+    );
+  }
+
+  function mentionMsg(content: string) {
+    return makeMsg({ content, rawContent: `[CQ:at,qq=${BOT_ID}] ${content}` });
+  }
+
+  it('clean reply passes through sentinel unchanged', async () => {
+    claude.mockResolvedValue({ text: '哈哈今天天气不错', inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 });
+    const chat = makeSentinelChat();
+    const result = await chat.generateReply('g1', mentionMsg('天气'), []);
+    expect(result).toBe('哈哈今天天气不错');
+    expect(claude.mock.calls.length).toBe(1);
+  });
+
+  it('AI self-disclosure in first reply triggers regeneration, returns clean second reply', async () => {
+    let n = 0;
+    claude.mockImplementation(async () => {
+      n++;
+      return {
+        text: n === 1 ? '我只是一个AI，根据您提供的历史发言：笑死我了' : '笑死我了',
+        inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0,
+      };
+    });
+    const chat = makeSentinelChat();
+    const result = await chat.generateReply('g1', mentionMsg('哈'), []);
+    expect(result).toBe('笑死我了');
+    expect(claude.mock.calls.length).toBe(2);
+  });
+
+  it('claude name-drop triggers sentinel (claude mentioned in third-person)', async () => {
+    let n = 0;
+    claude.mockImplementation(async () => {
+      n++;
+      return {
+        text: n === 1 ? '笑死这算法题都给你拒了，claude是真有个性' : '笑死这算法题都给你拒了',
+        inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0,
+      };
+    });
+    const chat = makeSentinelChat();
+    const result = await chat.generateReply('g1', mentionMsg('算法题'), []);
+    expect(result).toBe('笑死这算法题都给你拒了');
+    expect(claude.mock.calls.length).toBe(2);
+  });
+
+  it('both attempts contain forbidden content → returns "..."', async () => {
+    claude.mockResolvedValue({
+      text: '我是一个AI助手，很高兴为您服务',
+      inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0,
+    });
+    const chat = makeSentinelChat();
+    const result = await chat.generateReply('g1', mentionMsg('你好'), []);
+    expect(result).toBe('...');
+    expect(claude.mock.calls.length).toBe(2);
+  });
+
+  it('system prompt uses identity framing and contains output rules', async () => {
+    claude.mockResolvedValue({ text: '没啥', inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 });
+    const chat = makeSentinelChat();
+    await chat.generateReply('g1', mentionMsg('哈'), []);
+    const call = claude.mock.calls[0]![0] as { system: Array<{ text: string }> };
+    const systemText = call.system.map((s: { text: string }) => s.text).join('');
+    expect(systemText).toContain('你就是这个QQ群里的一员');
+    expect(systemText).toContain('输出规则');
   });
 });
