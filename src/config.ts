@@ -9,7 +9,10 @@ export const lurkerDefaults = {
 
 export const chatHistoryDefaults = {
   chatRecentCount: 20,
-  chatHistoricalSampleCount: 10,
+  chatHistoricalSampleCount: 15,
+  chatKeywordMatchCount: 15,
+  groupIdentityCacheTtlMs: 3_600_000, // 1 hour
+  groupIdentityTopUsers: 20,
 } as const;
 
 export function defaultGroupConfig(groupId: string): GroupConfig {

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ChatModule } from '../src/modules/chat.js';
+import { ChatModule, extractKeywords } from '../src/modules/chat.js';
 import type { IClaudeClient, ClaudeResponse } from '../src/ai/claude.js';
 import type { GroupMessage } from '../src/adapter/napcat.js';
 import { Database } from '../src/storage/db.js';
@@ -434,5 +434,123 @@ describe('ChatModule — mixed few-shot history', () => {
 
     const sample = db.messages.sampleRandomHistorical('g1', 20, 10);
     expect(sample).toHaveLength(0);
+  });
+});
+
+describe('ChatModule — keyword retrieval and group identity', () => {
+  let db: Database;
+  let claude: IClaudeClient;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    claude = makeMockClaude();
+  });
+
+  function makeChat(overrides: Record<string, unknown> = {}) {
+    return new ChatModule(claude, db, {
+      botUserId: BOT_ID,
+      lurkerReplyChance: 1.0,
+      lurkerCooldownMs: 0,
+      chatKeywordMatchCount: 15,
+      groupIdentityTopUsers: 20,
+      groupIdentityCacheTtlMs: 3_600_000,
+      ...overrides,
+    });
+  }
+
+  // 1. Zero matching keywords → fallback to recent+random only (no keyword section)
+  it('trigger with zero matching keywords: no keyword section in prompt, still replies', async () => {
+    const ts = Math.floor(Date.now() / 1000);
+    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'good morning everyone', timestamp: ts - 60, deleted: false });
+
+    const chat = makeChat();
+    // Trigger with only stopwords — extractKeywords returns []
+    const result = await chat.generateReply('g1', makeMsg({ content: '我 你 他' }), []);
+    expect(result).toBe('bot reply');
+
+    const call = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { messages: Array<{ content: string }> };
+    const promptText = call.messages.map((m: { content: string }) => m.content).join(' ');
+    expect(promptText).not.toContain('相关历史消息');
+    expect(promptText).toContain('最近聊天');
+  });
+
+  // 2. Keyword cap: searchByKeywords returns at most chatKeywordMatchCount rows
+  it('keyword search returns at most chatKeywordMatchCount rows even with many matches', async () => {
+    const ts = Math.floor(Date.now() / 1000);
+    for (let i = 0; i < 50; i++) {
+      db.messages.insert({ groupId: 'g1', userId: `u${i}`, nickname: `User${i}`, content: `邦多利真好吃 ${i}`, timestamp: ts - i * 60, deleted: false });
+    }
+    const results = db.messages.searchByKeywords('g1', ['邦多利'], 15);
+    expect(results.length).toBeLessThanOrEqual(15);
+    expect(results.length).toBeGreaterThan(0);
+  });
+
+  // 3. Chinese tokenization: stopwords excluded, CQ codes stripped, meaningful tokens kept
+  it('extractKeywords: CQ codes stripped and stopwords excluded', () => {
+    // With explicit spaces between tokens (how QQ sends them after CQ stripping)
+    const keywords = extractKeywords('[CQ:at,qq=1234] 邦多利 是 什么');
+    // CQ:at stripped, single-char stopwords like '是' filtered by length<2, '什么' is a stopword
+    expect(keywords).not.toContain('什么');
+    expect(keywords).toContain('邦多利');
+    // Verify stopword filtering: pure stopword message yields empty
+    const stopOnly = extractKeywords('我 你 他 的 了 是 不');
+    expect(stopOnly).toHaveLength(0);
+  });
+
+  // 4. English keyword matches
+  it('English keyword "ygfn" matches messages containing it', async () => {
+    const ts = Math.floor(Date.now() / 1000);
+    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'ygfn is a great server', timestamp: ts - 100, deleted: false });
+    db.messages.insert({ groupId: 'g1', userId: 'u2', nickname: 'Bob', content: 'nothing here', timestamp: ts - 90, deleted: false });
+
+    const results = db.messages.searchByKeywords('g1', ['ygfn'], 10);
+    expect(results.length).toBe(1);
+    expect(results[0]!.content).toContain('ygfn');
+  });
+
+  // 5. Group identity cache: first call queries DB, second call within TTL uses cache
+  it('group identity cache: DB queried once, second call within TTL hits cache', async () => {
+    const ts = Math.floor(Date.now() / 1000);
+    for (let i = 0; i < 5; i++) {
+      db.messages.insert({ groupId: 'g1', userId: `u${i}`, nickname: `User${i}`, content: `hello ${i}`, timestamp: ts - i, deleted: false });
+      db.users.upsert({ userId: `u${i}`, groupId: 'g1', nickname: `User${i}`, styleSummary: null, lastSeen: ts - i });
+    }
+
+    const getTopUsersSpy = vi.spyOn(db.messages, 'getTopUsers');
+    // Use @-mention so both calls bypass lurker gates, and debounceMs=0 so debounce never blocks
+    const chat = makeChat({ groupIdentityCacheTtlMs: 3_600_000, debounceMs: 0 });
+    const atMsg1 = makeMsg({ content: '有人吗', rawContent: `[CQ:at,qq=${BOT_ID}] 有人吗` });
+    const atMsg2 = makeMsg({ content: '在线吗', rawContent: `[CQ:at,qq=${BOT_ID}] 在线吗` });
+
+    await chat.generateReply('g1', atMsg1, []);
+    await chat.generateReply('g1', atMsg2, []);
+
+    expect(getTopUsersSpy).toHaveBeenCalledTimes(1);
+  });
+
+  // 6. Cross-group isolation: keywords from group A don't return messages from group B
+  it('cross-group isolation: searchByKeywords only returns messages from the queried group', async () => {
+    const ts = Math.floor(Date.now() / 1000);
+    db.messages.insert({ groupId: 'gA', userId: 'u1', nickname: 'Alice', content: '邦多利真好', timestamp: ts - 10, deleted: false });
+    db.messages.insert({ groupId: 'gB', userId: 'u2', nickname: 'Bob', content: '邦多利也好', timestamp: ts - 5, deleted: false });
+
+    const resultsA = db.messages.searchByKeywords('gA', ['邦多利'], 10);
+    const resultsB = db.messages.searchByKeywords('gB', ['邦多利'], 10);
+
+    expect(resultsA.every(m => m.groupId === 'gA')).toBe(true);
+    expect(resultsB.every(m => m.groupId === 'gB')).toBe(true);
+    expect(resultsA).toHaveLength(1);
+    expect(resultsB).toHaveLength(1);
+  });
+
+  // 7. Empty corpus: all retrievals return [], chat falls back gracefully
+  it('empty corpus: zero keyword matches + zero historical, reply still succeeds', async () => {
+    const chat = makeChat();
+    const result = await chat.generateReply('g1', makeMsg({ content: '邦多利是什么' }), []);
+    expect(result).toBe('bot reply');
+
+    const call = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { messages: Array<{ content: string }> };
+    const promptText = call.messages.map((m: { content: string }) => m.content).join(' ');
+    expect(promptText).toContain('现在回复这条消息');
   });
 });

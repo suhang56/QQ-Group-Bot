@@ -15,11 +15,33 @@ interface ChatOptions {
   recentMessageCount?: number;
   chatRecentCount?: number;
   chatHistoricalSampleCount?: number;
+  chatKeywordMatchCount?: number;
   botUserId?: string;
   lurkerReplyChance?: number;
   lurkerCooldownMs?: number;
   burstWindowMs?: number;
   burstMinMessages?: number;
+  groupIdentityCacheTtlMs?: number;
+  groupIdentityTopUsers?: number;
+}
+
+// Chinese stopwords that add no retrieval signal
+const STOPWORDS = new Set([
+  '我','你','他','她','它','我们','你们','他们','的','了','是','不','啥','什么',
+  '怎么','一个','这个','那个','就','也','都','在','有','和','吧','嗯','哦','哈',
+  '吗','呢','啊','呀','么','这','那','为','以','到','从','但','所以','因为',
+]);
+
+/** Extract meaningful keywords from a message for corpus retrieval. */
+export function extractKeywords(text: string): string[] {
+  // Strip CQ codes first
+  const stripped = text.replace(/\[CQ:[^\]]+\]/g, ' ');
+  // Split on punctuation / whitespace; keep tokens ≥2 chars
+  const tokens = stripped.split(/[\s\p{P}！？。，、；：""''【】《》（）…—]+/u)
+    .map(t => t.trim())
+    .filter(t => t.length >= 2 && !STOPWORDS.has(t));
+  // Deduplicate and cap at 5
+  return [...new Set(tokens)].slice(0, 5);
 }
 
 export class ChatModule implements IChatModule {
@@ -28,11 +50,14 @@ export class ChatModule implements IChatModule {
   private readonly maxGroupRepliesPerMinute: number;
   private readonly recentMessageCount: number;
   private readonly historicalSampleCount: number;
+  private readonly keywordMatchCount: number;
   private readonly botUserId: string;
   private readonly lurkerReplyChance: number;
   private readonly lurkerCooldownMs: number;
   private readonly burstWindowMs: number;
   private readonly burstMinMessages: number;
+  private readonly groupIdentityCacheTtlMs: number;
+  private readonly groupIdentityTopUsers: number;
 
   // debounce: groupId -> last trigger timestamp
   private readonly debounceMap = new Map<string, number>();
@@ -42,6 +67,8 @@ export class ChatModule implements IChatModule {
   private readonly lastProactiveReply = new Map<string, number>();
   // in-flight lock: groups currently awaiting a Claude reply — prevents concurrent duplicate sends
   private readonly inFlightGroups = new Set<string>();
+  // group identity cache: groupId -> { text, expiresAt }
+  private readonly groupIdentityCache = new Map<string, { text: string; expiresAt: number }>();
 
   constructor(
     private readonly claude: IClaudeClient,
@@ -52,11 +79,14 @@ export class ChatModule implements IChatModule {
     this.maxGroupRepliesPerMinute = options.maxGroupRepliesPerMinute ?? 20;
     this.recentMessageCount = options.chatRecentCount ?? options.recentMessageCount ?? chatHistoryDefaults.chatRecentCount;
     this.historicalSampleCount = options.chatHistoricalSampleCount ?? chatHistoryDefaults.chatHistoricalSampleCount;
+    this.keywordMatchCount = options.chatKeywordMatchCount ?? chatHistoryDefaults.chatKeywordMatchCount;
     this.botUserId = options.botUserId ?? '';
     this.lurkerReplyChance = options.lurkerReplyChance ?? lurkerDefaults.lurkerReplyChance;
     this.lurkerCooldownMs = options.lurkerCooldownMs ?? lurkerDefaults.lurkerCooldownMs;
     this.burstWindowMs = options.burstWindowMs ?? lurkerDefaults.burstWindowMs;
     this.burstMinMessages = options.burstMinMessages ?? lurkerDefaults.burstMinMessages;
+    this.groupIdentityCacheTtlMs = options.groupIdentityCacheTtlMs ?? chatHistoryDefaults.groupIdentityCacheTtlMs;
+    this.groupIdentityTopUsers = options.groupIdentityTopUsers ?? chatHistoryDefaults.groupIdentityTopUsers;
   }
 
   async generateReply(
@@ -122,8 +152,19 @@ export class ChatModule implements IChatModule {
       this.lastProactiveReply.set(groupId, now);
     }
 
-    // Fetch recent messages (passed in or fetched from DB)
-    const recentSlice: GroupMessage[] = recentMessages.length > 0
+    // ── Retrieve context ──────────────────────────────────────────────────
+
+    // 1. Keyword matches: find messages mentioning what the trigger talks about
+    const keywords = extractKeywords(triggerMessage.content);
+    const keywordMsgs = keywords.length > 0
+      ? this.db.messages.searchByKeywords(groupId, keywords, this.keywordMatchCount)
+      : [];
+
+    // 2. Random historical sample for group vibe
+    const historical = this.db.messages.sampleRandomHistorical(groupId, this.recentMessageCount, this.historicalSampleCount);
+
+    // 3. Recent messages (passed in or fetched from DB)
+    const recentSlice = recentMessages.length > 0
       ? recentMessages.slice(0, this.recentMessageCount)
       : this.db.messages.getRecent(groupId, this.recentMessageCount).map(m => ({
           messageId: String(m.id),
@@ -136,40 +177,40 @@ export class ChatModule implements IChatModule {
           timestamp: m.timestamp,
         }));
 
-    // Sample random historical messages outside the recent window for group-vibe context
-    const historical = this.db.messages.sampleRandomHistorical(groupId, this.recentMessageCount, this.historicalSampleCount)
-      .map(m => ({
-        messageId: String(m.id),
-        groupId: m.groupId,
-        userId: m.userId,
-        nickname: m.nickname,
-        role: 'member' as const,
-        content: m.content,
-        rawContent: m.content,
-        timestamp: m.timestamp,
-      }));
+    // ── Build prompt ──────────────────────────────────────────────────────
 
-    // Build prompt: historical sample (sorted oldest→newest) then recent (oldest→newest)
-    // recentSlice is newest-first from DB, so reverse it; historical sorted by timestamp asc
+    // Keyword matches — most relevant, shown first as "related history"
+    const keywordSection = keywordMsgs.length > 0
+      ? `【相关历史消息】\n${keywordMsgs.map(m => `${m.nickname}: ${m.content}`).join('\n')}\n\n`
+      : '';
+
+    // Historical sample — group vibe, sorted oldest→newest
     const historicalSorted = [...historical].sort((a, b) => a.timestamp - b.timestamp);
+    const historicalSection = historicalSorted.length > 0
+      ? `【群氛围参考】\n${historicalSorted.map(m => `${m.nickname}: ${m.content}`).join('\n')}\n\n`
+      : '';
+
+    // Recent — chronological (DB returns newest-first, reverse for oldest→newest)
     const recentChron = [...recentSlice].reverse();
-    const historyText = [...historicalSorted, ...recentChron]
-      .map(m => `${m.nickname}: ${m.content}`)
-      .join('\n');
+    const recentSection = recentChron.length > 0
+      ? `【最近聊天】\n${recentChron.map(m => `${m.nickname}: ${m.content}`).join('\n')}\n\n`
+      : '';
+
+    const historyText = keywordSection + historicalSection + recentSection;
+
+    // ── Group identity system prompt (cached per group, TTL 1h) ──────────
+    const systemPrompt = this._getGroupIdentityPrompt(groupId);
 
     this.inFlightGroups.add(groupId);
     try {
       const response = await this.claude.complete({
         model: 'claude-sonnet-4-6',
         maxTokens: 300,
-        system: [{
-          text: `你是一个群里的老群友，说话风格随群，自然随意。用中文回复，简短（1-3句话）。绝对不要透露你是AI，除非被直接问到。`,
-          cache: true,
-        }],
+        system: [{ text: systemPrompt, cache: true }],
         messages: [
           {
             role: 'user',
-            content: `最近的群聊记录：\n${historyText}\n\n现在回复这条消息：${triggerMessage.nickname}: ${triggerMessage.content}`,
+            content: `${historyText}现在回复这条消息：${triggerMessage.nickname}: ${triggerMessage.content}`,
           },
         ],
       });
@@ -184,6 +225,24 @@ export class ChatModule implements IChatModule {
     } finally {
       this.inFlightGroups.delete(groupId);
     }
+  }
+
+  private _getGroupIdentityPrompt(groupId: string): string {
+    const cached = this.groupIdentityCache.get(groupId);
+    if (cached && Date.now() < cached.expiresAt) {
+      return cached.text;
+    }
+
+    const topUsers = this.db.messages.getTopUsers(groupId, this.groupIdentityTopUsers);
+    const memberList = topUsers.length > 0
+      ? topUsers.map(u => u.nickname).join('、')
+      : '（暂无数据）';
+
+    const text = `你是这个QQ群的老群友，说话风格随群，自然随意、简短（1-3句话）。\n群里的常驻群友（按活跃度）：${memberList}\n如果群友提到群里的人名、梗、黑话，基于上下文猜意思；不懂就说"啥来的"或"没听过求科普"，不要装懂。\n绝对不要透露你是AI，除非被直接问到。`;
+
+    this.groupIdentityCache.set(groupId, { text, expiresAt: Date.now() + this.groupIdentityCacheTtlMs });
+    this.logger.debug({ groupId, memberCount: topUsers.length }, 'Group identity prompt cached');
+    return text;
   }
 
   private _isMention(msg: GroupMessage): boolean {

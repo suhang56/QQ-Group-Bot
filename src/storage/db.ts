@@ -67,11 +67,19 @@ export interface Rule {
 
 // ---- Repository interfaces ----
 
+export interface TopUser {
+  userId: string;
+  nickname: string;
+  count: number;
+}
+
 export interface IMessageRepository {
   insert(msg: Omit<Message, 'id'>, sourceMessageId?: string): Message;
   getRecent(groupId: string, limit: number): Message[];
   getByUser(groupId: string, userId: string, limit: number): Message[];
   sampleRandomHistorical(groupId: string, excludeNewestN: number, sampleSize: number): Message[];
+  searchByKeywords(groupId: string, keywords: string[], limit: number): Message[];
+  getTopUsers(groupId: string, limit: number): TopUser[];
   softDelete(msgId: string): void;
 }
 
@@ -245,6 +253,26 @@ class MessageRepository implements IMessageRepository {
        ORDER BY RANDOM() LIMIT ?`
     ).all(groupId, groupId, excludeNewestN, sampleSize) as unknown as MessageRow[];
     return rows.map(msgFromRow);
+  }
+
+  searchByKeywords(groupId: string, keywords: string[], limit: number): Message[] {
+    if (keywords.length === 0) return [];
+    const capped = keywords.slice(0, 5);
+    const likes = capped.map(() => 'content LIKE ?').join(' OR ');
+    const params = [groupId, ...capped.map(k => `%${k}%`), limit] as Parameters<typeof this.db.prepare>[0][];
+    const rows = this.db.prepare(
+      `SELECT * FROM messages WHERE group_id = ? AND deleted = 0 AND (${likes}) ORDER BY timestamp DESC LIMIT ?`
+    ).all(...(params as unknown as [string, ...string[]])) as unknown as MessageRow[];
+    return rows.map(msgFromRow);
+  }
+
+  getTopUsers(groupId: string, limit: number): TopUser[] {
+    const rows = this.db.prepare(
+      `SELECT user_id, nickname, COUNT(*) as count
+       FROM messages WHERE group_id = ? AND deleted = 0
+       GROUP BY user_id ORDER BY count DESC LIMIT ?`
+    ).all(groupId, limit) as unknown as { user_id: string; nickname: string; count: number }[];
+    return rows.map(r => ({ userId: r.user_id, nickname: r.nickname, count: r.count }));
   }
 
   softDelete(msgId: string): void {
