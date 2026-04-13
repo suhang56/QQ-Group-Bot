@@ -68,12 +68,6 @@ router.setMimic(mimic);
 router.setModerator(moderator);
 
 const announcementSync = new AnnouncementSyncModule(adapter, db.announcements, db.rules, claude, learner);
-if (ACTIVE_GROUPS.length > 0) {
-  void announcementSync.start(ACTIVE_GROUPS);
-  logger.info({ groups: ACTIVE_GROUPS }, 'announcement sync started');
-} else {
-  logger.warn('no active groups configured, announcement sync disabled');
-}
 
 // 5. Wire events
 adapter.on('error', (err) => {
@@ -89,6 +83,12 @@ adapter.on('message.group', (msg) => {
 try {
   await adapter.connect();
   logger.info('Bot ready');
+  if (ACTIVE_GROUPS.length > 0) {
+    void announcementSync.start(ACTIVE_GROUPS);
+    logger.info({ groups: ACTIVE_GROUPS }, 'announcement sync started');
+  } else {
+    logger.warn('no active groups configured, announcement sync disabled');
+  }
 } catch (err) {
   logger.fatal({ err }, 'Failed to connect to NapCat — check NAPCAT_WS_URL and NapCat status');
   process.exit(1);
