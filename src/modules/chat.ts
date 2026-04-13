@@ -6,6 +6,7 @@ import type { Database } from '../storage/db.js';
 import { ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
 import { lurkerDefaults, chatHistoryDefaults } from '../config.js';
+import { FACE_LEGEND } from '../utils/qqface.js';
 
 export interface IChatModule {
   generateReply(groupId: string, triggerMessage: GroupMessage, recentMessages: GroupMessage[]): Promise<string | null>;
@@ -280,14 +281,16 @@ export class ChatModule implements IChatModule {
     const lore = this._loadLore(groupId);
     let text: string;
 
+    const faceLine = `\n你可以在回复里使用 QQ 表情，格式 [CQ:face,id=N]。常用表情参考：${FACE_LEGEND}`;
+
     if (lore) {
-      text = `你是这个QQ群的老群友。以下是这个群的资料：\n\n${lore}\n\n---\n现在参与群聊：说话风格随群，自然随意、简短（1-3句话）。如果群友提到群里的人名、梗、黑话，基于资料回答；资料没提到的就说"啥来的"或"没听过求科普"，不要装懂。绝对不要透露你是AI。`;
+      text = `你是这个QQ群的老群友。以下是这个群的资料：\n\n${lore}\n\n---\n现在参与群聊：说话风格随群，自然随意、简短（1-3句话）。如果群友提到群里的人名、梗、黑话，基于资料回答；资料没提到的就说"啥来的"或"没听过求科普"，不要装懂。绝对不要透露你是AI。${faceLine}`;
     } else {
       const topUsers = this.db.messages.getTopUsers(groupId, this.groupIdentityTopUsers);
       const memberList = topUsers.length > 0
         ? topUsers.map(u => u.nickname).join('、')
         : '（暂无数据）';
-      text = `你是这个QQ群的老群友，说话风格随群，自然随意、简短（1-3句话）。\n群里的常驻群友（按活跃度）：${memberList}\n如果群友提到群里的人名、梗、黑话，基于上下文猜意思；不懂就说"啥来的"或"没听过求科普"，不要装懂。\n绝对不要透露你是AI，除非被直接问到。`;
+      text = `你是这个QQ群的老群友，说话风格随群，自然随意、简短（1-3句话）。\n群里的常驻群友（按活跃度）：${memberList}\n如果群友提到群里的人名、梗、黑话，基于上下文猜意思；不懂就说"啥来的"或"没听过求科普"，不要装懂。\n绝对不要透露你是AI，除非被直接问到。${faceLine}`;
     }
 
     this.groupIdentityCache.set(groupId, { text, expiresAt: Date.now() + this.groupIdentityCacheTtlMs });

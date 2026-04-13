@@ -1,6 +1,7 @@
 .claude/
 .env
 data/
+!src/data/
 node_modules/
 dist/
 *.log
