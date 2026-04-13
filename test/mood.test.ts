@@ -274,10 +274,10 @@ describe('ChatModule — silence-breaker proactive', () => {
         debounceMs: 0,
         chatMinScore: -999,
         moodProactiveEnabled: false,
-        moodProactiveMaxPerGroupMs: 1_800_000, // 30 min shared cooldown
-        silenceBreakerActiveWindowMs: 600_000,    // 10 min
-        silenceBreakerSilentThresholdMs: 300_000, // 5 min
-        silenceBreakerMinRecentMsgs: 3,
+        moodProactiveMaxPerGroupMs: 1_800_000,  // 30 min shared cooldown
+        silenceBreakerMinAgeMs: 180_000,         // 3 min
+        silenceBreakerMaxAgeMs: 600_000,         // 10 min
+        silenceBreakerCooldownMs: 1_800_000,     // 30 min own cooldown
         ...opts,
       },
     );
@@ -292,105 +292,94 @@ describe('ChatModule — silence-breaker proactive', () => {
     });
   }
 
-  // 1. Active group (3+ non-bot msgs in 5-10 min window) then silent 5 min → fires
-  it('active then 5-min silent → silence breaker fires', async () => {
+  // 1. Bot sends msg → 3 min later nobody replies → fires
+  it('bot msg 3 min ago with no reply → silence breaker fires', async () => {
     const sent: string[] = [];
     const chat = makeChat();
     chat.setProactiveAdapter(async (_g, text) => { sent.push(text); return 42; });
     chat['knownGroups'].add('g1');
 
-    // 3 messages 6-9 min ago (in 5-10 min active window)
-    insertMsg('g1', 'u1', 6 * 60);
-    insertMsg('g1', 'u2', 7 * 60);
-    insertMsg('g1', 'u3', 8 * 60);
-    // No messages in last 5 min
+    // Only message in group is bot's, 3 min ago
+    insertMsg('g1', 'bot-123', 3 * 60);
 
     await chat['_moodProactiveTick']();
     expect(sent.length).toBe(1);
     expect(SILENCE_BREAKER_POOL).toContain(sent[0]);
   });
 
-  // 2. Only 2 msgs in active window → no trigger
-  it('only 2 msgs in active window → no silence breaker', async () => {
+  // 2. Bot sends msg → only 2 min ago → not yet 3-min threshold → no trigger
+  it('bot msg only 2 min ago → below min threshold → no trigger', async () => {
     const sent: string[] = [];
     const chat = makeChat();
     chat.setProactiveAdapter(async (_g, text) => { sent.push(text); return 42; });
     chat['knownGroups'].add('g1');
 
-    insertMsg('g1', 'u1', 6 * 60);
-    insertMsg('g1', 'u2', 7 * 60);
-    // only 2 messages — below threshold of 3
+    insertMsg('g1', 'bot-123', 2 * 60);
 
     await chat['_moodProactiveTick']();
     expect(sent.length).toBe(0);
   });
 
-  // 3. Silent only 4 min (not yet 5 min threshold) → no trigger
-  it('silent only 4 min → no trigger', async () => {
+  // 3. Bot sends msg → user replies 1 min later → user is last msg → no trigger
+  it('user replied after bot → last msg is not bot → no trigger', async () => {
     const sent: string[] = [];
     const chat = makeChat();
     chat.setProactiveAdapter(async (_g, text) => { sent.push(text); return 42; });
     chat['knownGroups'].add('g1');
 
-    // 3 active messages 6-9 min ago
-    insertMsg('g1', 'u1', 6 * 60);
-    insertMsg('g1', 'u2', 7 * 60);
-    insertMsg('g1', 'u3', 8 * 60);
-    // 1 message 4 min ago (still within silent threshold — not yet silent)
+    // Bot posted 5 min ago, user replied 4 min ago
+    insertMsg('g1', 'bot-123', 5 * 60);
     insertMsg('g1', 'u1', 4 * 60);
 
     await chat['_moodProactiveTick']();
     expect(sent.length).toBe(0);
   });
 
-  // 4. Silence breaker fires → cooldown blocks next tick
-  it('after silence breaker fires → cooldown blocks next 30 min', async () => {
+  // 4. Bot sends msg → 11 min later → too stale → no trigger
+  it('bot msg 11 min ago → above max threshold → no trigger', async () => {
     const sent: string[] = [];
     const chat = makeChat();
     chat.setProactiveAdapter(async (_g, text) => { sent.push(text); return 42; });
     chat['knownGroups'].add('g1');
 
-    insertMsg('g1', 'u1', 6 * 60);
-    insertMsg('g1', 'u2', 7 * 60);
-    insertMsg('g1', 'u3', 8 * 60);
-
-    await chat['_moodProactiveTick']();
-    expect(sent.length).toBe(1);
-
-    // Second tick immediately — cooldown active
-    await chat['_moodProactiveTick']();
-    expect(sent.length).toBe(1); // still 1, not 2
-  });
-
-  // 5. Permanently dead group (zero messages) → no trigger
-  it('group with zero messages → no trigger', async () => {
-    const sent: string[] = [];
-    const chat = makeChat();
-    chat.setProactiveAdapter(async (_g, text) => { sent.push(text); return 42; });
-    chat['knownGroups'].add('g1');
-    // no messages inserted
+    insertMsg('g1', 'bot-123', 11 * 60);
 
     await chat['_moodProactiveTick']();
     expect(sent.length).toBe(0);
   });
 
-  // 6. Bot messages don't count — only non-bot silence matters
-  it("bot's own messages don't count as recent non-bot activity", async () => {
+  // 5. Silence breaker fired → own cooldown blocks next trigger 10 min later
+  it('after silence breaker fires → own cooldown blocks next tick', async () => {
     const sent: string[] = [];
     const chat = makeChat();
     chat.setProactiveAdapter(async (_g, text) => { sent.push(text); return 42; });
     chat['knownGroups'].add('g1');
 
-    // 3 non-bot messages in active window
-    insertMsg('g1', 'u1', 6 * 60);
-    insertMsg('g1', 'u2', 7 * 60);
-    insertMsg('g1', 'u3', 8 * 60);
-    // Bot message 2 min ago — should NOT count as "recent activity" from humans
-    insertMsg('g1', 'bot-123', 2 * 60);
+    insertMsg('g1', 'bot-123', 3 * 60);
 
     await chat['_moodProactiveTick']();
-    // Silence breaker should still fire (humans haven't spoken in 5+ min)
     expect(sent.length).toBe(1);
-    expect(SILENCE_BREAKER_POOL).toContain(sent[0]);
+
+    // Simulate bot posting again (new msg 3 min ago) — but own cooldown is active
+    await chat['_moodProactiveTick']();
+    expect(sent.length).toBe(1); // still 1, cooldown blocked
+  });
+
+  // 6. Multiple groups independent — only group where bot went unanswered fires
+  it('multiple groups: only the unanswered bot fires', async () => {
+    const sent: Array<{ groupId: string; text: string }> = [];
+    const chat = makeChat();
+    chat.setProactiveAdapter(async (groupId, text) => { sent.push({ groupId, text }); return 42; });
+    chat['knownGroups'].add('g1');
+    chat['knownGroups'].add('g2');
+
+    // g1: bot posted 3 min ago, unanswered
+    insertMsg('g1', 'bot-123', 3 * 60);
+    // g2: last message was a user (not bot) → no trigger
+    insertMsg('g2', 'u1', 3 * 60);
+
+    await chat['_moodProactiveTick']();
+    expect(sent.length).toBe(1);
+    expect(sent[0]!.groupId).toBe('g1');
   });
 });
