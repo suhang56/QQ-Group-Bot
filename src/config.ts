@@ -37,7 +37,7 @@ export function defaultGroupConfig(groupId: string): GroupConfig {
     mimicStartedBy: null,
     chatTriggerKeywords: [],
     chatTriggerAtOnly: false,
-    chatDebounceMs: 2000,
+    chatDebounceMs: 200,
     modConfidenceThreshold: 0.7,
     modWhitelist: [],
     appealWindowHours: 24,
@@ -60,6 +60,8 @@ export function defaultGroupConfig(groupId: string): GroupConfig {
     loreUpdateEnabled: true,
     loreUpdateThreshold: 200,
     loreUpdateCooldownMs: 30 * 60 * 1000,
+    liveStickerCaptureEnabled: true,
+    stickerLegendRefreshEveryMsgs: 50,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };

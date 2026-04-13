@@ -12,8 +12,8 @@ import { defaultGroupConfig } from '../config.js';
 import { resolveAtTarget } from '../utils/cqcode.js';
 
 const MAX_SPLIT_LINES = 3;
-const SPLIT_DELAY_MIN_MS = 100;
-const SPLIT_DELAY_MAX_MS = 300;
+const SPLIT_DELAY_MIN_MS = 50;
+const SPLIT_DELAY_MAX_MS = 150;
 
 /** Split a reply on newlines, cap at MAX_SPLIT_LINES, drop empty lines. */
 export function splitReply(text: string): string[] {
