@@ -1,15 +1,17 @@
 CREATE TABLE IF NOT EXISTS messages (
-  id        INTEGER PRIMARY KEY AUTOINCREMENT,
-  group_id  TEXT    NOT NULL,
-  user_id   TEXT    NOT NULL,
-  nickname  TEXT    NOT NULL DEFAULT '',
-  content   TEXT    NOT NULL,
-  timestamp INTEGER NOT NULL,
-  deleted   INTEGER NOT NULL DEFAULT 0
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id          TEXT    NOT NULL,
+  user_id           TEXT    NOT NULL,
+  nickname          TEXT    NOT NULL DEFAULT '',
+  content           TEXT    NOT NULL,
+  timestamp         INTEGER NOT NULL,
+  deleted           INTEGER NOT NULL DEFAULT 0,
+  source_message_id TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_group ON messages(group_id, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_user  ON messages(group_id, user_id, timestamp DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_source_id ON messages(source_message_id) WHERE source_message_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS users (
   user_id       TEXT    NOT NULL,

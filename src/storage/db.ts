@@ -68,7 +68,7 @@ export interface Rule {
 // ---- Repository interfaces ----
 
 export interface IMessageRepository {
-  insert(msg: Omit<Message, 'id'>): Message;
+  insert(msg: Omit<Message, 'id'>, sourceMessageId?: string): Message;
   getRecent(groupId: string, limit: number): Message[];
   getByUser(groupId: string, userId: string, limit: number): Message[];
   softDelete(msgId: string): void;
@@ -108,7 +108,7 @@ export interface IRuleRepository {
 
 interface MessageRow {
   id: number; group_id: string; user_id: string; nickname: string;
-  content: string; timestamp: number; deleted: number;
+  content: string; timestamp: number; deleted: number; source_message_id: string | null;
 }
 
 interface UserRow {

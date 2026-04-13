@@ -10,7 +10,8 @@
     "test": "vitest run --coverage",
     "test:watch": "vitest",
     "test:integration": "vitest run --testPathPattern=integration",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "import-history": "tsx scripts/import-history.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.104",
