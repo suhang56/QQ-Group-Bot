@@ -148,8 +148,8 @@ export interface IAnnouncementRepository {
 }
 
 export interface INameImageRepository {
-  /** Returns null on dedup hit (source_file conflict). */
-  insert(groupId: string, name: string, filePath: string, sourceFile: string | null, addedBy: string): NameImage | null;
+  /** Returns null on dedup (source_file conflict) or cap reached (maxPerName exceeded). */
+  insert(groupId: string, name: string, filePath: string, sourceFile: string | null, addedBy: string, maxPerName: number): NameImage | null;
   listByName(groupId: string, name: string): NameImage[];
   countByName(groupId: string, name: string): number;
   pickRandom(groupId: string, name: string): NameImage | null;
@@ -613,8 +613,11 @@ class AnnouncementRepository implements IAnnouncementRepository {
 class NameImageRepository implements INameImageRepository {
   constructor(private readonly db: DatabaseSync) {}
 
-  insert(groupId: string, name: string, filePath: string, sourceFile: string | null, addedBy: string): NameImage | null {
+  insert(groupId: string, name: string, filePath: string, sourceFile: string | null, addedBy: string, maxPerName: number): NameImage | null {
     const addedAt = Math.floor(Date.now() / 1000);
+    // Enforce cap at the repository layer — single-row count check before insert
+    const current = this.countByName(groupId, name);
+    if (current >= maxPerName) return null;
     if (sourceFile !== null) {
       // Use INSERT OR IGNORE — returns 0 changes on dedup
       const result = this.db.prepare(

@@ -66,9 +66,8 @@ export class NameImagesModule {
     addedBy: string,
     maxPerName: number,
   ): Promise<NameImage | 'dedup' | 'cap_reached'> {
-    // Check cap before downloading
-    const current = this.repo.countByName(groupId, name);
-    if (current >= maxPerName) return 'cap_reached';
+    // Early cap check to avoid downloading if already at limit
+    if (this.repo.countByName(groupId, name) >= maxPerName) return 'cap_reached';
 
     // Download
     let buf: Buffer;
@@ -89,18 +88,18 @@ export class NameImagesModule {
       throw err;
     }
 
-    // Determine extension from first bytes (magic bytes)
+    // Filename is sha256 hash only — no user-supplied name or URL in path
     const ext = _sniffExt(buf);
     const hash = createHash('sha256').update(buf).digest('hex');
-    const filename = `${hash}${ext}`;
-    const dir = path.join(this.namesDirPath, groupId, name);
-    const filePath = path.join(dir, filename);
+    const filePath = path.join(this.namesDirPath, `${hash}${ext}`);
 
-    mkdirSync(dir, { recursive: true });
+    mkdirSync(this.namesDirPath, { recursive: true });
     writeFileSync(filePath, buf);
 
-    const result = this.repo.insert(groupId, name, filePath, sourceFile, addedBy);
+    const result = this.repo.insert(groupId, name, filePath, sourceFile, addedBy, maxPerName);
     if (result === null) {
+      // null means either dedup or cap race — check which
+      if (this.repo.countByName(groupId, name) >= maxPerName) return 'cap_reached';
       logger.debug({ groupId, name, sourceFile }, 'Dedup: image already in library');
       return 'dedup';
     }
