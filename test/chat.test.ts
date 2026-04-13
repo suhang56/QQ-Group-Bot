@@ -1538,3 +1538,82 @@ describe('ChatModule — deflection cache', () => {
     expect(chat['_validateDeflection']('短句')).toBe('短句');
   });
 });
+
+// ── Pure @-mention with no content ───────────────────────────────────────────
+
+describe('ChatModule — pure @-mention reply', () => {
+  let db: Database;
+  let claude: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    claude = vi.fn().mockResolvedValue({
+      text: 'bot reply', inputTokens: 10, outputTokens: 5,
+      cacheReadTokens: 0, cacheWriteTokens: 0,
+    } satisfies ClaudeResponse);
+  });
+
+  function makeChat(opts: Record<string, unknown> = {}): ChatModule {
+    return new ChatModule(
+      { complete: claude } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999, moodProactiveEnabled: false, deflectCacheEnabled: false, ...opts },
+    );
+  }
+
+  // 1. Pure @-mention → at_only deflection (Claude not called for main reply)
+  it('pure @-mention → at_only deflection, full pipeline skipped', async () => {
+    const chat = makeChat();
+    const msg = makeMsg({
+      content: '',
+      rawContent: `[CQ:at,qq=${BOT_ID}]`,
+    });
+    const result = await chat.generateReply('g1', msg, []);
+    expect(DEFLECT_FALLBACKS['at_only']).toContain(result);
+    expect(claude).not.toHaveBeenCalled();
+  });
+
+  // 2. @-mention with content → normal chat flow (not at_only)
+  it('@-mention with text → normal chat pipeline', async () => {
+    const chat = makeChat();
+    const msg = makeMsg({
+      content: 'hello',
+      rawContent: `[CQ:at,qq=${BOT_ID}] hello`,
+    });
+    await chat.generateReply('g1', msg, []);
+    expect(claude).toHaveBeenCalled();
+  });
+
+  // 3. @ targeting OTHER user, empty content → null (not bot's @)
+  it('@ targeting other user with empty content → null', async () => {
+    const chat = makeChat();
+    const msg = makeMsg({
+      content: '',
+      rawContent: '[CQ:at,qq=other-user]',
+    });
+    const result = await chat.generateReply('g1', msg, []);
+    expect(result).toBeNull();
+    expect(claude).not.toHaveBeenCalled();
+  });
+
+  // 4. Empty content, no @ at all → null
+  it('empty content with no @ → null', async () => {
+    const chat = makeChat();
+    const msg = makeMsg({ content: '', rawContent: '' });
+    const result = await chat.generateReply('g1', msg, []);
+    expect(result).toBeNull();
+  });
+
+  // 5. Rate limit still applies to @-only replies
+  it('rate limit blocks at_only reply when limit reached', async () => {
+    const chat = makeChat({ maxGroupRepliesPerMinute: 1 });
+    const atMsg = () => makeMsg({ content: '', rawContent: `[CQ:at,qq=${BOT_ID}]` });
+
+    const first = await chat.generateReply('g1', atMsg(), []);
+    expect(DEFLECT_FALLBACKS['at_only']).toContain(first);
+
+    // Second @-only within same minute — rate limit hit
+    const second = await chat.generateReply('g1', atMsg(), []);
+    expect(second).toBeNull();
+  });
+});

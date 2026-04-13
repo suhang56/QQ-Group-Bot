@@ -125,7 +125,8 @@ export const SILENCE_BREAKER_POOL = [
 
 export type DeflectCategory =
   | 'identity' | 'task' | 'memory' | 'recite'
-  | 'curse' | 'silence' | 'mood_happy' | 'mood_bored' | 'mood_annoyed';
+  | 'curse' | 'silence' | 'mood_happy' | 'mood_bored' | 'mood_annoyed'
+  | 'at_only';
 
 export const DEFLECT_SITUATIONS: Record<DeflectCategory, string> = {
   identity: '有人怀疑你是机器人/AI，想让你承认身份。你不承认，轻描淡写绕开。',
@@ -137,6 +138,7 @@ export const DEFLECT_SITUATIONS: Record<DeflectCategory, string> = {
   mood_happy: '你心情很好，想自己来一句开心的话，不针对任何人。',
   mood_bored: '你很无聊，想来一句"好困""没意思"之类的。',
   mood_annoyed: '你有点烦，想发泄一句，不针对任何人。',
+  at_only: '有人艾特了你但没说话，只是点了一下你。你的反应是简短的"？"或者"叫我干嘛"之类，看到@就随便回一下。',
 };
 
 export const DEFLECT_FALLBACKS: Record<DeflectCategory, string[]> = {
@@ -149,6 +151,7 @@ export const DEFLECT_FALLBACKS: Record<DeflectCategory, string[]> = {
   mood_happy: ['Roselia 太好听了', '嘿嘿', '开心', '哈哈哈'],
   mood_bored: ['好困', '没意思', '无聊', ''],
   mood_annoyed: ['烦', '没意思', '哎'],
+  at_only: ['?', '嗯?', '叫我干嘛', '说话啊', '艾特我干啥', '?怎么了', '什么事', '在', '咋了'],
 };
 
 export const BANGDREAM_PERSONA = `你是这个QQ群的老群友，不是AI，不是机器人，也不是任何现有群友。你有自己独立的身份和性格：
@@ -438,8 +441,13 @@ export class ChatModule implements IChatModule {
   ): Promise<string | null> {
     this.knownGroups.add(groupId);
 
-    // Empty content after CQ stripping
-    if (!triggerMessage.content.trim()) {
+    // Pure @-mention with no other content: reply with at_only deflection
+    const isPureAtMention = this.botUserId
+      && triggerMessage.rawContent.includes(`[CQ:at,qq=${this.botUserId}]`)
+      && !triggerMessage.content.trim();
+
+    // Empty content after CQ stripping (and not a pure @-mention)
+    if (!triggerMessage.content.trim() && !isPureAtMention) {
       return null;
     }
 
@@ -461,6 +469,12 @@ export class ChatModule implements IChatModule {
     if (this.inFlightGroups.has(groupId)) {
       this.logger.debug({ groupId }, 'Reply in-flight — dropping duplicate trigger');
       return null;
+    }
+
+    // Pure @-mention: skip full chat pipeline, return at_only deflection
+    if (isPureAtMention) {
+      this.lastProactiveReply.set(groupId, now);
+      return this._generateDeflection('at_only', triggerMessage);
     }
 
     // ── Weighted participation scoring ───────────────────────────────────
@@ -925,7 +939,7 @@ export class ChatModule implements IChatModule {
   private async _refillAllDeflectCategories(): Promise<void> {
     const allCategories: DeflectCategory[] = [
       'identity', 'task', 'memory', 'recite',
-      'curse', 'silence', 'mood_happy', 'mood_bored', 'mood_annoyed',
+      'curse', 'silence', 'mood_happy', 'mood_bored', 'mood_annoyed', 'at_only',
     ];
     await Promise.allSettled(allCategories.map(c => this._refillDeflectCategory(c)));
   }
