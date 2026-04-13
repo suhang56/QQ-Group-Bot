@@ -53,6 +53,12 @@ interface ScoreFactors {
   replyToOther: number;
 }
 
+// Matches direct identity probes directed at the bot (not incidental keyword mentions)
+export const IDENTITY_PROBE =
+  /(是.{0,3}机器人|你.{0,4}是.{0,4}(ai|bot)|是.{0,4}(ai|bot).{0,4}吗|bot\s*吧|真人吗?|是真的.{0,3}人|are\s+you\s+(a\s+)?bot|are\s+you\s+(an\s+)?ai|are\s+you\s+human)/i;
+
+export const IDENTITY_DEFLECTIONS = ['啊？', '什么', '？？', '?', '我不明白', '啥'];
+
 // Chinese stopwords that add no retrieval signal
 const STOPWORDS = new Set([
   '我','你','他','她','它','我们','你们','他们','的','了','是','不','啥','什么',
@@ -234,6 +240,12 @@ export class ChatModule implements IChatModule {
 
     // Record last-reply timestamp for silence factor (applies to all replies)
     this.lastProactiveReply.set(groupId, now);
+
+    // Identity probe: bypass Claude entirely with a canned deflection
+    if (IDENTITY_PROBE.test(triggerMessage.content)) {
+      const pool = IDENTITY_DEFLECTIONS;
+      return pool[Math.floor(Math.random() * pool.length)]!;
+    }
 
     // ── Retrieve context ──────────────────────────────────────────────────
 

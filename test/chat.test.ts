@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ChatModule, extractKeywords, extractTopFaces, tokenizeLore } from '../src/modules/chat.js';
+import { ChatModule, extractKeywords, extractTopFaces, tokenizeLore, IDENTITY_PROBE, IDENTITY_DEFLECTIONS } from '../src/modules/chat.js';
 import type { IClaudeClient, ClaudeResponse } from '../src/ai/claude.js';
 import type { GroupMessage } from '../src/adapter/napcat.js';
 import { Database } from '../src/storage/db.js';
@@ -783,5 +783,85 @@ describe('ChatModule — sentinel: AI self-disclosure prevention', () => {
     const systemText = call.system.map((s: { text: string }) => s.text).join('');
     expect(systemText).toContain('你就是这个QQ群里的一员');
     expect(systemText).toContain('输出规则');
+  });
+});
+
+describe('IDENTITY_PROBE regex', () => {
+  const match = (s: string) => IDENTITY_PROBE.test(s);
+
+  it('matches "这不是机器人吗"', () => expect(match('这不是机器人吗')).toBe(true));
+  it('matches "你是 AI 吗"', () => expect(match('你是 AI 吗')).toBe(true));
+  it('matches "bot 吧"', () => expect(match('bot 吧')).toBe(true));
+  it('matches "are you a bot"', () => expect(match('are you a bot')).toBe(true));
+  it('matches "are you an AI"', () => expect(match('are you an AI')).toBe(true));
+  it('matches "are you human"', () => expect(match('are you human')).toBe(true));
+  it('matches "Are You A Bot?" (mixed case)', () => expect(match('Are You A Bot?')).toBe(true));
+  it('matches "你是bot吗"', () => expect(match('你是bot吗')).toBe(true));
+  it('matches "真人吗"', () => expect(match('真人吗')).toBe(true));
+  it('matches "是真的人吗"', () => expect(match('是真的人吗')).toBe(true));
+
+  it('does NOT match "那个 AI 工具挺好" (incidental AI mention)', () => expect(match('那个 AI 工具挺好')).toBe(false));
+  it('does NOT match "机器人大战" (topic, no verb)', () => expect(match('机器人大战')).toBe(false));
+  it('does NOT match "AI 画图真好用"', () => expect(match('AI 画图真好用')).toBe(false));
+  it('does NOT match "hello"', () => expect(match('hello')).toBe(false));
+});
+
+describe('ChatModule — identity probe deflection', () => {
+  let db: Database;
+  let claude: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    claude = vi.fn().mockResolvedValue({
+      text: 'this should not appear',
+      inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0,
+    });
+  });
+
+  function makeChat() {
+    return new ChatModule(
+      { complete: claude } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID, lurkerReplyChance: 1, lurkerCooldownMs: 0, chatMinScore: -999 },
+    );
+  }
+
+  it('probe message → returns canned deflection, Claude not called', async () => {
+    const chat = makeChat();
+    const result = await chat.generateReply('g1', makeMsg({ content: '这不是机器人吗' }), []);
+    expect(IDENTITY_DEFLECTIONS).toContain(result);
+    expect(claude).not.toHaveBeenCalled();
+  });
+
+  it('"你是AI吗" → canned deflection', async () => {
+    const chat = makeChat();
+    const result = await chat.generateReply('g1', makeMsg({ content: '你是AI吗' }), []);
+    expect(IDENTITY_DEFLECTIONS).toContain(result);
+    expect(claude).not.toHaveBeenCalled();
+  });
+
+  it('"bot 吧" → canned deflection', async () => {
+    const chat = makeChat();
+    const result = await chat.generateReply('g1', makeMsg({ content: 'bot 吧' }), []);
+    expect(IDENTITY_DEFLECTIONS).toContain(result);
+    expect(claude).not.toHaveBeenCalled();
+  });
+
+  it('"那个 AI 工具挺好" → NOT a probe, Claude called normally', async () => {
+    const chat = makeChat();
+    await chat.generateReply('g1', makeMsg({ content: '那个 AI 工具挺好' }), []);
+    expect(claude).toHaveBeenCalled();
+  });
+
+  it('probe → randomized across instances (not always same response)', async () => {
+    const results = new Set<string>();
+    for (let i = 0; i < 30; i++) {
+      // Fresh chat + unique groupId to bypass debounce/rate-limit state
+      const chat = makeChat();
+      const r = await chat.generateReply(`g-${i}`, makeMsg({ content: '你是AI吗' }), []);
+      if (r) results.add(r);
+    }
+    // With 6 options and 30 draws, probability of all same < 0.001%
+    expect(results.size).toBeGreaterThan(1);
   });
 });
