@@ -1,13 +1,14 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ChatModule } from '../src/modules/chat.js';
 import type { IClaudeClient, ClaudeResponse } from '../src/ai/claude.js';
 import type { GroupMessage } from '../src/adapter/napcat.js';
 import { Database } from '../src/storage/db.js';
 import { ClaudeApiError } from '../src/utils/errors.js';
 import { initLogger } from '../src/utils/logger.js';
-import { BotErrorCode } from '../src/utils/errors.js';
 
 initLogger({ level: 'silent' });
+
+const BOT_ID = 'bot-123';
 
 function makeMsg(overrides: Partial<GroupMessage> = {}): GroupMessage {
   return {
@@ -29,6 +30,16 @@ function makeMockClaude(text = 'bot reply'): IClaudeClient {
   };
 }
 
+// Insert N messages into db spaced by deltaSeconds between each
+function insertMessages(db: Database, groupId: string, count: number, baseTimestamp: number, deltaSeconds: number) {
+  for (let i = 0; i < count; i++) {
+    db.messages.insert({
+      groupId, userId: `u${i}`, nickname: `User${i}`,
+      content: `msg ${i}`, timestamp: baseTimestamp + i * deltaSeconds, deleted: false,
+    });
+  }
+}
+
 describe('ChatModule', () => {
   let db: Database;
   let claude: IClaudeClient;
@@ -37,8 +48,22 @@ describe('ChatModule', () => {
   beforeEach(() => {
     db = new Database(':memory:');
     claude = makeMockClaude();
-    chat = new ChatModule(claude, db);
+    // Default lurker config: 15% chance, 90s cooldown, burst=5 msgs in 10s
+    // Use lurkerReplyChance=1.0 by default so tests that don't test probability always reply
+    chat = new ChatModule(claude, db, {
+      botUserId: BOT_ID,
+      lurkerReplyChance: 1.0,  // always pass probability unless overridden
+      lurkerCooldownMs: 0,     // no cooldown unless overridden
+      burstMinMessages: 5,
+      burstWindowMs: 10_000,
+    });
   });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // ── Existing behavior ────────────────────────────────────────────────
 
   it('generateReply returns text from Claude', async () => {
     const result = await chat.generateReply('g1', makeMsg(), []);
@@ -46,7 +71,6 @@ describe('ChatModule', () => {
   });
 
   it('uses recent messages as few-shot context', async () => {
-    // Insert some history
     const ts = Math.floor(Date.now() / 1000);
     db.messages.insert({ groupId: 'g1', userId: 'u2', nickname: 'Bob', content: 'sup', timestamp: ts - 10, deleted: false });
     db.messages.insert({ groupId: 'g1', userId: 'u3', nickname: 'Carol', content: 'yo', timestamp: ts - 5, deleted: false });
@@ -55,7 +79,6 @@ describe('ChatModule', () => {
     await chat.generateReply('g1', makeMsg(), recentMsgs);
 
     const call = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { messages: Array<{ content: string }> };
-    // The recent messages should appear in the prompt
     const allContent = call.messages.map(m => m.content).join(' ');
     expect(allContent).toContain('sup');
     expect(allContent).toContain('yo');
@@ -68,27 +91,23 @@ describe('ChatModule', () => {
   });
 
   it('returns null when group rate limit is exceeded', async () => {
-    // Saturate the group reply count
-    chat = new ChatModule(claude, db, { maxGroupRepliesPerMinute: 0 });
+    chat = new ChatModule(claude, db, { maxGroupRepliesPerMinute: 0, botUserId: BOT_ID, lurkerReplyChance: 1.0, lurkerCooldownMs: 0 });
     const result = await chat.generateReply('g1', makeMsg(), []);
     expect(result).toBeNull();
   });
 
   it('debounces consecutive messages (same group, within window)', async () => {
     vi.useFakeTimers();
-    chat = new ChatModule(claude, db, { debounceMs: 2000 });
+    chat = new ChatModule(claude, db, { debounceMs: 2000, botUserId: BOT_ID, lurkerReplyChance: 1.0, lurkerCooldownMs: 0 });
 
     const p1 = chat.generateReply('g1', makeMsg({ content: 'msg1' }), []);
     const p2 = chat.generateReply('g1', makeMsg({ content: 'msg2' }), []);
 
-    // Advance past debounce
     vi.advanceTimersByTime(2100);
     const [r1, r2] = await Promise.all([p1, p2]);
 
-    // Only the last message in the debounce window should trigger a Claude call
     const callCount = (claude.complete as ReturnType<typeof vi.fn>).mock.calls.length;
     expect(callCount).toBeLessThanOrEqual(1);
-    // The other should be null (debounced away)
     expect([r1, r2].filter(r => r === null).length).toBeGreaterThanOrEqual(1);
 
     vi.useRealTimers();
@@ -107,7 +126,159 @@ describe('ChatModule', () => {
 
   it('handles message with only CQ codes (empty content after strip)', async () => {
     const result = await chat.generateReply('g1', makeMsg({ content: '' }), []);
-    // Empty content — no meaningful trigger, return null
     expect(result).toBeNull();
+  });
+
+  // ── @-mention always replies ─────────────────────────────────────────
+
+  it('@-mention always replies regardless of probability', async () => {
+    chat = new ChatModule(claude, db, {
+      botUserId: BOT_ID,
+      lurkerReplyChance: 0,    // probability would block
+      lurkerCooldownMs: 999_999, // cooldown would block
+    });
+    const msg = makeMsg({ rawContent: `[CQ:at,qq=${BOT_ID}] hello bot` });
+    const result = await chat.generateReply('g1', msg, []);
+    expect(result).toBe('bot reply');
+  });
+
+  it('@-mention always replies regardless of burst', async () => {
+    // Fill burst window: 5 messages in 8 seconds
+    const now = Math.floor(Date.now() / 1000);
+    insertMessages(db, 'g1', 5, now - 8, 2);
+
+    chat = new ChatModule(claude, db, {
+      botUserId: BOT_ID,
+      lurkerReplyChance: 0,
+      lurkerCooldownMs: 999_999,
+      burstMinMessages: 5,
+      burstWindowMs: 10_000,
+    });
+    const msg = makeMsg({ rawContent: `[CQ:at,qq=${BOT_ID}] are you there?` });
+    const result = await chat.generateReply('g1', msg, []);
+    expect(result).toBe('bot reply');
+  });
+
+  // ── Reply-to-bot always triggers ────────────────────────────────────
+
+  it('reply-to-bot-msg always replies regardless of probability/cooldown', async () => {
+    chat = new ChatModule(claude, db, {
+      botUserId: BOT_ID,
+      lurkerReplyChance: 0,
+      lurkerCooldownMs: 999_999,
+    });
+    const msg = makeMsg({ rawContent: '[CQ:reply,id=999]thanks for that' });
+    const result = await chat.generateReply('g1', msg, []);
+    expect(result).toBe('bot reply');
+  });
+
+  // ── Probabilistic gate ───────────────────────────────────────────────
+
+  it('probabilistic: Math.random=0.10 with chance=0.15 → replies', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.10);
+    chat = new ChatModule(claude, db, {
+      botUserId: BOT_ID,
+      lurkerReplyChance: 0.15,
+      lurkerCooldownMs: 0,
+    });
+    const result = await chat.generateReply('g1', makeMsg(), []);
+    expect(result).toBe('bot reply');
+  });
+
+  it('probabilistic: Math.random=0.20 with chance=0.15 → skips', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.20);
+    chat = new ChatModule(claude, db, {
+      botUserId: BOT_ID,
+      lurkerReplyChance: 0.15,
+      lurkerCooldownMs: 0,
+    });
+    const result = await chat.generateReply('g1', makeMsg(), []);
+    expect(result).toBeNull();
+  });
+
+  // ── Cooldown ─────────────────────────────────────────────────────────
+
+  it('cooldown: second qualifying message within 90s is skipped', async () => {
+    chat = new ChatModule(claude, db, {
+      botUserId: BOT_ID,
+      lurkerReplyChance: 1.0,
+      lurkerCooldownMs: 90_000,
+    });
+    // First message — should reply (no cooldown yet)
+    const r1 = await chat.generateReply('g1', makeMsg({ content: 'msg 1' }), []);
+    expect(r1).toBe('bot reply');
+
+    // Second message immediately after — cooldown blocks it
+    const r2 = await chat.generateReply('g1', makeMsg({ content: 'msg 2' }), []);
+    expect(r2).toBeNull();
+  });
+
+  // ── Burst detection ──────────────────────────────────────────────────
+
+  it('burst: 5 messages in 8 seconds → skips (non-mention)', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    // 5 messages spread over 8 seconds (0,2,4,6,8 seconds apart)
+    insertMessages(db, 'g1', 5, now - 8, 2);
+
+    chat = new ChatModule(claude, db, {
+      botUserId: BOT_ID,
+      lurkerReplyChance: 1.0,
+      lurkerCooldownMs: 0,
+      burstMinMessages: 5,
+      burstWindowMs: 10_000,
+    });
+    const result = await chat.generateReply('g1', makeMsg(), []);
+    expect(result).toBeNull();
+  });
+
+  it('burst cools: 6th message 15s after oldest → eligible', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    // Insert 4 old messages (outside burst window) + 1 recent
+    insertMessages(db, 'g1', 4, now - 30, 1);  // ts: now-30, now-29, now-28, now-27
+    db.messages.insert({ groupId: 'g1', userId: 'u99', nickname: 'X', content: 'recent', timestamp: now - 15, deleted: false });
+    // newest=now-15, oldest of last 5 = now-30 → span = 15s ≥ 10s → NOT burst
+
+    chat = new ChatModule(claude, db, {
+      botUserId: BOT_ID,
+      lurkerReplyChance: 1.0,
+      lurkerCooldownMs: 0,
+      burstMinMessages: 5,
+      burstWindowMs: 10_000,
+    });
+    const result = await chat.generateReply('g1', makeMsg(), []);
+    expect(result).toBe('bot reply');
+  });
+
+  it('empty group history → no burst false positive', async () => {
+    // No messages in DB — getRecent returns [] → fewer than burstMinMessages → not burst
+    chat = new ChatModule(claude, db, {
+      botUserId: BOT_ID,
+      lurkerReplyChance: 1.0,
+      lurkerCooldownMs: 0,
+      burstMinMessages: 5,
+      burstWindowMs: 10_000,
+    });
+    const result = await chat.generateReply('g1', makeMsg(), []);
+    expect(result).toBe('bot reply');
+  });
+
+  // ── Debounce still works within lurker flow ───────────────────────────
+
+  it('debounce still fires within lurker flow', async () => {
+    vi.useFakeTimers();
+    chat = new ChatModule(claude, db, {
+      debounceMs: 2000,
+      botUserId: BOT_ID,
+      lurkerReplyChance: 1.0,
+      lurkerCooldownMs: 0,
+    });
+
+    const p1 = chat.generateReply('g1', makeMsg({ content: 'first' }), []);
+    const p2 = chat.generateReply('g1', makeMsg({ content: 'second' }), []);
+    vi.advanceTimersByTime(2100);
+    const results = await Promise.all([p1, p2]);
+
+    expect(results.filter(r => r === null).length).toBeGreaterThanOrEqual(1);
+    vi.useRealTimers();
   });
 });

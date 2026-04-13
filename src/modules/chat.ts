@@ -3,6 +3,7 @@ import type { GroupMessage } from '../adapter/napcat.js';
 import type { Database } from '../storage/db.js';
 import { ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
+import { lurkerDefaults } from '../config.js';
 
 export interface IChatModule {
   generateReply(groupId: string, triggerMessage: GroupMessage, recentMessages: GroupMessage[]): Promise<string | null>;
@@ -12,6 +13,11 @@ interface ChatOptions {
   debounceMs?: number;
   maxGroupRepliesPerMinute?: number;
   recentMessageCount?: number;
+  botUserId?: string;
+  lurkerReplyChance?: number;
+  lurkerCooldownMs?: number;
+  burstWindowMs?: number;
+  burstMinMessages?: number;
 }
 
 export class ChatModule implements IChatModule {
@@ -19,11 +25,18 @@ export class ChatModule implements IChatModule {
   private readonly debounceMs: number;
   private readonly maxGroupRepliesPerMinute: number;
   private readonly recentMessageCount: number;
+  private readonly botUserId: string;
+  private readonly lurkerReplyChance: number;
+  private readonly lurkerCooldownMs: number;
+  private readonly burstWindowMs: number;
+  private readonly burstMinMessages: number;
 
   // debounce: groupId -> last trigger timestamp
   private readonly debounceMap = new Map<string, number>();
   // group reply counter: groupId -> { count, windowStart }
   private readonly groupReplyCount = new Map<string, { count: number; windowStart: number }>();
+  // last proactive (non-mention) reply timestamp per group
+  private readonly lastProactiveReply = new Map<string, number>();
 
   constructor(
     private readonly claude: IClaudeClient,
@@ -33,6 +46,11 @@ export class ChatModule implements IChatModule {
     this.debounceMs = options.debounceMs ?? 2000;
     this.maxGroupRepliesPerMinute = options.maxGroupRepliesPerMinute ?? 20;
     this.recentMessageCount = options.recentMessageCount ?? 20;
+    this.botUserId = options.botUserId ?? '';
+    this.lurkerReplyChance = options.lurkerReplyChance ?? lurkerDefaults.lurkerReplyChance;
+    this.lurkerCooldownMs = options.lurkerCooldownMs ?? lurkerDefaults.lurkerCooldownMs;
+    this.burstWindowMs = options.burstWindowMs ?? lurkerDefaults.burstWindowMs;
+    this.burstMinMessages = options.burstMinMessages ?? lurkerDefaults.burstMinMessages;
   }
 
   async generateReply(
@@ -62,6 +80,31 @@ export class ChatModule implements IChatModule {
     this.debounceMap.set(groupId, now);
     if (lastTrigger !== undefined && now - lastTrigger < this.debounceMs) {
       return null;
+    }
+
+    // Determine if this is a direct trigger (@mention or reply-to-bot)
+    const isDirect = this._isMention(triggerMessage) || this._isReplyToBot(triggerMessage);
+
+    if (!isDirect) {
+      // Burst detection: if last N messages arrived within burstWindowMs, stay quiet
+      if (this._isBurst(groupId)) {
+        this.logger.debug({ groupId }, 'Burst detected — lurker skipping');
+        return null;
+      }
+
+      // Cooldown: must be at least lurkerCooldownMs since last proactive reply
+      const lastProactive = this.lastProactiveReply.get(groupId) ?? 0;
+      if (now - lastProactive < this.lurkerCooldownMs) {
+        this.logger.debug({ groupId, msSinceLast: now - lastProactive }, 'Lurker cooldown active — skipping');
+        return null;
+      }
+
+      // Probabilistic gate
+      if (Math.random() >= this.lurkerReplyChance) {
+        return null;
+      }
+
+      this.lastProactiveReply.set(groupId, now);
     }
 
     // Fetch history from DB if recentMessages not provided
@@ -108,6 +151,24 @@ export class ChatModule implements IChatModule {
       }
       throw err;
     }
+  }
+
+  private _isMention(msg: GroupMessage): boolean {
+    if (!this.botUserId) return false;
+    return msg.rawContent.includes(`[CQ:at,qq=${this.botUserId}]`);
+  }
+
+  private _isReplyToBot(msg: GroupMessage): boolean {
+    return msg.rawContent.startsWith('[CQ:reply,');
+  }
+
+  private _isBurst(groupId: string): boolean {
+    const recent = this.db.messages.getRecent(groupId, this.burstMinMessages);
+    if (recent.length < this.burstMinMessages) return false;
+    const newest = recent[0]!.timestamp;
+    const oldest = recent[recent.length - 1]!.timestamp;
+    // timestamps are unix seconds; burstWindowMs is ms
+    return (newest - oldest) * 1000 < this.burstWindowMs;
   }
 
   private _checkGroupLimit(groupId: string): boolean {

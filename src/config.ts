@@ -1,5 +1,12 @@
 import type { GroupConfig } from './storage/db.js';
 
+export const lurkerDefaults = {
+  lurkerReplyChance: 0.15,
+  lurkerCooldownMs: 90_000,
+  burstWindowMs: 10_000,
+  burstMinMessages: 5,
+} as const;
+
 export function defaultGroupConfig(groupId: string): GroupConfig {
   return {
     groupId,
