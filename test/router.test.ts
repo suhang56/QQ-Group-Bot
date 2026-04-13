@@ -367,4 +367,26 @@ describe('Router — moderator commands (appeal, rule_add, rule_false_positive)'
     await router.dispatch(makeMsg({ content: '/appeal', role: 'admin' }));
     expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('申诉已批准'));
   });
+
+  // /appeal exception: any member may appeal their OWN punishment
+  it('member sending /appeal reaches handler and succeeds for own punishment', async () => {
+    db.moderation.insert({ msgId: 'msg-ban', groupId: 'g1', userId: 'u1', violation: true,
+      severity: 3, action: 'ban', reason: 'test', appealed: 0, reversed: false,
+      timestamp: Math.floor(Date.now() / 1000) - 60 });
+    await router.dispatch(makeMsg({ content: '/appeal', role: 'member', userId: 'u1' }));
+    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('申诉已批准'));
+  });
+
+  it('member sending /appeal @other_user is rejected before reaching handler', async () => {
+    await router.dispatch(makeMsg({ content: '/appeal @other-user', role: 'member', userId: 'u1' }));
+    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('只能申诉自己'));
+  });
+
+  it('admin sending /appeal @other_user appeals on behalf of that user', async () => {
+    db.moderation.insert({ msgId: 'msg-other', groupId: 'g1', userId: 'u-victim', violation: true,
+      severity: 2, action: 'ban', reason: 'test', appealed: 0, reversed: false,
+      timestamp: Math.floor(Date.now() / 1000) - 60 });
+    await router.dispatch(makeMsg({ content: '/appeal @u-victim', role: 'admin', userId: 'admin-1' }));
+    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('申诉已批准'));
+  });
 });

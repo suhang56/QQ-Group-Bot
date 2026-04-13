@@ -83,9 +83,11 @@ export class Router implements IRouter {
         lastSeen: msg.timestamp,
       });
 
-      // Command routing — admin/owner only at router level
+      // Command routing — admin/owner only at router level; /appeal is open to all roles
       const trimmed = msg.content.trim();
-      if (trimmed.startsWith('/') && (msg.role === 'admin' || msg.role === 'owner')) {
+      const isAdmin = msg.role === 'admin' || msg.role === 'owner';
+      const peekCmd = trimmed.startsWith('/') ? (trimmed.slice(1).split(/\s+/)[0]?.toLowerCase() ?? '') : '';
+      if (trimmed.startsWith('/') && (isAdmin || peekCmd === 'appeal')) {
         const parts = trimmed.slice(1).split(/\s+/);
         const cmd = parts[0]?.toLowerCase() ?? '';
         const args = parts.slice(1);
@@ -306,12 +308,24 @@ export class Router implements IRouter {
       }
     });
 
-    this.commands.set('appeal', async (msg, _args, config) => {
+    this.commands.set('appeal', async (msg, args, config) => {
       if (!this.moderatorModule) {
         await this.adapter.send(msg.groupId, '此功能即将推出，敬请期待。');
         return;
       }
-      const result = await this.moderatorModule.handleAppeal(msg, config);
+
+      // Parse optional @target: /appeal or /appeal @userId
+      const atArg = args[0];
+      const targetUserId = atArg?.startsWith('@') ? atArg.slice(1) : undefined;
+      const isAdmin = msg.role === 'admin' || msg.role === 'owner';
+
+      // Members may only appeal their own punishment; only admins may target others
+      if (targetUserId && targetUserId !== msg.userId && !isAdmin) {
+        await this.adapter.send(msg.groupId, '你只能申诉自己的处罚。');
+        return;
+      }
+
+      const result = await this.moderatorModule.handleAppeal(msg, config, targetUserId);
       if (!result.ok) {
         if (result.errorCode === BotErrorCode.NO_PUNISHMENT_RECORD) {
           await this.adapter.send(msg.groupId, '未找到你的近期处罚记录，无法发起申诉。');
@@ -322,12 +336,13 @@ export class Router implements IRouter {
         }
         return;
       }
+      const subjectNickname = targetUserId ? targetUserId : msg.nickname;
       if (result.wasKick) {
         await this.adapter.send(msg.groupId,
-          `@${msg.nickname} 申诉已批准，记录已更正。你已被移出群聊，无法自动恢复，请联系管理员重新邀请。`);
+          `@${subjectNickname} 申诉已批准，记录已更正。你已被移出群聊，无法自动恢复，请联系管理员重新邀请。`);
       } else {
         await this.adapter.send(msg.groupId,
-          `@${msg.nickname} 申诉已批准，禁言已解除，处罚已撤销。`);
+          `@${subjectNickname} 申诉已批准，禁言已解除，处罚已撤销。`);
       }
     });
 

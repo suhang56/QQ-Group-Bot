@@ -300,10 +300,11 @@ ${offenseHistory}${ragSection}`;
     }
   }
 
-  async handleAppeal(msg: GroupMessage, config: GroupConfig): Promise<AppealResult> {
+  async handleAppeal(msg: GroupMessage, config: GroupConfig, targetUserId?: string): Promise<AppealResult> {
     // findPendingAppeal queries WHERE appealed=0, so already-appealed records are not returned.
     // A second appeal attempt naturally surfaces as NO_PUNISHMENT_RECORD (E007).
-    const record = this.moderation.findPendingAppeal(msg.userId, msg.groupId);
+    const subjectId = targetUserId ?? msg.userId;
+    const record = this.moderation.findPendingAppeal(subjectId, msg.groupId);
     if (!record) {
       return { ok: false, errorCode: BotErrorCode.NO_PUNISHMENT_RECORD };
     }
@@ -320,13 +321,13 @@ ${offenseHistory}${ragSection}`;
 
     if (!wasKick && record.action === 'ban') {
       try {
-        await this.adapter.ban(msg.groupId, msg.userId, 0); // unban
+        await this.adapter.ban(msg.groupId, subjectId, 0); // unban
       } catch {
-        this.logger.error({ groupId: msg.groupId, userId: msg.userId }, 'unban during appeal failed');
+        this.logger.error({ groupId: msg.groupId, userId: subjectId }, 'unban during appeal failed');
       }
     }
 
-    this.logger.info({ groupId: msg.groupId, userId: msg.userId, recordId: record.id, wasKick }, 'appeal approved');
+    this.logger.info({ groupId: msg.groupId, userId: subjectId, recordId: record.id, wasKick }, 'appeal approved');
     return { ok: true, wasKick };
   }
 
