@@ -3,6 +3,7 @@ import type { Database, GroupConfig } from '../storage/db.js';
 import type { RateLimiter } from './rateLimiter.js';
 import type { IChatModule } from '../modules/chat.js';
 import type { MimicModule } from '../modules/mimic.js';
+import type { ModeratorModule } from '../modules/moderator.js';
 import { BotErrorCode } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
 import { defaultGroupConfig } from '../config.js';
@@ -22,6 +23,7 @@ export class Router implements IRouter {
   private readonly commands = new Map<string, CommandHandler>();
   private chatModule: IChatModule | null = null;
   private mimicModule: MimicModule | null = null;
+  private moderatorModule: ModeratorModule | null = null;
 
   constructor(
     private readonly db: Database,
@@ -39,9 +41,31 @@ export class Router implements IRouter {
     this.mimicModule = mimic;
   }
 
+  setModerator(moderator: ModeratorModule): void {
+    this.moderatorModule = moderator;
+  }
+
   async dispatch(msg: GroupMessage): Promise<void> {
     try {
-      // Persist message and upsert user first
+      this.logger.trace({ messageId: msg.messageId, groupId: msg.groupId, userId: msg.userId }, 'dispatching message');
+
+      // Bot mimic output — skip to prevent loop
+      if (msg.content.startsWith('[模仿')) {
+        return;
+      }
+
+      const config = this.db.groupConfig.get(msg.groupId) ?? this._defaultConfig(msg.groupId);
+
+      // Moderator runs FIRST, before persistence
+      if (this.moderatorModule && !msg.content.trim().startsWith('/')) {
+        const verdict = await this.moderatorModule.assess(msg, config);
+        if (verdict.violation && verdict.severity !== null && verdict.severity >= 1) {
+          // Message was deleted — do not persist or route downstream
+          return;
+        }
+      }
+
+      // Persist message and upsert user
       this.db.messages.insert({
         groupId: msg.groupId,
         userId: msg.userId,
@@ -59,13 +83,6 @@ export class Router implements IRouter {
         lastSeen: msg.timestamp,
       });
 
-      this.logger.trace({ messageId: msg.messageId, groupId: msg.groupId, userId: msg.userId }, 'dispatching message');
-
-      // Bot mimic output — skip to prevent loop
-      if (msg.content.startsWith('[模仿')) {
-        return;
-      }
-
       // Command routing
       const trimmed = msg.content.trim();
       if (trimmed.startsWith('/')) {
@@ -82,7 +99,6 @@ export class Router implements IRouter {
 
         const handler = this.commands.get(cmd);
         if (handler) {
-          const config = this.db.groupConfig.get(msg.groupId) ?? this._defaultConfig(msg.groupId);
           await handler(msg, args, config);
         }
         // Unknown commands silently ignored
@@ -290,11 +306,76 @@ export class Router implements IRouter {
       }
     });
 
-    // Stubs for M4
-    for (const cmd of ['rule_add', 'rule_false_positive', 'appeal']) {
-      this.commands.set(cmd, async (msg, _args, _config) => {
+    this.commands.set('appeal', async (msg, _args, config) => {
+      if (!this.moderatorModule) {
         await this.adapter.send(msg.groupId, '此功能即将推出，敬请期待。');
-      });
-    }
+        return;
+      }
+      const result = await this.moderatorModule.handleAppeal(msg, config);
+      if (!result.ok) {
+        if (result.errorCode === BotErrorCode.NO_PUNISHMENT_RECORD) {
+          await this.adapter.send(msg.groupId, '未找到你的近期处罚记录，无法发起申诉。');
+        } else if (result.errorCode === BotErrorCode.APPEAL_EXPIRED) {
+          await this.adapter.send(msg.groupId, '申诉窗口已关闭（仅限处罚后24小时内）。如有异议请直接联系管理员。');
+        } else {
+          await this.adapter.send(msg.groupId, '申诉处理失败，请稍后再试。');
+        }
+        return;
+      }
+      if (result.wasKick) {
+        await this.adapter.send(msg.groupId,
+          `@${msg.nickname} 申诉已批准，记录已更正。你已被移出群聊，无法自动恢复，请联系管理员重新邀请。`);
+      } else {
+        await this.adapter.send(msg.groupId,
+          `@${msg.nickname} 申诉已批准，禁言已解除，处罚已撤销。`);
+      }
+    });
+
+    this.commands.set('rule_add', async (msg, args, _config) => {
+      if (!this.moderatorModule) {
+        await this.adapter.send(msg.groupId, '此功能即将推出，敬请期待。');
+        return;
+      }
+      if (msg.role !== 'admin' && msg.role !== 'owner') {
+        await this.adapter.send(msg.groupId, '没有权限。只有管理员可以添加规则。');
+        return;
+      }
+      const content = args.join(' ').trim();
+      if (!content) {
+        await this.adapter.send(msg.groupId, '规则描述不能为空，请重新输入。');
+        return;
+      }
+      const result = await this.moderatorModule.addRule(msg.groupId, content, msg.role);
+      if (result.ok) {
+        const preview = content.length > 80 ? content.slice(0, 80) + '...' : content;
+        await this.adapter.send(msg.groupId, `规则已添加（ID: ${result.ruleId}）：${preview}`);
+      } else {
+        await this.adapter.send(msg.groupId, '规则保存失败，请稍后再试。');
+      }
+    });
+
+    this.commands.set('rule_false_positive', async (msg, args, _config) => {
+      if (!this.moderatorModule) {
+        await this.adapter.send(msg.groupId, '此功能即将推出，敬请期待。');
+        return;
+      }
+      if (msg.role !== 'admin' && msg.role !== 'owner') {
+        await this.adapter.send(msg.groupId, '没有权限。只有管理员可以操作此指令。');
+        return;
+      }
+      const msgId = args[0];
+      if (!msgId) {
+        await this.adapter.send(msg.groupId, '用法：/rule_false_positive <消息ID>');
+        return;
+      }
+      const result = await this.moderatorModule.markFalsePositive(msgId, msg.role);
+      if (result.ok) {
+        await this.adapter.send(msg.groupId, `消息 ${msgId} 已标记为误判，处罚已撤销，已记录至学习库。`);
+      } else if (!result.ok && result.errorCode === BotErrorCode.NO_PUNISHMENT_RECORD) {
+        await this.adapter.send(msg.groupId, `未找到消息 ${msgId} 的审核记录，请确认 ID 是否正确。`);
+      } else {
+        await this.adapter.send(msg.groupId, '操作失败，请稍后再试。');
+      }
+    });
   }
 }
