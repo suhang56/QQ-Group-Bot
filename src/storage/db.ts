@@ -712,18 +712,33 @@ export class Database {
   }
 
   private _runMigrations(): void {
-    // Each ALTER is wrapped in try/catch — SQLite throws if the column already exists,
-    // which is the correct idempotency behaviour for ADD COLUMN on existing DBs.
-    const alters = [
-      "ALTER TABLE group_config ADD COLUMN chat_lore_enabled INTEGER NOT NULL DEFAULT 1",
-      "ALTER TABLE group_config ADD COLUMN name_images_enabled INTEGER NOT NULL DEFAULT 1",
-      "ALTER TABLE group_config ADD COLUMN name_images_collection_timeout_ms INTEGER NOT NULL DEFAULT 120000",
-      "ALTER TABLE group_config ADD COLUMN name_images_collection_max INTEGER NOT NULL DEFAULT 20",
-      "ALTER TABLE group_config ADD COLUMN name_images_cooldown_ms INTEGER NOT NULL DEFAULT 300000",
-      "ALTER TABLE group_config ADD COLUMN name_images_max_per_name INTEGER NOT NULL DEFAULT 50",
-    ];
-    for (const sql of alters) {
-      try { this._db.exec(sql); } catch { /* column already exists — safe to ignore */ }
+    // ALTER TABLE: each wrapped in try/catch — SQLite throws "duplicate column" on existing DBs,
+    // which is the correct idempotency signal for ADD COLUMN.
+    for (const col of [
+      'chat_lore_enabled INTEGER NOT NULL DEFAULT 1',
+      'name_images_enabled INTEGER NOT NULL DEFAULT 1',
+      'name_images_collection_timeout_ms INTEGER NOT NULL DEFAULT 120000',
+      'name_images_collection_max INTEGER NOT NULL DEFAULT 20',
+      'name_images_cooldown_ms INTEGER NOT NULL DEFAULT 300000',
+      'name_images_max_per_name INTEGER NOT NULL DEFAULT 50',
+    ]) {
+      try { this._db.exec(`ALTER TABLE group_config ADD COLUMN ${col}`); } catch { /* already exists */ }
     }
+
+    // name_images table — CREATE TABLE IF NOT EXISTS in schema.sql handles fresh installs,
+    // but we repeat it here so existing DBs that predate schema.sql also get the table.
+    this._db.exec(`
+      CREATE TABLE IF NOT EXISTS name_images (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id    TEXT    NOT NULL,
+        name        TEXT    NOT NULL,
+        file_path   TEXT    NOT NULL,
+        source_file TEXT,
+        added_by    TEXT    NOT NULL,
+        added_at    INTEGER NOT NULL
+      )
+    `);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_name_images_group_name ON name_images(group_id, name)`);
+    this._db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_name_images_source ON name_images(group_id, name, source_file) WHERE source_file IS NOT NULL`);
   }
 }

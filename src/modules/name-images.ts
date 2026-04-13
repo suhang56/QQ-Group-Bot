@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 import type { INameImageRepository, NameImage } from '../storage/db.js';
 import { createLogger } from '../utils/logger.js';
@@ -98,7 +98,8 @@ export class NameImagesModule {
 
     const result = this.repo.insert(groupId, name, filePath, sourceFile, addedBy, maxPerName);
     if (result === null) {
-      // null means either dedup or cap race — check which
+      // Orphaned file — unlink before returning to prevent disk leak
+      try { unlinkSync(filePath); } catch { /* already gone or never written — ignore */ }
       if (this.repo.countByName(groupId, name) >= maxPerName) return 'cap_reached';
       logger.debug({ groupId, name, sourceFile }, 'Dedup: image already in library');
       return 'dedup';
