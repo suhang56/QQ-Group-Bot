@@ -396,7 +396,10 @@ class RuleRepository implements IRuleRepository {
   insert(rule: Omit<Rule, 'id'>): Rule {
     let embBuf: Buffer | null = null;
     if (rule.embedding) {
-      embBuf = Buffer.from(rule.embedding.buffer);
+      const f = rule.embedding;
+      // Use byteOffset+byteLength to slice the view correctly — avoids writing the parent
+      // buffer when `f` is a view (e.g. produced by ruleFromRow after a DB read-back).
+      embBuf = Buffer.from(new Uint8Array(f.buffer, f.byteOffset, f.byteLength));
     }
     const result = this.db.prepare(
       'INSERT INTO rules (group_id, content, type, embedding_vec) VALUES (?, ?, ?, ?)'

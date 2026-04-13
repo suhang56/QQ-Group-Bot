@@ -322,3 +322,55 @@ describe('LearnerModule.retrieveExamples', () => {
     expect(results[0]!.content).toBe(injection);
   });
 });
+
+describe('LearnerModule — real DB embedding round-trip', () => {
+  it('retrieveExamples returns rules bit-for-bit matching stored embedding', async () => {
+    const { LearnerModule } = await import('../src/modules/learner.js');
+    // Use real DB to exercise the full storage round-trip
+    const { Database } = await import('../src/storage/db.js');
+    const db = new Database(':memory:');
+
+    const storedVec = [1, 0]; // unit vec in dim 0
+    const embedder = makeEmbedder(storedVec);
+
+    const learner = new LearnerModule(embedder, db.rules, db.moderation);
+
+    // addRule: embed + persist
+    const addResult = await learner.addRule('g1', 'no spam', 'negative');
+    expect(addResult.ok).toBe(true);
+
+    // retrieveExamples: reads from DB, scores, returns
+    const results = await learner.retrieveExamples('g1', 'test message', 5);
+    expect(results).toHaveLength(1);
+
+    const emb = results[0]!.embedding!;
+    // After embed([1,0]) → normalise → [1,0]. Values must survive the DB round-trip exactly.
+    expect(emb[0]).toBeCloseTo(1, 5);
+    expect(emb[1]).toBeCloseTo(0, 5);
+  });
+
+  it('re-persisting a DB read-back embedding via addRule preserves values', async () => {
+    const { LearnerModule } = await import('../src/modules/learner.js');
+    const { Database } = await import('../src/storage/db.js');
+    const db = new Database(':memory:');
+
+    const storedVec = [0.6, 0.8]; // pre-normalised (|v|=1)
+    const embedder = makeEmbedder(storedVec);
+    const learner = new LearnerModule(embedder, db.rules, db.moderation);
+
+    await learner.addRule('g1', 'rule-a', 'negative');
+    const first = await learner.retrieveExamples('g1', 'x', 5);
+    expect(first).toHaveLength(1);
+
+    // Directly insert the view-based embedding back into DB (simulates re-persist scenario)
+    const viewEmb = first[0]!.embedding!;
+    db.rules.insert({ groupId: 'g1', content: 'rule-b', type: 'negative', embedding: viewEmb });
+
+    const second = db.rules.getAll('g1');
+    const ruleB = second.find(r => r.content === 'rule-b')!;
+    expect(ruleB.embedding).not.toBeNull();
+    expect(ruleB.embedding!).toHaveLength(2);
+    expect(ruleB.embedding![0]).toBeCloseTo(0.6, 5);
+    expect(ruleB.embedding![1]).toBeCloseTo(0.8, 5);
+  });
+});

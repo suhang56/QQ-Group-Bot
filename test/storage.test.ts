@@ -290,4 +290,50 @@ describe('Database / RuleRepository', () => {
     const page2 = db.rules.getPage('g1', 3, 3);
     expect(page2.rules).toHaveLength(2);
   });
+
+  it('round-trip: persists Float32Array embedding and reads back exact values', () => {
+    const original = new Float32Array([1.5, 2.5, 3.5]);
+    const inserted = db.rules.insert({ groupId: 'g1', content: 'embed-rule', type: 'negative', embedding: original });
+
+    const readBack = db.rules.findById(inserted.id);
+    expect(readBack).not.toBeNull();
+    expect(readBack!.embedding).not.toBeNull();
+    expect(readBack!.embedding!).toHaveLength(3);
+    expect(readBack!.embedding![0]).toBeCloseTo(1.5, 5);
+    expect(readBack!.embedding![1]).toBeCloseTo(2.5, 5);
+    expect(readBack!.embedding![2]).toBeCloseTo(3.5, 5);
+  });
+
+  it('round-trip: re-persisting a read-back view embedding preserves values (no parent-buffer corruption)', () => {
+    const original = new Float32Array([1.5, 2.5, 3.5]);
+    const inserted = db.rules.insert({ groupId: 'g1', content: 'roundtrip', type: 'negative', embedding: original });
+
+    // First read-back — embedding is a view on a larger Node Buffer
+    const first = db.rules.findById(inserted.id)!;
+    expect(first.embedding).not.toBeNull();
+
+    // Insert again using the read-back view (this is the view-vs-parent scenario)
+    const reInserted = db.rules.insert({ groupId: 'g1', content: 'roundtrip-2', type: 'negative', embedding: first.embedding });
+
+    // Second read-back must still match exactly
+    const second = db.rules.findById(reInserted.id)!;
+    expect(second.embedding).not.toBeNull();
+    expect(second.embedding!).toHaveLength(3);
+    expect(second.embedding![0]).toBeCloseTo(1.5, 5);
+    expect(second.embedding![1]).toBeCloseTo(2.5, 5);
+    expect(second.embedding![2]).toBeCloseTo(3.5, 5);
+  });
+
+  it('round-trip via getAll: embedding retrieved by group matches original values', () => {
+    const original = new Float32Array([0.1, 0.9, 0.5]);
+    db.rules.insert({ groupId: 'g-rt', content: 'vec-rule', type: 'positive', embedding: original });
+
+    const rules = db.rules.getAll('g-rt');
+    expect(rules).toHaveLength(1);
+    const emb = rules[0]!.embedding!;
+    expect(emb).toHaveLength(3);
+    expect(emb[0]).toBeCloseTo(0.1, 5);
+    expect(emb[1]).toBeCloseTo(0.9, 5);
+    expect(emb[2]).toBeCloseTo(0.5, 5);
+  });
 });
