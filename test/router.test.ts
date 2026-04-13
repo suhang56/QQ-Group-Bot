@@ -1,8 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Router } from '../src/core/router.js';
 import { RateLimiter } from '../src/core/rateLimiter.js';
+import { MimicModule } from '../src/modules/mimic.js';
 import { Database } from '../src/storage/db.js';
 import type { GroupMessage, INapCatAdapter } from '../src/adapter/napcat.js';
+import type { IClaudeClient } from '../src/ai/claude.js';
 import { initLogger } from '../src/utils/logger.js';
 
 initLogger({ level: 'silent' });
@@ -104,5 +106,91 @@ describe('Router', () => {
     const sendSpy = vi.spyOn(adapter, 'send');
     await isolatedRouter.dispatch(makeMsg({ content: 'just chatting' }));
     expect(sendSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('Router — mimic commands', () => {
+  let db: Database;
+  let adapter: INapCatAdapter;
+  let rl: RateLimiter;
+  let router: Router;
+  let mimic: MimicModule;
+  let mockClaude: IClaudeClient;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    adapter = makeMockAdapter();
+    rl = new RateLimiter();
+    router = new Router(db, adapter, rl);
+    mockClaude = {
+      complete: vi.fn().mockResolvedValue({
+        text: '随便说一句', inputTokens: 10, outputTokens: 5,
+        cacheReadTokens: 0, cacheWriteTokens: 0,
+      }),
+    };
+    mimic = new MimicModule(mockClaude, db.messages, db.groupConfig, 'bot-self');
+    router.setMimic(mimic);
+  });
+
+  it('/mimic without @user replies with usage hint', async () => {
+    await router.dispatch(makeMsg({ content: '/mimic' }));
+    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('用法'));
+  });
+
+  it('/mimic @unknown replies with E002 message', async () => {
+    await router.dispatch(makeMsg({ content: '/mimic @nobody' }));
+    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('没有历史消息记录'));
+  });
+
+  it('/mimic @user with history replies with [模仿] text', async () => {
+    // Insert some messages for 'u-target'
+    for (let i = 0; i < 5; i++) {
+      db.messages.insert({ groupId: 'g1', userId: 'u-target', nickname: 'Target',
+        content: `msg${i}`, timestamp: Math.floor(Date.now() / 1000) - i, deleted: false });
+    }
+    await router.dispatch(makeMsg({ content: '/mimic @u-target' }));
+    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('[模仿'));
+  });
+
+  it('/mimic_on without @user replies with usage hint', async () => {
+    await router.dispatch(makeMsg({ content: '/mimic_on' }));
+    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('用法'));
+  });
+
+  it('/mimic_on @unknown with no history replies with E002 message', async () => {
+    await router.dispatch(makeMsg({ content: '/mimic_on @nobody' }));
+    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('没有历史消息记录'));
+  });
+
+  it('/mimic_on @user with history activates mimic mode', async () => {
+    db.messages.insert({ groupId: 'g1', userId: 'u-target', nickname: 'Target',
+      content: 'hi', timestamp: Math.floor(Date.now() / 1000), deleted: false });
+    await router.dispatch(makeMsg({ content: '/mimic_on @u-target' }));
+    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('模仿模式已开启'));
+  });
+
+  it('/mimic_off when no active session replies idempotently', async () => {
+    await router.dispatch(makeMsg({ content: '/mimic_off' }));
+    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('没有开启模仿模式'));
+  });
+
+  it('/mimic_off after /mimic_on closes the session', async () => {
+    db.messages.insert({ groupId: 'g1', userId: 'u-target', nickname: 'Target',
+      content: 'hi', timestamp: Math.floor(Date.now() / 1000), deleted: false });
+    await router.dispatch(makeMsg({ content: '/mimic_on @u-target' }));
+    vi.mocked(adapter.send).mockClear();
+    await router.dispatch(makeMsg({ content: '/mimic_off' }));
+    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('模仿模式已关闭'));
+  });
+
+  it('non-command message triggers mimic when session is active', async () => {
+    for (let i = 0; i < 10; i++) {
+      db.messages.insert({ groupId: 'g1', userId: 'u-target', nickname: 'Target',
+        content: `msg${i}`, timestamp: Math.floor(Date.now() / 1000) - i, deleted: false });
+    }
+    await router.dispatch(makeMsg({ content: '/mimic_on @u-target' }));
+    vi.mocked(adapter.send).mockClear();
+    await router.dispatch(makeMsg({ content: 'just a regular chat message', userId: 'u-other' }));
+    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('[模仿'));
   });
 });

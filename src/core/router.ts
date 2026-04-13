@@ -2,6 +2,8 @@ import type { GroupMessage, INapCatAdapter } from '../adapter/napcat.js';
 import type { Database, GroupConfig } from '../storage/db.js';
 import type { RateLimiter } from './rateLimiter.js';
 import type { IChatModule } from '../modules/chat.js';
+import type { MimicModule } from '../modules/mimic.js';
+import { BotErrorCode } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
 
 export interface IRouter {
@@ -18,6 +20,7 @@ export class Router implements IRouter {
   private readonly logger = createLogger('router');
   private readonly commands = new Map<string, CommandHandler>();
   private chatModule: IChatModule | null = null;
+  private mimicModule: MimicModule | null = null;
 
   constructor(
     private readonly db: Database,
@@ -29,6 +32,10 @@ export class Router implements IRouter {
 
   setChat(chat: IChatModule): void {
     this.chatModule = chat;
+  }
+
+  setMimic(mimic: MimicModule): void {
+    this.mimicModule = mimic;
   }
 
   async dispatch(msg: GroupMessage): Promise<void> {
@@ -81,19 +88,30 @@ export class Router implements IRouter {
         return;
       }
 
-      // Non-command: pass to chat module if available
-      if (this.chatModule) {
-        const recentMsgs = this.db.messages.getRecent(msg.groupId, 20).map(m => ({
-          messageId: String(m.id),
-          groupId: m.groupId,
-          userId: m.userId,
-          nickname: m.nickname,
-          role: 'member' as const,
-          content: m.content,
-          rawContent: m.content,
-          timestamp: m.timestamp,
-        }));
+      // Non-command: check mimic mode first, then chat
+      const recentMsgs = this.db.messages.getRecent(msg.groupId, 20).map(m => ({
+        messageId: String(m.id),
+        groupId: m.groupId,
+        userId: m.userId,
+        nickname: m.nickname,
+        role: 'member' as const,
+        content: m.content,
+        rawContent: m.content,
+        timestamp: m.timestamp,
+      }));
 
+      if (this.mimicModule) {
+        const activeUserId = this.mimicModule.getActiveMimicUser(msg.groupId);
+        if (activeUserId) {
+          const result = await this.mimicModule.generateMimic(msg.groupId, activeUserId, msg.content, recentMsgs);
+          if (result.ok) {
+            await this.adapter.send(msg.groupId, result.text);
+          }
+          return;
+        }
+      }
+
+      if (this.chatModule) {
         const reply = await this.chatModule.generateReply(msg.groupId, msg, recentMsgs);
         if (reply) {
           await this.adapter.send(msg.groupId, reply);
@@ -199,9 +217,98 @@ export class Router implements IRouter {
 - 当前模仿模式：${mimicUser ? `正在模仿 @${mimicUser}` : 'OFF'}`);
     });
 
-    // Stub: mimic, mimic_on, mimic_off, rule_add, rule_false_positive, appeal
-    // Will be fully implemented in M3/M4
-    for (const cmd of ['mimic', 'mimic_on', 'mimic_off', 'rule_add', 'rule_false_positive', 'appeal']) {
+    this.commands.set('mimic', async (msg, args, _config) => {
+      if (!this.mimicModule) {
+        await this.adapter.send(msg.groupId, '此功能即将推出，敬请期待。');
+        return;
+      }
+
+      // Parse @user from args[0]
+      const atArg = args[0];
+      if (!atArg || !atArg.startsWith('@')) {
+        await this.adapter.send(msg.groupId, '用法：/mimic @群友 [话题]\n例如：/mimic @小明 今天吃了什么');
+        return;
+      }
+
+      const targetUserId = atArg.slice(1);
+      const topic = args.slice(1).join(' ') || null;
+
+      const recentMsgs = this.db.messages.getRecent(msg.groupId, 20).map(m => ({
+        messageId: String(m.id), groupId: m.groupId, userId: m.userId,
+        nickname: m.nickname, role: 'member' as const,
+        content: m.content, rawContent: m.content, timestamp: m.timestamp,
+      }));
+
+      const result = await this.mimicModule.generateMimic(msg.groupId, targetUserId, topic, recentMsgs);
+
+      if (!result.ok) {
+        if (result.errorCode === BotErrorCode.USER_NOT_FOUND) {
+          await this.adapter.send(msg.groupId, `@${targetUserId} 在本群没有历史消息记录，无法进行模仿。`);
+        } else if (result.errorCode === BotErrorCode.SELF_MIMIC) {
+          await this.adapter.send(msg.groupId, '我没办法模仿我自己啦。');
+        } else {
+          await this.adapter.send(msg.groupId, 'AI 服务暂时不可用，请稍后再试。');
+        }
+        return;
+      }
+
+      let reply = '';
+      if (this.mimicModule.isInsufficientHistory(result.historyCount)) {
+        reply += `⚠️ 目前只有 ${result.historyCount} 条历史消息，模仿效果可能不准确。\n\n`;
+      }
+      reply += result.text;
+      await this.adapter.send(msg.groupId, reply);
+    });
+
+    this.commands.set('mimic_on', async (msg, args, _config) => {
+      if (!this.mimicModule) {
+        await this.adapter.send(msg.groupId, '此功能即将推出，敬请期待。');
+        return;
+      }
+
+      const atArg = args[0];
+      if (!atArg || !atArg.startsWith('@')) {
+        await this.adapter.send(msg.groupId, '用法：/mimic_on @群友');
+        return;
+      }
+
+      const targetUserId = atArg.slice(1);
+
+      // Check target has history
+      const userMsgs = this.db.messages.getByUser(msg.groupId, targetUserId, 1);
+      if (userMsgs.length === 0) {
+        await this.adapter.send(msg.groupId, `@${targetUserId} 在本群没有历史消息记录，无法开启模仿模式。`);
+        return;
+      }
+
+      const nickname = userMsgs[0]!.nickname;
+      const result = await this.mimicModule.startMimic(msg.groupId, targetUserId, nickname, msg.userId);
+
+      if (result.replaced) {
+        await this.adapter.send(msg.groupId,
+          `已切换模仿目标：现在模仿 @${nickname} 的说话风格。使用 /mimic_off 可随时关闭。`);
+      } else {
+        await this.adapter.send(msg.groupId,
+          `模仿模式已开启：本群之后的回复将模仿 @${nickname} 的说话风格。使用 /mimic_off 可随时关闭。`);
+      }
+    });
+
+    this.commands.set('mimic_off', async (msg, _args, _config) => {
+      if (!this.mimicModule) {
+        await this.adapter.send(msg.groupId, '此功能即将推出，敬请期待。');
+        return;
+      }
+
+      const result = await this.mimicModule.stopMimic(msg.groupId);
+      if (result.wasActive) {
+        await this.adapter.send(msg.groupId, '模仿模式已关闭，恢复正常聊天模式。');
+      } else {
+        await this.adapter.send(msg.groupId, '当前没有开启模仿模式，无需关闭。');
+      }
+    });
+
+    // Stubs for M4
+    for (const cmd of ['rule_add', 'rule_false_positive', 'appeal']) {
       this.commands.set(cmd, async (msg, _args, _config) => {
         await this.adapter.send(msg.groupId, '此功能即将推出，敬请期待。');
       });
