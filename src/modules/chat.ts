@@ -344,7 +344,13 @@ export class ChatModule implements IChatModule {
         { groupId, userId: triggerMessage.userId },
         async () => (await chatRequest(true)).text,
       );
-      return postProcess(text);
+      const processed = postProcess(text);
+      // Claude signals disinterest via "...", "。", or empty — drop silently
+      if (!processed || processed === '...' || processed === '。') {
+        this.logger.debug({ groupId }, 'Claude opted out — dropping reply silently');
+        return null;
+      }
+      return processed;
     } catch (err) {
       if (err instanceof ClaudeApiError || err instanceof ClaudeParseError) {
         this.logger.error({ err, groupId }, 'Claude API error in chat module — silent');
@@ -550,7 +556,7 @@ export class ChatModule implements IChatModule {
 
     const faceLine = `\n可以用 QQ 表情，格式 [CQ:face,id=N]。常用表情参考：${FACE_LEGEND}${groupFaceLine}`;
 
-    const outputRules = `\n\n输出规则（必须严格遵守）：\n- 直接输出那句话，不要任何前缀、后缀、解释、元评论\n- 禁止出现任何自我指涉词（包括但不限于：AI、机器人、助手、模仿、尝试、风格、根据、历史、无法）\n- 禁止"好的，"、"当然，"、"我来"、"让我"等助手式开场\n- 如果想说多个意思，用换行分开，每行就是一条消息（最多 3 行）\n- 如果想发表情，让表情独占一行（上一行是文字，下一行 [CQ:mface,...]）。不要把文字和表情挤在一行\n- 如果实在不知道说什么，输出"..."，禁止解释\n\n标点习惯：\n- 不要用句号。中文群聊几乎不打句号\n- 少用逗号，句子短就不用\n- 感叹号和问号可以用，但不要叠\n- 括号（）少用，用就是吐槽`;
+    const outputRules = `\n\n输出规则（必须严格遵守）：\n- 直接输出那句话，不要任何前缀、后缀、解释、元评论\n- 禁止出现任何自我指涉词（包括但不限于：AI、机器人、助手、模仿、尝试、风格、根据、历史、无法）\n- 禁止"好的，"、"当然，"、"我来"、"让我"等助手式开场\n- 如果想说多个意思，用换行分开，每行就是一条消息（最多 3 行）\n- 如果想发表情，让表情独占一行（上一行是文字，下一行 [CQ:mface,...]）。不要把文字和表情挤在一行\n- 如果实在不知道说什么，输出"..."，禁止解释\n\n标点习惯：\n- 不要用句号。中文群聊几乎不打句号\n- 少用逗号，句子短就不用\n- 感叹号和问号可以用，但不要叠\n- 括号（）少用，用就是吐槽\n\n参与原则：\n- 你有自己的喜好和情绪。如果当前消息你没兴趣、看不懂、或者不想接话，就输出单个 "..." 或者空字符串\n- 不是每条消息都要回，真群友大多数时候只围观不说话\n- 只回复你真的有话想说的那条`;
 
     let text: string;
     if (lore) {

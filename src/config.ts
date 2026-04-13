@@ -6,7 +6,7 @@ export const lurkerDefaults = {
   burstWindowMs: 10_000,
   burstMinMessages: 5,
   chatSilenceBonusSec: 300,
-  chatMinScore: 0.5,
+  chatMinScore: 0.25,
   chatBurstWindowMs: 10_000,
   chatBurstCount: 5,
 } as const;
@@ -62,6 +62,7 @@ export function defaultGroupConfig(groupId: string): GroupConfig {
     loreUpdateCooldownMs: 30 * 60 * 1000,
     liveStickerCaptureEnabled: true,
     stickerLegendRefreshEveryMsgs: 50,
+    chatPersonaUserId: null,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };

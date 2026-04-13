@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ChatModule, extractKeywords, extractTopFaces, tokenizeLore, IDENTITY_PROBE, IDENTITY_DEFLECTIONS, TASK_REQUEST, TASK_DEFLECTIONS, MEMORY_INJECT, MEMORY_INJECT_DEFLECTIONS, pickDeflection } from '../src/modules/chat.js';
+import { lurkerDefaults } from '../src/config.js';
 import type { IClaudeClient, ClaudeResponse } from '../src/ai/claude.js';
 import type { GroupMessage } from '../src/adapter/napcat.js';
 import { Database } from '../src/storage/db.js';
@@ -764,14 +765,14 @@ describe('ChatModule — sentinel: AI self-disclosure prevention', () => {
     expect(claude.mock.calls.length).toBe(2);
   });
 
-  it('both attempts contain forbidden content → returns "..."', async () => {
+  it('both attempts contain forbidden content → returns null (silence-drop applied)', async () => {
     claude.mockResolvedValue({
       text: '我是一个AI助手，很高兴为您服务',
       inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0,
     });
     const chat = makeSentinelChat();
     const result = await chat.generateReply('g1', mentionMsg('你好'), []);
-    expect(result).toBe('...');
+    expect(result).toBeNull();
     expect(claude.mock.calls.length).toBe(2);
   });
 
@@ -1043,5 +1044,66 @@ describe('pickDeflection helper', () => {
     const results = new Set<string>();
     for (let i = 0; i < 40; i++) results.add(pickDeflection(pool));
     expect(results.size).toBeGreaterThan(1);
+  });
+});
+
+describe('ChatModule — soft score gate + Claude-driven silence', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+  });
+
+  function makeChat(claudeText: string) {
+    const claude = makeMockClaude(claudeText);
+    const chat = new ChatModule(
+      claude,
+      db,
+      { botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999 },
+    );
+    return { chat, claude };
+  }
+
+  it('Claude returns "..." → reply dropped (null returned)', async () => {
+    const { chat } = makeChat('...');
+    const result = await chat.generateReply('g1', makeMsg({ content: '随便说点什么' }), []);
+    expect(result).toBeNull();
+  });
+
+  it('Claude returns empty string → reply dropped', async () => {
+    const { chat } = makeChat('');
+    const result = await chat.generateReply('g1', makeMsg({ content: '随便说点什么' }), []);
+    expect(result).toBeNull();
+  });
+
+  it('Claude returns "。" → reply dropped', async () => {
+    const { chat } = makeChat('。');
+    const result = await chat.generateReply('g1', makeMsg({ content: '随便说点什么' }), []);
+    expect(result).toBeNull();
+  });
+
+  it('Claude returns real text → reply sent normally', async () => {
+    const { chat } = makeChat('好啊');
+    const result = await chat.generateReply('g1', makeMsg({ content: '今天吃啥' }), []);
+    expect(result).toBe('好啊');
+  });
+
+  it('chatMinScore default is 0.25 (soft gate)', () => {
+    expect(lurkerDefaults.chatMinScore).toBe(0.25);
+  });
+
+  it('system prompt contains participation opt-out instruction', async () => {
+    const claude: IClaudeClient = {
+      complete: vi.fn().mockResolvedValue({
+        text: '好的',
+        inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0,
+      }),
+    };
+    const chat = new ChatModule(claude, db, { botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999 });
+    await chat.generateReply('g1', makeMsg({ content: '你好' }), []);
+    const call = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+    const systemText = call?.system?.[0]?.text as string;
+    expect(systemText).toContain('没兴趣');
+    expect(systemText).toContain('...');
   });
 });
