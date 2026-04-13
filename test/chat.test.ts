@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ChatModule, extractKeywords, extractTopFaces, tokenizeLore, IDENTITY_PROBE, IDENTITY_DEFLECTIONS, TASK_REQUEST, TASK_DEFLECTIONS, MEMORY_INJECT, MEMORY_INJECT_DEFLECTIONS, pickDeflection, BANGDREAM_PERSONA, CURSE_DEFLECTIONS } from '../src/modules/chat.js';
+import { ChatModule, extractKeywords, extractTopFaces, tokenizeLore, IDENTITY_PROBE, IDENTITY_DEFLECTIONS, TASK_REQUEST, TASK_DEFLECTIONS, MEMORY_INJECT, MEMORY_INJECT_DEFLECTIONS, pickDeflection, BANGDREAM_PERSONA, CURSE_DEFLECTIONS, DEFLECT_FALLBACKS, type DeflectCategory } from '../src/modules/chat.js';
 import { lurkerDefaults, defaultGroupConfig } from '../src/config.js';
 import type { IClaudeClient, ClaudeResponse } from '../src/ai/claude.js';
 import type { GroupMessage } from '../src/adapter/napcat.js';
@@ -824,7 +824,7 @@ describe('ChatModule — identity probe deflection', () => {
     return new ChatModule(
       { complete: claude } as unknown as IClaudeClient,
       db,
-      { botUserId: BOT_ID, lurkerReplyChance: 1, lurkerCooldownMs: 0, chatMinScore: -999 },
+      { botUserId: BOT_ID, lurkerReplyChance: 1, lurkerCooldownMs: 0, chatMinScore: -999, deflectCacheEnabled: false },
     );
   }
 
@@ -909,7 +909,7 @@ describe('ChatModule — task request deflection', () => {
     return new ChatModule(
       { complete: claude } as unknown as IClaudeClient,
       db,
-      { botUserId: BOT_ID, lurkerReplyChance: 1, lurkerCooldownMs: 0, chatMinScore: -999 },
+      { botUserId: BOT_ID, lurkerReplyChance: 1, lurkerCooldownMs: 0, chatMinScore: -999, deflectCacheEnabled: false },
     );
   }
 
@@ -994,7 +994,7 @@ describe('ChatModule — memory-injection deflection', () => {
     return new ChatModule(
       { complete: claude } as unknown as IClaudeClient,
       db,
-      { botUserId: BOT_ID, lurkerReplyChance: 1, lurkerCooldownMs: 0, chatMinScore: -999 },
+      { botUserId: BOT_ID, lurkerReplyChance: 1, lurkerCooldownMs: 0, chatMinScore: -999, deflectCacheEnabled: false },
     );
   }
 
@@ -1078,6 +1078,7 @@ describe('ChatModule — implicit bot reference detection', () => {
       chatBurstCount: 5,
       lurkerReplyChance: 1,
       lurkerCooldownMs: 0,
+      deflectCacheEnabled: false,
       ...overrides,
     });
   }
@@ -1299,6 +1300,7 @@ describe('ChatModule — curse escalation for repeat teasers', () => {
       debounceMs: 0,
       chatMinScore: -999,
       moodProactiveEnabled: false,
+      deflectCacheEnabled: false,
       teaseCurseThreshold: 3,
       teaseCounterWindowMs: 900_000, // 15 min
       ...overrides,
@@ -1376,5 +1378,127 @@ describe('ChatModule — curse escalation for repeat teasers', () => {
     await chat.generateReply('g1', normalMsg, []);
     // Counter should still be 2 (unchanged)
     expect(chat['teaseCounter'].get('g1:u1')?.count).toBe(2);
+  });
+});
+
+// ── Deflection cache ──────────────────────────────────────────────────────────
+
+describe('ChatModule — deflection cache', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+  });
+
+  function makeChat(claudeFn: ReturnType<typeof vi.fn>, opts: Record<string, unknown> = {}): ChatModule {
+    return new ChatModule(
+      { complete: claudeFn } as unknown as IClaudeClient,
+      db,
+      {
+        botUserId: BOT_ID,
+        debounceMs: 0,
+        chatMinScore: -999,
+        moodProactiveEnabled: false,
+        deflectCacheEnabled: true,
+        deflectCacheSize: 5,
+        deflectCacheRefreshMinThreshold: 2,
+        ...opts,
+      },
+    );
+  }
+
+  // 1. Empty cache + disabled live → synchronous fallback to static pool
+  it('empty cache → returns phrase from static fallback pool', async () => {
+    const claude = vi.fn().mockRejectedValue(new Error('API error'));
+    const chat = makeChat(claude, { deflectCacheEnabled: false });
+    const msg = makeMsg({ content: '你是机器人吗', userId: 'u1' });
+    const result = await chat.generateReply('g1', msg, []);
+    expect(DEFLECT_FALLBACKS['identity']).toContain(result);
+  });
+
+  // 2. Cache has entries → pop one, return it (no Claude call for the deflection)
+  it('cache has entries → pops and returns cached phrase', async () => {
+    const claude = vi.fn().mockResolvedValue({ text: 'not used', inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } satisfies ClaudeResponse);
+    const chat = makeChat(claude, { deflectCacheEnabled: true });
+    // Wait for initial pre-warm to settle, then replace cache with known values
+    await new Promise(r => setTimeout(r, 20));
+    // Block further refills and set a known 2-entry cache
+    const allCategories: DeflectCategory[] = ['identity', 'task', 'memory', 'recite', 'curse', 'silence', 'mood_happy', 'mood_bored', 'mood_annoyed'];
+    for (const c of allCategories) chat['deflectRefilling'].add(c);
+    chat['deflectCache'].set('identity', ['啥', '？？？']);
+
+    const msg = makeMsg({ content: '你是机器人吗', userId: 'u1' });
+    const result = await chat.generateReply('g1', msg, []);
+    expect(['啥', '？？？']).toContain(result);
+    // Cache should have one fewer entry
+    expect(chat['deflectCache'].get('identity')!.length).toBe(1);
+  });
+
+  // 3. Cache drops below threshold → async refill triggered
+  it('cache below threshold → refill triggered async', async () => {
+    const batchLines = Array(5).fill('好烦').join('\n');
+    const claude = vi.fn().mockResolvedValue({ text: batchLines, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } satisfies ClaudeResponse);
+    const chat = makeChat(claude, { deflectCacheEnabled: true, deflectCacheRefreshMinThreshold: 3 });
+    // Pre-load with 2 entries (at threshold)
+    chat['deflectCache'].set('identity', ['a', 'b']);
+
+    const msg = makeMsg({ content: '你是机器人吗', userId: 'u1' });
+    await chat.generateReply('g1', msg, []);
+
+    // Wait a tick for async refill to complete
+    await new Promise(r => setTimeout(r, 50));
+    const cache = chat['deflectCache'].get('identity') ?? [];
+    // Should have grown (refill added entries)
+    expect(cache.length).toBeGreaterThan(0);
+  });
+
+  // 4. Refill fires on 30-min timer — verified by calling _refillAllDeflectCategories directly
+  it('_refillAllDeflectCategories populates all categories', async () => {
+    const batchLines = Array(5).fill('短回复').join('\n');
+    const claude = vi.fn().mockResolvedValue({ text: batchLines, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } satisfies ClaudeResponse);
+    const chat = makeChat(claude, { deflectCacheEnabled: true });
+    // Clear all caches and refilling flags
+    chat['deflectCache'].clear();
+    chat['deflectRefilling'].clear();
+
+    await chat['_refillAllDeflectCategories']();
+
+    const categories: DeflectCategory[] = ['identity', 'task', 'memory', 'recite', 'curse', 'silence', 'mood_happy', 'mood_bored', 'mood_annoyed'];
+    for (const cat of categories) {
+      expect((chat['deflectCache'].get(cat) ?? []).length).toBeGreaterThan(0);
+    }
+  });
+
+  // 5. Refill fails → cache stays empty, next request uses static fallback
+  it('refill Claude error → cache empty, falls back to static pool', async () => {
+    const claude = vi.fn().mockRejectedValue(new Error('timeout'));
+    const chat = makeChat(claude, { deflectCacheEnabled: true });
+    chat['deflectCache'].clear();
+    chat['deflectRefilling'].clear();
+
+    await chat['_refillDeflectCategory']('task');
+    expect((chat['deflectCache'].get('task') ?? []).length).toBe(0);
+
+    // Now a deflection request should return static pool phrase
+    const msg = makeMsg({ content: '帮我写首诗', userId: 'u1' });
+    const result = await chat.generateReply('g1', msg, []);
+    expect(DEFLECT_FALLBACKS['task']).toContain(result);
+  });
+
+  // 6. Generated response contains AI self-disclosure → _validateDeflection rejects it
+  it('_validateDeflection rejects AI self-disclosure phrases', () => {
+    const claude = vi.fn();
+    const chat = makeChat(claude);
+    expect(chat['_validateDeflection']('作为AI我无法帮你')).toBeNull();
+    expect(chat['_validateDeflection']('我是一个语言模型')).toBeNull();
+    expect(chat['_validateDeflection']('好的，我来帮你')).toBeNull();
+  });
+
+  // 7. Generated response too long → _validateDeflection rejects it
+  it('_validateDeflection rejects responses longer than 30 chars', () => {
+    const claude = vi.fn();
+    const chat = makeChat(claude);
+    expect(chat['_validateDeflection']('这是一句超过三十个字符的超级超级超级超级超级超级超级超级长句子啊')).toBeNull();
+    expect(chat['_validateDeflection']('短句')).toBe('短句');
   });
 });

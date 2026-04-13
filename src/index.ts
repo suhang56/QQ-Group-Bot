@@ -54,7 +54,7 @@ const adapter = new NapCatAdapter(NAPCAT_WS_URL, process.env['NAPCAT_ACCESS_TOKE
 const claude = new ClaudeClient();
 const rateLimiter = new RateLimiter();
 const router = new Router(db, adapter, rateLimiter, botUserId);
-const chat = new ChatModule(claude, db, { botUserId });
+const chat = new ChatModule(claude, db, { botUserId, deflectCacheEnabled: true });
 router.setChat(chat);
 
 // Embedding service: fire-and-forget init — bot must not block on model load
