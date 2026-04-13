@@ -31,14 +31,9 @@ const logger = createLogger('bootstrap');
 
 // 2. Validate required env vars
 const NAPCAT_WS_URL = process.env['NAPCAT_WS_URL'];
-const ANTHROPIC_API_KEY = process.env['ANTHROPIC_API_KEY'];
 
 if (!NAPCAT_WS_URL) {
   logger.fatal('Missing required env var: NAPCAT_WS_URL');
-  process.exit(1);
-}
-if (!ANTHROPIC_API_KEY) {
-  logger.fatal('Missing required env var: ANTHROPIC_API_KEY');
   process.exit(1);
 }
 
@@ -49,7 +44,7 @@ logger.info({ dbPath }, 'Database opened');
 
 // 4. Instantiate services (bootstrap order per architecture §5.2)
 const adapter = new NapCatAdapter(NAPCAT_WS_URL, process.env['NAPCAT_ACCESS_TOKEN']);
-const claude = new ClaudeClient(ANTHROPIC_API_KEY);
+const claude = new ClaudeClient();
 const rateLimiter = new RateLimiter();
 const router = new Router(db, adapter, rateLimiter);
 const chat = new ChatModule(claude, db);
