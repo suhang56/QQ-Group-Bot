@@ -54,7 +54,18 @@ interface ScoreFactors {
   twoUser: number;
   burst: number;
   replyToOther: number;
+  implicitBotRef: number;
 }
+
+// Signal A: bot alias keywords — always indicate a reference to the bot
+const BOT_ALIAS_RE = /小号|QAQ|bot|机器人|这\s*[Aa][Ii]/i;
+// Pronouns that count only when bot posted recently (ambiguous)
+const BOT_PRONOUN_RE = /[她他它]/;
+// Signal B: reaction phrases that suggest commenting on bot's recent output (intentionally narrow)
+const BOT_REACTION_RE = /变笨|变傻|抽风|死机|坏了|没反应|真的假的|笑死|绷不住/;
+const IMPLICIT_BOT_REF_ALIAS_WINDOW_MS = 60_000;
+const IMPLICIT_BOT_REF_REACTION_WINDOW_MS = 30_000;
+const IMPLICIT_BOT_REF_REACTION_MAX_CHARS = 15;
 
 // Matches direct identity probes directed at the bot (not incidental keyword mentions)
 export const IDENTITY_PROBE =
@@ -438,6 +449,7 @@ export class ChatModule implements IChatModule {
       twoUser: 0,
       burst: 0,
       replyToOther: 0,
+      implicitBotRef: 0,
     };
 
     // +1.0 @-mention of bot
@@ -502,6 +514,13 @@ export class ChatModule implements IChatModule {
       factors.replyToOther = -0.4;
     }
 
+    // +0.8 implicit bot reference: alias keyword OR (pronoun/reaction + recent bot post)
+    const lastProactiveMs = this.lastProactiveReply.get(groupId) ?? 0;
+    if (this._isImplicitBotRef(content, nowMs, lastProactiveMs)) {
+      factors.implicitBotRef = 0.8;
+      this.logger.debug({ groupId, content }, 'implicit bot reference detected');
+    }
+
     const score = Object.values(factors).reduce((s, f) => s + f, 0);
     return { score: Math.max(0, score), factors, isDirect: false };
   }
@@ -524,6 +543,20 @@ export class ChatModule implements IChatModule {
     // Message is a reply-quote, but NOT to the bot
     if (!msg.rawContent.includes('[CQ:reply,')) return false;
     return !this._isReplyToBot(msg);
+  }
+
+  private _isImplicitBotRef(content: string, nowMs: number, lastBotPostMs: number): boolean {
+    // Signal A: explicit bot alias keyword — always counts regardless of timing
+    if (BOT_ALIAS_RE.test(content)) return true;
+    // Signal B: pronoun OR reaction phrase + bot posted recently
+    const msSinceBot = nowMs - lastBotPostMs;
+    if (BOT_PRONOUN_RE.test(content) && msSinceBot < IMPLICIT_BOT_REF_ALIAS_WINDOW_MS) return true;
+    if (
+      BOT_REACTION_RE.test(content) &&
+      content.length <= IMPLICIT_BOT_REF_REACTION_MAX_CHARS &&
+      msSinceBot < IMPLICIT_BOT_REF_REACTION_WINDOW_MS
+    ) return true;
+    return false;
   }
 
   private _hasLoreKeyword(groupId: string, content: string): boolean {
