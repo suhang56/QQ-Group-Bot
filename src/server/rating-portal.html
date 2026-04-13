@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bot Reply Rating Portal</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f0f0f; color: #e0e0e0; min-height: 100vh; padding: 24px; }
+h1 { font-size: 18px; font-weight: 600; color: #fff; margin-bottom: 16px; }
+.toolbar { display: flex; gap: 12px; align-items: center; margin-bottom: 20px; flex-wrap: wrap; }
+.toolbar select, .toolbar button { background: #1e1e1e; border: 1px solid #333; color: #e0e0e0; padding: 6px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; }
+.toolbar button:hover { background: #2a2a2a; }
+.toolbar .stat { font-size: 13px; color: #888; }
+.card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 10px; padding: 20px; margin-bottom: 16px; position: relative; transition: border-color 0.15s; }
+.card.active { border-color: #4a9eff; }
+.card.rated-good { border-left: 3px solid #4caf50; }
+.card.rated-bad { border-left: 3px solid #f44336; }
+.card.rated-mid { border-left: 3px solid #ff9800; }
+.meta { font-size: 12px; color: #666; margin-bottom: 10px; display: flex; gap: 12px; flex-wrap: wrap; }
+.meta span { display: flex; align-items: center; gap: 4px; }
+.trigger { background: #111; border-radius: 6px; padding: 10px 14px; margin-bottom: 10px; font-size: 14px; line-height: 1.5; }
+.trigger .label { font-size: 11px; color: #666; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+.reply { background: #0d1a2d; border: 1px solid #1e3a5f; border-radius: 6px; padding: 10px 14px; font-size: 14px; line-height: 1.5; }
+.reply .label { font-size: 11px; color: #4a9eff; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+.stars { display: flex; gap: 6px; margin-top: 12px; align-items: center; }
+.star { font-size: 24px; cursor: pointer; line-height: 1; transition: transform 0.1s; color: #444; }
+.star:hover, .star.lit { color: #f5c518; transform: scale(1.1); }
+.comment-box { margin-top: 10px; display: none; }
+.comment-box.visible { display: block; }
+.comment-box input { width: 100%; background: #111; border: 1px solid #333; color: #e0e0e0; padding: 8px 12px; border-radius: 6px; font-size: 13px; outline: none; }
+.comment-box input:focus { border-color: #4a9eff; }
+.module-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; text-transform: uppercase; }
+.module-chat { background: #1a3a1a; color: #4caf50; }
+.module-mimic { background: #3a1a3a; color: #ce93d8; }
+.kbd { display: inline-block; background: #2a2a2a; border: 1px solid #444; border-radius: 4px; padding: 1px 5px; font-size: 11px; font-family: monospace; color: #aaa; }
+.help { font-size: 12px; color: #555; margin-top: 8px; }
+.empty { text-align: center; padding: 60px; color: #555; }
+#nav { display: flex; gap: 8px; align-items: center; margin-top: 20px; }
+#nav button { background: #1e1e1e; border: 1px solid #333; color: #e0e0e0; padding: 6px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+#nav button:disabled { opacity: 0.35; cursor: default; }
+#nav .pos { font-size: 13px; color: #666; padding: 0 8px; }
+</style>
+</head>
+<body>
+<h1>Bot Reply Rating Portal</h1>
+<div class="toolbar">
+  <select id="modeSelect">
+    <option value="unrated">Unrated only</option>
+    <option value="recent">All recent</option>
+  </select>
+  <button id="refreshBtn">Refresh</button>
+  <span class="stat" id="statEl"></span>
+</div>
+<div class="help">
+  <span class="kbd">1</span>–<span class="kbd">5</span> rate &nbsp;
+  <span class="kbd">←</span><span class="kbd">→</span> or <span class="kbd">Enter</span> navigate &nbsp;
+  <span class="kbd">c</span> add comment
+</div>
+<div id="listEl" style="margin-top:20px"></div>
+<div id="nav">
+  <button id="prevBtn" disabled>← Prev</button>
+  <span class="pos" id="posEl"></span>
+  <button id="nextBtn" disabled>Next →</button>
+</div>
+
+<script>
+let replies = [];
+let current = 0;
+const PAGE = 1; // single-card focus mode
+
+async function load() {
+  const mode = document.getElementById('modeSelect').value;
+  const res = await fetch(`/api/replies?mode=${mode}&limit=200`);
+  replies = await res.json();
+  current = 0;
+  render();
+}
+
+function render() {
+  const el = document.getElementById('listEl');
+  const stat = document.getElementById('statEl');
+  const pos = document.getElementById('posEl');
+  const prev = document.getElementById('prevBtn');
+  const next = document.getElementById('nextBtn');
+
+  if (replies.length === 0) {
+    el.innerHTML = '<div class="empty">No replies to show.</div>';
+    stat.textContent = '';
+    pos.textContent = '';
+    prev.disabled = true;
+    next.disabled = true;
+    return;
+  }
+
+  stat.textContent = `${replies.length} replies`;
+  pos.textContent = `${current + 1} / ${replies.length}`;
+  prev.disabled = current === 0;
+  next.disabled = current === replies.length - 1;
+
+  const r = replies[current];
+  const rated = r.rating !== null;
+  const ratingClass = rated ? (r.rating >= 4 ? 'rated-good' : r.rating <= 2 ? 'rated-bad' : 'rated-mid') : '';
+  const ts = new Date(r.sentAt * 1000).toLocaleString('zh-CN');
+  const modCls = r.module === 'mimic' ? 'module-mimic' : 'module-chat';
+
+  el.innerHTML = `
+    <div class="card active ${ratingClass}" id="card-${r.id}">
+      <div class="meta">
+        <span><span class="module-badge ${modCls}">${r.module}</span></span>
+        <span>${ts}</span>
+        ${r.triggerUserNickname ? `<span>from: <b>${esc(r.triggerUserNickname)}</b></span>` : ''}
+        ${rated ? `<span style="color:#f5c518">★ ${r.rating}/5${r.ratingComment ? ` — ${esc(r.ratingComment)}` : ''}</span>` : ''}
+      </div>
+      <div class="trigger">
+        <div class="label">Trigger</div>
+        ${esc(r.triggerContent)}
+      </div>
+      <div class="reply">
+        <div class="label">Bot reply</div>
+        ${esc(r.botReply)}
+      </div>
+      <div class="stars" id="stars-${r.id}">
+        ${[1,2,3,4,5].map(n => `<span class="star ${rated && n <= r.rating ? 'lit' : ''}" data-n="${n}" onclick="rate(${r.id},${n})">★</span>`).join('')}
+        <span style="font-size:13px;color:#555;margin-left:8px">${rated ? 'rated' : 'unrated'}</span>
+      </div>
+      <div class="comment-box" id="cbox-${r.id}">
+        <input type="text" placeholder="Comment (optional) — press Enter to save" id="cinput-${r.id}" value="${esc(r.ratingComment ?? '')}">
+      </div>
+    </div>
+  `;
+
+  // bind comment input enter
+  const cinput = document.getElementById(`cinput-${r.id}`);
+  if (cinput) {
+    cinput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const rating = replies[current].rating ?? pendingRating;
+        if (rating) saveRating(r.id, rating, cinput.value.trim() || null);
+      }
+    });
+  }
+}
+
+let pendingRating = null;
+
+async function rate(id, n) {
+  pendingRating = n;
+  // Highlight stars immediately
+  const stars = document.querySelectorAll(`#stars-${id} .star`);
+  stars.forEach((s, i) => s.classList.toggle('lit', i < n));
+  // Show comment box
+  const cbox = document.getElementById(`cbox-${id}`);
+  if (cbox) cbox.classList.add('visible');
+  // Focus comment input
+  const cinput = document.getElementById(`cinput-${id}`);
+  if (cinput) cinput.focus();
+  // Save immediately (comment can update after)
+  await saveRating(id, n, null);
+}
+
+async function saveRating(id, rating, comment) {
+  await fetch(`/api/replies/${id}/rate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rating, comment }),
+  });
+  // Update local state
+  const r = replies[current];
+  if (r && r.id === id) {
+    r.rating = rating;
+    r.ratingComment = comment;
+  }
+  render();
+  // Auto-advance to next after a short delay
+  setTimeout(() => {
+    if (current < replies.length - 1) {
+      current++;
+      render();
+    }
+  }, 600);
+}
+
+function esc(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+document.getElementById('prevBtn').addEventListener('click', () => { if (current > 0) { current--; render(); } });
+document.getElementById('nextBtn').addEventListener('click', () => { if (current < replies.length - 1) { current++; render(); } });
+document.getElementById('refreshBtn').addEventListener('click', load);
+document.getElementById('modeSelect').addEventListener('change', load);
+
+document.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT') return;
+  if (e.key >= '1' && e.key <= '5') {
+    const r = replies[current];
+    if (r) rate(r.id, parseInt(e.key));
+  } else if (e.key === 'ArrowRight' || e.key === 'Enter') {
+    if (current < replies.length - 1) { current++; render(); }
+  } else if (e.key === 'ArrowLeft') {
+    if (current > 0) { current--; render(); }
+  } else if (e.key === 'c') {
+    const r = replies[current];
+    if (r) {
+      const cbox = document.getElementById(`cbox-${r.id}`);
+      if (cbox) { cbox.classList.add('visible'); document.getElementById(`cinput-${r.id}`)?.focus(); }
+    }
+  }
+});
+
+load();
+</script>
+</body>
+</html>
