@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { hasForbiddenContent, stripEcho } from '../src/utils/sentinel.js';
+import { hasForbiddenContent, stripEcho, postProcess } from '../src/utils/sentinel.js';
 
 describe('hasForbiddenContent', () => {
   it('returns null for clean Chinese group reply', () => {
@@ -82,5 +82,29 @@ describe('stripEcho', () => {
     const reply = `${user}\n--- \n这是Claude助手`;
     const result = stripEcho(reply, user);
     expect(result).toBe('这是Claude助手');
+  });
+});
+
+describe('postProcess', () => {
+  it('strips trailing Chinese period', () => {
+    expect(postProcess('好的哦。')).toBe('好的哦');
+  });
+
+  it('strips multiple trailing periods', () => {
+    expect(postProcess('哈哈。。')).toBe('哈哈');
+  });
+
+  it('leaves replies without trailing period unchanged', () => {
+    expect(postProcess('笑死我了')).toBe('笑死我了');
+    expect(postProcess('好哦！')).toBe('好哦！');
+    expect(postProcess('真的假的？')).toBe('真的假的？');
+  });
+
+  it('strips trailing whitespace then period', () => {
+    expect(postProcess('来了  。')).toBe('来了');
+  });
+
+  it('does not strip mid-sentence period', () => {
+    expect(postProcess('他说。然后走了')).toBe('他说。然后走了');
   });
 });

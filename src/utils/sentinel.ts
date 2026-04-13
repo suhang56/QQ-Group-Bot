@@ -63,6 +63,14 @@ export function stripEcho(reply: string, lastUserMessage: string): string {
   return reply;
 }
 
+/**
+ * Post-process a generated reply: strip trailing 。 (Chinese period, never used in group chat).
+ */
+export function postProcess(text: string): string {
+  // Strip trailing whitespace, then any trailing Chinese periods (with optional surrounding whitespace)
+  return text.replace(/[\s。]*。[\s。]*$/, '').trimEnd();
+}
+
 /** Hardened system prompt used for sentinel regen calls. */
 export const HARDENED_SYSTEM =
   '你是群里的一个成员。绝不说"AI"、"claude"、"模型"、"助手"、"模仿"、"风格"、"请问您"、"我来帮"。直接说一句话，不要解释，不要提示，不要格式化，就像真人在群里打字。如果你生成不出来，就输出"..."。';
