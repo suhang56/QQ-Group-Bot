@@ -6,7 +6,7 @@ export type ClaudeModel = 'claude-sonnet-4-6' | 'claude-opus-4-6';
 
 export interface CachedSystemBlock {
   text: string;
-  cache: boolean;
+  cache: true;
 }
 
 export interface ClaudeMessage {

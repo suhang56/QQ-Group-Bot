@@ -98,14 +98,11 @@ describe('Router', () => {
     expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('统计数据'));
   });
 
-  it('non-command message is persisted without sending reply by default', async () => {
+  it('non-command message is persisted without sending reply when no chat module attached', async () => {
+    // Router created without setChat() — no chat module, so no reply should be sent
+    const isolatedRouter = new Router(db, adapter, rl);
     const sendSpy = vi.spyOn(adapter, 'send');
-    // No chat trigger configured, at-only mode doesn't apply
-    // Just a regular message — persisted, no chat reply unless triggered
-    await router.dispatch(makeMsg({ content: 'just chatting' }));
-    // No send unless chat module triggered
-    const calls = sendSpy.mock.calls;
-    // May or may not send depending on chat trigger — just ensure no crash
-    expect(calls.length).toBeLessThanOrEqual(1);
+    await isolatedRouter.dispatch(makeMsg({ content: 'just chatting' }));
+    expect(sendSpy).not.toHaveBeenCalled();
   });
 });

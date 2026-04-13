@@ -1,5 +1,5 @@
 import type { GroupMessage, INapCatAdapter } from '../adapter/napcat.js';
-import type { Database } from '../storage/db.js';
+import type { Database, GroupConfig } from '../storage/db.js';
 import type { RateLimiter } from './rateLimiter.js';
 import type { IChatModule } from '../modules/chat.js';
 import { createLogger } from '../utils/logger.js';
@@ -11,6 +11,7 @@ export interface IRouter {
 export type CommandHandler = (
   msg: GroupMessage,
   args: string[],
+  config: GroupConfig,
 ) => Promise<void>;
 
 export class Router implements IRouter {
@@ -73,7 +74,8 @@ export class Router implements IRouter {
 
         const handler = this.commands.get(cmd);
         if (handler) {
-          await handler(msg, args);
+          const config = this.db.groupConfig.get(msg.groupId) ?? this._defaultConfig(msg.groupId);
+          await handler(msg, args, config);
         }
         // Unknown commands silently ignored
         return;
@@ -102,8 +104,30 @@ export class Router implements IRouter {
     }
   }
 
+  private _defaultConfig(groupId: string): GroupConfig {
+    return {
+      groupId,
+      enabledModules: ['chat', 'mimic', 'moderator', 'learner'],
+      autoMod: true,
+      dailyPunishmentLimit: 10,
+      punishmentsToday: 0,
+      punishmentsResetDate: new Date().toISOString().slice(0, 10),
+      mimicActiveUserId: null,
+      mimicStartedBy: null,
+      chatTriggerKeywords: [],
+      chatTriggerAtOnly: false,
+      chatDebounceMs: 2000,
+      modConfidenceThreshold: 0.7,
+      modWhitelist: [],
+      appealWindowHours: 24,
+      kickConfirmModel: 'claude-opus-4-6',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
   private _registerCommands(): void {
-    this.commands.set('help', async (msg) => {
+    this.commands.set('help', async (msg, _args, _config) => {
       await this.adapter.send(msg.groupId, `欢迎使用群机器人！以下是所有可用指令：
 
 【聊天 & 模仿】
@@ -125,7 +149,7 @@ export class Router implements IRouter {
 如有疑问请联系群管理员。`);
     });
 
-    this.commands.set('rules', async (msg, args) => {
+    this.commands.set('rules', async (msg, args, _config) => {
       const pageArg = args[0] === 'page' ? parseInt(args[1] ?? '1', 10) : 1;
       const page = isNaN(pageArg) ? 1 : Math.max(1, pageArg);
       const limit = 20;
@@ -152,20 +176,22 @@ export class Router implements IRouter {
       await this.adapter.send(msg.groupId, text);
     });
 
-    this.commands.set('stats', async (msg) => {
+    this.commands.set('stats', async (msg, _args, config) => {
+      // NOTE: Bug 1 (pending architect approval) — findRecentByGroup not yet available.
+      // findRecentByUser requires a specific userId; passing empty string returns no results.
+      // Will be fixed once IModerationRepository.findRecentByGroup is approved + implemented.
       const sevenDays = 7 * 24 * 3600;
       const recent = this.db.moderation.findRecentByUser('', msg.groupId, sevenDays * 1000);
 
-      const config = this.db.groupConfig.get(msg.groupId);
-      const cap = config?.dailyPunishmentLimit ?? 10;
-      const punishmentsToday = config?.punishmentsToday ?? 0;
+      const cap = config.dailyPunishmentLimit;
+      const punishmentsToday = config.punishmentsToday;
       const remaining = Math.max(0, cap - punishmentsToday);
 
       const violations = recent.filter(r => r.violation).length;
       const punishments = recent.filter(r => r.action !== 'none').length;
       const appeals = recent.filter(r => r.appealed > 0).length;
       const approved = recent.filter(r => r.reversed).length;
-      const mimicUser = config?.mimicActiveUserId;
+      const mimicUser = config.mimicActiveUserId;
 
       await this.adapter.send(msg.groupId, `本群近7天统计数据：
 - 处理消息数：${this.db.messages.getRecent(msg.groupId, 9999).length}
@@ -179,7 +205,7 @@ export class Router implements IRouter {
     // Stub: mimic, mimic_on, mimic_off, rule_add, rule_false_positive, appeal
     // Will be fully implemented in M3/M4
     for (const cmd of ['mimic', 'mimic_on', 'mimic_off', 'rule_add', 'rule_false_positive', 'appeal']) {
-      this.commands.set(cmd, async (msg) => {
+      this.commands.set(cmd, async (msg, _args, _config) => {
         await this.adapter.send(msg.groupId, '此功能即将推出，敬请期待。');
       });
     }
