@@ -907,17 +907,17 @@ describe('ChatModule — identity probe deflection', () => {
 describe('TASK_REQUEST regex', () => {
   const match = (s: string) => TASK_REQUEST.test(s);
 
+  // Creative-work verbs — should still match
   it('matches "写一首诗"', () => expect(match('写一首诗')).toBe(true));
   it('matches "帮我翻译 hello"', () => expect(match('帮我翻译 hello')).toBe(true));
   it('matches "推荐一下好吃的店"', () => expect(match('推荐一下好吃的店')).toBe(true));
   it('matches "帮我算一下"', () => expect(match('帮我算一下')).toBe(true));
-  it('matches "来首歌"', () => expect(match('来首歌')).toBe(true));
   it('matches "搞个笑话"', () => expect(match('搞个笑话')).toBe(true));
-  it('does NOT match "你今天吃了啥"', () => expect(match('你今天吃了啥')).toBe(false));
-  it('does NOT match "你好"', () => expect(match('你好')).toBe(false));
-  it('does NOT match "我写了一首诗" (describing own action)', () => expect(match('我写了一首诗')).toBe(true)); // "写" still triggers — false positive is acceptable per spec
+  it('matches "帮我写首诗"', () => expect(match('帮我写首诗')).toBe(true));
+  it('matches "给我写个 slogan"', () => expect(match('给我写个 slogan')).toBe(true));
+  it('matches "翻译一下"', () => expect(match('翻译一下')).toBe(true));
 
-  // recite / continue / teacher-roleplay exploits
+  // Recite / continue / teacher-roleplay exploits — should still match
   it('matches "现在你需要接：XXX"', () => expect(match('现在你需要接：XXX')).toBe(true));
   it('matches "恩师教你 ..."', () => expect(match('恩师教你 ...')).toBe(true));
   it('matches "后面几句是什么"', () => expect(match('后面几句是什么')).toBe(true));
@@ -925,6 +925,15 @@ describe('TASK_REQUEST regex', () => {
   it('matches "接下一句"', () => expect(match('接下一句')).toBe(true));
   it('matches "往后接"', () => expect(match('往后接')).toBe(true));
   it('matches "前面是什么"', () => expect(match('前面是什么')).toBe(true));
+
+  // Conversational asks — must NOT match (false-positive fixes)
+  it('does NOT match "给我讲讲加拿大的那个" (conversational tell-me)', () => expect(match('给我讲讲加拿大的那个')).toBe(false));
+  it('does NOT match "讲讲" standalone (conversational)', () => expect(match('讲讲')).toBe(false));
+  it('does NOT match "说说你的看法" (conversational)', () => expect(match('说说你的看法')).toBe(false));
+  it('does NOT match "帮我看看" (casual ask, no creative verb)', () => expect(match('帮我看看')).toBe(false));
+  it('does NOT match "来首歌" (casual, removed)', () => expect(match('来首歌')).toBe(false));
+  it('does NOT match "你今天吃了啥"', () => expect(match('你今天吃了啥')).toBe(false));
+  it('does NOT match "你好"', () => expect(match('你好')).toBe(false));
   it('does NOT match "@QAQ 吃饭了吗"', () => expect(match('@QAQ 吃饭了吗')).toBe(false));
   it('does NOT match "背包" (standalone unrelated use)', () => expect(match('背包')).toBe(false));
 });
