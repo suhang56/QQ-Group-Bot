@@ -56,6 +56,7 @@ export function defaultGroupConfig(groupId: string): GroupConfig {
     repeaterCooldownMs: 600_000,
     repeaterMinContentLength: 2,
     repeaterMaxContentLength: 100,
+    nameImagesBlocklist: [],
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };

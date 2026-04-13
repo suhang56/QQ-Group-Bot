@@ -201,19 +201,22 @@ export class Router implements IRouter {
       // Name-image trigger: fires only when the entire message IS a known name (exact match after trim)
       if (this.nameImagesModule && config.nameImagesEnabled) {
         const trimmedContent = msg.content.trim();
-        const names = this.nameImagesModule.getAllNames(msg.groupId);
-        const exactName = names.find(n => n.toLowerCase() === trimmedContent.toLowerCase());
-        if (exactName) {
-          // Burst guard: skip if last 5 messages arrived within 10s
-          const recent5 = this.db.messages.getRecent(msg.groupId, 5);
-          const isBurst = recent5.length >= 5 &&
-            (recent5[0]!.timestamp - recent5[recent5.length - 1]!.timestamp) * 1000 <= 10_000;
-          if (!isBurst) {
-            const ok = this.nameImagesModule.checkAndSetCooldown(msg.groupId, exactName, config.nameImagesCooldownMs);
-            if (ok) {
-              const image = this.nameImagesModule.pickRandom(msg.groupId, exactName);
-              if (image) {
-                await this.adapter.send(msg.groupId, `[CQ:image,file=file:///${image.filePath.replace(/\\/g, '/')}]`);
+        const blocklist = (config.nameImagesBlocklist ?? []).map(b => b.toLowerCase());
+        if (!blocklist.includes(trimmedContent.toLowerCase())) {
+          const names = this.nameImagesModule.getAllNames(msg.groupId);
+          const exactName = names.find(n => n.toLowerCase() === trimmedContent.toLowerCase());
+          if (exactName) {
+            // Burst guard: skip if last 5 messages arrived within 10s
+            const recent5 = this.db.messages.getRecent(msg.groupId, 5);
+            const isBurst = recent5.length >= 5 &&
+              (recent5[0]!.timestamp - recent5[recent5.length - 1]!.timestamp) * 1000 <= 10_000;
+            if (!isBurst) {
+              const ok = this.nameImagesModule.checkAndSetCooldown(msg.groupId, exactName, config.nameImagesCooldownMs);
+              if (ok) {
+                const image = this.nameImagesModule.pickRandom(msg.groupId, exactName);
+                if (image) {
+                  await this.adapter.send(msg.groupId, `[CQ:image,file=file:///${image.filePath.replace(/\\/g, '/')}]`);
+                }
               }
             }
           }
@@ -645,6 +648,36 @@ export class Router implements IRouter {
       if (!this.nameImagesModule) return;
       this.nameImagesModule.stopCollecting(msg.groupId, msg.userId);
       await this.adapter.send(msg.groupId, '已停止收集，图片库已保存。');
+    });
+
+    this.commands.set('add_block', async (msg, args, config) => {
+      if (msg.role !== 'admin' && msg.role !== 'owner') {
+        await this.adapter.send(msg.groupId, '没有权限。只有管理员可以操作此指令。');
+        return;
+      }
+      const name = args.join(' ').trim();
+      if (!name) {
+        await this.adapter.send(msg.groupId, '用法：/add_block <人名>');
+        return;
+      }
+      const blocklist = [...new Set([...(config.nameImagesBlocklist ?? []), name])];
+      this.db.groupConfig.upsert({ ...config, nameImagesBlocklist: blocklist, updatedAt: new Date().toISOString() });
+      await this.adapter.send(msg.groupId, `已将 "${name}" 加入图片触发屏蔽名单，发该名字不再触发图片库。`);
+    });
+
+    this.commands.set('add_unblock', async (msg, args, config) => {
+      if (msg.role !== 'admin' && msg.role !== 'owner') {
+        await this.adapter.send(msg.groupId, '没有权限。只有管理员可以操作此指令。');
+        return;
+      }
+      const name = args.join(' ').trim();
+      if (!name) {
+        await this.adapter.send(msg.groupId, '用法：/add_unblock <人名>');
+        return;
+      }
+      const blocklist = (config.nameImagesBlocklist ?? []).filter(b => b.toLowerCase() !== name.toLowerCase());
+      this.db.groupConfig.upsert({ ...config, nameImagesBlocklist: blocklist, updatedAt: new Date().toISOString() });
+      await this.adapter.send(msg.groupId, `已将 "${name}" 从屏蔽名单移除，发该名字将恢复触发图片库。`);
     });
 
     this.commands.set('rule_false_positive', async (msg, args, _config) => {

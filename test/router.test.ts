@@ -702,6 +702,81 @@ describe('Router — /add name-images integration', () => {
   });
 });
 
+describe('Router — name-images blocklist', () => {
+  let db: Database;
+  let adapter: INapCatAdapter;
+  let router: Router;
+  let tmpDir: string;
+
+  function seedImg(name: string): string {
+    const imgPath = `${tmpDir}/${name}/test.jpg`;
+    fs.mkdirSync(`${tmpDir}/${name}`, { recursive: true });
+    fs.writeFileSync(imgPath, Buffer.from([0xff, 0xd8, 0xff, 0xe0]));
+    db.nameImages.insert('g1', name, imgPath, 'test.jpg', 'u1', 100);
+    return imgPath;
+  }
+
+  function setBlocklist(names: string[]): void {
+    const config = db.groupConfig.get('g1') ?? { groupId: 'g1', enabledModules: [], autoMod: false, dailyPunishmentLimit: 10, punishmentsToday: 0, punishmentsResetDate: '2026-01-01', mimicActiveUserId: null, mimicStartedBy: null, chatTriggerKeywords: [], chatTriggerAtOnly: false, chatDebounceMs: 2000, modConfidenceThreshold: 0.7, modWhitelist: [], appealWindowHours: 24, kickConfirmModel: 'claude-opus-4-6' as const, chatLoreEnabled: true, nameImagesEnabled: true, nameImagesCollectionTimeoutMs: 120_000, nameImagesCollectionMax: 20, nameImagesCooldownMs: 300_000, nameImagesMaxPerName: 50, chatAtMentionQueueMax: 5, chatAtMentionBurstWindowMs: 30_000, chatAtMentionBurstThreshold: 3, repeaterEnabled: true, repeaterMinCount: 3, repeaterCooldownMs: 600_000, repeaterMinContentLength: 2, repeaterMaxContentLength: 100, nameImagesBlocklist: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    db.groupConfig.upsert({ ...config, nameImagesBlocklist: names });
+  }
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    adapter = makeMockAdapter();
+    router = new Router(db, adapter, new RateLimiter());
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'router-bl-test-'));
+    router.setNameImages(new NameImagesModule(db.nameImages, tmpDir));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('blocked name → image not sent even though images exist', async () => {
+    seedImg('西瓜');
+    setBlocklist(['西瓜']);
+    await router.dispatch(makeMsg({ content: '西瓜', rawContent: '西瓜' }));
+    expect(adapter.send).not.toHaveBeenCalledWith('g1', expect.stringContaining('CQ:image'));
+  });
+
+  it('name removed from blocklist → image sent normally', async () => {
+    seedImg('西瓜');
+    setBlocklist([]); // not blocked
+    await router.dispatch(makeMsg({ content: '西瓜', rawContent: '西瓜' }));
+    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('CQ:image'));
+  });
+
+  it('/add_block by member → silently ignored (router gate blocks non-admin commands)', async () => {
+    await router.dispatch(makeMsg({ content: '/add_block 西瓜', rawContent: '/add_block 西瓜', role: 'member' }));
+    expect(adapter.send).not.toHaveBeenCalled();
+    const config = db.groupConfig.get('g1');
+    expect(config?.nameImagesBlocklist ?? []).not.toContain('西瓜');
+  });
+
+  it('/add_block 西瓜 by admin → blocklist updated, confirm reply', async () => {
+    await router.dispatch(makeMsg({ content: '/add_block 西瓜', rawContent: '/add_block 西瓜', role: 'admin' }));
+    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('西瓜'));
+    const config = db.groupConfig.get('g1');
+    expect(config?.nameImagesBlocklist).toContain('西瓜');
+  });
+
+  it('/add_unblock 西瓜 by admin → removed from blocklist, confirm reply', async () => {
+    setBlocklist(['西瓜']);
+    await router.dispatch(makeMsg({ content: '/add_unblock 西瓜', rawContent: '/add_unblock 西瓜', role: 'admin' }));
+    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('西瓜'));
+    const config = db.groupConfig.get('g1');
+    expect(config?.nameImagesBlocklist).not.toContain('西瓜');
+  });
+
+  it('case-insensitive: blocklist has "kisa", message "Kisa" → blocked', async () => {
+    seedImg('kisa');
+    setBlocklist(['kisa']);
+    await router.dispatch(makeMsg({ content: 'Kisa', rawContent: 'Kisa' }));
+    expect(adapter.send).not.toHaveBeenCalledWith('g1', expect.stringContaining('CQ:image'));
+  });
+});
+
 describe('Router — @-mention queue with quote-reply', () => {
   const BOT_ID = 'bot-42';
 

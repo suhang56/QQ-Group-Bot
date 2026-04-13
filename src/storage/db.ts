@@ -67,6 +67,7 @@ export interface GroupConfig {
   repeaterCooldownMs: number;
   repeaterMinContentLength: number;
   repeaterMaxContentLength: number;
+  nameImagesBlocklist: string[];
   createdAt: string;
   updatedAt: string;
 }
@@ -201,6 +202,7 @@ interface GroupConfigRow {
   repeater_cooldown_ms: number;
   repeater_min_content_length: number;
   repeater_max_content_length: number;
+  name_images_blocklist: string;
   created_at: string; updated_at: string;
 }
 
@@ -281,6 +283,7 @@ function configFromRow(row: GroupConfigRow): GroupConfig {
     repeaterCooldownMs: row.repeater_cooldown_ms ?? 600_000,
     repeaterMinContentLength: row.repeater_min_content_length ?? 2,
     repeaterMaxContentLength: row.repeater_max_content_length ?? 100,
+    nameImagesBlocklist: JSON.parse(row.name_images_blocklist ?? '[]') as string[],
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -492,8 +495,9 @@ class GroupConfigRepository implements IGroupConfigRepository {
         kick_confirm_model,
         name_images_enabled, name_images_collection_timeout_ms,
         name_images_collection_max, name_images_cooldown_ms, name_images_max_per_name,
+        name_images_blocklist,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(group_id) DO UPDATE SET
         enabled_modules = excluded.enabled_modules,
         auto_mod = excluded.auto_mod,
@@ -514,6 +518,7 @@ class GroupConfigRepository implements IGroupConfigRepository {
         name_images_collection_max = excluded.name_images_collection_max,
         name_images_cooldown_ms = excluded.name_images_cooldown_ms,
         name_images_max_per_name = excluded.name_images_max_per_name,
+        name_images_blocklist = excluded.name_images_blocklist,
         updated_at = excluded.updated_at
     `).run(
       config.groupId,
@@ -536,6 +541,7 @@ class GroupConfigRepository implements IGroupConfigRepository {
       config.nameImagesCollectionMax ?? 20,
       config.nameImagesCooldownMs ?? 300_000,
       config.nameImagesMaxPerName ?? 50,
+      JSON.stringify(config.nameImagesBlocklist ?? []),
       config.createdAt,
       config.updatedAt,
     );
@@ -753,6 +759,7 @@ export class Database {
       'repeater_cooldown_ms INTEGER NOT NULL DEFAULT 600000',
       'repeater_min_content_length INTEGER NOT NULL DEFAULT 2',
       'repeater_max_content_length INTEGER NOT NULL DEFAULT 100',
+      "name_images_blocklist TEXT NOT NULL DEFAULT '[]'",
     ]) {
       try { this._db.exec(`ALTER TABLE group_config ADD COLUMN ${col}`); } catch { /* already exists */ }
     }
