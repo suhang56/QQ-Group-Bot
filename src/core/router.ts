@@ -4,6 +4,7 @@ import type { RateLimiter } from './rateLimiter.js';
 import type { IChatModule } from '../modules/chat.js';
 import type { MimicModule } from '../modules/mimic.js';
 import type { ModeratorModule } from '../modules/moderator.js';
+import type { NameImagesModule } from '../modules/name-images.js';
 import { BotErrorCode } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
 import { defaultGroupConfig } from '../config.js';
@@ -23,6 +24,14 @@ function randomDelay(): number {
   return SPLIT_DELAY_MIN_MS + Math.floor(Math.random() * (SPLIT_DELAY_MAX_MS - SPLIT_DELAY_MIN_MS));
 }
 
+/** Extract the first image URL from a rawContent string containing [CQ:image,...,url=X,...]. */
+export function _extractImageUrl(rawContent: string): string | null {
+  const m = rawContent.match(/\[CQ:image,[^\]]*url=([^,\]]+)/);
+  if (!m || !m[1]) return null;
+  const url = decodeURIComponent(m[1]);
+  return url.startsWith('http') ? url : null;
+}
+
 export interface IRouter {
   dispatch(msg: GroupMessage): Promise<void>;
 }
@@ -39,6 +48,7 @@ export class Router implements IRouter {
   private chatModule: IChatModule | null = null;
   private mimicModule: MimicModule | null = null;
   private moderatorModule: ModeratorModule | null = null;
+  private nameImagesModule: NameImagesModule | null = null;
 
   constructor(
     private readonly db: Database,
@@ -58,6 +68,10 @@ export class Router implements IRouter {
 
   setModerator(moderator: ModeratorModule): void {
     this.moderatorModule = moderator;
+  }
+
+  setNameImages(nameImages: NameImagesModule): void {
+    this.nameImagesModule = nameImages;
   }
 
   async dispatch(msg: GroupMessage): Promise<void> {
@@ -117,6 +131,35 @@ export class Router implements IRouter {
         return;
       }
 
+      // Image-capture hook: if sender is in collection mode and message contains an image
+      if (this.nameImagesModule && config.nameImagesEnabled) {
+        const target = this.nameImagesModule.getCollectionTarget(msg.groupId, msg.userId);
+        if (target !== null && msg.rawContent.includes('[CQ:image,')) {
+          const imageUrl = _extractImageUrl(msg.rawContent);
+          if (imageUrl) {
+            try {
+              const result = await this.nameImagesModule.saveImage(
+                msg.groupId, target, imageUrl, imageUrl,
+                msg.userId, config.nameImagesMaxPerName,
+              );
+              if (result === 'cap_reached') {
+                await this.adapter.send(msg.groupId, `${target} 的图片库已满（${config.nameImagesMaxPerName}张），请先清理再添加。`);
+                this.nameImagesModule.stopCollecting(msg.groupId, msg.userId);
+              } else if (result === 'dedup') {
+                const count = this.nameImagesModule.countByName(msg.groupId, target);
+                await this.adapter.send(msg.groupId, `这张图已经在 ${target} 的图片库里了（共${count}张）`);
+              } else {
+                const count = this.nameImagesModule.countByName(msg.groupId, target);
+                await this.adapter.send(msg.groupId, `已保存到 ${target}（${count}张）`);
+              }
+            } catch {
+              await this.adapter.send(msg.groupId, '图片下载失败，请稍后再试。');
+            }
+            return; // Skip chat/mimic pipeline for this message
+          }
+        }
+      }
+
       // Non-command: check mimic mode first, then chat
       const recentMsgs = this.db.messages.getRecent(msg.groupId, 20).map(m => ({
         messageId: String(m.id),
@@ -140,10 +183,30 @@ export class Router implements IRouter {
         }
       }
 
+      let chatReplied = false;
       if (this.chatModule) {
         const reply = await this.chatModule.generateReply(msg.groupId, msg, recentMsgs);
         if (reply) {
           await this._sendReply(msg.groupId, reply);
+          chatReplied = true;
+        }
+      }
+
+      // Name-mention hook: piggybacks on chat reply — only fires if bot decided to speak
+      if (chatReplied && this.nameImagesModule && config.nameImagesEnabled) {
+        const names = this.nameImagesModule.getAllNames(msg.groupId);
+        if (names.length > 0) {
+          const matched = this.nameImagesModule.findLongestMatch(msg.content, names);
+          if (matched) {
+            const ok = this.nameImagesModule.checkAndSetCooldown(msg.groupId, matched, config.nameImagesCooldownMs);
+            if (ok) {
+              const image = this.nameImagesModule.pickRandom(msg.groupId, matched);
+              if (image) {
+                const cq = `[CQ:image,file=file:///${image.filePath.replace(/\\/g, '/')}]`;
+                await this.adapter.send(msg.groupId, cq);
+              }
+            }
+          }
         }
       }
     } catch (err) {
@@ -185,6 +248,8 @@ export class Router implements IRouter {
 【群规 & 管理】（仅管理员）
 /rule_add <描述>       — 添加一条群规或违规示例
 /rule_false_positive <消息ID> — 标记一条 AI 误判，撤销对应处罚
+/add <人名>            — 进入图片收集模式，接下来发的图存入该人名图片库
+/add_stop             — 提前结束图片收集
 
 【申诉】
 /appeal               — 申诉你最近一次受到的处罚（处罚后24小时内有效）
@@ -395,6 +460,34 @@ export class Router implements IRouter {
       } else {
         await this.adapter.send(msg.groupId, '规则保存失败，请稍后再试。');
       }
+    });
+
+    this.commands.set('add', async (msg, args, config) => {
+      if (!this.nameImagesModule) {
+        await this.adapter.send(msg.groupId, '此功能即将推出，敬请期待。');
+        return;
+      }
+      if (!config.nameImagesEnabled) {
+        await this.adapter.send(msg.groupId, '图片库功能已禁用。');
+        return;
+      }
+      const name = args.join(' ').trim();
+      if (!name) {
+        await this.adapter.send(msg.groupId, '用法：/add <人名>\n例如：/add 西瓜');
+        return;
+      }
+      const timeoutMs = config.nameImagesCollectionTimeoutMs;
+      this.nameImagesModule.startCollecting(msg.groupId, msg.userId, name, timeoutMs);
+      const minutes = Math.round(timeoutMs / 60_000);
+      const count = this.nameImagesModule.countByName(msg.groupId, name);
+      await this.adapter.send(msg.groupId,
+        `好的，接下来 ${minutes} 分钟内你发的图片会存到 ${name} 的图片库（当前${count}张）。发 /add_stop 可提前结束。`);
+    });
+
+    this.commands.set('add_stop', async (msg, _args, _config) => {
+      if (!this.nameImagesModule) return;
+      this.nameImagesModule.stopCollecting(msg.groupId, msg.userId);
+      await this.adapter.send(msg.groupId, '已停止收集，图片库已保存。');
     });
 
     this.commands.set('rule_false_positive', async (msg, args, _config) => {

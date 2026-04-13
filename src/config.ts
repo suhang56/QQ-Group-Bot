@@ -43,6 +43,11 @@ export function defaultGroupConfig(groupId: string): GroupConfig {
     appealWindowHours: 24,
     kickConfirmModel: 'claude-opus-4-6',
     chatLoreEnabled: true,
+    nameImagesEnabled: true,
+    nameImagesCollectionTimeoutMs: 120_000,
+    nameImagesCollectionMax: 20,
+    nameImagesCooldownMs: 300_000,
+    nameImagesMaxPerName: 50,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };

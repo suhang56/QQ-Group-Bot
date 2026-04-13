@@ -63,21 +63,39 @@ CREATE TABLE IF NOT EXISTS group_announcements (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_announcements_notice ON group_announcements(group_id, notice_id);
 
 CREATE TABLE IF NOT EXISTS group_config (
-  group_id                 TEXT    PRIMARY KEY,
-  enabled_modules          TEXT    NOT NULL DEFAULT 'chat,mimic,moderator,learner',
-  auto_mod                 INTEGER NOT NULL DEFAULT 1,
-  daily_punishment_limit   INTEGER NOT NULL DEFAULT 10,
-  punishments_today        INTEGER NOT NULL DEFAULT 0,
-  punishments_reset_date   TEXT    NOT NULL DEFAULT '',
-  mimic_active_user_id     TEXT,
-  mimic_started_by         TEXT,
-  chat_trigger_keywords    TEXT    NOT NULL DEFAULT '[]',
-  chat_trigger_at_only     INTEGER NOT NULL DEFAULT 0,
-  chat_debounce_ms         INTEGER NOT NULL DEFAULT 2000,
-  mod_confidence_threshold REAL    NOT NULL DEFAULT 0.7,
-  mod_whitelist            TEXT    NOT NULL DEFAULT '[]',
-  appeal_window_hours      INTEGER NOT NULL DEFAULT 24,
-  kick_confirm_model       TEXT    NOT NULL DEFAULT 'claude-opus-4-6',
-  created_at               TEXT    NOT NULL DEFAULT '',
-  updated_at               TEXT    NOT NULL DEFAULT ''
+  group_id                              TEXT    PRIMARY KEY,
+  enabled_modules                       TEXT    NOT NULL DEFAULT 'chat,mimic,moderator,learner',
+  auto_mod                              INTEGER NOT NULL DEFAULT 1,
+  daily_punishment_limit                INTEGER NOT NULL DEFAULT 10,
+  punishments_today                     INTEGER NOT NULL DEFAULT 0,
+  punishments_reset_date                TEXT    NOT NULL DEFAULT '',
+  mimic_active_user_id                  TEXT,
+  mimic_started_by                      TEXT,
+  chat_trigger_keywords                 TEXT    NOT NULL DEFAULT '[]',
+  chat_trigger_at_only                  INTEGER NOT NULL DEFAULT 0,
+  chat_debounce_ms                      INTEGER NOT NULL DEFAULT 2000,
+  mod_confidence_threshold              REAL    NOT NULL DEFAULT 0.7,
+  mod_whitelist                         TEXT    NOT NULL DEFAULT '[]',
+  appeal_window_hours                   INTEGER NOT NULL DEFAULT 24,
+  kick_confirm_model                    TEXT    NOT NULL DEFAULT 'claude-opus-4-6',
+  name_images_enabled                   INTEGER NOT NULL DEFAULT 1,
+  name_images_collection_timeout_ms     INTEGER NOT NULL DEFAULT 120000,
+  name_images_collection_max            INTEGER NOT NULL DEFAULT 20,
+  name_images_cooldown_ms               INTEGER NOT NULL DEFAULT 300000,
+  name_images_max_per_name              INTEGER NOT NULL DEFAULT 50,
+  created_at                            TEXT    NOT NULL DEFAULT '',
+  updated_at                            TEXT    NOT NULL DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS name_images (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id    TEXT    NOT NULL,
+  name        TEXT    NOT NULL,
+  file_path   TEXT    NOT NULL,
+  source_file TEXT,
+  added_by    TEXT    NOT NULL,
+  added_at    INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_name_images_group_name ON name_images(group_id, name);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_name_images_source ON name_images(group_id, name, source_file) WHERE source_file IS NOT NULL;

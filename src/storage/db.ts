@@ -54,8 +54,23 @@ export interface GroupConfig {
   appealWindowHours: number;
   kickConfirmModel: ClaudeModel;
   chatLoreEnabled: boolean;
+  nameImagesEnabled: boolean;
+  nameImagesCollectionTimeoutMs: number;
+  nameImagesCollectionMax: number;
+  nameImagesCooldownMs: number;
+  nameImagesMaxPerName: number;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface NameImage {
+  id: number;
+  groupId: string;
+  name: string;
+  filePath: string;
+  sourceFile: string | null;
+  addedBy: string;
+  addedAt: number;
 }
 
 export interface Rule {
@@ -132,6 +147,15 @@ export interface IAnnouncementRepository {
   getLatest(groupId: string): GroupAnnouncement | null;
 }
 
+export interface INameImageRepository {
+  /** Returns null on dedup hit (source_file conflict). */
+  insert(groupId: string, name: string, filePath: string, sourceFile: string | null, addedBy: string): NameImage | null;
+  listByName(groupId: string, name: string): NameImage[];
+  countByName(groupId: string, name: string): number;
+  pickRandom(groupId: string, name: string): NameImage | null;
+  getAllNames(groupId: string): string[];
+}
+
 // ---- Raw row types from SQLite ----
 
 interface MessageRow {
@@ -158,7 +182,15 @@ interface GroupConfigRow {
   chat_trigger_at_only: number; chat_debounce_ms: number;
   mod_confidence_threshold: number; mod_whitelist: string;
   appeal_window_hours: number; kick_confirm_model: string;
+  name_images_enabled: number; name_images_collection_timeout_ms: number;
+  name_images_collection_max: number; name_images_cooldown_ms: number;
+  name_images_max_per_name: number;
   created_at: string; updated_at: string;
+}
+
+interface NameImageRow {
+  id: number; group_id: string; name: string; file_path: string;
+  source_file: string | null; added_by: string; added_at: number;
 }
 
 interface RuleRow {
@@ -220,8 +252,21 @@ function configFromRow(row: GroupConfigRow): GroupConfig {
     appealWindowHours: row.appeal_window_hours,
     kickConfirmModel: row.kick_confirm_model as ClaudeModel,
     chatLoreEnabled: true, // not persisted in DB; always default to enabled
+    nameImagesEnabled: (row.name_images_enabled ?? 1) !== 0,
+    nameImagesCollectionTimeoutMs: row.name_images_collection_timeout_ms ?? 120_000,
+    nameImagesCollectionMax: row.name_images_collection_max ?? 20,
+    nameImagesCooldownMs: row.name_images_cooldown_ms ?? 300_000,
+    nameImagesMaxPerName: row.name_images_max_per_name ?? 50,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function nameImageFromRow(row: NameImageRow): NameImage {
+  return {
+    id: row.id, groupId: row.group_id, name: row.name,
+    filePath: row.file_path, sourceFile: row.source_file,
+    addedBy: row.added_by, addedAt: row.added_at,
   };
 }
 
@@ -420,8 +465,11 @@ class GroupConfigRepository implements IGroupConfigRepository {
         punishments_reset_date, mimic_active_user_id, mimic_started_by,
         chat_trigger_keywords, chat_trigger_at_only, chat_debounce_ms,
         mod_confidence_threshold, mod_whitelist, appeal_window_hours,
-        kick_confirm_model, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        kick_confirm_model,
+        name_images_enabled, name_images_collection_timeout_ms,
+        name_images_collection_max, name_images_cooldown_ms, name_images_max_per_name,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(group_id) DO UPDATE SET
         enabled_modules = excluded.enabled_modules,
         auto_mod = excluded.auto_mod,
@@ -437,6 +485,11 @@ class GroupConfigRepository implements IGroupConfigRepository {
         mod_whitelist = excluded.mod_whitelist,
         appeal_window_hours = excluded.appeal_window_hours,
         kick_confirm_model = excluded.kick_confirm_model,
+        name_images_enabled = excluded.name_images_enabled,
+        name_images_collection_timeout_ms = excluded.name_images_collection_timeout_ms,
+        name_images_collection_max = excluded.name_images_collection_max,
+        name_images_cooldown_ms = excluded.name_images_cooldown_ms,
+        name_images_max_per_name = excluded.name_images_max_per_name,
         updated_at = excluded.updated_at
     `).run(
       config.groupId,
@@ -454,6 +507,11 @@ class GroupConfigRepository implements IGroupConfigRepository {
       JSON.stringify(config.modWhitelist),
       config.appealWindowHours,
       config.kickConfirmModel,
+      (config.nameImagesEnabled ?? true) ? 1 : 0,
+      config.nameImagesCollectionTimeoutMs ?? 120_000,
+      config.nameImagesCollectionMax ?? 20,
+      config.nameImagesCooldownMs ?? 300_000,
+      config.nameImagesMaxPerName ?? 50,
       config.createdAt,
       config.updatedAt,
     );
@@ -552,6 +610,57 @@ class AnnouncementRepository implements IAnnouncementRepository {
   }
 }
 
+class NameImageRepository implements INameImageRepository {
+  constructor(private readonly db: DatabaseSync) {}
+
+  insert(groupId: string, name: string, filePath: string, sourceFile: string | null, addedBy: string): NameImage | null {
+    const addedAt = Math.floor(Date.now() / 1000);
+    if (sourceFile !== null) {
+      // Use INSERT OR IGNORE — returns 0 changes on dedup
+      const result = this.db.prepare(
+        'INSERT OR IGNORE INTO name_images (group_id, name, file_path, source_file, added_by, added_at) VALUES (?, ?, ?, ?, ?, ?)'
+      ).run(groupId, name, filePath, sourceFile, addedBy, addedAt);
+      if ((result as { changes: number }).changes === 0) return null;
+    } else {
+      this.db.prepare(
+        'INSERT INTO name_images (group_id, name, file_path, source_file, added_by, added_at) VALUES (?, ?, ?, ?, ?, ?)'
+      ).run(groupId, name, filePath, null, addedBy, addedAt);
+    }
+    const row = this.db.prepare(
+      'SELECT * FROM name_images WHERE group_id = ? AND file_path = ? ORDER BY id DESC LIMIT 1'
+    ).get(groupId, filePath) as unknown as NameImageRow;
+    return nameImageFromRow(row);
+  }
+
+  listByName(groupId: string, name: string): NameImage[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM name_images WHERE group_id = ? AND name = ? ORDER BY added_at DESC'
+    ).all(groupId, name) as unknown as NameImageRow[];
+    return rows.map(nameImageFromRow);
+  }
+
+  countByName(groupId: string, name: string): number {
+    const row = this.db.prepare(
+      'SELECT COUNT(*) as count FROM name_images WHERE group_id = ? AND name = ?'
+    ).get(groupId, name) as unknown as CountRow;
+    return row.count;
+  }
+
+  pickRandom(groupId: string, name: string): NameImage | null {
+    const row = this.db.prepare(
+      'SELECT * FROM name_images WHERE group_id = ? AND name = ? ORDER BY RANDOM() LIMIT 1'
+    ).get(groupId, name) as unknown as NameImageRow | undefined;
+    return row ? nameImageFromRow(row) : null;
+  }
+
+  getAllNames(groupId: string): string[] {
+    const rows = this.db.prepare(
+      'SELECT DISTINCT name FROM name_images WHERE group_id = ? ORDER BY name'
+    ).all(groupId) as unknown as { name: string }[];
+    return rows.map(r => r.name);
+  }
+}
+
 // ---- Main Database class ----
 
 export class Database {
@@ -561,6 +670,7 @@ export class Database {
   readonly groupConfig: IGroupConfigRepository;
   readonly rules: IRuleRepository;
   readonly announcements: IAnnouncementRepository;
+  readonly nameImages: INameImageRepository;
 
   private readonly _db: DatabaseSync;
 
@@ -576,6 +686,7 @@ export class Database {
     this.groupConfig = new GroupConfigRepository(this._db);
     this.rules = new RuleRepository(this._db);
     this.announcements = new AnnouncementRepository(this._db);
+    this.nameImages = new NameImageRepository(this._db);
   }
 
   /** Execute arbitrary SQL — intended for bulk-import scripts and migrations only. */
