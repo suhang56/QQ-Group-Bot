@@ -43,11 +43,12 @@ const db = new Database(dbPath);
 logger.info({ dbPath }, 'Database opened');
 
 // 4. Instantiate services (bootstrap order per architecture §5.2)
+const botUserId = process.env['BOT_QQ_ID'] ?? '';
 const adapter = new NapCatAdapter(NAPCAT_WS_URL, process.env['NAPCAT_ACCESS_TOKEN']);
 const claude = new ClaudeClient();
 const rateLimiter = new RateLimiter();
 const router = new Router(db, adapter, rateLimiter);
-const chat = new ChatModule(claude, db);
+const chat = new ChatModule(claude, db, { botUserId });
 router.setChat(chat);
 
 // Embedding service: fire-and-forget init — bot must not block on model load
@@ -57,7 +58,6 @@ void embedder.waitReady().then(() => {
 });
 
 const learner = new LearnerModule(embedder, db.rules, db.moderation);
-const botUserId = process.env['BOT_QQ_ID'] ?? '';
 const mimic = new MimicModule(claude, db.messages, db.groupConfig, botUserId);
 const moderator = new ModeratorModule(claude, adapter, db.messages, db.moderation, db.groupConfig, db.rules, learner);
 router.setMimic(mimic);
