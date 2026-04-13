@@ -282,3 +282,118 @@ describe('ChatModule', () => {
     vi.useRealTimers();
   });
 });
+
+describe('ChatModule — mixed few-shot history', () => {
+  let db: Database;
+  let claude: IClaudeClient;
+
+  function makeChatWithCounts(recent: number, historical: number) {
+    return new ChatModule(claude, db, {
+      botUserId: BOT_ID,
+      lurkerReplyChance: 1.0,
+      lurkerCooldownMs: 0,
+      chatRecentCount: recent,
+      chatHistoricalSampleCount: historical,
+    });
+  }
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    claude = makeMockClaude();
+  });
+
+  // 1. Group with only 5 messages — historical sample returns empty; chat still works
+  it('group with 5 messages: historical sample is empty, reply still succeeds', async () => {
+    const ts = Math.floor(Date.now() / 1000);
+    insertMessages(db, 'g1', 5, ts - 50, 10);
+
+    const chat = makeChatWithCounts(20, 10);
+    const result = await chat.generateReply('g1', makeMsg(), []);
+    expect(result).toBe('bot reply');
+
+    // sampleRandomHistorical with excludeNewestN=20 and only 5 msgs → should return 0
+    const sample = db.messages.sampleRandomHistorical('g1', 20, 10);
+    expect(sample).toHaveLength(0);
+  });
+
+  // 2. Group with 100 messages — recent 20, historical 10 from the other 80
+  it('group with 100 messages: recent=20, historical sample=10 from remaining 80', async () => {
+    const ts = Math.floor(Date.now() / 1000);
+    insertMessages(db, 'g1', 100, ts - 1000, 10);
+
+    const sample = db.messages.sampleRandomHistorical('g1', 20, 10);
+    expect(sample).toHaveLength(10);
+
+    const recentIds = new Set(db.messages.getRecent('g1', 20).map(m => m.id));
+    for (const m of sample) {
+      expect(recentIds.has(m.id)).toBe(false);
+    }
+  });
+
+  // 3. Group with 500 messages — verify no overlap with recent window
+  it('group with 500 messages: no overlap between recent and historical sample', async () => {
+    const ts = Math.floor(Date.now() / 1000);
+    insertMessages(db, 'g1', 500, ts - 5000, 10);
+
+    const recentIds = new Set(db.messages.getRecent('g1', 20).map(m => m.id));
+    const sample = db.messages.sampleRandomHistorical('g1', 20, 10);
+
+    expect(sample).toHaveLength(10);
+    for (const m of sample) {
+      expect(recentIds.has(m.id)).toBe(false);
+    }
+  });
+
+  // 4. Sample reproducibility: two calls return different samples (not cached)
+  it('two sampleRandomHistorical calls return different orderings (not cached)', async () => {
+    const ts = Math.floor(Date.now() / 1000);
+    insertMessages(db, 'g1', 200, ts - 2000, 10);
+
+    const sample1 = db.messages.sampleRandomHistorical('g1', 20, 10).map(m => m.id);
+    const sample2 = db.messages.sampleRandomHistorical('g1', 20, 10).map(m => m.id);
+
+    // With 180 eligible messages and sample size 10, identical draws are astronomically unlikely
+    // We just verify neither call throws and both return the right count
+    expect(sample1).toHaveLength(10);
+    expect(sample2).toHaveLength(10);
+    // At least one id should differ (extremely high probability)
+    const allSame = sample1.every((id, i) => id === sample2[i]);
+    expect(allSame).toBe(false);
+  });
+
+  // 5. Off-by-one: excludeNewestN boundary is respected exactly
+  it('excludeNewestN boundary: message at position N+1 is eligible, message at N is excluded', async () => {
+    const ts = Math.floor(Date.now() / 1000);
+    // Insert exactly 5 messages, timestamps ts-4 through ts
+    for (let i = 0; i < 5; i++) {
+      db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'U', content: `msg${i}`, timestamp: ts - (4 - i), deleted: false });
+    }
+
+    // excludeNewestN=4 → newest 4 excluded, 1 remains eligible
+    const sample = db.messages.sampleRandomHistorical('g1', 4, 10);
+    expect(sample).toHaveLength(1);
+
+    const recentIds = new Set(db.messages.getRecent('g1', 4).map(m => m.id));
+    expect(recentIds.has(sample[0]!.id)).toBe(false);
+  });
+
+  // 6. Empty group — both slices return empty, chat handles gracefully
+  it('empty group: both recent and historical are empty, reply still works', async () => {
+    const chat = makeChatWithCounts(20, 10);
+    const result = await chat.generateReply('g1', makeMsg(), []);
+    expect(result).toBe('bot reply');
+  });
+
+  // 7. Single-message group — recent=1, historical=0, chat works
+  it('single-message group: historical=0, reply still works', async () => {
+    const ts = Math.floor(Date.now() / 1000);
+    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Solo', content: 'only msg', timestamp: ts, deleted: false });
+
+    const chat = makeChatWithCounts(20, 10);
+    const result = await chat.generateReply('g1', makeMsg(), []);
+    expect(result).toBe('bot reply');
+
+    const sample = db.messages.sampleRandomHistorical('g1', 20, 10);
+    expect(sample).toHaveLength(0);
+  });
+});

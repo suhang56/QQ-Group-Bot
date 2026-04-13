@@ -3,7 +3,7 @@ import type { GroupMessage } from '../adapter/napcat.js';
 import type { Database } from '../storage/db.js';
 import { ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
-import { lurkerDefaults } from '../config.js';
+import { lurkerDefaults, chatHistoryDefaults } from '../config.js';
 
 export interface IChatModule {
   generateReply(groupId: string, triggerMessage: GroupMessage, recentMessages: GroupMessage[]): Promise<string | null>;
@@ -13,6 +13,8 @@ interface ChatOptions {
   debounceMs?: number;
   maxGroupRepliesPerMinute?: number;
   recentMessageCount?: number;
+  chatRecentCount?: number;
+  chatHistoricalSampleCount?: number;
   botUserId?: string;
   lurkerReplyChance?: number;
   lurkerCooldownMs?: number;
@@ -25,6 +27,7 @@ export class ChatModule implements IChatModule {
   private readonly debounceMs: number;
   private readonly maxGroupRepliesPerMinute: number;
   private readonly recentMessageCount: number;
+  private readonly historicalSampleCount: number;
   private readonly botUserId: string;
   private readonly lurkerReplyChance: number;
   private readonly lurkerCooldownMs: number;
@@ -45,7 +48,8 @@ export class ChatModule implements IChatModule {
   ) {
     this.debounceMs = options.debounceMs ?? 2000;
     this.maxGroupRepliesPerMinute = options.maxGroupRepliesPerMinute ?? 20;
-    this.recentMessageCount = options.recentMessageCount ?? 20;
+    this.recentMessageCount = options.chatRecentCount ?? options.recentMessageCount ?? chatHistoryDefaults.chatRecentCount;
+    this.historicalSampleCount = options.chatHistoricalSampleCount ?? chatHistoryDefaults.chatHistoricalSampleCount;
     this.botUserId = options.botUserId ?? '';
     this.lurkerReplyChance = options.lurkerReplyChance ?? lurkerDefaults.lurkerReplyChance;
     this.lurkerCooldownMs = options.lurkerCooldownMs ?? lurkerDefaults.lurkerCooldownMs;
@@ -107,9 +111,9 @@ export class ChatModule implements IChatModule {
       this.lastProactiveReply.set(groupId, now);
     }
 
-    // Fetch history from DB if recentMessages not provided
-    const history = recentMessages.length > 0
-      ? recentMessages
+    // Fetch recent messages (passed in or fetched from DB)
+    const recentSlice: GroupMessage[] = recentMessages.length > 0
+      ? recentMessages.slice(0, this.recentMessageCount)
       : this.db.messages.getRecent(groupId, this.recentMessageCount).map(m => ({
           messageId: String(m.id),
           groupId: m.groupId,
@@ -121,9 +125,24 @@ export class ChatModule implements IChatModule {
           timestamp: m.timestamp,
         }));
 
-    const historyText = history
-      .slice(0, this.recentMessageCount)
-      .reverse()
+    // Sample random historical messages outside the recent window for group-vibe context
+    const historical = this.db.messages.sampleRandomHistorical(groupId, this.recentMessageCount, this.historicalSampleCount)
+      .map(m => ({
+        messageId: String(m.id),
+        groupId: m.groupId,
+        userId: m.userId,
+        nickname: m.nickname,
+        role: 'member' as const,
+        content: m.content,
+        rawContent: m.content,
+        timestamp: m.timestamp,
+      }));
+
+    // Build prompt: historical sample (sorted oldest→newest) then recent (oldest→newest)
+    // recentSlice is newest-first from DB, so reverse it; historical sorted by timestamp asc
+    const historicalSorted = [...historical].sort((a, b) => a.timestamp - b.timestamp);
+    const recentChron = [...recentSlice].reverse();
+    const historyText = [...historicalSorted, ...recentChron]
       .map(m => `${m.nickname}: ${m.content}`)
       .join('\n');
 

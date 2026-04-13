@@ -71,6 +71,7 @@ export interface IMessageRepository {
   insert(msg: Omit<Message, 'id'>, sourceMessageId?: string): Message;
   getRecent(groupId: string, limit: number): Message[];
   getByUser(groupId: string, userId: string, limit: number): Message[];
+  sampleRandomHistorical(groupId: string, excludeNewestN: number, sampleSize: number): Message[];
   softDelete(msgId: string): void;
 }
 
@@ -229,6 +230,20 @@ class MessageRepository implements IMessageRepository {
     const rows = this.db.prepare(
       'SELECT * FROM messages WHERE group_id = ? AND user_id = ? AND deleted = 0 ORDER BY timestamp DESC LIMIT ?'
     ).all(groupId, userId, limit) as unknown as MessageRow[];
+    return rows.map(msgFromRow);
+  }
+
+  sampleRandomHistorical(groupId: string, excludeNewestN: number, sampleSize: number): Message[] {
+    if (sampleSize <= 0) return [];
+    const rows = this.db.prepare(
+      `SELECT * FROM messages
+       WHERE group_id = ? AND deleted = 0
+         AND id NOT IN (
+           SELECT id FROM messages WHERE group_id = ? AND deleted = 0
+           ORDER BY timestamp DESC LIMIT ?
+         )
+       ORDER BY RANDOM() LIMIT ?`
+    ).all(groupId, groupId, excludeNewestN, sampleSize) as unknown as MessageRow[];
     return rows.map(msgFromRow);
   }
 

@@ -7,6 +7,11 @@ export const lurkerDefaults = {
   burstMinMessages: 5,
 } as const;
 
+export const chatHistoryDefaults = {
+  chatRecentCount: 20,
+  chatHistoricalSampleCount: 10,
+} as const;
+
 export function defaultGroupConfig(groupId: string): GroupConfig {
   return {
     groupId,
