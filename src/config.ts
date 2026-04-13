@@ -17,6 +17,8 @@ export const chatHistoryDefaults = {
   groupIdentityTopUsers: 20,
   loreDirPath: 'data/lore',
   loreSizeCapBytes: 512 * 1024, // 512 KB hard cap before truncation warning
+  chatEmojiTopN: 5,             // top-N most-used faces injected into system prompt
+  chatEmojiSampleSize: 200,     // how many recent messages to scan for emoji stats
 } as const;
 
 export function defaultGroupConfig(groupId: string): GroupConfig {

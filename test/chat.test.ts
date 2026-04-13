@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ChatModule, extractKeywords } from '../src/modules/chat.js';
+import { ChatModule, extractKeywords, extractTopFaces } from '../src/modules/chat.js';
 import type { IClaudeClient, ClaudeResponse } from '../src/ai/claude.js';
 import type { GroupMessage } from '../src/adapter/napcat.js';
 import { Database } from '../src/storage/db.js';
@@ -658,6 +658,65 @@ describe('ChatModule — keyword retrieval and group identity', () => {
     const call = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { messages: Array<{ content: string }> };
     const promptText = call.messages.map((m: { content: string }) => m.content).join(' ');
     expect(promptText).toContain('邦多利是什么');
+  });
+
+  // 8. extractTopFaces unit tests
+  it('extractTopFaces: counts face IDs and returns top-N by frequency', () => {
+    const messages = [
+      { content: '[CQ:face,id=14] 哈哈 [CQ:face,id=14]' }, // id=14 appears twice
+      { content: '[CQ:face,id=21] 好可爱' },
+      { content: '[CQ:face,id=14] 再来一次' },
+      { content: '[CQ:face,id=21] [CQ:face,id=100]' },
+    ];
+    const top2 = extractTopFaces(messages, 2);
+    expect(top2[0]).toBe(14); // most frequent
+    expect(top2[1]).toBe(21); // second most frequent
+    expect(top2).toHaveLength(2);
+  });
+
+  it('extractTopFaces: no faces in messages → returns empty array', () => {
+    const messages = [{ content: '哈哈今天天气不错' }, { content: '笑死我了' }];
+    expect(extractTopFaces(messages, 5)).toHaveLength(0);
+  });
+
+  it('extractTopFaces: fewer unique faces than topN → returns all', () => {
+    const messages = [{ content: '[CQ:face,id=14]' }, { content: '[CQ:face,id=21]' }];
+    expect(extractTopFaces(messages, 10)).toHaveLength(2);
+  });
+
+  // 9. Emoji injection into system prompt
+  it('emoji: group with face usage has top faces injected into system prompt', async () => {
+    const ts = Math.floor(Date.now() / 1000);
+    // Insert messages with face codes — id=14 used most
+    for (let i = 0; i < 5; i++) {
+      db.messages.insert({ groupId: 'g1', userId: `u${i}`, nickname: `U${i}`,
+        content: `[CQ:face,id=14] msg ${i}`, timestamp: ts - (i + 1) * 60, deleted: false });
+    }
+    db.messages.insert({ groupId: 'g1', userId: 'u5', nickname: 'U5',
+      content: '[CQ:face,id=21]', timestamp: ts - 360, deleted: false });
+
+    const chat = makeChat({ chatEmojiTopN: 2, chatEmojiSampleSize: 50, debounceMs: 0 });
+    const msg = makeMsg({ content: '有人吗', rawContent: `[CQ:at,qq=${BOT_ID}] 有人吗` });
+    await chat.generateReply('g1', msg, []);
+
+    const call = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { system: Array<{ text: string }> };
+    const systemText = call.system.map((s: { text: string }) => s.text).join(' ');
+    // Should contain the group's most-used face
+    expect(systemText).toContain('[CQ:face,id=14]');
+    expect(systemText).toContain('最近常用的表情');
+  });
+
+  it('emoji: group with no faces → no emoji injection line', async () => {
+    const ts = Math.floor(Date.now() / 1000);
+    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: '纯文字消息', timestamp: ts - 60, deleted: false });
+
+    const chat = makeChat({ chatEmojiTopN: 5, chatEmojiSampleSize: 50, debounceMs: 0 });
+    const msg = makeMsg({ content: '有人吗', rawContent: `[CQ:at,qq=${BOT_ID}] 有人吗` });
+    await chat.generateReply('g1', msg, []);
+
+    const call = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { system: Array<{ text: string }> };
+    const systemText = call.system.map((s: { text: string }) => s.text).join(' ');
+    expect(systemText).not.toContain('最近常用的表情');
   });
 });
 

@@ -6,7 +6,7 @@ import type { Database } from '../storage/db.js';
 import { ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
 import { lurkerDefaults, chatHistoryDefaults } from '../config.js';
-import { FACE_LEGEND } from '../utils/qqface.js';
+import { FACE_LEGEND, parseFaces, renderFace } from '../utils/qqface.js';
 import { sentinelCheck, postProcess, HARDENED_SYSTEM } from '../utils/sentinel.js';
 
 export interface IChatModule {
@@ -31,6 +31,8 @@ interface ChatOptions {
   groupIdentityTopUsers?: number;
   loreDirPath?: string;
   loreSizeCapBytes?: number;
+  chatEmojiTopN?: number;
+  chatEmojiSampleSize?: number;
 }
 
 // Chinese stopwords that add no retrieval signal
@@ -39,6 +41,20 @@ const STOPWORDS = new Set([
   '怎么','一个','这个','那个','就','也','都','在','有','和','吧','嗯','哦','哈',
   '吗','呢','啊','呀','么','这','那','为','以','到','从','但','所以','因为',
 ]);
+
+/** Count [CQ:face,id=N] usage across messages and return top-N face IDs. */
+export function extractTopFaces(messages: Array<{ content: string }>, topN: number): number[] {
+  const counts = new Map<number, number>();
+  for (const m of messages) {
+    for (const id of parseFaces(m.content)) {
+      counts.set(id, (counts.get(id) ?? 0) + 1);
+    }
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, topN)
+    .map(([id]) => id);
+}
 
 /** Extract meaningful keywords from a message for corpus retrieval. */
 export function extractKeywords(text: string): string[] {
@@ -66,6 +82,8 @@ export class ChatModule implements IChatModule {
   private readonly burstMinMessages: number;
   private readonly chatSilenceBonusSec: number;
   private readonly chatMinScore: number;
+  private readonly chatEmojiTopN: number;
+  private readonly chatEmojiSampleSize: number;
   private readonly groupIdentityCacheTtlMs: number;
   private readonly groupIdentityTopUsers: number;
 
@@ -101,6 +119,8 @@ export class ChatModule implements IChatModule {
     this.burstMinMessages = options.burstMinMessages ?? lurkerDefaults.burstMinMessages;
     this.chatSilenceBonusSec = options.chatSilenceBonusSec ?? lurkerDefaults.chatSilenceBonusSec;
     this.chatMinScore = options.chatMinScore ?? lurkerDefaults.chatMinScore;
+    this.chatEmojiTopN = options.chatEmojiTopN ?? chatHistoryDefaults.chatEmojiTopN;
+    this.chatEmojiSampleSize = options.chatEmojiSampleSize ?? chatHistoryDefaults.chatEmojiSampleSize;
     this.groupIdentityCacheTtlMs = options.groupIdentityCacheTtlMs ?? chatHistoryDefaults.groupIdentityCacheTtlMs;
     this.groupIdentityTopUsers = options.groupIdentityTopUsers ?? chatHistoryDefaults.groupIdentityTopUsers;
     this.loreDirPath = options.loreDirPath ?? chatHistoryDefaults.loreDirPath;
@@ -297,7 +317,14 @@ export class ChatModule implements IChatModule {
     const lore = this._loadLore(groupId);
     let text: string;
 
-    const faceLine = `\n可以用 QQ 表情，格式 [CQ:face,id=N]。常用表情参考：${FACE_LEGEND}`;
+    // Build emoji awareness line from group history
+    const recentForEmoji = this.db.messages.getRecent(groupId, this.chatEmojiSampleSize);
+    const topFaceIds = extractTopFaces(recentForEmoji, this.chatEmojiTopN);
+    const groupFaceLine = topFaceIds.length > 0
+      ? `\n这个群最近常用的表情：${topFaceIds.map(renderFace).join(' ')}（可以用，但别每句都加）`
+      : '';
+
+    const faceLine = `\n可以用 QQ 表情，格式 [CQ:face,id=N]。常用表情参考：${FACE_LEGEND}${groupFaceLine}`;
 
     const outputRules = `\n\n输出规则（必须严格遵守）：\n- 直接输出那句话，不要任何前缀、后缀、解释、元评论\n- 禁止出现任何自我指涉词（包括但不限于：AI、机器人、助手、模仿、尝试、风格、根据、历史、无法）\n- 禁止"好的，"、"当然，"、"我来"、"让我"等助手式开场\n- 如果想说多个意思，用换行分开，每行就是一条消息（最多 3 行）\n- 如果实在不知道说什么，输出"..."，禁止解释\n\n标点习惯：\n- 不要用句号。中文群聊几乎不打句号\n- 少用逗号，句子短就不用\n- 感叹号和问号可以用，但不要叠\n- 括号（）少用，用就是吐槽`;
 
