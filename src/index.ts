@@ -12,6 +12,7 @@ import { MimicModule } from './modules/mimic.js';
 import { ModeratorModule } from './modules/moderator.js';
 import { LearnerModule } from './modules/learner.js';
 import { AnnouncementSyncModule } from './modules/announcement-sync.js';
+import { NameImagesModule } from './modules/name-images.js';
 
 // 1. Bootstrap logger
 const logLevel = process.env['LOG_LEVEL'] ?? 'info';
@@ -68,6 +69,10 @@ router.setMimic(mimic);
 router.setModerator(moderator);
 
 const announcementSync = new AnnouncementSyncModule(adapter, db.announcements, db.rules, claude, learner);
+
+const nameImagesDirPath = process.env['NAME_IMAGES_DIR'] ?? path.join(process.cwd(), 'data', 'name-images');
+const nameImages = new NameImagesModule(db.nameImages, nameImagesDirPath);
+router.setNameImages(nameImages);
 
 // 5. Wire events
 adapter.on('error', (err) => {
