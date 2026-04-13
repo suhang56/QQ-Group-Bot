@@ -58,6 +58,10 @@ export class AnnouncementSyncModule {
       return;
     }
 
+    // Collect all rules from all notices first, then replace once
+    const allRules: string[] = [];
+    let anyNewOrUpdated = false;
+
     for (const notice of notices) {
       if (!notice.message.trim()) continue;
 
@@ -65,10 +69,13 @@ export class AnnouncementSyncModule {
       const existing = this.announcements.getByNoticeId(groupId, notice.noticeId);
 
       if (existing && existing.contentHash === contentHash) {
-        this.logger.debug({ groupId, noticeId: notice.noticeId }, 'Announcement unchanged — skipping re-parse');
+        // Unchanged — accumulate already-parsed rules without re-parsing
+        for (const r of existing.parsedRules) allRules.push(r);
+        this.logger.debug({ groupId, noticeId: notice.noticeId }, 'Announcement unchanged — reusing cached rules');
         continue;
       }
 
+      anyNewOrUpdated = true;
       this.logger.info({ groupId, noticeId: notice.noticeId }, 'New/updated announcement — parsing rules');
 
       let parsedRules: string[];
@@ -79,7 +86,6 @@ export class AnnouncementSyncModule {
         parsedRules = [];
       }
 
-      // Upsert the announcement record
       this.announcements.upsert({
         groupId,
         noticeId: notice.noticeId,
@@ -89,17 +95,19 @@ export class AnnouncementSyncModule {
         parsedRules,
       });
 
-      if (parsedRules.length === 0) continue;
-
-      // Replace old announcement-sourced rules with fresh ones
-      const deleted = this.rules.deleteBySource(groupId, 'announcement');
-      this.logger.debug({ groupId, deleted }, 'Cleared old announcement-sourced rules');
-
-      for (const ruleText of parsedRules) {
-        await this.learner.addRuleWithSource(groupId, ruleText, 'positive', 'announcement');
-      }
-      this.logger.info({ groupId, noticeId: notice.noticeId, ruleCount: parsedRules.length }, 'Announcement rules upserted');
+      for (const r of parsedRules) allRules.push(r);
     }
+
+    if (!anyNewOrUpdated) return;
+
+    // Replace ALL announcement-sourced rules once with the full accumulated set
+    const deleted = this.rules.deleteBySource(groupId, 'announcement');
+    this.logger.debug({ groupId, deleted }, 'Cleared old announcement-sourced rules');
+
+    for (const ruleText of allRules) {
+      await this.learner.addRuleWithSource(groupId, ruleText, 'positive', 'announcement');
+    }
+    this.logger.info({ groupId, ruleCount: allRules.length }, 'Announcement rules upserted');
   }
 
   private async _syncAll(groupIds: string[]): Promise<void> {
@@ -112,16 +120,32 @@ export class AnnouncementSyncModule {
     const response = await this.claude.complete({
       model: 'claude-haiku-4-5-20251001',
       maxTokens: 1000,
-      system: [{ text: '你是一个群规提取助手。从群公告中提取所有明确的群规，输出纯文本列表，每条规则单独一行，无序号无前缀。语义去重，只保留规则本身，不要解释。如果没有群规，输出空行。', cache: true }],
+      system: [{ text: '你是一个群规提取助手。从群公告中提取所有明确的群规，输出纯文本列表，每条规则单独一行，无序号无前缀，语义去重，只保留规则本身不要解释。如果没有任何群规，只输出字面量 NONE，不要输出任何其他内容。', cache: true }],
       messages: [{ role: 'user', content: `以下是群公告，提取所有群规（每条一行，语义去重）:\n\n${announcementText}` }],
     });
 
-    const lines = response.text
+    const raw = response.text.trim();
+    if (raw === 'NONE' || raw === '') return [];
+
+    const lines = raw
       .split('\n')
       .map(l => l.trim())
-      .filter(l => l.length > 0 && l.length <= 500);
+      .filter(l => _isRealRule(l));
 
     this.logger.debug({ groupId, lineCount: lines.length }, 'Announcement rules parsed');
     return lines;
   }
+}
+
+/** Return false for Claude meta-responses that aren't real rules. */
+export function _isRealRule(line: string): boolean {
+  if (line.length === 0 || line.length > 500) return false;
+  // Starts with block-quote, parenthetical, or dash-parenthetical
+  if (/^[>（(]/.test(line)) return false;
+  if (/^-\s*[（(]/.test(line)) return false;
+  // Contains "no rules" language
+  if (/不含|不包含|无任何|不包括|不存在|没有.*群规|无.*群规/.test(line)) return false;
+  // Entire line is （空） or (空) variants
+  if (/^[（(]空[）)]$/.test(line)) return false;
+  return true;
 }
