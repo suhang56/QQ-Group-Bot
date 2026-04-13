@@ -4,6 +4,7 @@ import type {
   IMessageRepository, IModerationRepository, IGroupConfigRepository,
   IRuleRepository, GroupConfig,
 } from '../storage/db.js';
+import type { ILearnerModule } from './learner.js';
 import { BotErrorCode, ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
 
@@ -64,6 +65,7 @@ export class ModeratorModule implements IModeratorModule {
     private readonly moderation: IModerationRepository,
     private readonly configs: IGroupConfigRepository,
     private readonly rules: IRuleRepository,
+    private readonly learner: ILearnerModule | null = null,
   ) { void _messages; }
 
   async assess(msg: GroupMessage, config: GroupConfig): Promise<ModerationVerdict> {
@@ -94,6 +96,21 @@ export class ModeratorModule implements IModeratorModule {
       ? recentOffenses.map(r => `- ${r.reason} (severity ${r.severity}, action: ${r.action})`).join('\n')
       : '（无近期违规记录）';
 
+    // Retrieve RAG examples from learner (fail-safe: empty if disabled or not ready)
+    let ragExamples: string[] = [];
+    if (this.learner) {
+      try {
+        const examples = await this.learner.retrieveExamples(msg.groupId, trimmed, 5);
+        ragExamples = examples.map((r, i) => `${i + 1}. [${r.type}] ${r.content}`);
+      } catch {
+        this.logger.warn({ groupId: msg.groupId }, 'learner.retrieveExamples failed — proceeding without RAG');
+      }
+    }
+
+    const ragSection = ragExamples.length > 0
+      ? `\n相关违规示例（供参考，置于同等重视度）：\n${ragExamples.join('\n')}`
+      : '';
+
     // Build prompt — user content ONLY in user-role message (never system)
     const systemText = `你是一个群管理AI。请根据以下群规判断用户发送的消息是否违规。
 
@@ -109,7 +126,7 @@ severity说明：1=轻微, 2=一般, 3=严重, 4=很严重, 5=极严重（踢出
 ${msg.content}
 
 该用户近期违规记录：
-${offenseHistory}`;
+${offenseHistory}${ragSection}`;
 
     let parsed: ReturnType<typeof parseSonnetResponse>;
 

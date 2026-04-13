@@ -3,10 +3,14 @@ import path from 'node:path';
 import { initLogger, createLogger } from './utils/logger.js';
 import { NapCatAdapter } from './adapter/napcat.js';
 import { Database } from './storage/db.js';
+import { EmbeddingService } from './storage/embeddings.js';
 import { ClaudeClient } from './ai/claude.js';
 import { RateLimiter } from './core/rateLimiter.js';
 import { Router } from './core/router.js';
 import { ChatModule } from './modules/chat.js';
+import { MimicModule } from './modules/mimic.js';
+import { ModeratorModule } from './modules/moderator.js';
+import { LearnerModule } from './modules/learner.js';
 
 // 1. Bootstrap logger
 const logLevel = process.env['LOG_LEVEL'] ?? 'info';
@@ -50,6 +54,19 @@ const rateLimiter = new RateLimiter();
 const router = new Router(db, adapter, rateLimiter);
 const chat = new ChatModule(claude, db);
 router.setChat(chat);
+
+// Embedding service: fire-and-forget init — bot must not block on model load
+const embedder = new EmbeddingService();
+void embedder.waitReady().then(() => {
+  if (embedder.isReady) logger.info('Embedding model ready');
+});
+
+const learner = new LearnerModule(embedder, db.rules, db.moderation);
+const botUserId = process.env['BOT_QQ_ID'] ?? '';
+const mimic = new MimicModule(claude, db.messages, db.groupConfig, botUserId);
+const moderator = new ModeratorModule(claude, adapter, db.messages, db.moderation, db.groupConfig, db.rules, learner);
+router.setMimic(mimic);
+router.setModerator(moderator);
 
 // 5. Wire events
 adapter.on('error', (err) => {
