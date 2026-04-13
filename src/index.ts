@@ -11,6 +11,7 @@ import { ChatModule } from './modules/chat.js';
 import { MimicModule } from './modules/mimic.js';
 import { ModeratorModule } from './modules/moderator.js';
 import { LearnerModule } from './modules/learner.js';
+import { AnnouncementSyncModule } from './modules/announcement-sync.js';
 
 // 1. Bootstrap logger
 const logLevel = process.env['LOG_LEVEL'] ?? 'info';
@@ -31,6 +32,9 @@ const logger = createLogger('bootstrap');
 
 // 2. Validate required env vars
 const NAPCAT_WS_URL = process.env['NAPCAT_WS_URL'];
+const ACTIVE_GROUPS = process.env['ACTIVE_GROUPS']
+  ? process.env['ACTIVE_GROUPS'].split(',').map(s => s.trim()).filter(Boolean)
+  : [];
 
 if (!NAPCAT_WS_URL) {
   logger.fatal('Missing required env var: NAPCAT_WS_URL');
@@ -63,6 +67,14 @@ const moderator = new ModeratorModule(claude, adapter, db.messages, db.moderatio
 router.setMimic(mimic);
 router.setModerator(moderator);
 
+const announcementSync = new AnnouncementSyncModule(adapter, db.announcements, db.rules, claude, learner);
+if (ACTIVE_GROUPS.length > 0) {
+  void announcementSync.start(ACTIVE_GROUPS);
+  logger.info({ groups: ACTIVE_GROUPS }, 'announcement sync started');
+} else {
+  logger.warn('no active groups configured, announcement sync disabled');
+}
+
 // 5. Wire events
 adapter.on('error', (err) => {
   logger.fatal({ err }, 'Adapter fatal error');
@@ -85,6 +97,7 @@ try {
 // 7. Graceful shutdown
 const shutdown = async () => {
   logger.info('Shutting down...');
+  announcementSync.stop();
   await adapter.disconnect();
   db.close();
   process.exit(0);
