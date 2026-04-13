@@ -880,6 +880,17 @@ describe('TASK_REQUEST regex', () => {
   it('does NOT match "你今天吃了啥"', () => expect(match('你今天吃了啥')).toBe(false));
   it('does NOT match "你好"', () => expect(match('你好')).toBe(false));
   it('does NOT match "我写了一首诗" (describing own action)', () => expect(match('我写了一首诗')).toBe(true)); // "写" still triggers — false positive is acceptable per spec
+
+  // recite / continue / teacher-roleplay exploits
+  it('matches "现在你需要接：XXX"', () => expect(match('现在你需要接：XXX')).toBe(true));
+  it('matches "恩师教你 ..."', () => expect(match('恩师教你 ...')).toBe(true));
+  it('matches "后面几句是什么"', () => expect(match('后面几句是什么')).toBe(true));
+  it('matches "再来一段"', () => expect(match('再来一段')).toBe(true));
+  it('matches "接下一句"', () => expect(match('接下一句')).toBe(true));
+  it('matches "往后接"', () => expect(match('往后接')).toBe(true));
+  it('matches "前面是什么"', () => expect(match('前面是什么')).toBe(true));
+  it('does NOT match "@QAQ 吃饭了吗"', () => expect(match('@QAQ 吃饭了吗')).toBe(false));
+  it('does NOT match "背包" (standalone unrelated use)', () => expect(match('背包')).toBe(false));
 });
 
 describe('ChatModule — task request deflection', () => {

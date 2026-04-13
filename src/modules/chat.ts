@@ -62,13 +62,14 @@ export const IDENTITY_PROBE =
 
 export const IDENTITY_DEFLECTIONS = ['啊？', '什么', '？？', '?', '我不明白', '啧'];
 
-// Matches task-request exploitation attempts ("write me X", "translate Y", etc.)
+// Matches task-request exploitation attempts ("write me X", "translate Y", recite/continue exploits, etc.)
 export const TASK_REQUEST =
-  /(写[个一]?|编[个一]?|出[个一]?|帮我|给我|替我|来[个一段首]|生成|翻译|算一下|算算|推荐|讲个|说个|念一?段|背一段|作一首|搞一个|搞个|整一个|整个|做一个|画[个一]?|总结|解释一下)/;
+  /(写[个一]?|编[个一]?|出[个一]?|帮我|给我|替我|来[个一段首]|生成|翻译|算一下|算算|推荐|讲个|说个|念一?段|背一段|作一首|搞一个|搞个|整一个|整个|做一个|画[个一]?|总结|解释一下|接下[一]?句|后面[几一]?句|后面是.{0,10}[什么啥]|续[一下]|接龙|继续[背念说]|往[下后]接|再来[一几]段|背[一下出来]|[教叫].{0,3}你|恩师|师父|让你接|你要接|现在你(?:需要|要)接|前面是.{0,5}[什么啥])/;
 
 export const TASK_DEFLECTIONS = [
   '我不会', '你自己写', '想屁吃', '懒得', '不想',
   '写不出来', '不擅长这个', '？', '我又不是工具人', '想得美', '哈哈你自己搞',
+  '自己背', '我又不是AI', '烦死了', '你恩师是谁啊', '哈哈谁背这个', '你做梦', '无语', '不接', '想多了',
 ];
 
 // Matches memory-injection / persona-override exploit attempts.
