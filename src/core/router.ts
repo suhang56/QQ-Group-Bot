@@ -18,7 +18,14 @@ const SPLIT_DELAY_MAX_MS = 800;
 export function splitReply(text: string): string[] {
   // Collapse any \n inside [CQ:...] blocks so multi-line CQ codes become atomic tokens
   const flattened = text.replace(/\[CQ:[^\]]*\]/gs, (cq) => cq.replace(/\s*\n\s*/g, ''));
-  const lines = flattened.split('\n').map(l => l.trim()).filter(l => l.length > 0 && l !== ']' && l !== '[');
+  // Strip trailing unmatched lone bracket lines (not part of a CQ code)
+  const stripped = flattened.replace(/\n+[\[\]]\s*$/g, '');
+  const lines = stripped.split('\n').map(l => l.trim()).filter(l => {
+    if (l.length === 0) return false;
+    // Drop lines that are only brackets, parens, punctuation, or whitespace
+    if (/^[\s\[\]()（）【】｜|\-—\.。,，!！?？「」『』〔〕［］]+$/.test(l)) return false;
+    return true;
+  });
   return lines.slice(0, MAX_SPLIT_LINES);
 }
 

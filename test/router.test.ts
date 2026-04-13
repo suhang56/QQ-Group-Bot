@@ -496,6 +496,27 @@ describe('splitReply', () => {
     expect(splitReply('hello\n]\nworld')).toEqual(['hello', 'world']);
     expect(splitReply('[\nhello')).toEqual(['hello']);
   });
+
+  it('stray ] after CQ face — real screenshot pattern', () => {
+    const input = 'abc\n[CQ:face,id=14]\n]';
+    expect(splitReply(input)).toEqual(['abc', '[CQ:face,id=14]']);
+  });
+
+  it('stray ] with trailing space filtered', () => {
+    expect(splitReply('abc\n[CQ:face,id=14]\n] ')).toEqual(['abc', '[CQ:face,id=14]']);
+  });
+
+  it('fullwidth ］ filtered', () => {
+    expect(splitReply('abc\n[CQ:face,id=14]\n］')).toEqual(['abc', '[CQ:face,id=14]']);
+  });
+
+  it('misc closing paren line filtered', () => {
+    expect(splitReply('abc\n[CQ:face,id=14]\n)')).toEqual(['abc', '[CQ:face,id=14]']);
+  });
+
+  it('punctuation-only line filtered', () => {
+    expect(splitReply('hello\n——\nworld')).toEqual(['hello', 'world']);
+  });
 });
 
 describe('Router — multi-line chat reply dispatch', () => {

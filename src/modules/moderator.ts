@@ -38,9 +38,18 @@ function isCQOnly(content: string): boolean {
   return /^\s*(\[CQ:[^\]]+\]\s*)+\s*$/.test(content);
 }
 
+export function extractJson(raw: string): string {
+  const fenced = raw.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+  if (fenced && fenced[1]) return fenced[1].trim();
+  const jsonStart = raw.indexOf('{');
+  const jsonEnd = raw.lastIndexOf('}');
+  if (jsonStart !== -1 && jsonEnd > jsonStart) return raw.slice(jsonStart, jsonEnd + 1);
+  return raw.trim();
+}
+
 function parseSonnetResponse(text: string): { violation: boolean; severity: number | null; reason: string; confidence: number } | null {
   try {
-    const json = JSON.parse(text.trim()) as unknown;
+    const json = JSON.parse(extractJson(text)) as unknown;
     if (typeof json !== 'object' || json === null) return null;
     const j = json as Record<string, unknown>;
     if (typeof j['violation'] !== 'boolean') return null;
@@ -139,9 +148,10 @@ ${offenseHistory}${ragSection}`;
       });
       parsed = parseSonnetResponse(resp.text);
       if (!parsed) {
-        this.logger.error({ groupId: msg.groupId, raw: resp.text.slice(0, 100) }, 'Claude parse error in moderator');
+        this.logger.error({ groupId: msg.groupId, raw: resp.text.slice(0, 200) }, 'Claude parse error in moderator');
         return FAIL_SAFE_VERDICT;
       }
+      this.logger.debug({ groupId: msg.groupId, violation: parsed.violation, severity: parsed.severity }, 'Moderator parse ok');
     } catch (err) {
       if (err instanceof ClaudeApiError || err instanceof ClaudeParseError) {
         this.logger.error({ err, groupId: msg.groupId }, 'Claude API error in moderator — fail-safe');

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { ModeratorModule } from '../src/modules/moderator.js';
+import { ModeratorModule, extractJson } from '../src/modules/moderator.js';
 import type { IClaudeClient, ClaudeRequest, ClaudeResponse } from '../src/ai/claude.js';
 import type {
   IMessageRepository, IModerationRepository, IGroupConfigRepository,
@@ -592,5 +592,43 @@ describe('ModeratorModule — learner RAG integration', () => {
     const mod = makeModule(claude, adapter, makeConfig(), { learner: null });
     const verdict = await mod.assess(makeMsg(), makeConfig());
     expect(verdict.violation).toBe(false);
+  });
+
+  it('Claude returns JSON in code fence → parses correctly', async () => {
+    const fencedJson = '```json\n{"violation":true,"severity":3,"reason":"攻击他人","confidence":0.9}\n```';
+    const claude: IClaudeClient = {
+      complete: vi.fn().mockResolvedValue({
+        text: fencedJson, inputTokens: 10, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0,
+      }),
+    };
+    const mod = makeModule(claude, makeAdapter(), makeConfig());
+    const verdict = await mod.assess(makeMsg({ content: '你个傻逼' }), makeConfig());
+    expect(verdict.violation).toBe(true);
+    expect(verdict.severity).toBe(3);
+  });
+});
+
+describe('extractJson', () => {
+  it('strips ```json fence', () => {
+    expect(extractJson('```json\n{"violation":false}\n```')).toBe('{"violation":false}');
+  });
+
+  it('strips ``` fence without language tag', () => {
+    expect(extractJson('```\n{"violation":false}\n```')).toBe('{"violation":false}');
+  });
+
+  it('extracts JSON from surrounding prose', () => {
+    expect(extractJson('Here is the result:\n{"violation":true}\nDone.')).toBe('{"violation":true}');
+  });
+
+  it('passes through clean JSON unchanged', () => {
+    const raw = '{"violation":true,"severity":3,"reason":"test","confidence":0.9}';
+    expect(extractJson(raw)).toBe(raw);
+  });
+
+  it('full round-trip: fenced → parse → valid object', () => {
+    const fenced = '```json\n{"violation":false,"severity":null,"reason":"ok","confidence":0.1}\n```';
+    const obj = JSON.parse(extractJson(fenced)) as { violation: boolean };
+    expect(obj.violation).toBe(false);
   });
 });
