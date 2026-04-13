@@ -281,6 +281,45 @@ describe('ChatModule', () => {
     expect(results.filter(r => r === null).length).toBeGreaterThanOrEqual(1);
     vi.useRealTimers();
   });
+
+  // ── In-flight lock: duplicate @-mention within debounce window ───────────
+  // Regression for: user sent "@QAQ 咪", bot replied "咪" twice.
+  // Root cause: two concurrent generateReply() calls both read debounceMap as
+  // undefined before either wrote it, so both passed the timestamp-based check.
+  it('concurrent @-mention triggers send reply exactly once (in-flight lock)', async () => {
+    // Use a slow claude mock so the first call is still in-flight when the second arrives
+    let resolveFirst!: (v: string) => void;
+    const firstCallPending = new Promise<string>(r => { resolveFirst = r; });
+    const completeMock = vi.fn()
+      .mockReturnValueOnce(
+        (async () => ({ text: await firstCallPending, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 }))()
+      )
+      .mockResolvedValue({ text: 'second reply', inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 });
+
+    const slowClaude: IClaudeClient = { complete: completeMock };
+    const concurrentChat = new ChatModule(slowClaude, db, {
+      botUserId: BOT_ID,
+      lurkerReplyChance: 1.0,
+      lurkerCooldownMs: 0,
+      debounceMs: 50,  // short debounce so both get past timestamp check
+    });
+
+    const atMsg = makeMsg({ rawContent: `[CQ:at,qq=${BOT_ID}] 咪`, content: '咪' });
+
+    // Launch both concurrently — second arrives 10ms later, still within debounce window
+    const p1 = concurrentChat.generateReply('g1', atMsg, []);
+    await new Promise(r => setTimeout(r, 10));
+    const p2 = concurrentChat.generateReply('g1', atMsg, []);
+
+    // Resolve the first call
+    resolveFirst('咪');
+    const [r1, r2] = await Promise.all([p1, p2]);
+
+    // Exactly one reply, not two
+    const replies = [r1, r2].filter(r => r !== null);
+    expect(replies).toHaveLength(1);
+    expect(completeMock).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('ChatModule — mixed few-shot history', () => {

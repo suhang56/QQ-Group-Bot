@@ -40,6 +40,8 @@ export class ChatModule implements IChatModule {
   private readonly groupReplyCount = new Map<string, { count: number; windowStart: number }>();
   // last proactive (non-mention) reply timestamp per group
   private readonly lastProactiveReply = new Map<string, number>();
+  // in-flight lock: groups currently awaiting a Claude reply — prevents concurrent duplicate sends
+  private readonly inFlightGroups = new Set<string>();
 
   constructor(
     private readonly claude: IClaudeClient,
@@ -83,6 +85,15 @@ export class ChatModule implements IChatModule {
     const lastTrigger = this.debounceMap.get(groupId);
     this.debounceMap.set(groupId, now);
     if (lastTrigger !== undefined && now - lastTrigger < this.debounceMs) {
+      return null;
+    }
+
+    // In-flight lock: if a Claude reply is already being generated for this group,
+    // drop this trigger. Prevents duplicate sends when two concurrent dispatches
+    // (e.g. rapid @-mentions or NapCat retry) both pass the timestamp-based debounce
+    // before either has set it (read-then-write race on the Map).
+    if (this.inFlightGroups.has(groupId)) {
+      this.logger.debug({ groupId }, 'Reply in-flight — dropping duplicate trigger');
       return null;
     }
 
@@ -146,6 +157,7 @@ export class ChatModule implements IChatModule {
       .map(m => `${m.nickname}: ${m.content}`)
       .join('\n');
 
+    this.inFlightGroups.add(groupId);
     try {
       const response = await this.claude.complete({
         model: 'claude-sonnet-4-6',
@@ -169,6 +181,8 @@ export class ChatModule implements IChatModule {
         return null;
       }
       throw err;
+    } finally {
+      this.inFlightGroups.delete(groupId);
     }
   }
 
