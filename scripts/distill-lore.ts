@@ -15,7 +15,7 @@
  * The file is written atomically (write to .tmp then rename) to avoid corrupting existing lore.
  */
 
-import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, renameSync, unlinkSync, mkdirSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { Database } from '../src/storage/db.js';
 import { ClaudeClient } from '../src/ai/claude.js';
@@ -38,6 +38,8 @@ interface Args {
   metaModel: ClaudeModel;
   maxMessages: number;
   chunkSize: number;
+  resume: boolean;
+  fresh: boolean;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -49,6 +51,8 @@ function parseArgs(argv: string[]): Args {
   let metaModel: ClaudeModel = 'claude-opus-4-6';
   let maxMessages = 200_000;
   let chunkSize = 40_000;
+  let resume = false;
+  let fresh = false;
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--group-id' && args[i + 1]) { groupId = args[++i]!; }
@@ -64,10 +68,12 @@ function parseArgs(argv: string[]): Args {
     }
     else if (args[i] === '--max-messages' && args[i + 1]) { maxMessages = parseInt(args[++i]!, 10); }
     else if (args[i] === '--chunk-size' && args[i + 1]) { chunkSize = parseInt(args[++i]!, 10); }
+    else if (args[i] === '--resume') { resume = true; }
+    else if (args[i] === '--fresh') { fresh = true; }
   }
 
   if (!groupId) {
-    console.error('Usage: distill-lore.ts --group-id <id> [--db <path>] [--output <path>] [--chunk-model claude-sonnet-4-6] [--meta-model claude-opus-4-6] [--max-messages 200000] [--chunk-size 40000]');
+    console.error('Usage: distill-lore.ts --group-id <id> [--db <path>] [--output <path>] [--chunk-model claude-sonnet-4-6] [--meta-model claude-opus-4-6] [--max-messages 200000] [--chunk-size 40000] [--resume] [--fresh]');
     process.exit(1);
   }
 
@@ -75,7 +81,7 @@ function parseArgs(argv: string[]): Args {
     outputPath = `data/lore/${groupId}.md`;
   }
 
-  return { groupId, dbPath, outputPath, chunkModel, metaModel, maxMessages, chunkSize };
+  return { groupId, dbPath, outputPath, chunkModel, metaModel, maxMessages, chunkSize, resume, fresh };
 }
 
 // ---- Message sampling ----
@@ -177,6 +183,43 @@ function metaSynthesisPrompt(chunkSummaries: string[]): string {
 ${joined}`;
 }
 
+// ---- Chunk progress persistence ----
+
+interface ChunkRecord { chunkIndex: number; summary: string; }
+
+function chunksPath(outputPath: string): string {
+  return `${outputPath}.chunks.jsonl`;
+}
+
+function loadChunkProgress(outputPath: string): Map<number, string> {
+  const p = chunksPath(outputPath);
+  const result = new Map<number, string>();
+  if (!existsSync(p)) return result;
+  const lines = readFileSync(p, 'utf8').split('\n').filter(l => l.trim());
+  for (const line of lines) {
+    try {
+      const rec = JSON.parse(line) as ChunkRecord;
+      result.set(rec.chunkIndex, rec.summary);
+    } catch { /* skip malformed lines */ }
+  }
+  return result;
+}
+
+function appendChunkProgress(outputPath: string, chunkIndex: number, summary: string): void {
+  const dir = path.dirname(outputPath);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  const record: ChunkRecord = { chunkIndex, summary };
+  appendFileSync(chunksPath(outputPath), JSON.stringify(record) + '\n', 'utf8');
+}
+
+function deleteChunkProgress(outputPath: string): void {
+  const p = chunksPath(outputPath);
+  if (existsSync(p)) {
+    unlinkSync(p);
+    console.log(`[INFO] Deleted ${p}`);
+  }
+}
+
 // ---- Token estimation (rough: ~4 chars per token for Chinese) ----
 
 // Agent SDK subscription mode caps at ~200k; leave headroom for system prompt + output
@@ -190,9 +233,14 @@ function estimateTokens(text: string): number {
 // ---- Main pipeline ----
 
 export async function runDistillation(args: Args, claude: ClaudeClient): Promise<string> {
-  const db = new Database(args.dbPath);
+  // --fresh: delete any existing chunk progress before starting
+  if (args.fresh) {
+    deleteChunkProgress(args.outputPath);
+  }
 
+  const db = new Database(args.dbPath);
   const msgs = sampleMessages(db, args.groupId, args.maxMessages);
+  db.close();
 
   // Halve chunk size until a sample chunk fits within context budget
   let effectiveChunkSize = args.chunkSize;
@@ -212,12 +260,25 @@ export async function runDistillation(args: Args, claude: ClaudeClient): Promise
   const totalChunks = chunks.length;
   console.log(`[INFO] Split into ${totalChunks} chunk(s) of up to ${effectiveChunkSize} messages each`);
 
+  // Load any previously-saved chunk summaries (--resume reuses them; fresh run starts with empty map)
+  const savedChunks = loadChunkProgress(args.outputPath);
+  if (savedChunks.size > 0) {
+    console.log(`[INFO] Resuming: found ${savedChunks.size} saved chunk(s) in ${chunksPath(args.outputPath)}`);
+  }
+
   // Round 1 — chunk summaries
-  const chunkSummaries: string[] = [];
+  const chunkSummaries: string[] = new Array(totalChunks).fill('');
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
 
   for (let i = 0; i < chunks.length; i++) {
+    // Re-use saved summary if present
+    if (savedChunks.has(i)) {
+      chunkSummaries[i] = savedChunks.get(i)!;
+      console.log(`[INFO] chunk ${i + 1}/${totalChunks} — skipped (already saved)`);
+      continue;
+    }
+
     const chunk = chunks[i]!;
     const msgsBlock = formatMessagesBlock(chunk);
     const promptTokens = estimateTokens(msgsBlock);
@@ -237,43 +298,60 @@ export async function runDistillation(args: Args, claude: ClaudeClient): Promise
         messages: [{ role: 'user', content: chunkSummaryPrompt(args.groupId, msgsBlock) }],
       });
 
-      chunkSummaries.push(response.text);
+      chunkSummaries[i] = response.text;
+      // Persist immediately so a crash here loses at most this chunk
+      appendChunkProgress(args.outputPath, i, response.text);
       totalInputTokens += response.inputTokens;
       totalOutputTokens += response.outputTokens;
       console.log(`[INFO] chunk ${i + 1}/${totalChunks} done — input=${response.inputTokens} output=${response.outputTokens}`);
     } catch (err) {
-      // Save progress so far before re-throwing
-      if (chunkSummaries.length > 0) {
-        const partial = chunkSummaries.join('\n\n---\n\n');
-        const partialPath = `${args.outputPath}.partial`;
-        writeFileSync(partialPath, partial, 'utf8');
-        console.error(`[ERROR] Claude API error on chunk ${i + 1}. Partial progress saved to ${partialPath}`);
-      }
+      console.error(`[ERROR] Claude API error on chunk ${i + 1}. Progress saved to ${chunksPath(args.outputPath)}`);
       throw err;
     }
   }
 
-  if (chunkSummaries.length === 0) {
+  const completedSummaries = chunkSummaries.filter(s => s.length > 0);
+  if (completedSummaries.length === 0) {
     throw new Error('All chunks failed — no summaries produced');
   }
 
   // Round 2 — meta-synthesis (skip if only one chunk)
   let finalLore: string;
-  if (chunkSummaries.length === 1) {
+  if (completedSummaries.length === 1) {
     console.log('[INFO] Single chunk — skipping meta-synthesis, using chunk summary directly');
-    finalLore = chunkSummaries[0]!;
+    finalLore = completedSummaries[0]!;
   } else {
-    console.log(`[INFO] meta-synthesis of ${chunkSummaries.length} chunk summaries...`);
-    const metaPrompt = metaSynthesisPrompt(chunkSummaries);
+    console.log(`[INFO] meta-synthesis of ${completedSummaries.length} chunk summaries...`);
+    const metaPrompt = metaSynthesisPrompt(completedSummaries);
     const metaTokens = estimateTokens(metaPrompt);
     console.log(`[INFO] meta-synthesis prompt ~${metaTokens} estimated tokens`);
 
-    const metaResponse = await claude.complete({
-      model: args.metaModel,
-      maxTokens: 8000,
-      system: [{ text: '你是一个群聊分析助手，任务是将多段群聊分析合并成一份完整准确的群志，输出结构化中文 markdown。', cache: true }],
-      messages: [{ role: 'user', content: metaPrompt }],
-    });
+    // Retry up to 3 times with 2s backoff
+    let metaResponse: { text: string; inputTokens: number; outputTokens: number } | null = null;
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        metaResponse = await claude.complete({
+          model: args.metaModel,
+          maxTokens: 8000,
+          system: [{ text: '你是一个群聊分析助手，任务是将多段群聊分析合并成一份完整准确的群志，输出结构化中文 markdown。', cache: true }],
+          messages: [{ role: 'user', content: metaPrompt }],
+        });
+        break;
+      } catch (err) {
+        lastErr = err;
+        console.warn(`[WARN] meta-synthesis attempt ${attempt}/3 failed: ${(err as Error).message}`);
+        if (attempt < 3) await new Promise(r => setTimeout(r, 2000));
+      }
+    }
+
+    if (!metaResponse) {
+      // Write fallback file so at least concatenated summaries are usable
+      const fallbackPath = `${args.outputPath}.chunks.md`;
+      writeFileSync(fallbackPath, completedSummaries.join('\n\n---\n\n'), 'utf8');
+      console.error(`[ERROR] meta-synthesis failed after 3 attempts. Fallback written to ${fallbackPath}`);
+      throw lastErr;
+    }
 
     finalLore = metaResponse.text;
     totalInputTokens += metaResponse.inputTokens;
@@ -281,9 +359,8 @@ export async function runDistillation(args: Args, claude: ClaudeClient): Promise
     console.log(`[INFO] meta-synthesis done — input=${metaResponse.inputTokens} output=${metaResponse.outputTokens}`);
   }
 
-  db.close();
-
   console.log(`[INFO] Total tokens used — input=${totalInputTokens} output=${totalOutputTokens}`);
+  // Keep chunks.jsonl on success so re-runs can skip Sonnet round entirely
   return finalLore;
 }
 
@@ -314,6 +391,8 @@ async function main() {
   console.log(`[INFO] Output: ${args.outputPath}`);
   console.log(`[INFO] Chunk model: ${args.chunkModel}, Meta model: ${args.metaModel}`);
   console.log(`[INFO] Max messages: ${args.maxMessages}, Chunk size: ${args.chunkSize}`);
+  if (args.resume) console.log('[INFO] --resume: will skip already-saved chunks');
+  if (args.fresh) console.log('[INFO] --fresh: deleting existing chunk progress');
 
   const lore = await runDistillation(args, claude);
   writeLoreAtomic(args.outputPath, lore);
