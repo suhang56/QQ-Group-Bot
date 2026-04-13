@@ -194,6 +194,27 @@ export interface IImageDescriptionRepository {
   purgeOlderThan(cutoffTs: number): number;
 }
 
+export interface BotReply {
+  id: number;
+  groupId: string;
+  triggerMsgId: string | null;
+  triggerUserNickname: string | null;
+  triggerContent: string;
+  botReply: string;
+  module: string;
+  sentAt: number;
+  rating: number | null;
+  ratingComment: string | null;
+  ratedAt: number | null;
+}
+
+export interface IBotReplyRepository {
+  insert(row: Omit<BotReply, 'id' | 'rating' | 'ratingComment' | 'ratedAt'>): BotReply;
+  getUnrated(groupId: string, limit: number): BotReply[];
+  getRecent(groupId: string, limit: number): BotReply[];
+  rate(id: number, rating: number, comment: string | null, now: number): void;
+}
+
 // ---- Raw row types from SQLite ----
 
 interface MessageRow {
@@ -807,6 +828,58 @@ class ImageDescriptionRepository implements IImageDescriptionRepository {
   }
 }
 
+class BotReplyRepository implements IBotReplyRepository {
+  constructor(private readonly db: DatabaseSync) {}
+
+  insert(row: Omit<BotReply, 'id' | 'rating' | 'ratingComment' | 'ratedAt'>): BotReply {
+    const result = this.db.prepare(`
+      INSERT INTO bot_replies (group_id, trigger_msg_id, trigger_user_nickname, trigger_content, bot_reply, module, sent_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(row.groupId, row.triggerMsgId ?? null, row.triggerUserNickname ?? null, row.triggerContent, row.botReply, row.module, row.sentAt);
+    return { ...row, id: Number(result.lastInsertRowid), rating: null, ratingComment: null, ratedAt: null };
+  }
+
+  getUnrated(groupId: string, limit: number): BotReply[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM bot_replies WHERE group_id = ? AND rating IS NULL ORDER BY sent_at DESC LIMIT ?'
+    ).all(groupId, limit) as unknown as Array<{
+      id: number; group_id: string; trigger_msg_id: string | null;
+      trigger_user_nickname: string | null; trigger_content: string;
+      bot_reply: string; module: string; sent_at: number;
+      rating: number | null; rating_comment: string | null; rated_at: number | null;
+    }>;
+    return rows.map(r => ({
+      id: r.id, groupId: r.group_id, triggerMsgId: r.trigger_msg_id,
+      triggerUserNickname: r.trigger_user_nickname, triggerContent: r.trigger_content,
+      botReply: r.bot_reply, module: r.module, sentAt: r.sent_at,
+      rating: r.rating, ratingComment: r.rating_comment, ratedAt: r.rated_at,
+    }));
+  }
+
+  getRecent(groupId: string, limit: number): BotReply[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM bot_replies WHERE group_id = ? ORDER BY sent_at DESC LIMIT ?'
+    ).all(groupId, limit) as unknown as Array<{
+      id: number; group_id: string; trigger_msg_id: string | null;
+      trigger_user_nickname: string | null; trigger_content: string;
+      bot_reply: string; module: string; sent_at: number;
+      rating: number | null; rating_comment: string | null; rated_at: number | null;
+    }>;
+    return rows.map(r => ({
+      id: r.id, groupId: r.group_id, triggerMsgId: r.trigger_msg_id,
+      triggerUserNickname: r.trigger_user_nickname, triggerContent: r.trigger_content,
+      botReply: r.bot_reply, module: r.module, sentAt: r.sent_at,
+      rating: r.rating, ratingComment: r.rating_comment, ratedAt: r.rated_at,
+    }));
+  }
+
+  rate(id: number, rating: number, comment: string | null, now: number): void {
+    this.db.prepare(
+      'UPDATE bot_replies SET rating = ?, rating_comment = ?, rated_at = ? WHERE id = ?'
+    ).run(rating, comment ?? null, now, id);
+  }
+}
+
 // ---- Main Database class ----
 
 export class Database {
@@ -819,6 +892,7 @@ export class Database {
   readonly nameImages: INameImageRepository;
   readonly liveStickers: ILiveStickerRepository;
   readonly imageDescriptions: IImageDescriptionRepository;
+  readonly botReplies: IBotReplyRepository;
 
   private readonly _db: DatabaseSync;
 
@@ -837,6 +911,7 @@ export class Database {
     this.nameImages = new NameImageRepository(this._db);
     this.liveStickers = new LiveStickerRepository(this._db);
     this.imageDescriptions = new ImageDescriptionRepository(this._db);
+    this.botReplies = new BotReplyRepository(this._db);
   }
 
   /** Execute arbitrary SQL — intended for bulk-import scripts and migrations only. */

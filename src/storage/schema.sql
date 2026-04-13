@@ -128,3 +128,20 @@ CREATE TABLE IF NOT EXISTS image_descriptions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_image_desc_created ON image_descriptions(created_at);
+
+CREATE TABLE IF NOT EXISTS bot_replies (
+  id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id             TEXT    NOT NULL,
+  trigger_msg_id       TEXT,
+  trigger_user_nickname TEXT,
+  trigger_content      TEXT    NOT NULL,
+  bot_reply            TEXT    NOT NULL,
+  module               TEXT    NOT NULL,
+  sent_at              INTEGER NOT NULL,
+  rating               INTEGER,
+  rating_comment       TEXT,
+  rated_at             INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_bot_replies_group ON bot_replies(group_id, sent_at DESC);
+CREATE INDEX IF NOT EXISTS idx_bot_replies_unrated ON bot_replies(rating) WHERE rating IS NULL;
