@@ -13,6 +13,8 @@ export const chatHistoryDefaults = {
   chatKeywordMatchCount: 15,
   groupIdentityCacheTtlMs: 3_600_000, // 1 hour
   groupIdentityTopUsers: 20,
+  loreDirPath: 'data/lore',
+  loreSizeCapBytes: 512 * 1024, // 512 KB hard cap before truncation warning
 } as const;
 
 export function defaultGroupConfig(groupId: string): GroupConfig {
@@ -32,6 +34,7 @@ export function defaultGroupConfig(groupId: string): GroupConfig {
     modWhitelist: [],
     appealWindowHours: 24,
     kickConfirmModel: 'claude-opus-4-6',
+    chatLoreEnabled: true,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };

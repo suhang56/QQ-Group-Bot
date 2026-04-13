@@ -554,3 +554,97 @@ describe('ChatModule — keyword retrieval and group identity', () => {
     expect(promptText).toContain('现在回复这条消息');
   });
 });
+
+describe('ChatModule — group lore loading', () => {
+  let db: Database;
+  let claude: IClaudeClient;
+  let tmpDir: string;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    claude = makeMockClaude();
+    // Use OS temp dir for lore files in tests
+    tmpDir = require('node:os').tmpdir();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function makeChatWithLoreDir(loreDirPath: string, loreSizeCapBytes?: number) {
+    return new ChatModule(claude, db, {
+      botUserId: BOT_ID,
+      lurkerReplyChance: 1.0,
+      lurkerCooldownMs: 0,
+      debounceMs: 0,
+      loreDirPath,
+      ...(loreSizeCapBytes !== undefined ? { loreSizeCapBytes } : {}),
+    });
+  }
+
+  // 1. Lore file exists → system prompt contains lore markdown
+  it('lore file exists: system prompt contains lore markdown', async () => {
+    const { writeFileSync } = await import('node:fs');
+    const lorePath = require('node:path').join(tmpDir, `g-lore-test-1.md`);
+    writeFileSync(lorePath, '# 群志\n## 梗辞典\n邦多利 — 好吃的零食', 'utf8');
+
+    const chat = makeChatWithLoreDir(tmpDir);
+    const msg = makeMsg({ content: '有人吗', groupId: 'g-lore-test-1', rawContent: `[CQ:at,qq=${BOT_ID}] 有人吗` });
+    await chat.generateReply('g-lore-test-1', msg, []);
+
+    const call = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { system: Array<{ text: string }> };
+    const systemText = call.system.map((s: { text: string }) => s.text).join(' ');
+    expect(systemText).toContain('群志');
+    expect(systemText).toContain('邦多利');
+  });
+
+  // 2. Lore file missing → falls back to generic, chat still works
+  it('lore file missing: falls back to generic identity prompt, reply succeeds', async () => {
+    const chat = makeChatWithLoreDir('/nonexistent/path/that/does/not/exist');
+    const msg = makeMsg({ content: '有人吗', rawContent: `[CQ:at,qq=${BOT_ID}] 有人吗` });
+    const result = await chat.generateReply('g1', msg, []);
+    expect(result).toBe('bot reply');
+
+    const call = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { system: Array<{ text: string }> };
+    const systemText = call.system.map((s: { text: string }) => s.text).join(' ');
+    // Falls back to generic prompt — should contain standard fallback phrase
+    expect(systemText).toContain('说话风格随群');
+    expect(systemText).not.toContain('以下是这个群的资料');
+  });
+
+  // 3. Lore file empty → treat as missing, warn log
+  it('lore file empty: treated as missing, warn logged, fallback used', async () => {
+    const { writeFileSync } = await import('node:fs');
+    const lorePath = require('node:path').join(tmpDir, 'g-lore-test-3.md');
+    writeFileSync(lorePath, '   \n\n', 'utf8');
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const chat = makeChatWithLoreDir(tmpDir);
+    const msg = makeMsg({ content: '有人吗', groupId: 'g-lore-test-3', rawContent: `[CQ:at,qq=${BOT_ID}] 有人吗` });
+    await chat.generateReply('g-lore-test-3', msg, []);
+
+    const call = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { system: Array<{ text: string }> };
+    const systemText = call.system.map((s: { text: string }) => s.text).join(' ');
+    expect(systemText).not.toContain('以下是这个群的资料');
+    warnSpy.mockRestore();
+  });
+
+  // 4. Lore file too large → warn, truncate, still use
+  it('lore file too large: truncated to cap, lore still injected', async () => {
+    const { writeFileSync } = await import('node:fs');
+    const bigContent = '# 群志\n' + 'x'.repeat(2000);
+    const lorePath = require('node:path').join(tmpDir, 'g-lore-test-4.md');
+    writeFileSync(lorePath, bigContent, 'utf8');
+
+    const chat = makeChatWithLoreDir(tmpDir, 500); // 500-byte cap
+    const msg = makeMsg({ content: '有人吗', groupId: 'g-lore-test-4', rawContent: `[CQ:at,qq=${BOT_ID}] 有人吗` });
+    await chat.generateReply('g-lore-test-4', msg, []);
+
+    const call = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { system: Array<{ text: string }> };
+    const systemText = call.system.map((s: { text: string }) => s.text).join(' ');
+    // Should still contain lore (truncated) and be shorter than original
+    expect(systemText).toContain('群志');
+    // System text should not contain 2000 x's (it was truncated)
+    expect(systemText.length).toBeLessThan(bigContent.length + 500);
+  });
+});

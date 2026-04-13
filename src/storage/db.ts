@@ -53,6 +53,7 @@ export interface GroupConfig {
   modWhitelist: string[];
   appealWindowHours: number;
   kickConfirmModel: ClaudeModel;
+  chatLoreEnabled: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -195,6 +196,7 @@ function configFromRow(row: GroupConfigRow): GroupConfig {
     modWhitelist: JSON.parse(row.mod_whitelist) as string[],
     appealWindowHours: row.appeal_window_hours,
     kickConfirmModel: row.kick_confirm_model as ClaudeModel,
+    chatLoreEnabled: true, // not persisted in DB; always default to enabled
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

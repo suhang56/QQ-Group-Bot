@@ -1,3 +1,5 @@
+import { readFileSync, existsSync } from 'node:fs';
+import path from 'node:path';
 import type { IClaudeClient } from '../ai/claude.js';
 import type { GroupMessage } from '../adapter/napcat.js';
 import type { Database } from '../storage/db.js';
@@ -23,6 +25,8 @@ interface ChatOptions {
   burstMinMessages?: number;
   groupIdentityCacheTtlMs?: number;
   groupIdentityTopUsers?: number;
+  loreDirPath?: string;
+  loreSizeCapBytes?: number;
 }
 
 // Chinese stopwords that add no retrieval signal
@@ -69,6 +73,10 @@ export class ChatModule implements IChatModule {
   private readonly inFlightGroups = new Set<string>();
   // group identity cache: groupId -> { text, expiresAt }
   private readonly groupIdentityCache = new Map<string, { text: string; expiresAt: number }>();
+  // lore cache: groupId -> lore markdown (loaded once at first access)
+  private readonly loreCache = new Map<string, string | null>();
+  private readonly loreDirPath: string;
+  private readonly loreSizeCapBytes: number;
 
   constructor(
     private readonly claude: IClaudeClient,
@@ -87,6 +95,8 @@ export class ChatModule implements IChatModule {
     this.burstMinMessages = options.burstMinMessages ?? lurkerDefaults.burstMinMessages;
     this.groupIdentityCacheTtlMs = options.groupIdentityCacheTtlMs ?? chatHistoryDefaults.groupIdentityCacheTtlMs;
     this.groupIdentityTopUsers = options.groupIdentityTopUsers ?? chatHistoryDefaults.groupIdentityTopUsers;
+    this.loreDirPath = options.loreDirPath ?? chatHistoryDefaults.loreDirPath;
+    this.loreSizeCapBytes = options.loreSizeCapBytes ?? chatHistoryDefaults.loreSizeCapBytes;
   }
 
   async generateReply(
@@ -227,21 +237,66 @@ export class ChatModule implements IChatModule {
     }
   }
 
+  private _loadLore(groupId: string): string | null {
+    if (this.loreCache.has(groupId)) {
+      return this.loreCache.get(groupId) ?? null;
+    }
+
+    const lorePath = path.join(this.loreDirPath, `${groupId}.md`);
+    if (!existsSync(lorePath)) {
+      this.loreCache.set(groupId, null);
+      return null;
+    }
+
+    let content: string;
+    try {
+      content = readFileSync(lorePath, 'utf8');
+    } catch {
+      this.logger.warn({ groupId, lorePath }, 'Failed to read lore file — falling back to generic prompt');
+      this.loreCache.set(groupId, null);
+      return null;
+    }
+
+    if (!content.trim()) {
+      this.logger.warn({ groupId, lorePath }, 'Lore file is empty — treating as missing');
+      this.loreCache.set(groupId, null);
+      return null;
+    }
+
+    if (Buffer.byteLength(content, 'utf8') > this.loreSizeCapBytes) {
+      const capKb = (this.loreSizeCapBytes / 1024).toFixed(0);
+      this.logger.warn({ groupId, lorePath, capKb }, `Lore file exceeds ${capKb}KB cap — truncating`);
+      // Truncate to cap at a UTF-8 boundary (slice by chars approximates well enough)
+      const capChars = this.loreSizeCapBytes; // bytes ≈ chars for UTF-8 heavy Chinese is safe overcount
+      content = content.slice(0, capChars);
+    }
+
+    this.loreCache.set(groupId, content);
+    this.logger.debug({ groupId, lorePath, sizeKb: (content.length / 1024).toFixed(1) }, 'Lore file loaded');
+    return content;
+  }
+
   private _getGroupIdentityPrompt(groupId: string): string {
     const cached = this.groupIdentityCache.get(groupId);
     if (cached && Date.now() < cached.expiresAt) {
       return cached.text;
     }
 
-    const topUsers = this.db.messages.getTopUsers(groupId, this.groupIdentityTopUsers);
-    const memberList = topUsers.length > 0
-      ? topUsers.map(u => u.nickname).join('、')
-      : '（暂无数据）';
+    const lore = this._loadLore(groupId);
+    let text: string;
 
-    const text = `你是这个QQ群的老群友，说话风格随群，自然随意、简短（1-3句话）。\n群里的常驻群友（按活跃度）：${memberList}\n如果群友提到群里的人名、梗、黑话，基于上下文猜意思；不懂就说"啥来的"或"没听过求科普"，不要装懂。\n绝对不要透露你是AI，除非被直接问到。`;
+    if (lore) {
+      text = `你是这个QQ群的老群友。以下是这个群的资料：\n\n${lore}\n\n---\n现在参与群聊：说话风格随群，自然随意、简短（1-3句话）。如果群友提到群里的人名、梗、黑话，基于资料回答；资料没提到的就说"啥来的"或"没听过求科普"，不要装懂。绝对不要透露你是AI。`;
+    } else {
+      const topUsers = this.db.messages.getTopUsers(groupId, this.groupIdentityTopUsers);
+      const memberList = topUsers.length > 0
+        ? topUsers.map(u => u.nickname).join('、')
+        : '（暂无数据）';
+      text = `你是这个QQ群的老群友，说话风格随群，自然随意、简短（1-3句话）。\n群里的常驻群友（按活跃度）：${memberList}\n如果群友提到群里的人名、梗、黑话，基于上下文猜意思；不懂就说"啥来的"或"没听过求科普"，不要装懂。\n绝对不要透露你是AI，除非被直接问到。`;
+    }
 
     this.groupIdentityCache.set(groupId, { text, expiresAt: Date.now() + this.groupIdentityCacheTtlMs });
-    this.logger.debug({ groupId, memberCount: topUsers.length }, 'Group identity prompt cached');
+    this.logger.debug({ groupId, hasLore: !!lore }, 'Group identity prompt cached');
     return text;
   }
 
