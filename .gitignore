@@ -1,0 +1,8 @@
+.claude/
+.env
+data/
+node_modules/
+dist/
+*.log
+pino-*.txt
+coverage/

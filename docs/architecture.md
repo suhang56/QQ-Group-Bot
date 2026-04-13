@@ -1,0 +1,627 @@
+# QQ Group Bot — Architecture
+
+## Architectural Issues Flagged
+
+1. **`node-napcat-ts` maturity risk**: The plan references `node-napcat-ts ^1.x` but this library has limited documentation and an unstable API surface. The adapter must isolate this behind a clean interface so it can be swapped for a raw `ws` implementation with zero module-level changes. Developer must not let `node-napcat-ts` types leak beyond `src/adapter/`.
+
+2. **`@xenova/transformers` load time**: The local embedding model takes 2–10 seconds to initialise on first run. Learner module must lazy-load it and the bot must be fully online before embedding is ready (non-blocking startup). Embeddings unavailable at startup ≠ bot crash.
+
+3. **Severity escalation state**: The plan says "warn_count >= 3 within 7 days → auto-escalate next offense by +1 severity" but the spec stores warnings only in `moderation_log`, not a dedicated counter column. The Moderator module must query `moderation_log` at runtime; no in-memory state may be used for this (restart-safe).
+
+4. **`mimic_active_user_id` persistence gap**: The spec says "Bot restarts mid-session → session state lost; next message treated as no mimic mode (persisted in group_config)." These are contradictory. Decision: persist in `group_config` on every `/mimic_on` and `/mimic_off`; Router reads `group_config` on startup. No in-memory mimic session state.
+
+5. **Rate limiter is in-memory only**: Acceptable per spec, but the daily punishment cap must be read from DB on every moderation action (not cached in process) to be restart-safe.
+
+---
+
+## 1. Module Boundaries and Dependency Direction
+
+```
+adapter/ ──► core/ ──► modules/ ──► ai/
+                  │              └──► storage/
+                  └──► storage/
+utils/ (imported by all — no upward deps)
+config.ts (imported by all — no upward deps)
+```
+
+**Strict one-way rule**: no module may import from a layer above it. Specifically:
+- `adapter/` imports nothing from `core/`, `modules/`, `ai/`, `storage/`
+- `core/` imports from `modules/` and `storage/` only
+- `modules/` imports from `ai/` and `storage/` only
+- `ai/` imports from nothing in src (only Anthropic SDK)
+- `storage/` imports from nothing in src (only better-sqlite3)
+- `utils/` and `config.ts` are leaves — import nothing from src
+
+**Circular imports are a build error.** tsconfig `paths` aliases are forbidden; use relative paths so the compiler catches violations.
+
+---
+
+## 2. TypeScript Interface Signatures
+
+### 2.1 NapCatAdapter (`src/adapter/napcat.ts`)
+
+```typescript
+export interface GroupMessage {
+  messageId: string;
+  groupId: string;
+  userId: string;
+  nickname: string;
+  role: 'owner' | 'admin' | 'member';
+  content: string;       // plain text, already stripped of CQ codes
+  rawContent: string;    // original CQ-code string
+  timestamp: number;     // unix seconds
+}
+
+export interface AdapterEvents {
+  'message.group': (msg: GroupMessage) => void;
+  'notice.group_increase': (groupId: string, userId: string) => void;
+  'notice.group_decrease': (groupId: string, userId: string) => void;
+  'error': (err: Error) => void;
+  'close': () => void;
+}
+
+export interface INapCatAdapter {
+  connect(): Promise<void>;
+  disconnect(): Promise<void>;
+  on<K extends keyof AdapterEvents>(event: K, handler: AdapterEvents[K]): void;
+  send(groupId: string, text: string): Promise<void>;
+  ban(groupId: string, userId: string, durationSeconds: number): Promise<void>;
+  kick(groupId: string, userId: string): Promise<void>;
+  deleteMsg(messageId: string): Promise<void>;
+  sendPrivate(userId: string, text: string): Promise<void>;
+}
+```
+
+**Implementation note**: `NapCatAdapter` is a `class` that emits typed events. All OneBot action failures throw `NapCatActionError` (see §4). The adapter is the only file that knows about OneBot protocol; it exposes `GroupMessage` not raw OneBot frames.
+
+---
+
+### 2.2 Router (`src/core/router.ts`)
+
+```typescript
+export interface IRouter {
+  dispatch(msg: GroupMessage): Promise<void>;
+}
+
+export type CommandHandler = (
+  msg: GroupMessage,
+  args: string[],
+  config: GroupConfig
+) => Promise<void>;
+```
+
+Router internals (not exported as interface, but constrained by Iteration Contract):
+- Commands registered via a `Map<string, CommandHandler>` keyed by command name (e.g. `'mimic'`, `'rules'`).
+- Non-command messages pass through: Moderator → (if chat trigger) Chat/Mimic → Learner (persist).
+- Rate limiter checked before any handler runs; returns early on limit exceeded.
+
+---
+
+### 2.3 Chat Module (`src/modules/chat.ts`)
+
+```typescript
+export interface IChatModule {
+  /**
+   * Returns a reply string, or null if the bot should stay silent.
+   * Caller decides whether to send.
+   */
+  generateReply(
+    groupId: string,
+    triggerMessage: GroupMessage,
+    recentMessages: GroupMessage[]
+  ): Promise<string | null>;
+}
+```
+
+---
+
+### 2.4 Mimic Module (`src/modules/mimic.ts`)
+
+```typescript
+export interface IMimicModule {
+  /**
+   * One-shot mimic: generate a reply in targetUserId's style.
+   * topic is optional — if absent, reply to the latest group message.
+   */
+  generateMimic(
+    groupId: string,
+    targetUserId: string,
+    topic: string | null,
+    recentMessages: GroupMessage[]
+  ): Promise<MimicResult>;
+}
+
+export type MimicResult =
+  | { ok: true; text: string; historyCount: number }
+  | { ok: false; errorCode: BotErrorCode };
+```
+
+---
+
+### 2.5 Moderator Module (`src/modules/moderator.ts`)
+
+```typescript
+export interface ModerationVerdict {
+  violation: boolean;
+  severity: 1 | 2 | 3 | 4 | 5 | null;
+  reason: string;
+  confidence: number;
+}
+
+export interface IModerator {
+  /**
+   * Assess a message. If violation, execute the punishment ladder.
+   * Returns the verdict regardless of whether punishment was applied
+   * (e.g. whitelist or cap may suppress it).
+   */
+  assess(msg: GroupMessage, config: GroupConfig): Promise<ModerationVerdict>;
+}
+```
+
+The punishment ladder (delete/ban/kick) is encapsulated inside `Moderator`; it calls `INapCatAdapter` directly via constructor injection. `Moderator` does NOT return after assessing — it also executes side effects.
+
+---
+
+### 2.6 Learner Module (`src/modules/learner.ts`)
+
+```typescript
+export interface ILearner {
+  /** Persist a new rule with its embedding. */
+  addRule(groupId: string, content: string, type: 'positive' | 'negative'): Promise<AddRuleResult>;
+
+  /** Return top-k rules most similar to the query text. */
+  retrieveRelevant(groupId: string, query: string, topK: number): Promise<Rule[]>;
+
+  /** Check cosine similarity against existing rules; returns best match if >0.95. */
+  findDuplicate(groupId: string, content: string): Promise<Rule | null>;
+}
+
+export type AddRuleResult =
+  | { ok: true; ruleId: number }
+  | { ok: false; errorCode: BotErrorCode; duplicateId?: number };
+
+export interface Rule {
+  id: number;
+  groupId: string;
+  content: string;
+  type: 'positive' | 'negative';
+  embedding: Float32Array;
+}
+```
+
+---
+
+### 2.7 ClaudeClient (`src/ai/claude.ts`)
+
+```typescript
+export type ClaudeModel = 'claude-sonnet-4-6' | 'claude-opus-4-6';
+
+export interface CachedSystemBlock {
+  text: string;
+  cache: true;   // always sets cache_control: {type: 'ephemeral'}
+}
+
+export interface ClaudeMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export interface ClaudeRequest {
+  model: ClaudeModel;
+  maxTokens: number;
+  system: CachedSystemBlock[];
+  messages: ClaudeMessage[];
+}
+
+export interface ClaudeResponse {
+  text: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+}
+
+export interface IClaudeClient {
+  complete(req: ClaudeRequest): Promise<ClaudeResponse>;
+}
+```
+
+**Prompt caching**: Every call where `system` contains a `CachedSystemBlock` with `cache: true` must set `cache_control: {type: 'ephemeral'}` on that content block. The client must NOT add caching to user-turn messages. Response usage fields must be logged at DEBUG level on every call.
+
+**Retry policy**: One automatic retry on HTTP 529 (overloaded) with 2-second delay. All other errors propagate as `ClaudeApiError`. No retry on 400/401/403.
+
+---
+
+### 2.8 Database Layer (`src/storage/db.ts`)
+
+```typescript
+// --- Domain types ---
+
+export interface Message {
+  id: number;
+  groupId: string;
+  userId: string;
+  nickname: string;
+  content: string;
+  timestamp: number;
+  deleted: boolean;
+}
+
+export interface User {
+  userId: string;
+  groupId: string;
+  nickname: string;
+  styleSummary: string | null;
+  lastSeen: number;
+}
+
+export interface ModerationRecord {
+  id: number;
+  msgId: string;
+  groupId: string;
+  userId: string;
+  violation: boolean;
+  severity: number | null;
+  action: 'warn' | 'delete' | 'ban' | 'kick' | 'none';
+  reason: string;
+  appealed: 0 | 1 | 2;  // 0=no, 1=pending, 2=denied
+  reversed: boolean;
+  timestamp: number;
+}
+
+export interface GroupConfig {
+  groupId: string;
+  enabledModules: string[];
+  autoMod: boolean;
+  dailyPunishmentLimit: number;
+  punishmentsToday: number;
+  punishmentsResetDate: string;
+  mimicActiveUserId: string | null;
+  mimicStartedBy: string | null;
+  chatTriggerKeywords: string[];
+  chatTriggerAtOnly: boolean;
+  chatDebounceMs: number;
+  modConfidenceThreshold: number;
+  modWhitelist: string[];
+  appealWindowHours: number;
+  kickConfirmModel: ClaudeModel;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// --- Repository interfaces ---
+
+export interface IMessageRepository {
+  insert(msg: Omit<Message, 'id'>): Message;
+  getRecent(groupId: string, limit: number): Message[];
+  getByUser(groupId: string, userId: string, limit: number): Message[];
+  softDelete(msgId: string): void;
+}
+
+export interface IUserRepository {
+  upsert(user: Omit<User, never>): void;
+  findById(userId: string, groupId: string): User | null;
+}
+
+export interface IModerationRepository {
+  insert(record: Omit<ModerationRecord, 'id'>): ModerationRecord;
+  findById(id: number): ModerationRecord | null;
+  findByMsgId(msgId: string): ModerationRecord | null;
+  findRecentByUser(userId: string, groupId: string, windowMs: number): ModerationRecord[];
+  findPendingAppeal(userId: string, groupId: string): ModerationRecord | null;
+  update(id: number, patch: Partial<Pick<ModerationRecord, 'appealed' | 'reversed'>>): void;
+  countWarnsByUser(userId: string, groupId: string, withinMs: number): number;
+}
+
+export interface IGroupConfigRepository {
+  get(groupId: string): GroupConfig | null;
+  upsert(config: GroupConfig): void;
+  incrementPunishments(groupId: string): void;
+  resetDailyPunishments(groupId: string): void;
+}
+
+export interface IRuleRepository {
+  insert(rule: Omit<Rule, 'id'>): Rule;
+  findById(id: number): Rule | null;
+  getAll(groupId: string): Rule[];
+  getPage(groupId: string, offset: number, limit: number): { rules: Rule[]; total: number };
+}
+```
+
+All repository methods are **synchronous** (better-sqlite3 is sync). No Promises in the storage layer.
+
+---
+
+### 2.9 Logger (`src/utils/logger.ts`)
+
+```typescript
+import pino from 'pino';
+
+export type Logger = pino.Logger;
+
+export function createLogger(name: string): Logger;
+```
+
+Each module creates its own child logger: `createLogger('moderator')`, `createLogger('chat')`, etc.
+
+---
+
+## 3. Error Handling Strategy
+
+### 3.1 Error Taxonomy
+
+```typescript
+// src/utils/errors.ts
+
+export enum BotErrorCode {
+  PERMISSION_DENIED     = 'E001',
+  USER_NOT_FOUND        = 'E002',
+  INSUFFICIENT_HISTORY  = 'E003',
+  DAILY_CAP_REACHED     = 'E004',
+  APPEAL_EXPIRED        = 'E005',
+  APPEAL_DUPLICATE      = 'E006',
+  NO_PUNISHMENT_RECORD  = 'E007',
+  ALREADY_REVERSED      = 'E008',
+  CLAUDE_API_ERROR      = 'E009',
+  CLAUDE_PARSE_ERROR    = 'E010',
+  DB_ERROR              = 'E011',
+  NAPCAT_ACTION_FAIL    = 'E012',
+  MIMIC_SESSION_ACTIVE  = 'E013',
+  RULE_TOO_LONG         = 'E014',
+  RULE_DUPLICATE        = 'E015',
+  WHITELIST_MEMBER      = 'E016',
+  SELF_MIMIC            = 'E017',
+}
+
+export class BotError extends Error {
+  constructor(
+    public readonly code: BotErrorCode,
+    message: string,
+    public readonly cause?: unknown
+  ) { super(message); this.name = 'BotError'; }
+}
+
+export class ClaudeApiError extends BotError {
+  constructor(cause: unknown) {
+    super(BotErrorCode.CLAUDE_API_ERROR, 'Claude API call failed', cause);
+    this.name = 'ClaudeApiError';
+  }
+}
+
+export class ClaudeParseError extends BotError {
+  constructor(raw: string) {
+    super(BotErrorCode.CLAUDE_PARSE_ERROR, `Failed to parse Claude response: ${raw.slice(0, 100)}`);
+    this.name = 'ClaudeParseError';
+  }
+}
+
+export class NapCatActionError extends BotError {
+  constructor(action: string, cause: unknown) {
+    super(BotErrorCode.NAPCAT_ACTION_FAIL, `OneBot action '${action}' failed`, cause);
+    this.name = 'NapCatActionError';
+  }
+}
+
+export class DbError extends BotError {
+  constructor(cause: unknown) {
+    super(BotErrorCode.DB_ERROR, 'Database error', cause);
+    this.name = 'DbError';
+  }
+}
+```
+
+### 3.2 Where Errors Are Caught
+
+| Throw site | Caught at | Action |
+|---|---|---|
+| `ClaudeApiError` / `ClaudeParseError` | Caller module (Moderator, Chat, Mimic) | Fail-safe: treat as no-violation / no-reply; log ERROR |
+| `NapCatActionError` | `Moderator.assess()` or command handler in Router | Log ERROR; send admin notification via adapter |
+| `DbError` | Repository caller (module or command handler) | Log ERROR; reply "service unavailable" to user |
+| `BotError` (domain) | Command handler in Router | Reply with UX template for that error code |
+| Unhandled `Error` | `Router.dispatch()` top-level try/catch | Log FATAL; do not crash process |
+
+**Process does not exit on any single-message error.** The only acceptable crashes are: DB file corrupt at startup, adapter cannot connect after 3 retries.
+
+### 3.3 Retry Policy
+
+| Situation | Retry | Delay |
+|---|---|---|
+| Claude HTTP 529 | 1 retry | 2s |
+| Claude HTTP 4xx | 0 (throw immediately) | — |
+| OneBot action fail | 0 (throw, let admin handle) | — |
+| DB write fail | 0 (throw `DbError`) | — |
+| Adapter WebSocket disconnect | Reconnect loop: 3 attempts, backoff 2s/5s/10s | — |
+
+---
+
+## 4. Logging Conventions
+
+### 4.1 Pino Levels
+
+| Level | When to use |
+|---|---|
+| `trace` | Per-message routing decisions, rate limiter checks |
+| `debug` | Claude API request/response summaries (model, token counts, cache hit) |
+| `info` | Moderation actions taken, commands dispatched, bot started/stopped |
+| `warn` | Soft failures: rate limit reached, daily cap warning, `INSUFFICIENT_HISTORY` |
+| `error` | `ClaudeApiError`, `NapCatActionError`, `DbError` — with full `err` object |
+| `fatal` | Uncaught exceptions in `Router.dispatch()`, startup failures |
+
+### 4.2 Structured Fields
+
+Every log entry must include these fields where applicable:
+
+```typescript
+// Mandatory on every moderation-related log
+{
+  groupId: string,
+  userId: string,
+  messageId: string,
+  module: 'moderator' | 'chat' | 'mimic' | 'learner' | 'router' | 'adapter',
+}
+
+// Claude calls — logged at DEBUG
+{
+  model: ClaudeModel,
+  inputTokens: number,
+  outputTokens: number,
+  cacheReadTokens: number,
+  cacheWriteTokens: number,
+  durationMs: number,
+}
+
+// Punishment actions — logged at INFO
+{
+  action: 'warn' | 'delete' | 'ban' | 'kick',
+  severity: number,
+  reason: string,
+  durationSeconds?: number,
+  reversedBy?: string,
+}
+```
+
+Log output goes to stdout (pino default). A transport (`pino/file`) writing to `data/logs/bot-YYYY-MM-DD.log` is configured in `src/index.ts` only, not in modules.
+
+**Never log raw message content at INFO or above.** Log message IDs only; content goes to `trace` level where PII risk is documented.
+
+---
+
+## 5. DI / Composition Pattern
+
+Constructor injection is used throughout. No service locator, no global singletons except the logger.
+
+### 5.1 Dependency Graph
+
+```
+Database (better-sqlite3 instance)
+  └─► MessageRepository, UserRepository, ModerationRepository,
+      GroupConfigRepository, RuleRepository
+
+ClaudeClient (Anthropic SDK instance)
+
+EmbeddingService (@xenova/transformers, lazy-loaded)
+
+NapCatAdapter (ws connection)
+
+Learner(RuleRepository, EmbeddingService)
+Moderator(ClaudeClient, ModerationRepository, MessageRepository, GroupConfigRepository, NapCatAdapter)
+Chat(ClaudeClient, MessageRepository, GroupConfigRepository)
+Mimic(ClaudeClient, MessageRepository, GroupConfigRepository)
+
+RateLimiter()  — no deps
+
+Router(
+  NapCatAdapter,
+  Moderator, Chat, Mimic, Learner,
+  MessageRepository, UserRepository, GroupConfigRepository,
+  RateLimiter
+)
+```
+
+### 5.2 Bootstrap Order (`src/index.ts`)
+
+```typescript
+// 1. Load config (env vars)
+// 2. Open SQLite, run migrations
+// 3. Instantiate repositories
+// 4. Instantiate ClaudeClient
+// 5. Instantiate EmbeddingService (do NOT await — lazy)
+// 6. Instantiate modules (Learner, Moderator, Chat, Mimic)
+// 7. Instantiate RateLimiter
+// 8. Instantiate Router
+// 9. Instantiate NapCatAdapter; call adapter.connect()
+// 10. Register adapter.on('message.group', router.dispatch)
+// 11. Start midnight cron for punishments_today reset
+```
+
+All instantiation is in `src/index.ts`. No module creates its own dependencies.
+
+---
+
+## 6. Configuration Loading Order
+
+```
+1. .env file (via dotenv.config() at process start)
+   NAPCAT_WS_URL, ANTHROPIC_API_KEY, LOG_LEVEL, DB_PATH, NODE_ENV
+
+2. Process environment (overrides .env — for CI/production)
+
+3. group_config table in SQLite (per-group runtime config)
+   Loaded fresh from DB on every Router.dispatch() call.
+   Never cached in memory for longer than one message-handling cycle.
+```
+
+**Hard rules**:
+- `ANTHROPIC_API_KEY` must never appear in `group_config` or any DB column.
+- `DB_PATH` defaults to `data/bot.db` if not set.
+- Missing `NAPCAT_WS_URL` or `ANTHROPIC_API_KEY` at startup → log FATAL + `process.exit(1)`.
+
+---
+
+## 7. Test Strategy
+
+### 7.1 Framework and Coverage
+
+- **Vitest** for all unit and integration tests.
+- **Minimum 80% line coverage** enforced via `vitest --coverage` with `coverageThreshold: { global: { lines: 80 } }`.
+- Edge cases listed in the plan are **mandatory** — failing edge tests block milestone sign-off.
+
+### 7.2 Mocking Strategy
+
+- `IClaudeClient` is an interface; tests inject a `MockClaudeClient` that returns canned JSON responses. No HTTP calls in unit tests.
+- `INapCatAdapter` is an interface; tests inject a `MockNapCatAdapter` that records calls.
+- Repository interfaces allow `MockMessageRepository` etc. — in-memory Maps.
+- **No mocking of SQLite** in integration tests — use a real `:memory:` database.
+
+### 7.3 Test Files and What They Must Cover
+
+| Test file | Covers |
+|---|---|
+| `test/moderator.test.ts` | All 6 edge cases from plan; severity ladder; whitelist bypass; daily cap; Opus double-check flow; Claude error → fail-safe |
+| `test/mimic.test.ts` | Zero history (E002); <5 messages (E003); self-mimic (E017); session active (E013); session persistence across restart |
+| `test/chat.test.ts` | Debounce; bot mention loop prevention; group rate limit; Claude error → silent |
+| `test/learner.test.ts` | RAG retrieval correctness; duplicate detection (similarity >0.95); rule too long; embedding unavailable at startup |
+| `test/router.test.ts` | Command parsing; rate limiter; unknown command; private message rejection |
+| `test/adapter.test.ts` | Reconnect on disconnect; action error wraps to NapCatActionError |
+| `test/db.test.ts` | Repository CRUD; midnight reset logic; soft delete |
+
+### 7.4 Integration Test for Adapter
+
+One integration test connects to a local NapCat mock WebSocket server (test spins up a `ws.Server` on an ephemeral port) and verifies:
+1. `adapter.connect()` succeeds.
+2. Incoming OneBot `message_type: 'group'` frame triggers `'message.group'` event with parsed `GroupMessage`.
+3. `adapter.send()` emits correct OneBot action frame.
+4. WebSocket close triggers `'close'` event and automatic reconnect attempt.
+
+This test is tagged `@integration` and excluded from default `pnpm test`; run via `pnpm test:integration`.
+
+---
+
+## 8. Iteration Contract
+
+### What Developer Can Change Without Re-Approval
+
+- Implementation details inside any module that do not change its exported interface.
+- SQL queries inside repositories (schema must not change without approval).
+- Prompt wording inside `chat.ts`, `mimic.ts`, `moderator.ts` — as long as the JSON schema Claude is asked to return is unchanged.
+- Logger call sites (adding/removing log lines, changing levels within reason).
+- Internal helper functions not exported from a module.
+- Test implementations (new test cases always welcome).
+- Error message strings passed to `BotError` (not the error codes).
+
+### What Requires Architect Re-Approval
+
+- **Any change to exported interfaces** in §2 (adding/removing/renaming methods or fields).
+- **Dependency direction violations** — importing from a higher layer.
+- **Schema changes** to any SQLite table (columns added, renamed, removed, type changed).
+- **Claude API call structure** changes: system prompt structure, JSON response schema, model selection logic.
+- **New external dependencies** (adding a package to `dependencies` or `devDependencies`).
+- **Rate limiter semantics** changes (window type, limits, cooldown durations).
+- **Punishment ladder logic** changes (severity thresholds, action types, Opus double-check trigger).
+- **Startup/bootstrap order** changes in `src/index.ts`.
+- **Config loading order** or new env vars.
+- **Error codes** (`BotErrorCode` enum) — adding or changing codes.
+
+### Milestone Gate Rule
+
+Developer may not begin milestone M(n+1) until Reviewer has issued **APPROVED** for milestone M(n) in `.claude/code-reviews.md`. Partial approvals ("APPROVED with notes") are acceptable only if the noted issues are tracked as tasks for the current milestone and do not block correctness.
