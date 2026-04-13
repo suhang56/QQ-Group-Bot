@@ -517,6 +517,26 @@ describe('splitReply', () => {
   it('punctuation-only line filtered', () => {
     expect(splitReply('hello\n——\nworld')).toEqual(['hello', 'world']);
   });
+
+  it('double ]] directly after CQ code in same line stripped', () => {
+    expect(splitReply('[CQ:mface,emoji_id=x,key=y]]')).toEqual(['[CQ:mface,emoji_id=x,key=y]']);
+  });
+
+  it('CQ code + space + ] in same line stripped', () => {
+    expect(splitReply('[CQ:mface,emoji_id=x,key=y] ]')).toEqual(['[CQ:mface,emoji_id=x,key=y]']);
+  });
+
+  it('CQ code on line then ] on next line still filtered (existing path)', () => {
+    expect(splitReply('[CQ:mface,emoji_id=x,key=y]\n]')).toEqual(['[CQ:mface,emoji_id=x,key=y]']);
+  });
+
+  it('adjacent CQ codes not broken by bracket strip', () => {
+    expect(splitReply('[CQ:face,id=14]][CQ:face,id=15]')).toEqual(['[CQ:face,id=14][CQ:face,id=15]']);
+  });
+
+  it('multiple stray ]]]]] after one CQ stripped to single ]', () => {
+    expect(splitReply('[CQ:mface,emoji_id=x,key=y]]]]]')).toEqual(['[CQ:mface,emoji_id=x,key=y]']);
+  });
 });
 
 describe('Router — multi-line chat reply dispatch', () => {

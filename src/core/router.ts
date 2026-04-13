@@ -18,7 +18,10 @@ const SPLIT_DELAY_MAX_MS = 150;
 /** Split a reply on newlines, cap at MAX_SPLIT_LINES, drop empty lines. */
 export function splitReply(text: string): string[] {
   // Collapse any \n inside [CQ:...] blocks so multi-line CQ codes become atomic tokens
-  const flattened = text.replace(/\[CQ:[^\]]*\]/gs, (cq) => cq.replace(/\s*\n\s*/g, ''));
+  let flattened = text.replace(/\[CQ:[^\]]*\]/gs, (cq) => cq.replace(/\s*\n\s*/g, ''));
+  // Strip duplicate/stray ] that immediately follows a CQ code (with optional whitespace)
+  // e.g. [CQ:mface,...]] or [CQ:mface,...] ] → [CQ:mface,...]
+  flattened = flattened.replace(/(\[CQ:[^\]]*\])\s*\]+/g, '$1');
   // Strip trailing unmatched lone bracket lines (not part of a CQ code)
   const stripped = flattened.replace(/\n+[\[\]]\s*$/g, '');
   const lines = stripped.split('\n').map(l => l.trim()).filter(l => {
