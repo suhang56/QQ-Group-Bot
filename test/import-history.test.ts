@@ -1,8 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { DatabaseSync } from 'node:sqlite';
+import { Database } from '../src/storage/db.js';
 import {
   shouldKeep,
-  applyMigration,
   importLines,
   makeStats,
   type JsonlRecord,
@@ -15,7 +14,7 @@ function makeRecord(overrides: Partial<JsonlRecord> = {}): JsonlRecord {
   return {
     id: 'msg-001',
     timestamp: 1772964111000,
-    sender: { uid: 'u_abc', uin: '1279051865', name: '高木梦以', groupCard: '高木梦以' },
+    sender: { uin: '1279051865', name: '高木梦以', groupCard: '高木梦以' },
     type: 'text',
     content: { text: '草你的' },
     recalled: false,
@@ -28,29 +27,8 @@ async function* asyncLines(lines: string[]): AsyncIterable<string> {
   for (const line of lines) yield line;
 }
 
-function makeDb(): DatabaseSync {
-  const db = new DatabaseSync(':memory:');
-  db.exec(`
-    CREATE TABLE messages (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      group_id TEXT NOT NULL,
-      user_id TEXT NOT NULL,
-      nickname TEXT NOT NULL DEFAULT '',
-      content TEXT NOT NULL,
-      timestamp INTEGER NOT NULL,
-      deleted INTEGER NOT NULL DEFAULT 0
-    );
-    CREATE TABLE users (
-      user_id TEXT NOT NULL,
-      group_id TEXT NOT NULL,
-      nickname TEXT NOT NULL DEFAULT '',
-      style_summary TEXT,
-      last_seen INTEGER NOT NULL,
-      PRIMARY KEY (user_id, group_id)
-    );
-  `);
-  applyMigration(db);
-  return db;
+function makeDb(): Database {
+  return new Database(':memory:');
 }
 
 // ---- shouldKeep tests ----
@@ -105,33 +83,10 @@ describe('shouldKeep', () => {
   });
 });
 
-// ---- applyMigration tests ----
-
-describe('applyMigration', () => {
-  it('adds source_message_id column and allows inserts with it', () => {
-    const db = new DatabaseSync(':memory:');
-    db.exec('CREATE TABLE messages (id INTEGER PRIMARY KEY, group_id TEXT, user_id TEXT, nickname TEXT, content TEXT, timestamp INTEGER, deleted INTEGER DEFAULT 0)');
-    db.exec('CREATE TABLE users (user_id TEXT, group_id TEXT, nickname TEXT, style_summary TEXT, last_seen INTEGER, PRIMARY KEY(user_id, group_id))');
-    applyMigration(db);
-    db.prepare('INSERT INTO messages (group_id, user_id, nickname, content, timestamp, deleted, source_message_id) VALUES (?,?,?,?,?,0,?)').run('g1', 'u1', 'n', 'c', 1, 'src-1');
-    const row = db.prepare('SELECT source_message_id FROM messages LIMIT 1').get() as { source_message_id: string };
-    expect(row.source_message_id).toBe('src-1');
-    db.close();
-  });
-
-  it('is idempotent — calling twice does not throw', () => {
-    const db = new DatabaseSync(':memory:');
-    db.exec('CREATE TABLE messages (id INTEGER PRIMARY KEY, group_id TEXT, user_id TEXT, nickname TEXT, content TEXT, timestamp INTEGER, deleted INTEGER DEFAULT 0)');
-    db.exec('CREATE TABLE users (user_id TEXT, group_id TEXT, nickname TEXT, style_summary TEXT, last_seen INTEGER, PRIMARY KEY(user_id, group_id))');
-    expect(() => { applyMigration(db); applyMigration(db); }).not.toThrow();
-    db.close();
-  });
-});
-
 // ---- importLines tests ----
 
 describe('importLines', () => {
-  let db: DatabaseSync;
+  let db: Database;
   let deps: ImportDeps;
 
   beforeEach(() => {
@@ -142,7 +97,7 @@ describe('importLines', () => {
   it('inserts kept rows and counts filtered rows', async () => {
     const lines = [
       JSON.stringify(makeRecord({ id: 'msg-1', type: 'text', content: { text: 'hello' } })),
-      JSON.stringify(makeRecord({ id: 'msg-2', type: 'video' })),  // filtered
+      JSON.stringify(makeRecord({ id: 'msg-2', type: 'video' })),
       JSON.stringify(makeRecord({ id: 'msg-3', type: 'reply', content: { text: 'ok' } })),
     ];
     const stats = makeStats();
@@ -192,22 +147,42 @@ describe('importLines', () => {
     await importLines(asyncLines(lines), dryDeps, stats);
     expect(stats.linesKept).toBe(2);
     expect(stats.inserted).toBe(0);
-
-    const count = (db.prepare('SELECT COUNT(*) as c FROM messages').get() as { c: number }).c;
-    expect(count).toBe(0);
+    expect(db.messages.getRecent('g-test', 10)).toHaveLength(0);
   });
 
-  it('idempotent: re-import same lines → zero new inserts', async () => {
-    const lines = [JSON.stringify(makeRecord({ id: 'dup-1', content: { text: 'once' } }))];
+  it('idempotent: import twice → same row count in db', async () => {
+    const lines = [
+      JSON.stringify(makeRecord({ id: 'dup-1', content: { text: 'once' } })),
+      JSON.stringify(makeRecord({ id: 'dup-2', content: { text: 'twice' } })),
+    ];
 
     const stats1 = makeStats();
     await importLines(asyncLines(lines), deps, stats1);
-    expect(stats1.inserted).toBe(1);
+    expect(stats1.inserted).toBe(2);
+    const countAfterFirst = db.messages.getRecent('g-test', 100).length;
 
     const stats2 = makeStats();
     await importLines(asyncLines(lines), deps, stats2);
     expect(stats2.inserted).toBe(0);
-    expect(stats2.skippedDuplicate).toBe(1);
+    expect(stats2.skippedDuplicate).toBe(2);
+    expect(db.messages.getRecent('g-test', 100).length).toBe(countAfterFirst);
+  });
+
+  it('second run reports all rows as skipped-duplicate', async () => {
+    const lines = Array.from({ length: 4 }, (_, i) =>
+      JSON.stringify(makeRecord({ id: `sid-${i}`, content: { text: `msg ${i}` } }))
+    );
+
+    const stats1 = makeStats();
+    await importLines(asyncLines(lines), deps, stats1);
+    expect(stats1.inserted).toBe(4);
+    expect(stats1.skippedDuplicate).toBe(0);
+
+    const stats2 = makeStats();
+    await importLines(asyncLines(lines), deps, stats2);
+    expect(stats2.inserted).toBe(0);
+    expect(stats2.skippedDuplicate).toBe(4);
+    expect(stats2.linesKept).toBe(4);
   });
 
   it('upserts users for inserted rows', async () => {
@@ -217,10 +192,10 @@ describe('importLines', () => {
     const stats = makeStats();
     await importLines(asyncLines(lines), deps, stats);
 
-    const user = db.prepare('SELECT * FROM users WHERE user_id = ?').get('u111') as { nickname: string; group_id: string } | undefined;
-    expect(user).toBeDefined();
+    const user = db.users.findById('u111', 'g-test');
+    expect(user).not.toBeNull();
     expect(user!.nickname).toBe('Alice');
-    expect(user!.group_id).toBe('g-test');
+    expect(user!.groupId).toBe('g-test');
   });
 
   it('uses groupCard over name for nickname', async () => {
@@ -229,8 +204,8 @@ describe('importLines', () => {
     ];
     const stats = makeStats();
     await importLines(asyncLines(lines), deps, stats);
-    const user = db.prepare('SELECT nickname FROM users WHERE user_id = ?').get('u999') as { nickname: string };
-    expect(user.nickname).toBe('CardName');
+    const user = db.users.findById('u999', 'g-test');
+    expect(user!.nickname).toBe('CardName');
   });
 
   it('converts ms timestamp to seconds in db', async () => {
@@ -238,8 +213,8 @@ describe('importLines', () => {
     const lines = [JSON.stringify(makeRecord({ id: 'ts-1', timestamp: tsMs, content: { text: 'time check' } }))];
     const stats = makeStats();
     await importLines(asyncLines(lines), deps, stats);
-    const row = db.prepare('SELECT timestamp FROM messages LIMIT 1').get() as { timestamp: number };
-    expect(row.timestamp).toBe(Math.floor(tsMs / 1000));
+    const msgs = db.messages.getRecent('g-test', 1);
+    expect(msgs[0]!.timestamp).toBe(Math.floor(tsMs / 1000));
   });
 
   it('skips rows with missing sender.uin', async () => {
@@ -260,14 +235,13 @@ describe('importLines', () => {
     expect(stats.inserted).toBe(1);
   });
 
-  it('fires onProgress callback at the configured interval', async () => {
+  it('fires onProgress callback at configured interval', async () => {
     const progressCb = vi.fn();
     const lines = Array.from({ length: 5 }, (_, i) =>
       JSON.stringify(makeRecord({ id: `p${i}`, content: { text: `msg ${i}` } }))
     );
     const stats = makeStats();
     await importLines(asyncLines(lines), { ...deps, onProgress: progressCb, progressInterval: 3 }, stats);
-    // linesRead hits 3 once → callback called once
     expect(progressCb).toHaveBeenCalledOnce();
   });
 });

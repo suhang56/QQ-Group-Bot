@@ -8,15 +8,15 @@
  *     --target-group 484787509 \
  *     [--dry-run]
  *
- * Applies a one-time schema migration (source_message_id column + unique index)
- * before importing, making re-runs fully idempotent via INSERT OR IGNORE.
+ * Idempotent: re-runs skip duplicate source_message_id rows silently.
+ * Timestamps: JSONL uses ms epoch; messages table stores seconds.
  */
 
 import { createReadStream } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import path from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { Database } from '../src/storage/db.js';
 
 // ---- CLI arg parsing ----
 
@@ -43,7 +43,6 @@ function parseArgs(argv: string[]): { sourceDir: string; targetGroup: string; dr
 // ---- JSONL record types ----
 
 interface JsonlSender {
-  uid?: string;
   uin?: string;
   name?: string;
   groupCard?: string;
@@ -61,20 +60,6 @@ export interface JsonlRecord {
   content?: JsonlContent;
   recalled?: boolean;
   system?: boolean;
-}
-
-// ---- Migration: add source_message_id for idempotency ----
-
-export function applyMigration(db: DatabaseSync): void {
-  // Column may already exist on re-run — catch the error and proceed
-  try {
-    db.exec('ALTER TABLE messages ADD COLUMN source_message_id TEXT');
-  } catch {
-    // Already exists
-  }
-  db.exec(
-    'CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_source_id ON messages(source_message_id) WHERE source_message_id IS NOT NULL'
-  );
 }
 
 // ---- Filter logic ----
@@ -106,7 +91,7 @@ export function makeStats(): ImportStats {
   return { linesRead: 0, linesKept: 0, inserted: 0, skippedDuplicate: 0, skippedFilter: 0, errors: 0 };
 }
 
-// ---- File line streaming helper ----
+// ---- File streaming ----
 
 export async function* streamFileLines(filePath: string): AsyncIterable<string> {
   const rl = createInterface({
@@ -116,13 +101,12 @@ export async function* streamFileLines(filePath: string): AsyncIterable<string> 
   yield* rl;
 }
 
-// ---- Core import function (accepts any AsyncIterable<string> — injectable for tests) ----
+// ---- Core import function ----
 
 export interface ImportDeps {
-  db: DatabaseSync;
+  db: Database;
   dryRun: boolean;
   targetGroup: string;
-  batchSize?: number;
   label?: string;
   onProgress?: (stats: ImportStats) => void;
   progressInterval?: number;
@@ -133,44 +117,7 @@ export async function importLines(
   deps: ImportDeps,
   stats: ImportStats
 ): Promise<void> {
-  const { db, dryRun, targetGroup, batchSize = 5000, label = '', onProgress, progressInterval = 10_000 } = deps;
-
-  const insertMsg = db.prepare(
-    `INSERT OR IGNORE INTO messages (group_id, user_id, nickname, content, timestamp, deleted, source_message_id)
-     VALUES (?, ?, ?, ?, ?, 0, ?)`
-  );
-  const upsertUser = db.prepare(
-    `INSERT INTO users (user_id, group_id, nickname, style_summary, last_seen)
-     VALUES (?, ?, ?, NULL, ?)
-     ON CONFLICT(user_id, group_id) DO UPDATE SET
-       nickname = CASE WHEN excluded.last_seen > last_seen THEN excluded.nickname ELSE nickname END,
-       last_seen = MAX(last_seen, excluded.last_seen)`
-  );
-
-  type BatchRow = { userId: string; nickname: string; content: string; timestamp: number; sourceId: string };
-  let batch: BatchRow[] = [];
-
-  const flushBatch = () => {
-    if (batch.length === 0) return;
-    db.exec('BEGIN');
-    try {
-      for (const row of batch) {
-        const tsSeconds = Math.floor(row.timestamp / 1000);
-        const result = insertMsg.run(targetGroup, row.userId, row.nickname, row.content, tsSeconds, row.sourceId);
-        if ((result as { changes: number }).changes > 0) {
-          stats.inserted++;
-          upsertUser.run(row.userId, targetGroup, row.nickname, tsSeconds);
-        } else {
-          stats.skippedDuplicate++;
-        }
-      }
-      db.exec('COMMIT');
-    } catch (err) {
-      db.exec('ROLLBACK');
-      throw err;
-    }
-    batch = [];
-  };
+  const { db, dryRun, targetGroup, label = '', onProgress, progressInterval = 10_000 } = deps;
 
   for await (const line of lines) {
     const trimmed = line.trim();
@@ -195,16 +142,21 @@ export async function importLines(
     stats.linesKept++;
 
     if (!dryRun) {
-      batch.push({
-        userId: record.sender!.uin!,
-        nickname: (record.sender!.groupCard || record.sender!.name || record.sender!.uin)!,
-        content: record.content!.text!.trim(),
-        timestamp: record.timestamp!,
-        sourceId: record.id!,
-      });
+      const tsSeconds = Math.floor(record.timestamp! / 1000);
+      const userId = record.sender!.uin!;
+      const nickname = (record.sender!.groupCard || record.sender!.name || userId)!;
 
-      if (batch.length >= batchSize) {
-        flushBatch();
+      const inserted = db.messages.insert(
+        { groupId: targetGroup, userId, nickname, content: record.content!.text!.trim(), timestamp: tsSeconds, deleted: false },
+        record.id!
+      );
+
+      // INSERT OR IGNORE returns lastInsertRowid=0 when row was skipped
+      if (inserted.id !== 0) {
+        stats.inserted++;
+        db.users.upsert({ userId, groupId: targetGroup, nickname, styleSummary: null, lastSeen: tsSeconds });
+      } else {
+        stats.skippedDuplicate++;
       }
     }
 
@@ -212,11 +164,9 @@ export async function importLines(
       onProgress(stats);
     }
   }
-
-  if (!dryRun) flushBatch();
 }
 
-// ---- Main entry point ----
+// ---- Main ----
 
 async function main() {
   const { sourceDir, targetGroup, dryRun } = parseArgs(process.argv);
@@ -228,22 +178,14 @@ async function main() {
 
   const manifestPath = path.join(sourceDir, 'manifest.json');
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>;
-  const manifestPreview = JSON.stringify(manifest).slice(0, 300);
-  console.log(`[INFO] Manifest: ${manifestPreview}`);
+  console.log(`[INFO] Manifest: ${JSON.stringify(manifest).slice(0, 300)}`);
 
   const chunksDir = path.join(sourceDir, 'chunks');
   const allFiles = await readdir(chunksDir);
   const chunkFiles = allFiles.filter(f => f.endsWith('.jsonl')).sort();
   console.log(`[INFO] Found ${chunkFiles.length} chunk file(s)`);
 
-  const db = new DatabaseSync(dbPath);
-  db.exec('PRAGMA journal_mode = WAL;');
-  db.exec('PRAGMA synchronous = NORMAL;');
-
-  if (!dryRun) {
-    applyMigration(db);
-    console.log('[INFO] Schema migration applied');
-  }
+  const db = new Database(dbPath);
 
   const stats = makeStats();
   const globalStart = Date.now();
@@ -265,8 +207,7 @@ async function main() {
     await importLines(streamFileLines(path.join(chunksDir, chunkFile)), { ...deps, label: chunkFile }, stats);
   }
 
-  const totalElapsed = ((Date.now() - globalStart) / 1000).toFixed(1);
-
+  const elapsed = ((Date.now() - globalStart) / 1000).toFixed(1);
   console.log('\n[DONE] Import complete');
   console.log(`  Lines read:        ${stats.linesRead}`);
   console.log(`  Lines kept:        ${stats.linesKept}`);
@@ -274,13 +215,12 @@ async function main() {
   console.log(`  Skipped duplicate: ${stats.skippedDuplicate}`);
   console.log(`  Skipped filter:    ${stats.skippedFilter}`);
   console.log(`  Parse errors:      ${stats.errors}`);
-  console.log(`  Elapsed:           ${totalElapsed}s`);
+  console.log(`  Elapsed:           ${elapsed}s`);
   if (dryRun) console.log('  [DRY RUN — no rows written]');
 
   db.close();
 }
 
-// Run only when executed directly (not when imported by tests)
 const isMain = process.argv[1]?.endsWith('import-history.ts') ||
                process.argv[1]?.endsWith('import-history.js');
 if (isMain) {

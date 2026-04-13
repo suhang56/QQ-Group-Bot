@@ -207,12 +207,15 @@ function ruleFromRow(row: RuleRow): Rule {
 class MessageRepository implements IMessageRepository {
   constructor(private readonly db: DatabaseSync) {}
 
-  insert(msg: Omit<Message, 'id'>): Message {
+  insert(msg: Omit<Message, 'id'>, sourceMessageId?: string): Message {
+    const sid = sourceMessageId ?? null;
     const stmt = this.db.prepare(
-      'INSERT INTO messages (group_id, user_id, nickname, content, timestamp, deleted) VALUES (?, ?, ?, ?, ?, ?)'
+      'INSERT OR IGNORE INTO messages (group_id, user_id, nickname, content, timestamp, deleted, source_message_id) VALUES (?, ?, ?, ?, ?, ?, ?)'
     );
-    const result = stmt.run(msg.groupId, msg.userId, msg.nickname, msg.content, msg.timestamp, msg.deleted ? 1 : 0);
-    return { ...msg, id: Number(result.lastInsertRowid) };
+    const result = stmt.run(msg.groupId, msg.userId, msg.nickname, msg.content, msg.timestamp, msg.deleted ? 1 : 0, sid);
+    // id=0 signals the row was ignored (duplicate source_message_id)
+    const id = (result as { changes: number }).changes > 0 ? Number(result.lastInsertRowid) : 0;
+    return { ...msg, id };
   }
 
   getRecent(groupId: string, limit: number): Message[] {
