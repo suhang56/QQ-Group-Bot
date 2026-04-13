@@ -8,7 +8,7 @@ import { initLogger } from '../src/utils/logger.js';
 
 initLogger({ level: 'silent' });
 
-function makeMockAdapter(notices: GroupNotice[] = []): INapCatAdapter {
+function makeMockAdapter(notices: GroupNotice[] = [], description = ''): INapCatAdapter {
   return {
     connect: vi.fn(),
     disconnect: vi.fn(),
@@ -19,6 +19,8 @@ function makeMockAdapter(notices: GroupNotice[] = []): INapCatAdapter {
     deleteMsg: vi.fn(),
     sendPrivate: vi.fn(),
     getGroupNotices: vi.fn().mockResolvedValue(notices),
+    getGroupInfo: vi.fn().mockResolvedValue({ groupId: 'g1', name: 'Test Group', description, memberCount: 10 }),
+    getImage: vi.fn(),
   };
 }
 
@@ -287,6 +289,65 @@ describe('AnnouncementSyncModule', () => {
     await mod.syncGroup('g1');
     expect(rulesRepo.deleteBySource).not.toHaveBeenCalled();
     expect(learner.addRuleWithSource).not.toHaveBeenCalled();
+  });
+});
+
+describe('AnnouncementSyncModule — group description injection', () => {
+  it('non-empty description → injected as __group_info__ notice and parsed', async () => {
+    const adapter = makeMockAdapter([], '本群严禁广告\n禁止攻击他人');
+    const annRepo = makeMockAnnouncements();
+    const rulesRepo = makeMockRules();
+    const claude = makeMockClaude('本群严禁广告\n禁止攻击他人');
+    const learner = makeMockLearner();
+    const mod = new AnnouncementSyncModule(adapter, annRepo, rulesRepo, claude, learner);
+
+    await mod.syncGroup('g1');
+
+    expect(annRepo.upsert).toHaveBeenCalledWith(expect.objectContaining({ noticeId: '__group_info__' }));
+    expect(learner.addRuleWithSource).toHaveBeenCalled();
+  });
+
+  it('empty description → no __group_info__ notice upserted', async () => {
+    const adapter = makeMockAdapter([], '');
+    const annRepo = makeMockAnnouncements();
+    const rulesRepo = makeMockRules();
+    const claude = makeMockClaude();
+    const learner = makeMockLearner();
+    const mod = new AnnouncementSyncModule(adapter, annRepo, rulesRepo, claude, learner);
+
+    await mod.syncGroup('g1');
+
+    const calls = vi.mocked(annRepo.upsert).mock.calls;
+    expect(calls.every(([a]) => a.noticeId !== '__group_info__')).toBe(true);
+  });
+
+  it('whitespace-only description → treated as empty, no upsert', async () => {
+    const adapter = makeMockAdapter([], '   \n  ');
+    const annRepo = makeMockAnnouncements();
+    const rulesRepo = makeMockRules();
+    const claude = makeMockClaude();
+    const learner = makeMockLearner();
+    const mod = new AnnouncementSyncModule(adapter, annRepo, rulesRepo, claude, learner);
+
+    await mod.syncGroup('g1');
+
+    const calls = vi.mocked(annRepo.upsert).mock.calls;
+    expect(calls.every(([a]) => a.noticeId !== '__group_info__')).toBe(true);
+  });
+
+  it('getGroupInfo failure → logs debug, continues with notices normally', async () => {
+    const adapter = makeMockAdapter([{ noticeId: 'n1', senderId: 'u1', publishTime: 1, message: '禁止广告' }]);
+    vi.mocked(adapter.getGroupInfo).mockRejectedValue(new Error('not supported'));
+    const annRepo = makeMockAnnouncements();
+    const rulesRepo = makeMockRules();
+    const claude = makeMockClaude('禁止广告');
+    const learner = makeMockLearner();
+    const mod = new AnnouncementSyncModule(adapter, annRepo, rulesRepo, claude, learner);
+
+    await mod.syncGroup('g1');
+
+    // Still processes the real notice
+    expect(learner.addRuleWithSource).toHaveBeenCalledWith('g1', '禁止广告', 'positive', 'announcement');
   });
 });
 

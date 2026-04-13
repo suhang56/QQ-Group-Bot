@@ -53,6 +53,19 @@ export class AnnouncementSyncModule {
       return;
     }
 
+    // Fetch group description and inject as synthetic notice (only if non-empty)
+    try {
+      const info = await this.adapter.getGroupInfo(groupId);
+      if (info.description.trim()) {
+        notices = [
+          { noticeId: '__group_info__', senderId: '0', publishTime: 0, message: info.description.trim() },
+          ...notices,
+        ];
+      }
+    } catch (err) {
+      this.logger.debug({ err, groupId }, 'getGroupInfo failed — skipping description');
+    }
+
     if (notices.length === 0) {
       this.logger.debug({ groupId }, 'No announcements found');
       return;
