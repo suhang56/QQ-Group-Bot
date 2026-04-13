@@ -154,4 +154,26 @@ describe('ClaudeClient', () => {
     const call = mockQuery.mock.calls[0]![0] as { prompt: string };
     expect(call.prompt).toBe('hello\nAssistant: hi there\nhow are you?');
   });
+
+  // Regression: SDK session isolation — host CLI hooks must never bleed into bot replies
+  it('always passes settingSources:[] to prevent host CLI settings/hooks from loading', async () => {
+    mockQuery.mockReturnValueOnce(makeSuccessMessages());
+    await client.complete(makeRequest());
+    const call = mockQuery.mock.calls[0]![0] as { options: Record<string, unknown> };
+    expect(call.options['settingSources']).toEqual([]);
+  });
+
+  it('always passes persistSession:false to prevent writing session state to disk', async () => {
+    mockQuery.mockReturnValueOnce(makeSuccessMessages());
+    await client.complete(makeRequest());
+    const call = mockQuery.mock.calls[0]![0] as { options: Record<string, unknown> };
+    expect(call.options['persistSession']).toBe(false);
+  });
+
+  it('always passes hooks:{} to ensure no programmatic hooks are registered', async () => {
+    mockQuery.mockReturnValueOnce(makeSuccessMessages());
+    await client.complete(makeRequest());
+    const call = mockQuery.mock.calls[0]![0] as { options: Record<string, unknown> };
+    expect(call.options['hooks']).toEqual({});
+  });
 });

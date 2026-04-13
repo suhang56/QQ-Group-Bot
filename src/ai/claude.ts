@@ -52,11 +52,21 @@ export class ClaudeClient implements IClaudeClient {
       let inputTokens = 0;
       let outputTokens = 0;
 
+      // ISOLATION: settingSources:[] prevents the SDK from reading any host CLI
+      // settings (~/.claude/settings.json, project .claude/, CLAUDE.md files).
+      // Without this, the host user's Stop hooks fire at the end of each query()
+      // call and their output gets concatenated into the model's reply — causing
+      // hook text like "No user corrections received this session" to leak into
+      // QQ group messages. persistSession:false prevents writing session state to
+      // disk. hooks:{} ensures no programmatic hooks are registered either.
       const result = query({
         prompt,
         options: {
           model: req.model,
           systemPrompt,
+          settingSources: [],
+          persistSession: false,
+          hooks: {},
         },
       });
 
