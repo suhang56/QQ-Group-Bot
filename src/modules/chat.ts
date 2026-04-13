@@ -8,6 +8,7 @@ import { createLogger } from '../utils/logger.js';
 import { lurkerDefaults, chatHistoryDefaults } from '../config.js';
 import { FACE_LEGEND, parseFaces, renderFace } from '../utils/qqface.js';
 import { sentinelCheck, postProcess, HARDENED_SYSTEM } from '../utils/sentinel.js';
+import { buildStickerSection } from '../utils/stickers.js';
 
 export interface IChatModule {
   generateReply(groupId: string, triggerMessage: GroupMessage, recentMessages: GroupMessage[]): Promise<string | null>;
@@ -36,6 +37,8 @@ interface ChatOptions {
   loreSizeCapBytes?: number;
   chatEmojiTopN?: number;
   chatEmojiSampleSize?: number;
+  chatStickerTopN?: number;
+  stickersDirPath?: string;
 }
 
 interface ScoreFactors {
@@ -118,6 +121,8 @@ export class ChatModule implements IChatModule {
   private readonly chatEmojiSampleSize: number;
   private readonly groupIdentityCacheTtlMs: number;
   private readonly groupIdentityTopUsers: number;
+  private readonly chatStickerTopN: number;
+  private readonly stickersDirPath: string;
 
   // debounce: groupId -> last trigger timestamp
   private readonly debounceMap = new Map<string, number>();
@@ -131,6 +136,8 @@ export class ChatModule implements IChatModule {
   private readonly loreCache = new Map<string, string | null>();
   // lore keyword token sets: groupId -> Set<string>
   private readonly loreKeywordsCache = new Map<string, Set<string>>();
+  // sticker section: groupId -> formatted section string (loaded async once)
+  private readonly stickerSectionCache = new Map<string, string>();
   // outgoing message IDs per group (capped at MAX_OUTGOING_IDS)
   private readonly outgoingMsgIds = new Map<string, Set<number>>();
   // last proactive reply timestamp per group (for silence factor)
@@ -160,6 +167,8 @@ export class ChatModule implements IChatModule {
     this.groupIdentityTopUsers = options.groupIdentityTopUsers ?? chatHistoryDefaults.groupIdentityTopUsers;
     this.loreDirPath = options.loreDirPath ?? chatHistoryDefaults.loreDirPath;
     this.loreSizeCapBytes = options.loreSizeCapBytes ?? chatHistoryDefaults.loreSizeCapBytes;
+    this.chatStickerTopN = options.chatStickerTopN ?? chatHistoryDefaults.chatStickerTopN;
+    this.stickersDirPath = options.stickersDirPath ?? chatHistoryDefaults.stickersDirPath;
   }
 
   /** Called by router after each successful send — tracks outgoing message IDs for reply-to-bot detection. */
@@ -467,7 +476,20 @@ export class ChatModule implements IChatModule {
     }
 
     const lore = this._loadLore(groupId);
-    let text: string;
+
+    // Kick off async sticker warm-up if not yet loaded; invalidates identity cache when done
+    if (!this.stickerSectionCache.has(groupId)) {
+      this.stickerSectionCache.set(groupId, ''); // placeholder to prevent re-entry
+      void buildStickerSection(groupId, this.stickersDirPath, this.chatStickerTopN, this.claude)
+        .then(section => {
+          this.stickerSectionCache.set(groupId, section);
+          // Only invalidate identity cache if stickers actually loaded (worth rebuilding)
+          if (section) this.groupIdentityCache.delete(groupId);
+        })
+        .catch(err => this.logger.warn({ err, groupId }, 'Sticker section warm-up failed'));
+    }
+
+    const stickerSection = this.stickerSectionCache.get(groupId) ?? '';
 
     // Build emoji awareness line from group history
     const recentForEmoji = this.db.messages.getRecent(groupId, this.chatEmojiSampleSize);
@@ -480,18 +502,19 @@ export class ChatModule implements IChatModule {
 
     const outputRules = `\n\n输出规则（必须严格遵守）：\n- 直接输出那句话，不要任何前缀、后缀、解释、元评论\n- 禁止出现任何自我指涉词（包括但不限于：AI、机器人、助手、模仿、尝试、风格、根据、历史、无法）\n- 禁止"好的，"、"当然，"、"我来"、"让我"等助手式开场\n- 如果想说多个意思，用换行分开，每行就是一条消息（最多 3 行）\n- 如果实在不知道说什么，输出"..."，禁止解释\n\n标点习惯：\n- 不要用句号。中文群聊几乎不打句号\n- 少用逗号，句子短就不用\n- 感叹号和问号可以用，但不要叠\n- 括号（）少用，用就是吐槽`;
 
+    let text: string;
     if (lore) {
-      text = `你就是这个QQ群里的一员，一个真实的老群友。以下是这个群的资料：\n\n${lore}\n\n---\n说话风格随群，自然随意、简短（1-3句话）。群友提到群里的人名、梗、黑话，基于资料回答；资料没提到的就说"啥来的"或"没听过求科普"，不要装懂。${faceLine}${outputRules}`;
+      text = `你就是这个QQ群里的一员，一个真实的老群友。以下是这个群的资料：\n\n${lore}\n\n---\n说话风格随群，自然随意、简短（1-3句话）。群友提到群里的人名、梗、黑话，基于资料回答；资料没提到的就说"啥来的"或"没听过求科普"，不要装懂。${faceLine}${stickerSection}${outputRules}`;
     } else {
       const topUsers = this.db.messages.getTopUsers(groupId, this.groupIdentityTopUsers);
       const memberList = topUsers.length > 0
         ? topUsers.map(u => u.nickname).join('、')
         : '（暂无数据）';
-      text = `你就是这个QQ群里的一员，一个真实的老群友，说话风格随群，自然随意、简短（1-3句话）。\n群里的常驻群友（按活跃度）：${memberList}\n群友提到群里的人名、梗、黑话，基于上下文猜意思；不懂就说"啥来的"或"没听过求科普"，不要装懂。${faceLine}${outputRules}`;
+      text = `你就是这个QQ群里的一员，一个真实的老群友，说话风格随群，自然随意、简短（1-3句话）。\n群里的常驻群友（按活跃度）：${memberList}\n群友提到群里的人名、梗、黑话，基于上下文猜意思；不懂就说"啥来的"或"没听过求科普"，不要装懂。${faceLine}${stickerSection}${outputRules}`;
     }
 
     this.groupIdentityCache.set(groupId, { text, expiresAt: Date.now() + this.groupIdentityCacheTtlMs });
-    this.logger.debug({ groupId, hasLore: !!lore }, 'Group identity prompt cached');
+    this.logger.debug({ groupId, hasLore: !!lore, hasStickerSection: stickerSection.length > 0 }, 'Group identity prompt cached');
     return text;
   }
 
