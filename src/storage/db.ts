@@ -71,6 +71,9 @@ export interface GroupConfig {
   loreUpdateEnabled: boolean;
   loreUpdateThreshold: number;
   loreUpdateCooldownMs: number;
+  liveStickerCaptureEnabled: boolean;
+  stickerLegendRefreshEveryMsgs: number;
+  chatPersonaText: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -168,6 +171,23 @@ export interface INameImageRepository {
   getAllNames(groupId: string): string[];
 }
 
+export interface LiveSticker {
+  id: number;
+  groupId: string;
+  key: string;
+  type: 'mface' | 'image';
+  cqCode: string;
+  summary: string | null;
+  count: number;
+  firstSeen: number;
+  lastSeen: number;
+}
+
+export interface ILiveStickerRepository {
+  upsert(groupId: string, key: string, type: LiveSticker['type'], cqCode: string, summary: string | null, now: number): void;
+  getTopByGroup(groupId: string, limit: number): LiveSticker[];
+}
+
 // ---- Raw row types from SQLite ----
 
 interface MessageRow {
@@ -209,6 +229,9 @@ interface GroupConfigRow {
   lore_update_enabled: number;
   lore_update_threshold: number;
   lore_update_cooldown_ms: number;
+  live_sticker_capture_enabled: number;
+  sticker_legend_refresh_every_msgs: number;
+  chat_persona_text: string | null;
   created_at: string; updated_at: string;
 }
 
@@ -293,6 +316,9 @@ function configFromRow(row: GroupConfigRow): GroupConfig {
     loreUpdateEnabled: (row.lore_update_enabled ?? 1) !== 0,
     loreUpdateThreshold: row.lore_update_threshold ?? 200,
     loreUpdateCooldownMs: row.lore_update_cooldown_ms ?? 1_800_000,
+    liveStickerCaptureEnabled: (row.live_sticker_capture_enabled ?? 1) !== 0,
+    stickerLegendRefreshEveryMsgs: row.sticker_legend_refresh_every_msgs ?? 50,
+    chatPersonaText: row.chat_persona_text ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -506,8 +532,9 @@ class GroupConfigRepository implements IGroupConfigRepository {
         name_images_collection_max, name_images_cooldown_ms, name_images_max_per_name,
         name_images_blocklist,
         lore_update_enabled, lore_update_threshold, lore_update_cooldown_ms,
+        chat_persona_text,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(group_id) DO UPDATE SET
         enabled_modules = excluded.enabled_modules,
         auto_mod = excluded.auto_mod,
@@ -532,6 +559,7 @@ class GroupConfigRepository implements IGroupConfigRepository {
         lore_update_enabled = excluded.lore_update_enabled,
         lore_update_threshold = excluded.lore_update_threshold,
         lore_update_cooldown_ms = excluded.lore_update_cooldown_ms,
+        chat_persona_text = excluded.chat_persona_text,
         updated_at = excluded.updated_at
     `).run(
       config.groupId,
@@ -558,6 +586,7 @@ class GroupConfigRepository implements IGroupConfigRepository {
       (config.loreUpdateEnabled ?? true) ? 1 : 0,
       config.loreUpdateThreshold ?? 200,
       config.loreUpdateCooldownMs ?? 1_800_000,
+      config.chatPersonaText ?? null,
       config.createdAt,
       config.updatedAt,
     );
@@ -779,6 +808,9 @@ export class Database {
       'lore_update_enabled INTEGER NOT NULL DEFAULT 1',
       'lore_update_threshold INTEGER NOT NULL DEFAULT 200',
       'lore_update_cooldown_ms INTEGER NOT NULL DEFAULT 1800000',
+      'live_sticker_capture_enabled INTEGER NOT NULL DEFAULT 1',
+      'sticker_legend_refresh_every_msgs INTEGER NOT NULL DEFAULT 50',
+      'chat_persona_text TEXT',
     ]) {
       try { this._db.exec(`ALTER TABLE group_config ADD COLUMN ${col}`); } catch { /* already exists */ }
     }
@@ -798,5 +830,21 @@ export class Database {
     `);
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_name_images_group_name ON name_images(group_id, name)`);
     this._db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_name_images_source ON name_images(group_id, name, source_file) WHERE source_file IS NOT NULL`);
+
+    this._db.exec(`
+      CREATE TABLE IF NOT EXISTS live_stickers (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id    TEXT    NOT NULL,
+        key         TEXT    NOT NULL,
+        type        TEXT    NOT NULL,
+        cq_code     TEXT    NOT NULL,
+        summary     TEXT,
+        count       INTEGER NOT NULL DEFAULT 1,
+        first_seen  INTEGER NOT NULL,
+        last_seen   INTEGER NOT NULL,
+        UNIQUE(group_id, key)
+      )
+    `);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_live_stickers_group_count ON live_stickers(group_id, count DESC)`);
   }
 }

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ChatModule, extractKeywords, extractTopFaces, tokenizeLore, IDENTITY_PROBE, IDENTITY_DEFLECTIONS, TASK_REQUEST, TASK_DEFLECTIONS, MEMORY_INJECT, MEMORY_INJECT_DEFLECTIONS, pickDeflection } from '../src/modules/chat.js';
-import { lurkerDefaults } from '../src/config.js';
+import { ChatModule, extractKeywords, extractTopFaces, tokenizeLore, IDENTITY_PROBE, IDENTITY_DEFLECTIONS, TASK_REQUEST, TASK_DEFLECTIONS, MEMORY_INJECT, MEMORY_INJECT_DEFLECTIONS, pickDeflection, BANGDREAM_PERSONA } from '../src/modules/chat.js';
+import { lurkerDefaults, defaultGroupConfig } from '../src/config.js';
 import type { IClaudeClient, ClaudeResponse } from '../src/ai/claude.js';
 import type { GroupMessage } from '../src/adapter/napcat.js';
 import { Database } from '../src/storage/db.js';
@@ -538,7 +538,8 @@ describe('ChatModule — keyword retrieval and group identity', () => {
     await chat.generateReply('g1', atMsg1, []);
     await chat.generateReply('g1', atMsg2, []);
 
-    expect(getTopUsersSpy).toHaveBeenCalledTimes(1);
+    // getTopUsers no longer called — persona is hardcoded 邦批, group identity cached by config read
+    expect(getTopUsersSpy).toHaveBeenCalledTimes(0);
   });
 
   it('cross-group isolation: searchByKeywords only returns messages from the queried group', async () => {
@@ -668,7 +669,7 @@ describe('ChatModule — group lore loading', () => {
 
     const call = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { system: Array<{ text: string }> };
     const systemText = call.system.map((s: { text: string }) => s.text).join(' ');
-    expect(systemText).toContain('说话风格随群');
+    expect(systemText).toContain('邦批');
     expect(systemText).not.toContain('以下是这个群的资料');
   });
 
@@ -782,7 +783,7 @@ describe('ChatModule — sentinel: AI self-disclosure prevention', () => {
     await chat.generateReply('g1', mentionMsg('哈'), []);
     const call = claude.mock.calls[0]![0] as { system: Array<{ text: string }> };
     const systemText = call.system.map((s: { text: string }) => s.text).join('');
-    expect(systemText).toContain('你就是这个QQ群里的一员');
+    expect(systemText).toContain('邦批');
     expect(systemText).toContain('输出规则');
   });
 });
@@ -1105,5 +1106,55 @@ describe('ChatModule — soft score gate + Claude-driven silence', () => {
     const systemText = call?.system?.[0]?.text as string;
     expect(systemText).toContain('没兴趣');
     expect(systemText).toContain('...');
+  });
+});
+
+describe('ChatModule — 邦批 persona', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+  });
+
+  function makeChat() {
+    const claude = makeMockClaude('好啊');
+    return { chat: new ChatModule(claude, db, { botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999 }), claude };
+  }
+
+  it('BANGDREAM_PERSONA constant contains "邦批", "Roselia", "ykn"', () => {
+    expect(BANGDREAM_PERSONA).toContain('邦批');
+    expect(BANGDREAM_PERSONA).toContain('Roselia');
+    expect(BANGDREAM_PERSONA).toContain('ykn');
+  });
+
+  it('system prompt contains "邦批" by default (no lore file)', async () => {
+    const { chat, claude } = makeChat();
+    await chat.generateReply('g1', makeMsg({ content: '你好' }), []);
+    const call = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+    const systemText = call?.system?.[0]?.text as string;
+    expect(systemText).toContain('邦批');
+    expect(systemText).toContain('Roselia');
+  });
+
+  it('system prompt does NOT contain member-copy language', async () => {
+    const { chat, claude } = makeChat();
+    await chat.generateReply('g1', makeMsg({ content: '你好' }), []);
+    const call = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+    const systemText = call?.system?.[0]?.text as string;
+    expect(systemText).not.toContain('你就是 ');
+    expect(systemText).not.toContain('常驻群友（按活跃度）');
+  });
+
+  it('custom persona from DB overrides hardcoded 邦批', async () => {
+    db.groupConfig.upsert({
+      ...defaultGroupConfig('g1'),
+      chatPersonaText: '我是一只猫，喜欢摸鱼',
+    });
+    const { chat, claude } = makeChat();
+    await chat.generateReply('g1', makeMsg({ content: '你好' }), []);
+    const call = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+    const systemText = call?.system?.[0]?.text as string;
+    expect(systemText).toContain('摸鱼');
+    expect(systemText).not.toContain('Roselia');
   });
 });

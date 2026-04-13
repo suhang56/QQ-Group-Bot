@@ -700,6 +700,34 @@ export class Router implements IRouter {
       await this.adapter.send(msg.groupId, '群志已更新完成。');
     });
 
+    this.commands.set('persona', async (msg, args, config) => {
+      if (msg.role !== 'admin' && msg.role !== 'owner') {
+        await this.adapter.send(msg.groupId, '没有权限。只有管理员可以操作此指令。');
+        return;
+      }
+      if (args.length === 0) {
+        // Show current persona
+        const current = config.chatPersonaText ?? null;
+        if (current) {
+          await this.adapter.send(msg.groupId, `当前自定义人格：\n${current}`);
+        } else {
+          await this.adapter.send(msg.groupId, '当前使用默认邦批人格。');
+        }
+        return;
+      }
+      if (args[0] === 'reset') {
+        this.db.groupConfig.upsert({ ...config, chatPersonaText: null });
+        this.chat?.invalidateLore(msg.groupId);
+        await this.adapter.send(msg.groupId, '已重置为默认邦批人格。');
+        return;
+      }
+      // Set custom persona text (rest of args joined as the text)
+      const personaText = args.join(' ');
+      this.db.groupConfig.upsert({ ...config, chatPersonaText: personaText });
+      this.chat?.invalidateLore(msg.groupId);
+      await this.adapter.send(msg.groupId, '人格已更新。');
+    });
+
     this.commands.set('rule_false_positive', async (msg, args, _config) => {
       if (!this.moderatorModule) {
         await this.adapter.send(msg.groupId, '此功能即将推出，敬请期待。');
