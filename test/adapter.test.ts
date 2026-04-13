@@ -259,52 +259,84 @@ describe('NapCatAdapter', () => {
     expect(groupId).toBe('111');
   });
 
-  // --- ban/kick/deleteMsg/sendPrivate ---
-  it('ban() sends correct OneBot frame', async () => {
+  // --- ban/kick/deleteMsg/sendPrivate with frame-shape assertions ---
+  it('ban() sends correct OneBot frame shape', async () => {
     adapter = new NapCatAdapter(`ws://localhost:${getPort(server)}`);
     await adapter.connect();
 
-    serverSocket!.on('message', (data) => {
-      const req = JSON.parse(data.toString()) as { echo: string };
-      serverSocket!.send(JSON.stringify({ status: 'ok', retcode: 0, echo: req.echo }));
+    const framePromise = new Promise<Record<string, unknown>>(resolve => {
+      serverSocket!.once('message', (data) => {
+        const req = JSON.parse(data.toString()) as Record<string, unknown> & { echo: string };
+        serverSocket!.send(JSON.stringify({ status: 'ok', retcode: 0, echo: req.echo }));
+        resolve(req);
+      });
     });
 
-    await expect(adapter.ban('456', '789', 600)).resolves.toBeUndefined();
+    await adapter.ban('456', '789', 600);
+    const frame = await framePromise;
+    expect(frame['action']).toBe('set_group_ban');
+    const params = frame['params'] as Record<string, unknown>;
+    expect(params['group_id']).toBe(456);
+    expect(params['user_id']).toBe(789);
+    expect(params['duration']).toBe(600);
   });
 
-  it('kick() sends correct OneBot frame', async () => {
+  it('kick() sends correct OneBot frame shape', async () => {
     adapter = new NapCatAdapter(`ws://localhost:${getPort(server)}`);
     await adapter.connect();
 
-    serverSocket!.on('message', (data) => {
-      const req = JSON.parse(data.toString()) as { echo: string };
-      serverSocket!.send(JSON.stringify({ status: 'ok', retcode: 0, echo: req.echo }));
+    const framePromise = new Promise<Record<string, unknown>>(resolve => {
+      serverSocket!.once('message', (data) => {
+        const req = JSON.parse(data.toString()) as Record<string, unknown> & { echo: string };
+        serverSocket!.send(JSON.stringify({ status: 'ok', retcode: 0, echo: req.echo }));
+        resolve(req);
+      });
     });
 
-    await expect(adapter.kick('456', '789')).resolves.toBeUndefined();
+    await adapter.kick('456', '789');
+    const frame = await framePromise;
+    expect(frame['action']).toBe('set_group_kick');
+    const params = frame['params'] as Record<string, unknown>;
+    expect(params['group_id']).toBe(456);
+    expect(params['user_id']).toBe(789);
   });
 
-  it('deleteMsg() sends correct OneBot frame', async () => {
+  it('deleteMsg() sends correct OneBot frame shape', async () => {
     adapter = new NapCatAdapter(`ws://localhost:${getPort(server)}`);
     await adapter.connect();
 
-    serverSocket!.on('message', (data) => {
-      const req = JSON.parse(data.toString()) as { echo: string };
-      serverSocket!.send(JSON.stringify({ status: 'ok', retcode: 0, echo: req.echo }));
+    const framePromise = new Promise<Record<string, unknown>>(resolve => {
+      serverSocket!.once('message', (data) => {
+        const req = JSON.parse(data.toString()) as Record<string, unknown> & { echo: string };
+        serverSocket!.send(JSON.stringify({ status: 'ok', retcode: 0, echo: req.echo }));
+        resolve(req);
+      });
     });
 
-    await expect(adapter.deleteMsg('999')).resolves.toBeUndefined();
+    await adapter.deleteMsg('999');
+    const frame = await framePromise;
+    expect(frame['action']).toBe('delete_msg');
+    const params = frame['params'] as Record<string, unknown>;
+    expect(params['message_id']).toBe(999);
   });
 
-  it('sendPrivate() sends correct OneBot frame', async () => {
+  it('sendPrivate() sends correct OneBot frame shape', async () => {
     adapter = new NapCatAdapter(`ws://localhost:${getPort(server)}`);
     await adapter.connect();
 
-    serverSocket!.on('message', (data) => {
-      const req = JSON.parse(data.toString()) as { echo: string };
-      serverSocket!.send(JSON.stringify({ status: 'ok', retcode: 0, echo: req.echo }));
+    const framePromise = new Promise<Record<string, unknown>>(resolve => {
+      serverSocket!.once('message', (data) => {
+        const req = JSON.parse(data.toString()) as Record<string, unknown> & { echo: string };
+        serverSocket!.send(JSON.stringify({ status: 'ok', retcode: 0, echo: req.echo }));
+        resolve(req);
+      });
     });
 
-    await expect(adapter.sendPrivate('789', 'hey')).resolves.toBeUndefined();
+    await adapter.sendPrivate('789', 'hey');
+    const frame = await framePromise;
+    expect(frame['action']).toBe('send_private_msg');
+    const params = frame['params'] as Record<string, unknown>;
+    expect(params['user_id']).toBe(789);
+    expect(params['message']).toBe('hey');
   });
 });
