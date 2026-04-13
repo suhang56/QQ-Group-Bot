@@ -5,6 +5,7 @@ import type { IChatModule } from '../modules/chat.js';
 import type { MimicModule } from '../modules/mimic.js';
 import type { ModeratorModule } from '../modules/moderator.js';
 import type { NameImagesModule } from '../modules/name-images.js';
+import type { LoreUpdater } from '../modules/lore-updater.js';
 import { BotErrorCode } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
 import { defaultGroupConfig } from '../config.js';
@@ -68,6 +69,7 @@ export class Router implements IRouter {
   private mimicModule: MimicModule | null = null;
   private moderatorModule: ModeratorModule | null = null;
   private nameImagesModule: NameImagesModule | null = null;
+  private loreUpdater: LoreUpdater | null = null;
 
   // Repeater cooldown: key = `${groupId}:${content}`, value = last-triggered timestamp
   private readonly repeaterCooldown = new Map<string, number>();
@@ -104,14 +106,22 @@ export class Router implements IRouter {
     this.nameImagesModule = nameImages;
   }
 
+  setLoreUpdater(updater: LoreUpdater): void {
+    this.loreUpdater = updater;
+  }
+
   async dispatch(msg: GroupMessage): Promise<void> {
     try {
       this.logger.trace({ messageId: msg.messageId, groupId: msg.groupId, userId: msg.userId }, 'dispatching message');
 
       const config = this.db.groupConfig.get(msg.groupId) ?? this._defaultConfig(msg.groupId);
 
-      // Moderator runs FIRST, before persistence
-      if (this.moderatorModule && !msg.content.trim().startsWith('/')) {
+      // Lore updater tick: increment per-group counter, fire async update if threshold hit
+      this.loreUpdater?.tick(msg.groupId, config);
+
+      // Moderator runs FIRST, before persistence.
+      // Respect config.autoMod: skip entirely when false (observe-only mode).
+      if (this.moderatorModule && config.autoMod && !msg.content.trim().startsWith('/')) {
         const verdict = await this.moderatorModule.assess(msg, config);
         if (verdict.violation && verdict.severity !== null && verdict.severity >= 1) {
           // Message was deleted — do not persist or route downstream
@@ -678,6 +688,16 @@ export class Router implements IRouter {
       const blocklist = (config.nameImagesBlocklist ?? []).filter(b => b.toLowerCase() !== name.toLowerCase());
       this.db.groupConfig.upsert({ ...config, nameImagesBlocklist: blocklist, updatedAt: new Date().toISOString() });
       await this.adapter.send(msg.groupId, `已将 "${name}" 从屏蔽名单移除，发该名字将恢复触发图片库。`);
+    });
+
+    this.commands.set('lore_refresh', async (msg, _args, config) => {
+      if (!this.loreUpdater) {
+        await this.adapter.send(msg.groupId, '群志功能未启用。');
+        return;
+      }
+      await this.adapter.send(msg.groupId, '正在更新群志，请稍等...');
+      await this.loreUpdater.forceUpdate(msg.groupId, config);
+      await this.adapter.send(msg.groupId, '群志已更新完成。');
     });
 
     this.commands.set('rule_false_positive', async (msg, args, _config) => {

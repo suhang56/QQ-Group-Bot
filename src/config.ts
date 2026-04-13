@@ -57,6 +57,9 @@ export function defaultGroupConfig(groupId: string): GroupConfig {
     repeaterMinContentLength: 2,
     repeaterMaxContentLength: 100,
     nameImagesBlocklist: [],
+    loreUpdateEnabled: true,
+    loreUpdateThreshold: 200,
+    loreUpdateCooldownMs: 30 * 60 * 1000,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };

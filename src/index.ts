@@ -13,6 +13,7 @@ import { ModeratorModule } from './modules/moderator.js';
 import { LearnerModule } from './modules/learner.js';
 import { AnnouncementSyncModule } from './modules/announcement-sync.js';
 import { NameImagesModule } from './modules/name-images.js';
+import { LoreUpdater } from './modules/lore-updater.js';
 
 // 1. Bootstrap logger
 const logLevel = process.env['LOG_LEVEL'] ?? 'info';
@@ -73,6 +74,9 @@ const announcementSync = new AnnouncementSyncModule(adapter, db.announcements, d
 const nameImagesDirPath = process.env['NAME_IMAGES_DIR'] ?? path.join(process.cwd(), 'data', 'name-images');
 const nameImages = new NameImagesModule(db.nameImages, nameImagesDirPath, adapter);
 router.setNameImages(nameImages);
+
+const loreUpdater = new LoreUpdater(claude, db.messages, chat);
+router.setLoreUpdater(loreUpdater);
 
 // 5. Wire events
 adapter.on('error', (err) => {

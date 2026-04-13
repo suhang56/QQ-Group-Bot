@@ -68,6 +68,9 @@ export interface GroupConfig {
   repeaterMinContentLength: number;
   repeaterMaxContentLength: number;
   nameImagesBlocklist: string[];
+  loreUpdateEnabled: boolean;
+  loreUpdateThreshold: number;
+  loreUpdateCooldownMs: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -203,6 +206,9 @@ interface GroupConfigRow {
   repeater_min_content_length: number;
   repeater_max_content_length: number;
   name_images_blocklist: string;
+  lore_update_enabled: number;
+  lore_update_threshold: number;
+  lore_update_cooldown_ms: number;
   created_at: string; updated_at: string;
 }
 
@@ -284,6 +290,9 @@ function configFromRow(row: GroupConfigRow): GroupConfig {
     repeaterMinContentLength: row.repeater_min_content_length ?? 2,
     repeaterMaxContentLength: row.repeater_max_content_length ?? 100,
     nameImagesBlocklist: JSON.parse(row.name_images_blocklist ?? '[]') as string[],
+    loreUpdateEnabled: (row.lore_update_enabled ?? 1) !== 0,
+    loreUpdateThreshold: row.lore_update_threshold ?? 200,
+    loreUpdateCooldownMs: row.lore_update_cooldown_ms ?? 1_800_000,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -496,8 +505,9 @@ class GroupConfigRepository implements IGroupConfigRepository {
         name_images_enabled, name_images_collection_timeout_ms,
         name_images_collection_max, name_images_cooldown_ms, name_images_max_per_name,
         name_images_blocklist,
+        lore_update_enabled, lore_update_threshold, lore_update_cooldown_ms,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(group_id) DO UPDATE SET
         enabled_modules = excluded.enabled_modules,
         auto_mod = excluded.auto_mod,
@@ -519,6 +529,9 @@ class GroupConfigRepository implements IGroupConfigRepository {
         name_images_cooldown_ms = excluded.name_images_cooldown_ms,
         name_images_max_per_name = excluded.name_images_max_per_name,
         name_images_blocklist = excluded.name_images_blocklist,
+        lore_update_enabled = excluded.lore_update_enabled,
+        lore_update_threshold = excluded.lore_update_threshold,
+        lore_update_cooldown_ms = excluded.lore_update_cooldown_ms,
         updated_at = excluded.updated_at
     `).run(
       config.groupId,
@@ -542,6 +555,9 @@ class GroupConfigRepository implements IGroupConfigRepository {
       config.nameImagesCooldownMs ?? 300_000,
       config.nameImagesMaxPerName ?? 50,
       JSON.stringify(config.nameImagesBlocklist ?? []),
+      (config.loreUpdateEnabled ?? true) ? 1 : 0,
+      config.loreUpdateThreshold ?? 200,
+      config.loreUpdateCooldownMs ?? 1_800_000,
       config.createdAt,
       config.updatedAt,
     );
@@ -760,6 +776,9 @@ export class Database {
       'repeater_min_content_length INTEGER NOT NULL DEFAULT 2',
       'repeater_max_content_length INTEGER NOT NULL DEFAULT 100',
       "name_images_blocklist TEXT NOT NULL DEFAULT '[]'",
+      'lore_update_enabled INTEGER NOT NULL DEFAULT 1',
+      'lore_update_threshold INTEGER NOT NULL DEFAULT 200',
+      'lore_update_cooldown_ms INTEGER NOT NULL DEFAULT 1800000',
     ]) {
       try { this._db.exec(`ALTER TABLE group_config ADD COLUMN ${col}`); } catch { /* already exists */ }
     }

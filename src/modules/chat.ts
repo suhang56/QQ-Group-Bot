@@ -13,6 +13,7 @@ import { buildStickerSection } from '../utils/stickers.js';
 export interface IChatModule {
   generateReply(groupId: string, triggerMessage: GroupMessage, recentMessages: GroupMessage[]): Promise<string | null>;
   recordOutgoingMessage(groupId: string, msgId: number): void;
+  invalidateLore(groupId: string): void;
 }
 
 interface ChatOptions {
@@ -219,6 +220,13 @@ export class ChatModule implements IChatModule {
         if (++removed >= toRemove) break;
       }
     }
+  }
+
+  /** Evict lore + identity caches for a group so next message re-reads the updated file. */
+  invalidateLore(groupId: string): void {
+    this.loreCache.delete(groupId);
+    this.loreKeywordsCache.delete(groupId);
+    this.groupIdentityCache.delete(groupId);
   }
 
   async generateReply(
