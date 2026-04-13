@@ -284,6 +284,8 @@ ${offenseHistory}`;
   }
 
   async handleAppeal(msg: GroupMessage, config: GroupConfig): Promise<AppealResult> {
+    // findPendingAppeal queries WHERE appealed=0, so already-appealed records are not returned.
+    // A second appeal attempt naturally surfaces as NO_PUNISHMENT_RECORD (E007).
     const record = this.moderation.findPendingAppeal(msg.userId, msg.groupId);
     if (!record) {
       return { ok: false, errorCode: BotErrorCode.NO_PUNISHMENT_RECORD };

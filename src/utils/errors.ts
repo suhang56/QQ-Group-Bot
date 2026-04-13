@@ -6,7 +6,6 @@ export enum BotErrorCode {
   APPEAL_EXPIRED        = 'E005',
   APPEAL_DUPLICATE      = 'E006',
   NO_PUNISHMENT_RECORD  = 'E007',
-  ALREADY_REVERSED      = 'E008',
   CLAUDE_API_ERROR      = 'E009',
   CLAUDE_PARSE_ERROR    = 'E010',
   DB_ERROR              = 'E011',

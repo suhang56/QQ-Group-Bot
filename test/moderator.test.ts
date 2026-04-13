@@ -377,6 +377,58 @@ describe('ModeratorModule — /appeal command handler', () => {
     if (!result.ok) expect(result.errorCode).toBe(BotErrorCode.NO_PUNISHMENT_RECORD);
   });
 
+  // Boundary precision: appeal at windowSec - 1s → still within window
+  it('appeal at exactly windowSec - 1s succeeds', async () => {
+    const windowSec = 24 * 3600;
+    const ts = Math.floor(Date.now() / 1000) - (windowSec - 1);
+    const record: ModerationRecord = {
+      id: 46, msgId: 'msg-boundary-in', groupId: 'g1', userId: 'u1',
+      violation: true, severity: 3, action: 'ban', reason: 'test',
+      appealed: 0, reversed: false, timestamp: ts,
+    };
+    const claude = makeClaudeVerdict(false, null);
+    const adapter = makeAdapter();
+    const modRepo = makeModerationRepo();
+    vi.mocked(modRepo.findPendingAppeal).mockReturnValue(record);
+    const mod = makeModule(claude, adapter, makeConfig(), { moderation: modRepo });
+    const result = await mod.handleAppeal(makeMsg(), makeConfig());
+    expect(result.ok).toBe(true);
+    expect(modRepo.update).toHaveBeenCalledWith(46, expect.objectContaining({ reversed: true }));
+  });
+
+  // Boundary precision: appeal at windowSec + 1s → outside window
+  it('appeal at exactly windowSec + 1s returns E005', async () => {
+    const windowSec = 24 * 3600;
+    const ts = Math.floor(Date.now() / 1000) - (windowSec + 1);
+    const record: ModerationRecord = {
+      id: 47, msgId: 'msg-boundary-out', groupId: 'g1', userId: 'u1',
+      violation: true, severity: 2, action: 'warn', reason: 'test',
+      appealed: 0, reversed: false, timestamp: ts,
+    };
+    const claude = makeClaudeVerdict(false, null);
+    const adapter = makeAdapter();
+    const modRepo = makeModerationRepo();
+    vi.mocked(modRepo.findPendingAppeal).mockReturnValue(record);
+    const mod = makeModule(claude, adapter, makeConfig(), { moderation: modRepo });
+    const result = await mod.handleAppeal(makeMsg(), makeConfig());
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errorCode).toBe(BotErrorCode.APPEAL_EXPIRED);
+    expect(modRepo.update).not.toHaveBeenCalled();
+  });
+
+  // Idempotent re-appeal: findPendingAppeal filters appealed=0, so second attempt → E007
+  it('second appeal on same record returns E007', async () => {
+    const claude = makeClaudeVerdict(false, null);
+    const adapter = makeAdapter();
+    const modRepo = makeModerationRepo();
+    // After first appeal, record has appealed=1 so findPendingAppeal returns null
+    vi.mocked(modRepo.findPendingAppeal).mockReturnValue(null);
+    const mod = makeModule(claude, adapter, makeConfig(), { moderation: modRepo });
+    const result = await mod.handleAppeal(makeMsg(), makeConfig());
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.errorCode).toBe(BotErrorCode.NO_PUNISHMENT_RECORD);
+  });
+
   // Kick reversal: can't un-kick, but logs + informs
   it('marks kicked record as reversed without calling adapter.kick', async () => {
     const ts = Math.floor(Date.now() / 1000) - 3600;
