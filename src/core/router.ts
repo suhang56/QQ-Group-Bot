@@ -169,6 +169,30 @@ export class Router implements IRouter {
         }
       }
 
+      // Name-mention hook: independent of chat reply — fires on known-name mention
+      if (this.nameImagesModule && config.nameImagesEnabled) {
+        const names = this.nameImagesModule.getAllNames(msg.groupId);
+        if (names.length > 0) {
+          const matched = this.nameImagesModule.findLongestMatch(msg.content, names);
+          if (matched) {
+            // Burst guard: skip if last 5 messages arrived within 10s
+            const recent5 = this.db.messages.getRecent(msg.groupId, 5);
+            const isBurst = recent5.length >= 5 &&
+              (recent5[0]!.timestamp - recent5[recent5.length - 1]!.timestamp) * 1000 <= 10_000;
+            if (!isBurst) {
+              const ok = this.nameImagesModule.checkAndSetCooldown(msg.groupId, matched, config.nameImagesCooldownMs);
+              if (ok) {
+                const image = this.nameImagesModule.pickRandom(msg.groupId, matched);
+                if (image) {
+                  const cq = `[CQ:image,file=file:///${image.filePath.replace(/\\/g, '/')}]`;
+                  await this.adapter.send(msg.groupId, cq);
+                }
+              }
+            }
+          }
+        }
+      }
+
       // Non-command: check mimic mode first, then chat
       const recentMsgs = this.db.messages.getRecent(msg.groupId, 20).map(m => ({
         messageId: String(m.id),
@@ -192,32 +216,13 @@ export class Router implements IRouter {
         }
       }
 
-      let chatReplied = false;
       if (this.chatModule) {
         const reply = await this.chatModule.generateReply(msg.groupId, msg, recentMsgs);
         if (reply) {
           await this._sendReply(msg.groupId, reply);
-          chatReplied = true;
         }
       }
 
-      // Name-mention hook: piggybacks on chat reply — only fires if bot decided to speak
-      if (chatReplied && this.nameImagesModule && config.nameImagesEnabled) {
-        const names = this.nameImagesModule.getAllNames(msg.groupId);
-        if (names.length > 0) {
-          const matched = this.nameImagesModule.findLongestMatch(msg.content, names);
-          if (matched) {
-            const ok = this.nameImagesModule.checkAndSetCooldown(msg.groupId, matched, config.nameImagesCooldownMs);
-            if (ok) {
-              const image = this.nameImagesModule.pickRandom(msg.groupId, matched);
-              if (image) {
-                const cq = `[CQ:image,file=file:///${image.filePath.replace(/\\/g, '/')}]`;
-                await this.adapter.send(msg.groupId, cq);
-              }
-            }
-          }
-        }
-      }
     } catch (err) {
       this.logger.fatal({ err, messageId: msg.messageId }, 'Unhandled error in router.dispatch');
     }

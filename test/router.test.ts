@@ -583,6 +583,68 @@ describe('Router — /add name-images integration', () => {
     expect(adapter.send).not.toHaveBeenCalled();
   });
 
+  it('name mention (no chat) → image sent independently of chat reply', async () => {
+    // Seed a real image file and DB row for 青木阳菜
+    const imgPath = path.join(tmpDir, '青木阳菜', 'test.jpg');
+    fs.mkdirSync(path.dirname(imgPath), { recursive: true });
+    fs.writeFileSync(imgPath, Buffer.from([0xff, 0xd8, 0xff, 0xe0]));
+    db.nameImages.insert('g1', '青木阳菜', imgPath, 'test.jpg', 'u1', 100);
+
+    await router.dispatch(makeMsg({ content: '青木阳菜', rawContent: '青木阳菜' }));
+
+    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringMatching(/\[CQ:image,file=file:\/\/\//));
+  });
+
+  it('name mention hit cooldown → image not sent', async () => {
+    const imgPath = path.join(tmpDir, '青木阳菜', 'test.jpg');
+    fs.mkdirSync(path.dirname(imgPath), { recursive: true });
+    fs.writeFileSync(imgPath, Buffer.from([0xff, 0xd8, 0xff, 0xe0]));
+    db.nameImages.insert('g1', '青木阳菜', imgPath, 'test.jpg', 'u1', 100);
+    const ni = new NameImagesModule(db.nameImages, tmpDir);
+    router.setNameImages(ni);
+    // Pre-set cooldown
+    ni.checkAndSetCooldown('g1', '青木阳菜', 300_000);
+
+    await router.dispatch(makeMsg({ content: '青木阳菜', rawContent: '青木阳菜' }));
+
+    expect(adapter.send).not.toHaveBeenCalledWith('g1', expect.stringMatching(/\[CQ:image/));
+  });
+
+  it('burst (5 messages within 10s) → image not sent', async () => {
+    const imgPath = path.join(tmpDir, '青木阳菜', 'test.jpg');
+    fs.mkdirSync(path.dirname(imgPath), { recursive: true });
+    fs.writeFileSync(imgPath, Buffer.from([0xff, 0xd8, 0xff, 0xe0]));
+    db.nameImages.insert('g1', '青木阳菜', imgPath, 'test.jpg', 'u1', 100);
+
+    const now = Math.floor(Date.now() / 1000);
+    // Insert 4 recent messages with timestamps within the last 5s
+    for (let i = 0; i < 4; i++) {
+      db.messages.insert({ groupId: 'g1', userId: 'u2', nickname: 'X', content: 'hi', timestamp: now - i, deleted: false });
+    }
+
+    // Current message also lands within 10s of the oldest — total 5 within 10s
+    await router.dispatch(makeMsg({ content: '青木阳菜', rawContent: '青木阳菜', timestamp: now }));
+
+    expect(adapter.send).not.toHaveBeenCalledWith('g1', expect.stringMatching(/\[CQ:image/));
+  });
+
+  it('no images for matched name → no send', async () => {
+    // Name exists in DB but has zero images
+    await router.dispatch(makeMsg({ content: '青木阳菜', rawContent: '青木阳菜' }));
+    expect(adapter.send).not.toHaveBeenCalled();
+  });
+
+  it('unknown name in message → no image send', async () => {
+    const imgPath = path.join(tmpDir, '青木阳菜', 'test.jpg');
+    fs.mkdirSync(path.dirname(imgPath), { recursive: true });
+    fs.writeFileSync(imgPath, Buffer.from([0xff, 0xd8, 0xff, 0xe0]));
+    db.nameImages.insert('g1', '青木阳菜', imgPath, 'test.jpg', 'u1', 100);
+
+    await router.dispatch(makeMsg({ content: '完全不相关的内容', rawContent: '完全不相关的内容' }));
+
+    expect(adapter.send).not.toHaveBeenCalledWith('g1', expect.stringMatching(/\[CQ:image/));
+  });
+
   it('/add then image message → saves image and replies with count', async () => {
     // Enter collection mode
     await router.dispatch(makeMsg({ content: '/add 西瓜', role: 'admin' }));
