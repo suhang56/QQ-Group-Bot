@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { Router } from '../src/core/router.js';
+import { Router, splitReply } from '../src/core/router.js';
 import { RateLimiter } from '../src/core/rateLimiter.js';
 import { MimicModule } from '../src/modules/mimic.js';
 import { ModeratorModule } from '../src/modules/moderator.js';
@@ -442,5 +442,82 @@ describe('Router — moderator commands (appeal, rule_add, rule_false_positive)'
       timestamp: Math.floor(Date.now() / 1000) - 60 });
     await router.dispatch(makeMsg({ content: '/appeal @u-victim', role: 'admin', userId: 'admin-1' }));
     expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('申诉已批准'));
+  });
+});
+
+describe('splitReply', () => {
+  it('single-line reply → single element array', () => {
+    expect(splitReply('哈哈笑死')).toEqual(['哈哈笑死']);
+  });
+
+  it('two-line reply → two elements', () => {
+    expect(splitReply('第一句\n第二句')).toEqual(['第一句', '第二句']);
+  });
+
+  it('three-line reply → three elements', () => {
+    expect(splitReply('a\nb\nc')).toEqual(['a', 'b', 'c']);
+  });
+
+  it('four-line reply → capped at three', () => {
+    expect(splitReply('a\nb\nc\nd')).toEqual(['a', 'b', 'c']);
+  });
+
+  it('empty lines filtered out', () => {
+    expect(splitReply('a\n\nb\n\nc')).toEqual(['a', 'b', 'c']);
+  });
+
+  it('leading/trailing whitespace trimmed per line', () => {
+    expect(splitReply('  hello  \n  world  ')).toEqual(['hello', 'world']);
+  });
+
+  it('all-empty input returns empty array', () => {
+    expect(splitReply('\n\n\n')).toEqual([]);
+  });
+});
+
+describe('Router — multi-line chat reply dispatch', () => {
+  let db: Database;
+  let adapter: ReturnType<typeof makeMockAdapter>;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    adapter = makeMockAdapter();
+  });
+
+  it('single-line chat reply → adapter.send called once', async () => {
+    const router = new Router(db, adapter, new RateLimiter());
+    router.setChat({
+      generateReply: vi.fn().mockResolvedValue('一句话'),
+    });
+    await router.dispatch(makeMsg({ content: 'hello', rawContent: 'hello' }));
+    expect(adapter.send).toHaveBeenCalledTimes(1);
+    expect(adapter.send).toHaveBeenCalledWith('g1', '一句话');
+  });
+
+  it('two-line chat reply → adapter.send called twice', async () => {
+    const router = new Router(db, adapter, new RateLimiter());
+    router.setChat({
+      generateReply: vi.fn().mockResolvedValue('第一句\n第二句'),
+    });
+    await router.dispatch(makeMsg({ content: 'hello', rawContent: 'hello' }));
+    expect(adapter.send).toHaveBeenCalledTimes(2);
+    expect(adapter.send).toHaveBeenNthCalledWith(1, 'g1', '第一句');
+    expect(adapter.send).toHaveBeenNthCalledWith(2, 'g1', '第二句');
+  });
+
+  it('four-line reply capped at three sends', async () => {
+    const router = new Router(db, adapter, new RateLimiter());
+    router.setChat({
+      generateReply: vi.fn().mockResolvedValue('a\nb\nc\nd'),
+    });
+    await router.dispatch(makeMsg({ content: 'hello', rawContent: 'hello' }));
+    expect(adapter.send).toHaveBeenCalledTimes(3);
+  });
+
+  it('null chat reply → adapter.send not called', async () => {
+    const router = new Router(db, adapter, new RateLimiter());
+    router.setChat({ generateReply: vi.fn().mockResolvedValue(null) });
+    await router.dispatch(makeMsg({ content: 'hello', rawContent: 'hello' }));
+    expect(adapter.send).not.toHaveBeenCalled();
   });
 });

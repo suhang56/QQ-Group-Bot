@@ -9,6 +9,20 @@ import { createLogger } from '../utils/logger.js';
 import { defaultGroupConfig } from '../config.js';
 import { resolveAtTarget } from '../utils/cqcode.js';
 
+const MAX_SPLIT_LINES = 3;
+const SPLIT_DELAY_MIN_MS = 300;
+const SPLIT_DELAY_MAX_MS = 800;
+
+/** Split a reply on newlines, cap at MAX_SPLIT_LINES, drop empty lines. */
+export function splitReply(text: string): string[] {
+  const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  return lines.slice(0, MAX_SPLIT_LINES);
+}
+
+function randomDelay(): number {
+  return SPLIT_DELAY_MIN_MS + Math.floor(Math.random() * (SPLIT_DELAY_MAX_MS - SPLIT_DELAY_MIN_MS));
+}
+
 export interface IRouter {
   dispatch(msg: GroupMessage): Promise<void>;
 }
@@ -120,7 +134,7 @@ export class Router implements IRouter {
         if (activeUserId) {
           const result = await this.mimicModule.generateMimic(msg.groupId, activeUserId, msg.content, recentMsgs);
           if (result.ok) {
-            await this.adapter.send(msg.groupId, result.text);
+            await this._sendReply(msg.groupId, result.text);
           }
           return;
         }
@@ -129,11 +143,26 @@ export class Router implements IRouter {
       if (this.chatModule) {
         const reply = await this.chatModule.generateReply(msg.groupId, msg, recentMsgs);
         if (reply) {
-          await this.adapter.send(msg.groupId, reply);
+          await this._sendReply(msg.groupId, reply);
         }
       }
     } catch (err) {
       this.logger.fatal({ err, messageId: msg.messageId }, 'Unhandled error in router.dispatch');
+    }
+  }
+
+  /** Send a reply as one or more messages (split on newlines), with typing delay between lines. */
+  private async _sendReply(groupId: string, text: string): Promise<void> {
+    const lines = splitReply(text);
+    if (lines.length === 0) return;
+    if (lines.length > MAX_SPLIT_LINES) {
+      this.logger.info({ groupId, totalLines: text.split('\n').length }, 'reply truncated to 3 lines');
+    }
+    for (let i = 0; i < lines.length; i++) {
+      await this.adapter.send(groupId, lines[i]!);
+      if (i < lines.length - 1) {
+        await new Promise(r => setTimeout(r, randomDelay()));
+      }
     }
   }
 
