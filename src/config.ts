@@ -51,6 +51,11 @@ export function defaultGroupConfig(groupId: string): GroupConfig {
     chatAtMentionQueueMax: 5,
     chatAtMentionBurstWindowMs: 30_000,
     chatAtMentionBurstThreshold: 3,
+    repeaterEnabled: true,
+    repeaterMinCount: 3,
+    repeaterCooldownMs: 600_000,
+    repeaterMinContentLength: 2,
+    repeaterMaxContentLength: 100,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };

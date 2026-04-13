@@ -62,6 +62,11 @@ export interface GroupConfig {
   chatAtMentionQueueMax: number;
   chatAtMentionBurstWindowMs: number;
   chatAtMentionBurstThreshold: number;
+  repeaterEnabled: boolean;
+  repeaterMinCount: number;
+  repeaterCooldownMs: number;
+  repeaterMinContentLength: number;
+  repeaterMaxContentLength: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -191,6 +196,11 @@ interface GroupConfigRow {
   chat_at_mention_queue_max: number;
   chat_at_mention_burst_window_ms: number;
   chat_at_mention_burst_threshold: number;
+  repeater_enabled: number;
+  repeater_min_count: number;
+  repeater_cooldown_ms: number;
+  repeater_min_content_length: number;
+  repeater_max_content_length: number;
   created_at: string; updated_at: string;
 }
 
@@ -266,6 +276,11 @@ function configFromRow(row: GroupConfigRow): GroupConfig {
     chatAtMentionQueueMax: row.chat_at_mention_queue_max ?? 5,
     chatAtMentionBurstWindowMs: row.chat_at_mention_burst_window_ms ?? 30_000,
     chatAtMentionBurstThreshold: row.chat_at_mention_burst_threshold ?? 3,
+    repeaterEnabled: (row.repeater_enabled ?? 1) !== 0,
+    repeaterMinCount: row.repeater_min_count ?? 3,
+    repeaterCooldownMs: row.repeater_cooldown_ms ?? 600_000,
+    repeaterMinContentLength: row.repeater_min_content_length ?? 2,
+    repeaterMaxContentLength: row.repeater_max_content_length ?? 100,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -733,6 +748,11 @@ export class Database {
       'chat_at_mention_queue_max INTEGER NOT NULL DEFAULT 5',
       'chat_at_mention_burst_window_ms INTEGER NOT NULL DEFAULT 30000',
       'chat_at_mention_burst_threshold INTEGER NOT NULL DEFAULT 3',
+      'repeater_enabled INTEGER NOT NULL DEFAULT 1',
+      'repeater_min_count INTEGER NOT NULL DEFAULT 3',
+      'repeater_cooldown_ms INTEGER NOT NULL DEFAULT 600000',
+      'repeater_min_content_length INTEGER NOT NULL DEFAULT 2',
+      'repeater_max_content_length INTEGER NOT NULL DEFAULT 100',
     ]) {
       try { this._db.exec(`ALTER TABLE group_config ADD COLUMN ${col}`); } catch { /* already exists */ }
     }

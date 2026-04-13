@@ -69,6 +69,9 @@ export class Router implements IRouter {
   private moderatorModule: ModeratorModule | null = null;
   private nameImagesModule: NameImagesModule | null = null;
 
+  // Repeater cooldown: key = `${groupId}:${content}`, value = last-triggered timestamp
+  private readonly repeaterCooldown = new Map<string, number>();
+
   // @-mention queue: per-group list of pending mentions waiting for in-flight to complete
   private readonly atMentionQueue = new Map<string, QueuedMention[]>();
   // @-mention burst tracking: per-group timestamps of recent @-mention replies
@@ -187,6 +190,12 @@ export class Router implements IRouter {
             return; // Skip chat/mimic pipeline for this message
           }
         }
+      }
+
+      // Repeater: join when 3+ distinct users just said the same thing
+      if (msg.userId !== (this.botUserId ?? '')) {
+        const repeated = await this._checkRepeater(msg, config);
+        if (repeated) return;
       }
 
       // Name-image trigger: fires only when the entire message IS a known name (exact match after trim)
@@ -347,6 +356,42 @@ export class Router implements IRouter {
 
   private _defaultConfig(groupId: string) {
     return defaultGroupConfig(groupId);
+  }
+
+  /** Returns true and sends the repeated content if 3+ distinct users just said the same thing. */
+  private async _checkRepeater(msg: GroupMessage, config: GroupConfig): Promise<boolean> {
+    if (!config.repeaterEnabled) return false;
+
+    const content = msg.content.trim();
+    if (content.length < config.repeaterMinContentLength) return false;
+    if (content.length > config.repeaterMaxContentLength) return false;
+    if (content.startsWith('/')) return false;
+    if (msg.rawContent.includes('[CQ:at,')) return false;
+
+    // Burst guard: skip during rapid-fire group activity
+    const recent5 = this.db.messages.getRecent(msg.groupId, 5);
+    const isBurst = recent5.length >= 5 &&
+      (recent5[0]!.timestamp - recent5[recent5.length - 1]!.timestamp) * 1000 <= 10_000;
+    if (isBurst) return false;
+
+    // Last N non-bot messages that match the content
+    const recent = this.db.messages.getRecent(msg.groupId, 20)
+      .filter(m => m.userId !== (this.botUserId ?? '') && m.content.trim() === content)
+      .slice(0, config.repeaterMinCount);
+
+    if (recent.length < config.repeaterMinCount) return false;
+    const distinctUsers = new Set(recent.map(m => m.userId));
+    if (distinctUsers.size < config.repeaterMinCount) return false;
+
+    // Cooldown
+    const key = `${msg.groupId}:${content}`;
+    const last = this.repeaterCooldown.get(key);
+    if (last !== undefined && Date.now() - last < config.repeaterCooldownMs) return false;
+    this.repeaterCooldown.set(key, Date.now());
+
+    await this.adapter.send(msg.groupId, content);
+    this.logger.info({ groupId: msg.groupId, content }, '复读');
+    return true;
   }
 
   private _registerCommands(): void {
