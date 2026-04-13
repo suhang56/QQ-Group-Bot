@@ -107,6 +107,7 @@ export interface ImportDeps {
   db: Database;
   dryRun: boolean;
   targetGroup: string;
+  batchSize?: number;
   label?: string;
   onProgress?: (stats: ImportStats) => void;
   progressInterval?: number;
@@ -117,7 +118,13 @@ export async function importLines(
   deps: ImportDeps,
   stats: ImportStats
 ): Promise<void> {
-  const { db, dryRun, targetGroup, label = '', onProgress, progressInterval = 10_000 } = deps;
+  const { db, dryRun, targetGroup, batchSize = 5000, label = '', onProgress, progressInterval = 10_000 } = deps;
+
+  let txOpen = false;
+  let rowsSinceCommit = 0;
+
+  const beginTx = () => { if (!txOpen) { db.exec('BEGIN IMMEDIATE'); txOpen = true; } };
+  const commitTx = () => { if (txOpen) { db.exec('COMMIT'); txOpen = false; rowsSinceCommit = 0; } };
 
   for await (const line of lines) {
     const trimmed = line.trim();
@@ -146,17 +153,22 @@ export async function importLines(
       const userId = record.sender!.uin!;
       const nickname = (record.sender!.groupCard || record.sender!.name || userId)!;
 
+      beginTx();
       const inserted = db.messages.insert(
         { groupId: targetGroup, userId, nickname, content: record.content!.text!.trim(), timestamp: tsSeconds, deleted: false },
         record.id!
       );
 
-      // INSERT OR IGNORE returns lastInsertRowid=0 when row was skipped
       if (inserted.id !== 0) {
         stats.inserted++;
         db.users.upsert({ userId, groupId: targetGroup, nickname, styleSummary: null, lastSeen: tsSeconds });
       } else {
         stats.skippedDuplicate++;
+      }
+
+      rowsSinceCommit++;
+      if (rowsSinceCommit >= batchSize) {
+        commitTx();
       }
     }
 
@@ -164,6 +176,8 @@ export async function importLines(
       onProgress(stats);
     }
   }
+
+  commitTx();
 }
 
 // ---- Main ----
@@ -186,6 +200,11 @@ async function main() {
   console.log(`[INFO] Found ${chunkFiles.length} chunk file(s)`);
 
   const db = new Database(dbPath);
+
+  // Bulk-import PRAGMAs — safe for import, reset on close
+  db.exec('PRAGMA synchronous = NORMAL;');
+  db.exec('PRAGMA temp_store = MEMORY;');
+  db.exec('PRAGMA mmap_size = 30000000000;');
 
   const stats = makeStats();
   const globalStart = Date.now();

@@ -451,6 +451,11 @@ export class Database {
     this.rules = new RuleRepository(this._db);
   }
 
+  /** Execute arbitrary SQL — intended for bulk-import scripts and migrations only. */
+  exec(sql: string): void {
+    this._db.exec(sql);
+  }
+
   close(): void {
     this._db.close();
   }
