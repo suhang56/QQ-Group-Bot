@@ -49,13 +49,16 @@ describe('ChatModule', () => {
     db = new Database(':memory:');
     claude = makeMockClaude();
     // Default lurker config: 15% chance, 90s cooldown, burst=5 msgs in 10s
-    // Use lurkerReplyChance=1.0 by default so tests that don't test probability always reply
+    // lurkerReplyChance=1.0 and chatSilenceBonusSec=1 so score reaches 1.0 for any message
+    // older than 1 second — tests that don't test probability/score always reply
     chat = new ChatModule(claude, db, {
       botUserId: BOT_ID,
       lurkerReplyChance: 1.0,  // always pass probability unless overridden
       lurkerCooldownMs: 0,     // no cooldown unless overridden
       burstMinMessages: 5,
       burstWindowMs: 10_000,
+      chatSilenceBonusSec: 1,  // 1s silence → score=1.0; disables score gate for most tests
+      chatMinScore: 0,         // no minimum score gate unless overridden
     });
   });
 
@@ -245,6 +248,8 @@ describe('ChatModule', () => {
       lurkerCooldownMs: 0,
       burstMinMessages: 5,
       burstWindowMs: 10_000,
+      chatSilenceBonusSec: 1,  // 15s silence → score=1.0
+      chatMinScore: 0,
     });
     const result = await chat.generateReply('g1', makeMsg(), []);
     expect(result).toBe('bot reply');
@@ -321,6 +326,102 @@ describe('ChatModule', () => {
     expect(replies).toHaveLength(1);
     expect(completeMock).toHaveBeenCalledTimes(1);
   });
+
+  // ── Score-based participation gate ────────────────────────────────────
+
+  it('score gate: fresh message (0s silence) → score ~0 → blocked by chatMinScore', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    // Insert a message timestamped right now — zero silence
+    db.messages.insert({ groupId: 'g1', userId: 'u2', nickname: 'Bob', content: 'hey', timestamp: now, deleted: false });
+
+    chat = new ChatModule(claude, db, {
+      botUserId: BOT_ID,
+      lurkerReplyChance: 1.0,
+      lurkerCooldownMs: 0,
+      chatSilenceBonusSec: 120,
+      chatMinScore: 0.1,  // score must be >= 0.1 (i.e. silence >= 12s)
+    });
+    const result = await chat.generateReply('g1', makeMsg(), []);
+    expect(result).toBeNull();
+  });
+
+  it('score gate: 60s silence with bonusSec=120 → score=0.5 → random<0.5 passes', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.3); // 0.3 < 0.5 * 1.0 → pass
+    const now = Math.floor(Date.now() / 1000);
+    db.messages.insert({ groupId: 'g1', userId: 'u2', nickname: 'Bob', content: 'hey', timestamp: now - 60, deleted: false });
+
+    chat = new ChatModule(claude, db, {
+      botUserId: BOT_ID,
+      lurkerReplyChance: 1.0,
+      lurkerCooldownMs: 0,
+      chatSilenceBonusSec: 120,
+      chatMinScore: 0.1,
+    });
+    const result = await chat.generateReply('g1', makeMsg(), []);
+    expect(result).toBe('bot reply');
+  });
+
+  it('score gate: 60s silence with bonusSec=120 → score=0.5 → random=0.6 blocked', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.6); // 0.6 >= 0.5 * 1.0 → skip
+    const now = Math.floor(Date.now() / 1000);
+    db.messages.insert({ groupId: 'g1', userId: 'u2', nickname: 'Bob', content: 'hey', timestamp: now - 60, deleted: false });
+
+    chat = new ChatModule(claude, db, {
+      botUserId: BOT_ID,
+      lurkerReplyChance: 1.0,
+      lurkerCooldownMs: 0,
+      chatSilenceBonusSec: 120,
+      chatMinScore: 0.1,
+    });
+    const result = await chat.generateReply('g1', makeMsg(), []);
+    expect(result).toBeNull();
+  });
+
+  it('score gate: silence >= bonusSec → score capped at 1.0 → full lurkerReplyChance applies', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.14); // < 0.15 * 1.0 → pass
+    const now = Math.floor(Date.now() / 1000);
+    db.messages.insert({ groupId: 'g1', userId: 'u2', nickname: 'Bob', content: 'hey', timestamp: now - 300, deleted: false });
+
+    chat = new ChatModule(claude, db, {
+      botUserId: BOT_ID,
+      lurkerReplyChance: 0.15,
+      lurkerCooldownMs: 0,
+      chatSilenceBonusSec: 120,
+      chatMinScore: 0.1,
+    });
+    const result = await chat.generateReply('g1', makeMsg(), []);
+    expect(result).toBe('bot reply');
+  });
+
+  it('score gate: empty group (no DB messages) → score=1.0 → full chance', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.10);
+    chat = new ChatModule(claude, db, {
+      botUserId: BOT_ID,
+      lurkerReplyChance: 0.15,
+      lurkerCooldownMs: 0,
+      chatSilenceBonusSec: 120,
+      chatMinScore: 0.1,
+    });
+    const result = await chat.generateReply('g1', makeMsg(), []);
+    expect(result).toBe('bot reply');
+  });
+
+  it('score gate: @-mention always bypasses score check', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    // Fresh message → score near 0
+    db.messages.insert({ groupId: 'g1', userId: 'u2', nickname: 'Bob', content: 'hey', timestamp: now, deleted: false });
+
+    chat = new ChatModule(claude, db, {
+      botUserId: BOT_ID,
+      lurkerReplyChance: 0,
+      lurkerCooldownMs: 999_999,
+      chatSilenceBonusSec: 120,
+      chatMinScore: 0.99,
+    });
+    const msg = makeMsg({ rawContent: `[CQ:at,qq=${BOT_ID}] hello`, content: 'hello' });
+    const result = await chat.generateReply('g1', msg, []);
+    expect(result).toBe('bot reply');
+  });
 });
 
 describe('ChatModule — mixed few-shot history', () => {
@@ -332,6 +433,8 @@ describe('ChatModule — mixed few-shot history', () => {
       botUserId: BOT_ID,
       lurkerReplyChance: 1.0,
       lurkerCooldownMs: 0,
+      chatSilenceBonusSec: 1,
+      chatMinScore: 0,
       chatRecentCount: recent,
       chatHistoricalSampleCount: historical,
     });
@@ -427,7 +530,7 @@ describe('ChatModule — mixed few-shot history', () => {
   // 7. Single-message group — recent=1, historical=0, chat works
   it('single-message group: historical=0, reply still works', async () => {
     const ts = Math.floor(Date.now() / 1000);
-    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Solo', content: 'only msg', timestamp: ts, deleted: false });
+    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Solo', content: 'only msg', timestamp: ts - 10, deleted: false });
 
     const chat = makeChatWithCounts(20, 10);
     const result = await chat.generateReply('g1', makeMsg(), []);
@@ -452,6 +555,8 @@ describe('ChatModule — keyword retrieval and group identity', () => {
       botUserId: BOT_ID,
       lurkerReplyChance: 1.0,
       lurkerCooldownMs: 0,
+      chatSilenceBonusSec: 1,
+      chatMinScore: 0,
       chatKeywordMatchCount: 15,
       groupIdentityTopUsers: 20,
       groupIdentityCacheTtlMs: 3_600_000,
@@ -578,6 +683,8 @@ describe('ChatModule — group lore loading', () => {
       lurkerReplyChance: 1.0,
       lurkerCooldownMs: 0,
       debounceMs: 0,
+      chatSilenceBonusSec: 1,
+      chatMinScore: 0,
       loreDirPath,
       ...(loreSizeCapBytes !== undefined ? { loreSizeCapBytes } : {}),
     });

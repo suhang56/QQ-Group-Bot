@@ -25,6 +25,8 @@ interface ChatOptions {
   lurkerCooldownMs?: number;
   burstWindowMs?: number;
   burstMinMessages?: number;
+  chatSilenceBonusSec?: number;
+  chatMinScore?: number;
   groupIdentityCacheTtlMs?: number;
   groupIdentityTopUsers?: number;
   loreDirPath?: string;
@@ -62,6 +64,8 @@ export class ChatModule implements IChatModule {
   private readonly lurkerCooldownMs: number;
   private readonly burstWindowMs: number;
   private readonly burstMinMessages: number;
+  private readonly chatSilenceBonusSec: number;
+  private readonly chatMinScore: number;
   private readonly groupIdentityCacheTtlMs: number;
   private readonly groupIdentityTopUsers: number;
 
@@ -95,6 +99,8 @@ export class ChatModule implements IChatModule {
     this.lurkerCooldownMs = options.lurkerCooldownMs ?? lurkerDefaults.lurkerCooldownMs;
     this.burstWindowMs = options.burstWindowMs ?? lurkerDefaults.burstWindowMs;
     this.burstMinMessages = options.burstMinMessages ?? lurkerDefaults.burstMinMessages;
+    this.chatSilenceBonusSec = options.chatSilenceBonusSec ?? lurkerDefaults.chatSilenceBonusSec;
+    this.chatMinScore = options.chatMinScore ?? lurkerDefaults.chatMinScore;
     this.groupIdentityCacheTtlMs = options.groupIdentityCacheTtlMs ?? chatHistoryDefaults.groupIdentityCacheTtlMs;
     this.groupIdentityTopUsers = options.groupIdentityTopUsers ?? chatHistoryDefaults.groupIdentityTopUsers;
     this.loreDirPath = options.loreDirPath ?? chatHistoryDefaults.loreDirPath;
@@ -151,8 +157,13 @@ export class ChatModule implements IChatModule {
         return null;
       }
 
-      // Probabilistic gate
-      if (Math.random() >= this.lurkerReplyChance) {
+      // Score-based participation gate: longer silence → higher chance
+      const score = this._computeParticipationScore(groupId, now);
+      if (score < this.chatMinScore) {
+        this.logger.debug({ groupId, score }, 'Participation score below minimum — skipping');
+        return null;
+      }
+      if (Math.random() >= score * this.lurkerReplyChance) {
         return null;
       }
 
@@ -303,6 +314,20 @@ export class ChatModule implements IChatModule {
     this.groupIdentityCache.set(groupId, { text, expiresAt: Date.now() + this.groupIdentityCacheTtlMs });
     this.logger.debug({ groupId, hasLore: !!lore }, 'Group identity prompt cached');
     return text;
+  }
+
+  /**
+   * Compute a 0–1 participation score based on how long ago the group was active.
+   * At silenceBonusSec or more of silence → score = 1.0 (maximum chance).
+   * Fresh burst → score near 0.
+   */
+  private _computeParticipationScore(groupId: string, nowMs: number): number {
+    const recent = this.db.messages.getRecent(groupId, 1);
+    if (recent.length === 0) return 1.0; // brand-new group → full score
+    const lastMsgTimeSec = recent[0]!.timestamp; // unix seconds
+    const silenceSec = nowMs / 1000 - lastMsgTimeSec;
+    const score = silenceSec / this.chatSilenceBonusSec;
+    return Math.min(1.0, Math.max(0, score));
   }
 
   private _isMention(msg: GroupMessage): boolean {
