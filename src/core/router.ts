@@ -354,10 +354,7 @@ export class Router implements IRouter {
               }
               this._scheduleHarvest(msg.groupId, botReplyId, msg.content);
               // Online lookup fires immediately in parallel with the 60s harvest timer
-              const sl = this.selfLearning as SelfLearningModule & {
-                researchOnline?(p: { groupId: string; evasiveBotReplyId: number; originalTrigger: string }): Promise<unknown>;
-              };
-              void sl.researchOnline?.({
+              void this.selfLearning.researchOnline({
                 groupId: msg.groupId,
                 evasiveBotReplyId: botReplyId,
                 originalTrigger: msg.content,

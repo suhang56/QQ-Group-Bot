@@ -27,7 +27,35 @@ export interface SelfLearningOptions {
   model?: ClaudeModel;
   /** Override clock for tests. */
   now?: () => number;
+  /** Max online research calls per group inside a 10-minute window. Default 3. */
+  researchMaxPer10MinPerGroup?: number;
+  /** Max online research calls globally per 24-hour rolling window. Default 30. */
+  researchMaxPerDayGlobal?: number;
+  /** Kill-switch for {@link SelfLearningModule.researchOnline}. Default true. */
+  researchEnabled?: boolean;
 }
+
+/**
+ * Patterns that identify personal-info probes — questions about real-world
+ * identity, location, contact details. These must never be sent to web search.
+ */
+const PERSONAL_INFO_PATTERNS: ReadonlyArray<RegExp> = [
+  /你是谁/,
+  /你叫(什么|啥)/,
+  /你多大/,
+  /你几岁/,
+  /你在哪/,
+  /你住(在)?哪/,
+  /你家(在|住)?哪/,
+  /你电话/,
+  /你手机/,
+  /你微信/,
+  /你qq/i,
+  /你的qq/i,
+  /你的(电话|手机|微信|地址|住址|邮箱)/,
+  /\b1[3-9]\d{9}\b/, // CN mobile number
+  /[\w._%+-]+@[\w.-]+\.[A-Za-z]{2,}/, // email
+];
 
 /**
  * Result returned when a fact is successfully distilled and persisted.
@@ -76,9 +104,14 @@ export class SelfLearningModule {
   private readonly harvestWindowMs: number;
   private readonly model: ClaudeModel;
   private readonly now: () => number;
+  private readonly researchMaxPer10MinPerGroup: number;
+  private readonly researchMaxPerDayGlobal: number;
+  private readonly researchEnabled: boolean;
 
   private readonly correctionStamps: Map<string, number[]> = new Map();
   private readonly harvestStamps: Map<string, number[]> = new Map();
+  private readonly researchStamps: Map<string, number[]> = new Map();
+  private researchGlobalStamps: number[] = [];
 
   constructor(opts: SelfLearningOptions) {
     this.db = opts.db;
@@ -91,6 +124,9 @@ export class SelfLearningModule {
     this.harvestWindowMs = opts.harvestWindowMs ?? 60_000;
     this.model = opts.model ?? 'claude-sonnet-4-6';
     this.now = opts.now ?? (() => Date.now());
+    this.researchMaxPer10MinPerGroup = opts.researchMaxPer10MinPerGroup ?? 3;
+    this.researchMaxPerDayGlobal = opts.researchMaxPerDayGlobal ?? 30;
+    this.researchEnabled = opts.researchEnabled ?? true;
   }
 
   /**
@@ -214,6 +250,84 @@ export class SelfLearningModule {
     return `## 群里学到的事实（群友教过你的，别再错同一件）\n${lines.join('\n')}`;
   }
 
+  /**
+   * Run a Claude+WebSearch lookup for a question the bot punted on, racing
+   * with the {@link harvestPassiveKnowledge} group-member path. Designed to be
+   * called fire-and-forget by the router after an evasive reply.
+   *
+   * Hard guards (in order): kill-switch, length bounds, personal-info filter,
+   * per-group rate limit, global daily rate limit. All errors are swallowed —
+   * this method never throws and returns null on any failure.
+   *
+   * @returns the inserted {@link DistilledFact} or null when no fact was
+   *   stored (filter, rate limit, low confidence, model error, etc.).
+   */
+  async researchOnline(params: {
+    groupId: string;
+    evasiveBotReplyId: number;
+    originalTrigger: string;
+    topic?: string;
+  }): Promise<DistilledFact | null> {
+    const { groupId, evasiveBotReplyId, originalTrigger, topic } = params;
+
+    if (!this.researchEnabled) {
+      this.logger.debug({ groupId }, 'researchOnline: disabled by config');
+      return null;
+    }
+
+    const trigger = originalTrigger.trim();
+    if (trigger.length < 3 || trigger.length > 200) {
+      this.logger.debug({ groupId, len: trigger.length }, 'researchOnline: trigger length out of range');
+      return null;
+    }
+    if (PERSONAL_INFO_PATTERNS.some(re => re.test(trigger))) {
+      this.logger.info({ groupId }, 'researchOnline: personal-info probe filtered');
+      return null;
+    }
+    if (!this._allowResearchPerGroup(groupId)) {
+      this.logger.info({ groupId }, 'researchOnline: per-group rate limit hit');
+      return null;
+    }
+    if (!this._allowResearchGlobal()) {
+      this.logger.info({ groupId }, 'researchOnline: global daily rate limit hit');
+      return null;
+    }
+
+    let response: { found: boolean; fact?: string; source?: string; confidence?: number } | null;
+    try {
+      response = await this._distillResearch(trigger);
+    } catch (err) {
+      this.logger.warn({ err, groupId }, 'researchOnline: unexpected error');
+      return null;
+    }
+
+    if (!response || !response.found) {
+      return null;
+    }
+    const confidence = typeof response.confidence === 'number' ? response.confidence : 0;
+    if (confidence < 0.6) {
+      this.logger.info({ groupId, confidence }, 'researchOnline: confidence below threshold');
+      return null;
+    }
+    if (typeof response.fact !== 'string' || response.fact.length === 0) {
+      return null;
+    }
+
+    const sourceTag = `[online:${response.source ?? 'unknown'}]`;
+    const factId = this.db.learnedFacts.insert({
+      groupId,
+      topic: topic ?? trigger.slice(0, 10),
+      fact: response.fact,
+      sourceUserId: null,
+      sourceUserNickname: sourceTag,
+      sourceMsgId: null,
+      botReplyId: evasiveBotReplyId,
+      confidence,
+    });
+    this.logger.info({ groupId, factId, fact: response.fact, source: response.source }, 'learned fact (online)');
+    return { factId, fact: response.fact };
+  }
+
   /** Test/router hook — exposes the configured Claude model. */
   getModel(): ClaudeModel {
     return this.model;
@@ -227,6 +341,21 @@ export class SelfLearningModule {
 
   private _allowHarvest(groupId: string): boolean {
     return this._allow(this.harvestStamps, groupId, this.harvestWindowMs, this.harvestMaxPerMinute);
+  }
+
+  private _allowResearchPerGroup(groupId: string): boolean {
+    return this._allow(this.researchStamps, groupId, 600_000, this.researchMaxPer10MinPerGroup);
+  }
+
+  private _allowResearchGlobal(): boolean {
+    const now = this.now();
+    const cutoff = now - 86_400_000;
+    this.researchGlobalStamps = this.researchGlobalStamps.filter(t => t >= cutoff);
+    if (this.researchGlobalStamps.length >= this.researchMaxPerDayGlobal) {
+      return false;
+    }
+    this.researchGlobalStamps.push(now);
+    return true;
   }
 
   private _allow(map: Map<string, number[]>, groupId: string, windowMs: number, max: number): boolean {
@@ -308,6 +437,53 @@ export class SelfLearningModule {
       hasAnswer: true,
       answer: parsed.answer,
       topic: typeof parsed.topic === 'string' ? parsed.topic : undefined,
+    };
+  }
+
+  private async _distillResearch(
+    originalTrigger: string,
+  ): Promise<{ found: boolean; fact?: string; source?: string; confidence?: number } | null> {
+    const prompt =
+      `You are helping a bot build its knowledge base. The bot failed to answer ` +
+      `this question in a Chinese group chat: "${originalTrigger}"\n\n` +
+      `Context: the group is 北美炸梦同好会, a fan community for BanG Dream! / ` +
+      `idol/anime. Questions are usually about fandom trivia (bands, songs, ` +
+      `character voice actors, anime plots, concerts), occasionally about ` +
+      `tech/memes/group-specific references.\n\n` +
+      `Use web_search to find a definitive answer. Prefer authoritative sources ` +
+      `(official wiki, artist/label pages, MyAnimeList, VNDB, Wikipedia).\n\n` +
+      `Return JSON only:\n` +
+      `{\n  "found": true | false,\n  "fact": "<concise Chinese sentence, ≤50 chars, stating the fact>",\n  "source": "<domain name of primary source>",\n  "confidence": 0.0-1.0\n}\n\n` +
+      `If uncertain or sources conflict, return found: false. ` +
+      `If the question is about a specific person's private info, return found: false.`;
+
+    let res;
+    try {
+      res = await this.claude.complete({
+        model: this.model,
+        maxTokens: 1024,
+        system: [{ text: 'You are a careful fact extractor with web search. Only output JSON, no prose.', cache: true }],
+        messages: [{ role: 'user', content: prompt }],
+        allowedTools: ['WebSearch'],
+      });
+    } catch (err) {
+      this.logger.warn({ err }, 'researchOnline: Claude call failed');
+      return null;
+    }
+
+    const parsed = this._parseJson(res.text);
+    if (!parsed) {
+      this.logger.warn({ raw: res.text }, 'researchOnline: malformed JSON');
+      return null;
+    }
+    if (parsed.found !== true) {
+      return { found: false };
+    }
+    return {
+      found: true,
+      fact: typeof parsed.fact === 'string' ? parsed.fact : undefined,
+      source: typeof parsed.source === 'string' ? parsed.source : undefined,
+      confidence: typeof parsed.confidence === 'number' ? parsed.confidence : undefined,
     };
   }
 

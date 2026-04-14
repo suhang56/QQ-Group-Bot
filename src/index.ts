@@ -65,13 +65,10 @@ void embedder.waitReady().then(() => {
   if (embedder.isReady) logger.info('Embedding model ready');
 });
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const selfLearningOpts: any = {
+const selfLearning = new SelfLearningModule({
   db, claude, botUserId,
-  // researchEnabled: dev-5 is adding this option; forwarded now so it takes effect once SelfLearningModule supports it
   researchEnabled: process.env['SELF_LEARN_ONLINE'] !== '0',
-};
-const selfLearning = new SelfLearningModule(selfLearningOpts);
+});
 router.setSelfLearning(selfLearning);
 
 const vision = new VisionService(claude, adapter, db.imageDescriptions);

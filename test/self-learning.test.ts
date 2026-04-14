@@ -299,3 +299,179 @@ describe('SelfLearningModule.formatFactsForPrompt', () => {
     expect(out).toContain('fact C');
   });
 });
+
+describe('SelfLearningModule.researchOnline', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = makeDb();
+  });
+
+  function seedEvasive(groupId: string): number {
+    const reply = db.botReplies.insert({
+      groupId, triggerMsgId: 't1', triggerUserNickname: 'a',
+      triggerContent: 'fire bird 谁唱的', botReply: '忘了',
+      module: 'chat', sentAt: Math.floor(Date.now() / 1000),
+    });
+    db.botReplies.markEvasive(reply.id);
+    return reply.id;
+  }
+
+  it('inserts a learned fact when web search returns a high-confidence answer', async () => {
+    const claude = stubClaude([
+      JSON.stringify({ found: true, fact: 'fire bird 是 Roselia 的曲', source: 'bandori.fandom.com', confidence: 0.9 }),
+    ]);
+    const learner = new SelfLearningModule({ db, claude });
+    const evasiveId = seedEvasive('g1');
+
+    const result = await learner.researchOnline({
+      groupId: 'g1',
+      evasiveBotReplyId: evasiveId,
+      originalTrigger: 'fire bird 是谁唱的',
+    });
+
+    expect(result).not.toBeNull();
+    expect(result!.fact).toBe('fire bird 是 Roselia 的曲');
+
+    const facts = db.learnedFacts.listActive('g1', 10);
+    expect(facts).toHaveLength(1);
+    expect(facts[0]!.sourceUserNickname).toBe('[online:bandori.fandom.com]');
+    expect(facts[0]!.botReplyId).toBe(evasiveId);
+    expect(facts[0]!.confidence).toBeCloseTo(0.9);
+  });
+
+  it('drops answers with confidence below 0.6', async () => {
+    const claude = stubClaude([
+      JSON.stringify({ found: true, fact: 'maybe Roselia', source: 'reddit.com', confidence: 0.4 }),
+    ]);
+    const learner = new SelfLearningModule({ db, claude });
+
+    const result = await learner.researchOnline({
+      groupId: 'g1', evasiveBotReplyId: seedEvasive('g1'),
+      originalTrigger: 'fire bird 谁唱的',
+    });
+
+    expect(result).toBeNull();
+    expect(db.learnedFacts.countActive('g1')).toBe(0);
+  });
+
+  it('returns null when web search reports found:false', async () => {
+    const claude = stubClaude([JSON.stringify({ found: false })]);
+    const learner = new SelfLearningModule({ db, claude });
+
+    const result = await learner.researchOnline({
+      groupId: 'g1', evasiveBotReplyId: seedEvasive('g1'),
+      originalTrigger: 'fire bird 谁唱的',
+    });
+
+    expect(result).toBeNull();
+    expect(db.learnedFacts.countActive('g1')).toBe(0);
+  });
+
+  it('blocks personal-info probes without calling Claude', async () => {
+    const completeSpy = vi.fn();
+    const claude: IClaudeClient = {
+      complete: completeSpy as unknown as IClaudeClient['complete'],
+      async describeImage() { return ''; },
+    };
+    const learner = new SelfLearningModule({ db, claude });
+
+    const result = await learner.researchOnline({
+      groupId: 'g1', evasiveBotReplyId: seedEvasive('g1'),
+      originalTrigger: '你电话是多少',
+    });
+
+    expect(result).toBeNull();
+    expect(completeSpy).not.toHaveBeenCalled();
+  });
+
+  it('rate-limits per-group after 3 successful calls in 10 minutes', async () => {
+    const ok = JSON.stringify({ found: true, fact: 'x', source: 'wiki', confidence: 0.9 });
+    const claude = stubClaude([ok, ok, ok, ok, ok]);
+    const completeSpy = vi.spyOn(claude, 'complete');
+    const learner = new SelfLearningModule({ db, claude });
+    const evasiveId = seedEvasive('g1');
+
+    for (let i = 0; i < 4; i++) {
+      await learner.researchOnline({
+        groupId: 'g1', evasiveBotReplyId: evasiveId, originalTrigger: `fire bird q${i}`,
+      });
+    }
+
+    expect(completeSpy).toHaveBeenCalledTimes(3);
+  });
+
+  it('rate-limits globally after researchMaxPerDayGlobal hits across groups', async () => {
+    const ok = JSON.stringify({ found: true, fact: 'x', source: 'wiki', confidence: 0.9 });
+    const claude = stubClaude(Array(10).fill(ok));
+    const completeSpy = vi.spyOn(claude, 'complete');
+    const learner = new SelfLearningModule({
+      db, claude,
+      researchMaxPer10MinPerGroup: 100,
+      researchMaxPerDayGlobal: 2,
+    });
+
+    for (let i = 0; i < 4; i++) {
+      const evasiveId = seedEvasive(`g${i}`);
+      await learner.researchOnline({
+        groupId: `g${i}`, evasiveBotReplyId: evasiveId, originalTrigger: `q ${i}`,
+      });
+    }
+
+    expect(completeSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('swallows Claude errors and returns null', async () => {
+    const learner = new SelfLearningModule({ db, claude: failingClaude() });
+    const result = await learner.researchOnline({
+      groupId: 'g1', evasiveBotReplyId: seedEvasive('g1'),
+      originalTrigger: 'fire bird 谁唱的',
+    });
+    expect(result).toBeNull();
+  });
+
+  it('drops malformed JSON without crashing', async () => {
+    const claude = stubClaude(['not json {{']);
+    const learner = new SelfLearningModule({ db, claude });
+
+    const result = await learner.researchOnline({
+      groupId: 'g1', evasiveBotReplyId: seedEvasive('g1'),
+      originalTrigger: 'fire bird 谁唱的',
+    });
+
+    expect(result).toBeNull();
+    expect(db.learnedFacts.countActive('g1')).toBe(0);
+  });
+
+  it('returns null immediately when researchEnabled is false', async () => {
+    const completeSpy = vi.fn();
+    const claude: IClaudeClient = {
+      complete: completeSpy as unknown as IClaudeClient['complete'],
+      async describeImage() { return ''; },
+    };
+    const learner = new SelfLearningModule({ db, claude, researchEnabled: false });
+
+    const result = await learner.researchOnline({
+      groupId: 'g1', evasiveBotReplyId: seedEvasive('g1'),
+      originalTrigger: 'fire bird 谁唱的',
+    });
+
+    expect(result).toBeNull();
+    expect(completeSpy).not.toHaveBeenCalled();
+  });
+
+  it('forwards allowedTools:[WebSearch] to the Claude client', async () => {
+    const claude = stubClaude([JSON.stringify({ found: false })]);
+    const completeSpy = vi.spyOn(claude, 'complete');
+    const learner = new SelfLearningModule({ db, claude });
+
+    await learner.researchOnline({
+      groupId: 'g1', evasiveBotReplyId: seedEvasive('g1'),
+      originalTrigger: 'fire bird 谁唱的',
+    });
+
+    expect(completeSpy).toHaveBeenCalledTimes(1);
+    const req = completeSpy.mock.calls[0]![0];
+    expect(req.allowedTools).toEqual(['WebSearch']);
+  });
+});

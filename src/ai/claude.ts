@@ -20,6 +20,11 @@ export interface ClaudeRequest {
   maxTokens: number;
   system: CachedSystemBlock[];
   messages: ClaudeMessage[];
+  /**
+   * Built-in Claude Code tool names to allow during this query (e.g. `['WebSearch']`).
+   * Forwarded to the Agent SDK's `allowedTools` option. Omit to run text-only.
+   */
+  allowedTools?: string[];
 }
 
 export interface ClaudeResponse {
@@ -71,6 +76,7 @@ export class ClaudeClient implements IClaudeClient {
           settingSources: [],
           persistSession: false,
           hooks: {},
+          ...(req.allowedTools ? { allowedTools: req.allowedTools } : {}),
         },
       });
 
