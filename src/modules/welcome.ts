@@ -22,6 +22,9 @@ const DEFAULT_MIN_DELAY_MS = 2000;
 const DEFAULT_MAX_DELAY_MS = 8000;
 const BURST_WINDOW_MS = 10 * 60 * 1000;
 
+const WELCOME_MIN_LEN = 15;
+const WELCOME_MAX_LEN = 50;
+
 export class WelcomeModule {
   private readonly logger = createLogger('welcome');
   private readonly reWelcomeWindowMs: number;
@@ -59,41 +62,67 @@ export class WelcomeModule {
     const delay = this.minDelayMs + Math.random() * (this.maxDelayMs - this.minDelayMs);
     await new Promise(r => setTimeout(r, delay));
 
-    const prompt = `一个新人刚进群，qq号 ${newUserId}，昵称 "${nickname}"。
-生成一条欢迎消息，必须：
-- 以邦批的口吻自然问候，不要官方腔
-- 可以带群内特色（比如问"你推谁"/"最喜欢哪个团"/"来日本 live 吗"），但不要信息量过载
-- 长度 3-30 字，不要一本正经
-- 不要说"欢迎加入群聊"这种八股
-- 禁止 "<" 开头的任何输出
+    const prompt = `# 任务
+一个新人刚进群（QQ ${newUserId}，昵称 "${nickname}"）。生成一条欢迎消息：
 
-只输出那一句话，不要解释。`;
+必须包含这两件事：
+1. 把群称呼为"北美邦批聚集地"或同义表达（欢迎来到北美邦批 / 欢迎加入 / 来对地方了）
+2. 明确提示新人去看群公告，里面有群规和活动信息（"看群公告" / "记得翻一下群公告" / "群公告有群规和活动" 这类）
 
-    let reply: string;
-    try {
-      const resp = await this.opts.claude.complete({
-        model: RUNTIME_CHAT_MODEL,
-        maxTokens: 80,
-        system: [{ text: BANGDREAM_PERSONA, cache: true }],
-        messages: [{ role: 'user', content: prompt }],
-      });
-      reply = resp.text.trim();
-    } catch (err) {
-      this.logger.warn({ err, groupId, newUserId }, 'welcome Claude call failed — skipping');
-      return;
+形式：
+- 长度 15-50 字（要比之前的短闲聊长一点，容纳两条信息）
+- 可以带一点邦批语气（不是八股，但也不要太轻浮）
+- 禁止说"欢迎加入群聊"这种纯官方话术
+- 禁止以 "<" 开头任何字符
+- 不要直接问"推谁的快报"这种跳过欢迎直接套近乎的句式
+
+只输出那一条消息。`;
+
+    const fallback = `[CQ:at,qq=${newUserId}] 欢迎来到北美邦批聚集地！群公告里有群规和活动信息，先翻一下`;
+
+    let reply: string | null = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let raw: string;
+      try {
+        const resp = await this.opts.claude.complete({
+          model: RUNTIME_CHAT_MODEL,
+          maxTokens: 100,
+          system: [{ text: BANGDREAM_PERSONA, cache: true }],
+          messages: [{ role: 'user', content: prompt }],
+        });
+        raw = resp.text.trim();
+      } catch (err) {
+        this.logger.warn({ err, groupId, newUserId }, 'welcome Claude call failed — skipping');
+        return;
+      }
+      if (this._validate(raw)) {
+        reply = raw;
+        break;
+      }
+      this.logger.info({ groupId, newUserId, reply: raw, attempt }, 'welcome reply rejected by validator — retrying');
     }
 
-    if (!reply || reply.startsWith('<') || reply.length > 80) {
-      this.logger.info({ groupId, newUserId, reply }, 'welcome reply rejected by validator — skipping');
-      return;
+    const text = reply
+      ? `[CQ:at,qq=${newUserId}] ${reply}`
+      : fallback;
+    if (!reply) {
+      this.logger.info({ groupId, newUserId }, 'welcome using fallback after validator rejections');
     }
 
-    const text = `[CQ:at,qq=${newUserId}] ${reply}`;
     await this.opts.adapter.send(groupId, text);
 
     this.opts.welcomeLog.record(groupId, newUserId, nowSec);
     this._trackBurst(groupId);
-    this.logger.info({ groupId, newUserId, reply }, 'welcome sent');
+    this.logger.info({ groupId, newUserId, text }, 'welcome sent');
+  }
+
+  _validate(reply: string): boolean {
+    if (!reply || reply.startsWith('<')) return false;
+    const len = reply.length;
+    if (len < WELCOME_MIN_LEN || len > WELCOME_MAX_LEN) return false;
+    if (!/群公告|公告/.test(reply)) return false;
+    if (!/邦批|欢迎/.test(reply)) return false;
+    return true;
   }
 
   private _isBurstCapExceeded(groupId: string): boolean {
