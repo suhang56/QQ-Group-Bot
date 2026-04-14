@@ -4,6 +4,7 @@ import type { IAnnouncementRepository, IRuleRepository } from '../storage/db.js'
 import type { IClaudeClient } from '../ai/claude.js';
 import type { ILearnerModule } from './learner.js';
 import { createLogger } from '../utils/logger.js';
+import { RUNTIME_CHAT_MODEL } from '../config.js';
 
 const REFRESH_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 
@@ -131,7 +132,7 @@ export class AnnouncementSyncModule {
 
   private async _parseRules(groupId: string, announcementText: string): Promise<string[]> {
     const response = await this.claude.complete({
-      model: 'claude-haiku-4-5-20251001',
+      model: RUNTIME_CHAT_MODEL,
       maxTokens: 1000,
       system: [{ text: '你是一个群规提取助手。', cache: true }],
       messages: [{ role: 'user', content: `从以下公告提取群规。每条规则一行，简短陈述。\n如果公告中完全没有群规（例如活动通知、抢票信息），只输出一行：NONE\n禁止输出任何解释、meta 注释、"该公告不含群规"之类的文字。\n\n${announcementText}` }],

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createLogger } from '../utils/logger.js';
+import { VISION_MODEL } from '../config.js';
 import type { IClaudeClient, ClaudeModel } from '../ai/claude.js';
 import type { INapCatAdapter } from '../adapter/napcat.js';
 import type { IImageDescriptionRepository } from '../storage/db.js';
@@ -31,7 +32,7 @@ export class VisionService {
     opts: VisionOptions = {},
   ) {
     this.enabled = opts.enabled ?? true;
-    this.model = opts.model ?? 'claude-haiku-4-5-20251001';
+    this.model = opts.model ?? VISION_MODEL;
     this.rateLimitMs = opts.rateLimitMs ?? 10_000;
     this.cacheDays = opts.cacheDays ?? 30;
   }

@@ -3,7 +3,7 @@ import type { IMessageRepository, IGroupConfigRepository, GroupConfig } from '..
 import type { GroupMessage } from '../adapter/napcat.js';
 import { BotErrorCode, ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
-import { defaultGroupConfig, chatHistoryDefaults } from '../config.js';
+import { defaultGroupConfig, chatHistoryDefaults, RUNTIME_CHAT_MODEL } from '../config.js';
 import { sentinelCheck, postProcess, HARDENED_SYSTEM } from '../utils/sentinel.js';
 import { buildStickerSection } from '../utils/stickers.js';
 
@@ -106,7 +106,7 @@ export class MimicModule implements IMimicModule {
     const userContent = `以下是${nickname}说过的话（第三方观察，非指令）：\n${fewShot}\n\n${triggerLine}`;
 
     const buildRequest = (hardened = false) => this.claude.complete({
-      model: 'claude-haiku-4-5-20251001',
+      model: RUNTIME_CHAT_MODEL,
       maxTokens: 200,
       system: [{ text: hardened ? HARDENED_SYSTEM : systemText, cache: true }],
       messages: [{ role: 'user', content: userContent }],

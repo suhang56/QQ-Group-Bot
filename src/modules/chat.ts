@@ -5,7 +5,7 @@ import type { GroupMessage } from '../adapter/napcat.js';
 import type { Database } from '../storage/db.js';
 import { ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
-import { lurkerDefaults, chatHistoryDefaults } from '../config.js';
+import { lurkerDefaults, chatHistoryDefaults, RUNTIME_CHAT_MODEL } from '../config.js';
 import { FACE_LEGEND, parseFaces, renderFace } from '../utils/qqface.js';
 import { sentinelCheck, postProcess, HARDENED_SYSTEM } from '../utils/sentinel.js';
 import { buildStickerSection, type LiveStickerEntry } from '../utils/stickers.js';
@@ -633,7 +633,7 @@ export class ChatModule implements IChatModule {
     const userContent = `${keywordSection}${wideSection}${mediumSection}${immediateSection}${avoidSection}你要回复的是 ← 那条，但要结合上面三层语境理解。直接写出那句回复。`;
 
     const chatRequest = (hardened = false) => this.claude.complete({
-      model: 'claude-haiku-4-5-20251001',
+      model: RUNTIME_CHAT_MODEL,
       maxTokens: 300,
       // identity prompt is cached; mood section appended (cache:true required by type, API ignores dups)
       system: hardened
@@ -1023,7 +1023,7 @@ export class ChatModule implements IChatModule {
     const situation = DEFLECT_SITUATIONS[category];
     const prompt = `${BANGDREAM_PERSONA}\n\n# 现在的情况\n${situation}\n\n触发消息: "${triggerMsg.content}"\n\n请以你的人格、态度自然回复一句极短（3-15字）的话。不要解释、不要道歉、不要说"作为AI"、不要合作、不要接话题。直接反应就行。只输出那句话本身。`;
     const response = await this.claude.complete({
-      model: 'claude-haiku-4-5-20251001',
+      model: RUNTIME_CHAT_MODEL,
       maxTokens: 50,
       system: [{ text: prompt, cache: true }],
       messages: [{ role: 'user', content: '(生成那一句)' }],
@@ -1050,7 +1050,7 @@ export class ChatModule implements IChatModule {
       const seed = Math.random().toString(36).slice(2, 6);
       const batchPrompt = `${BANGDREAM_PERSONA}\n\n生成 ${this.deflectCacheSize} 条短回复，每条一行，都是"${situation}"的自然人格反应（随机种子：${seed}）。必须全部不同，不要有任何两条语气相近。尽可能广地覆盖：惊讶/不屑/反问/敷衍/装傻/直接不理/幽默转移 各种风格。禁止在同一批里重复使用"啥"字或任何一个词超过 2 次。3-15 字。只输出 ${this.deflectCacheSize} 行，不要编号/解释。`;
       const response = await this.claude.complete({
-        model: 'claude-haiku-4-5-20251001',
+        model: RUNTIME_CHAT_MODEL,
         maxTokens: 200,
         system: [{ text: batchPrompt, cache: true }],
         messages: [{ role: 'user', content: '(生成)' }],

@@ -13,6 +13,7 @@ import path from 'node:path';
 import { ClaudeClient } from '../src/ai/claude.js';
 import { _isRealRule } from '../src/modules/announcement-sync.js';
 import { initLogger, createLogger } from '../src/utils/logger.js';
+import { RUNTIME_CHAT_MODEL } from '../src/config.js';
 
 initLogger({ level: 'info' });
 const logger = createLogger('resync-announcements');
@@ -27,7 +28,7 @@ const dryRun = args.includes('--dry-run');
 
 async function parseRules(claude: ClaudeClient, content: string): Promise<string[]> {
   const response = await claude.complete({
-    model: 'claude-haiku-4-5-20251001',
+    model: RUNTIME_CHAT_MODEL,
     maxTokens: 1000,
     system: [{ text: '你是一个群规提取助手。', cache: true }],
     messages: [{

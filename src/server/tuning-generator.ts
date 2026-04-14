@@ -2,6 +2,7 @@ import { writeFileSync } from 'node:fs';
 import type { IBotReplyRepository, BotReply } from '../storage/db.js';
 import type { IClaudeClient, ClaudeMessage } from '../ai/claude.js';
 import { createLogger } from '../utils/logger.js';
+import { RUNTIME_CHAT_MODEL } from '../config.js';
 
 const logger = createLogger('tuning-generator');
 
@@ -53,7 +54,7 @@ ${midSamples || '（无）'}
 
     const messages: ClaudeMessage[] = [{ role: 'user', content: prompt }];
     const resp = await this.claude.complete({
-      model: 'claude-haiku-4-5-20251001',
+      model: RUNTIME_CHAT_MODEL,
       maxTokens: 1000,
       system: [],
       messages,

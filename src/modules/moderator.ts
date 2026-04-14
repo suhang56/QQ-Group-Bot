@@ -7,6 +7,7 @@ import type {
 import type { ILearnerModule } from './learner.js';
 import { BotErrorCode, ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
+import { RUNTIME_CHAT_MODEL } from '../config.js';
 
 // Short banter words/patterns that are normal Chinese group chat — skip moderation entirely
 const BANTER_WHITELIST = new Set([
@@ -172,7 +173,7 @@ ${offenseHistory}${ragSection}`;
 
     try {
       const resp = await this.claude.complete({
-        model: 'claude-haiku-4-5-20251001',
+        model: RUNTIME_CHAT_MODEL,
         maxTokens: 200,
         system: [{ text: systemText, cache: true }],
         messages: [{ role: 'user', content: userText }],
