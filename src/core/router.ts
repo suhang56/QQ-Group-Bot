@@ -6,14 +6,15 @@ import type { MimicModule } from '../modules/mimic.js';
 import type { ModeratorModule } from '../modules/moderator.js';
 import type { NameImagesModule } from '../modules/name-images.js';
 import type { LoreUpdater } from '../modules/lore-updater.js';
+import type { StickerCaptureService } from '../modules/sticker-capture.js';
 import { BotErrorCode } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
 import { defaultGroupConfig } from '../config.js';
 import { resolveAtTarget } from '../utils/cqcode.js';
 
 const MAX_SPLIT_LINES = 3;
-const SPLIT_DELAY_MIN_MS = 50;
-const SPLIT_DELAY_MAX_MS = 150;
+const SPLIT_DELAY_MIN_MS = 0;
+const SPLIT_DELAY_MAX_MS = 50;
 
 /** Split a reply on newlines, cap at MAX_SPLIT_LINES, drop empty lines. */
 export function splitReply(text: string): string[] {
@@ -73,6 +74,7 @@ export class Router implements IRouter {
   private moderatorModule: ModeratorModule | null = null;
   private nameImagesModule: NameImagesModule | null = null;
   private loreUpdater: LoreUpdater | null = null;
+  private stickerCapture: StickerCaptureService | null = null;
 
   // Repeater cooldown: key = `${groupId}:${content}`, value = last-triggered timestamp
   private readonly repeaterCooldown = new Map<string, number>();
@@ -111,6 +113,10 @@ export class Router implements IRouter {
 
   setLoreUpdater(updater: LoreUpdater): void {
     this.loreUpdater = updater;
+  }
+
+  setStickerCapture(svc: StickerCaptureService): void {
+    this.stickerCapture = svc;
   }
 
   async dispatch(msg: GroupMessage): Promise<void> {
@@ -153,6 +159,16 @@ export class Router implements IRouter {
       // Live sticker capture: record mface + image stickers (sub_type=1) seen in the wild
       if (config.liveStickerCaptureEnabled) {
         this._captureLiveStickers(msg);
+      }
+
+      // Local sticker learning: download image stickers, track mfaces with context
+      if (this.stickerCapture && msg.rawContent.match(/\[CQ:(image|mface),/)) {
+        const recent2 = this.db.messages.getRecent(msg.groupId, 2).map(m => m.content).filter(Boolean);
+        const { StickerCaptureService: Svc } = await import('../modules/sticker-capture.js');
+        const contextSample = Svc.buildContextSample(recent2);
+        void this.stickerCapture.captureFromMessage(
+          msg.groupId, msg.rawContent, contextSample, msg.userId, this.botUserId ?? '',
+        );
       }
 
       // Tick sticker legend refresh counter (rebuilds sticker section every N messages)
