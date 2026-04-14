@@ -948,10 +948,22 @@ export class ChatModule implements IChatModule {
       : '';
     const immediateSection = `# 当前 thread 语境\n${immediateLines.join('\n')}${speakerHint}\n\n`;
 
+    const t0 = Date.now();
     const systemPrompt = this._getGroupIdentityPrompt(groupId);
+    const t1 = Date.now();
     const moodSection = this._buildMoodSection(groupId);
+    const t2 = Date.now();
     const contextStickerSection = await this._getContextStickers(groupId, triggerMessage.content);
+    const t3 = Date.now();
     const rotatedStickerSection = this._buildRotatedStickerSection(groupId);
+    const t4 = Date.now();
+    this.logger.info({
+      groupId,
+      ms_identity: t1 - t0,
+      ms_mood: t2 - t1,
+      ms_ctxStickers: t3 - t2,
+      ms_rotatedStickers: t4 - t3,
+    }, 'chat timing (prompt build)');
 
     const recentOutputs = this.botRecentOutputs.get(groupId) ?? [];
     const avoidSection = recentOutputs.length > 0
@@ -1002,7 +1014,10 @@ export class ChatModule implements IChatModule {
 
     this.inFlightGroups.add(groupId);
     try {
+      const tc0 = Date.now();
       const response = await chatRequest();
+      const tc1 = Date.now();
+      this.logger.info({ groupId, ms_claude: tc1 - tc0, tokens_in: response.inputTokens, tokens_out: response.outputTokens, cache_read: response.cacheReadTokens }, 'chat timing (claude)');
       const text = await sentinelCheck(
         response.text,
         triggerMessage.content,
