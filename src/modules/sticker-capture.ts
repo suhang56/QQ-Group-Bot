@@ -1,8 +1,10 @@
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import type { INapCatAdapter } from '../adapter/napcat.js';
 import type { ILocalStickerRepository } from '../storage/db.js';
+import type { IClaudeClient } from '../ai/claude.js';
+import { VISION_MODEL } from '../config.js';
 import { createLogger } from '../utils/logger.js';
 
 const logger = createLogger('sticker-capture');
@@ -11,14 +13,22 @@ export interface StickerCaptureOptions {
   localDir?: string;
   maxContextSamples?: number;
   downloadRateLimitMs?: number;
+  claude?: IClaudeClient;
+  backfillIntervalMs?: number;
+  backfillBatchSize?: number;
 }
 
 export class StickerCaptureService {
   private readonly localDir: string;
   private readonly maxContextSamples: number;
   private readonly downloadRateLimitMs: number;
+  private readonly claude: IClaudeClient | null;
+  private readonly backfillIntervalMs: number;
+  private readonly backfillBatchSize: number;
   // groupId → last download timestamp
   private readonly lastDownload = new Map<string, number>();
+  private backfillTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly activeGroups = new Set<string>();
 
   constructor(
     private readonly repo: ILocalStickerRepository,
@@ -28,6 +38,62 @@ export class StickerCaptureService {
     this.localDir = options.localDir ?? path.join(process.cwd(), 'data', 'stickers-local');
     this.maxContextSamples = options.maxContextSamples ?? 3;
     this.downloadRateLimitMs = options.downloadRateLimitMs ?? 10_000;
+    this.claude = options.claude ?? null;
+    this.backfillIntervalMs = options.backfillIntervalMs ?? 5 * 60_000;
+    this.backfillBatchSize = options.backfillBatchSize ?? 5;
+  }
+
+  /** Start periodic backfill of missing summaries for all known groups. */
+  startBackfillLoop(groupIds: string[]): void {
+    if (!this.claude || this.backfillTimer) return;
+    for (const g of groupIds) this.activeGroups.add(g);
+    this.backfillTimer = setInterval(
+      () => void this._backfillTick().catch(err => logger.warn({ err }, 'backfill tick failed')),
+      this.backfillIntervalMs,
+    );
+    this.backfillTimer.unref?.();
+    // Run one immediate tick on startup
+    void this._backfillTick().catch(err => logger.warn({ err }, 'backfill initial tick failed'));
+  }
+
+  stopBackfillLoop(): void {
+    if (this.backfillTimer) { clearInterval(this.backfillTimer); this.backfillTimer = null; }
+  }
+
+  private async _backfillTick(): Promise<void> {
+    if (!this.claude) return;
+    for (const groupId of this.activeGroups) {
+      const missing = this.repo.listMissingSummary(groupId, this.backfillBatchSize);
+      if (missing.length === 0) continue;
+      logger.info({ groupId, count: missing.length }, 'backfilling sticker summaries');
+      for (const s of missing) {
+        if (s.type !== 'image' || !s.localPath || !existsSync(s.localPath)) continue;
+        try {
+          const bytes = readFileSync(s.localPath);
+          const summary = await this._describeSticker(bytes, s.contextSamples);
+          if (summary) {
+            this.repo.setSummary(groupId, s.key, summary);
+            logger.debug({ groupId, key: s.key, summary }, 'sticker summary saved');
+          }
+        } catch (err) {
+          logger.warn({ err, key: s.key }, 'sticker summary generation failed');
+        }
+      }
+    }
+  }
+
+  private async _describeSticker(imageBytes: Buffer, contextSamples: string[]): Promise<string | null> {
+    if (!this.claude) return null;
+    const ctx = contextSamples.filter(Boolean).slice(0, 2).join(' / ');
+    const prompt = `这是QQ群里的一个表情包。${ctx ? `曾用在这些对话语境里："${ctx}"。` : ''}用 2-6 个中文字描述它的情绪/用途/梗（比如"笑哭"/"摆烂"/"震惊"/"狗头保命"/"我真没说过"/"生气"）。只输出那几个字，不加标点、不解释、不前缀。`;
+    try {
+      const text = await this.claude.visionWithPrompt(imageBytes, VISION_MODEL, prompt, 30);
+      const cleaned = text.trim().replace(/^[【「『"'‘“]|[】」』"'’”]$/g, '').slice(0, 12);
+      return cleaned.length > 0 ? cleaned : null;
+    } catch (err) {
+      logger.warn({ err }, 'vision call for sticker summary failed');
+      return null;
+    }
   }
 
   /** Extract up to 2 recent text context strings from preceding messages. */

@@ -120,8 +120,9 @@ router.setNameImages(nameImages);
 const loreUpdater = new LoreUpdater(claude, db.messages, chat);
 router.setLoreUpdater(loreUpdater);
 
-const stickerCapture = new StickerCaptureService(db.localStickers, adapter);
+const stickerCapture = new StickerCaptureService(db.localStickers, adapter, { claude });
 router.setStickerCapture(stickerCapture);
+stickerCapture.startBackfillLoop(ACTIVE_GROUPS);
 
 const welcome = new WelcomeModule({ welcomeLog: db.welcomeLog, claude, adapter, botUserId });
 
@@ -233,6 +234,7 @@ const shutdown = async () => {
   harvest.dispose();
   aliasMiner.dispose();
   chat.destroy();
+  stickerCapture.stopBackfillLoop();
   router.dispose();
   ratingPortal?.stop();
   await adapter.disconnect();

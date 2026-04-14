@@ -337,6 +337,8 @@ export interface ILocalStickerRepository {
   ): 'inserted' | 'updated';
   getTopByGroup(groupId: string, limit: number): LocalSticker[];
   recordUsage(groupId: string, key: string, positive: boolean): void;
+  setSummary(groupId: string, key: string, summary: string): void;
+  listMissingSummary(groupId: string, limit: number): LocalSticker[];
 }
 
 // ---- Raw row types from SQLite ----
@@ -1239,6 +1241,33 @@ class LocalStickerRepository implements ILocalStickerRepository {
     this.db.prepare(
       `UPDATE local_stickers SET ${col} = ${col} + 1 WHERE group_id = ? AND key = ?`
     ).run(groupId, key);
+  }
+
+  setSummary(groupId: string, key: string, summary: string): void {
+    this.db.prepare(
+      'UPDATE local_stickers SET summary = ? WHERE group_id = ? AND key = ?'
+    ).run(summary, groupId, key);
+  }
+
+  listMissingSummary(groupId: string, limit: number): LocalSticker[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM local_stickers
+      WHERE group_id = ? AND (summary IS NULL OR summary = '')
+      ORDER BY count DESC LIMIT ?
+    `).all(groupId, limit) as unknown as Array<{
+      id: number; group_id: string; key: string; type: string;
+      local_path: string | null; cq_code: string; summary: string | null;
+      context_samples: string; count: number; first_seen: number; last_seen: number;
+      usage_positive: number; usage_negative: number;
+    }>;
+    return rows.map(r => ({
+      id: r.id, groupId: r.group_id, key: r.key,
+      type: r.type as LocalSticker['type'],
+      localPath: r.local_path, cqCode: r.cq_code, summary: r.summary,
+      contextSamples: (() => { try { return JSON.parse(r.context_samples) as string[]; } catch { return []; } })(),
+      count: r.count, firstSeen: r.first_seen, lastSeen: r.last_seen,
+      usagePositive: r.usage_positive, usageNegative: r.usage_negative,
+    }));
   }
 }
 
