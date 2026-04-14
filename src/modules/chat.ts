@@ -75,6 +75,7 @@ interface ChatOptions {
   chatAdminMirrorMaxAdmins?: number;
   chatAdminMirrorSamplesPerAdmin?: number;
   selfLearning?: SelfLearningModule;
+  tuningPath?: string;
 }
 
 interface ScoreFactors {
@@ -435,6 +436,7 @@ export class ChatModule implements IChatModule {
 
   private readonly loreDirPath: string;
   private readonly loreSizeCapBytes: number;
+  private readonly tuningPath: string | null;
 
   constructor(
     private readonly claude: IClaudeClient,
@@ -452,6 +454,7 @@ export class ChatModule implements IChatModule {
     this.groupIdentityCacheTtlMs = options.groupIdentityCacheTtlMs ?? chatHistoryDefaults.groupIdentityCacheTtlMs;
     this.loreDirPath = options.loreDirPath ?? chatHistoryDefaults.loreDirPath;
     this.loreSizeCapBytes = options.loreSizeCapBytes ?? chatHistoryDefaults.loreSizeCapBytes;
+    this.tuningPath = options.tuningPath ?? null;
     this.chatStickerTopN = options.chatStickerTopN ?? chatHistoryDefaults.chatStickerTopN;
     this.stickersDirPath = options.stickersDirPath ?? chatHistoryDefaults.stickersDirPath;
     this.stickerLegendRefreshEveryMsgs = options.stickerLegendRefreshEveryMsgs ?? 50;
@@ -773,6 +776,8 @@ export class ChatModule implements IChatModule {
 
     const factsBlock = this.selfLearning?.formatFactsForPrompt(groupId, 50) ?? '';
 
+    const tuningBlock = this._loadTuning();
+
     const chatRequest = (hardened = false) => this.claude.complete({
       model: RUNTIME_CHAT_MODEL,
       maxTokens: 300,
@@ -784,6 +789,7 @@ export class ChatModule implements IChatModule {
             ...(moodSection ? [{ text: moodSection, cache: true as const }] : []),
             ...(contextStickerSection ? [{ text: contextStickerSection, cache: true as const }] : []),
             ...(factsBlock ? [{ text: factsBlock, cache: true as const }] : []),
+            ...(tuningBlock ? [{ text: tuningBlock, cache: true as const }] : []),
           ],
       messages: [{ role: 'user', content: userContent }],
     });
@@ -1312,6 +1318,17 @@ export class ChatModule implements IChatModule {
     this.loreKeywordsCache.set(groupId, tokenizeLore(content));
     this.logger.debug({ groupId, lorePath, sizeKb: (content.length / 1024).toFixed(1) }, 'Lore file loaded');
     return content;
+  }
+
+  private _loadTuning(): string | null {
+    if (!this.tuningPath) return null;
+    try {
+      if (!existsSync(this.tuningPath)) return null;
+      const content = readFileSync(this.tuningPath, 'utf8').trim();
+      return content ? `\n\n# 自我反思调优建议（上次反思结果，参考执行）\n${content}` : null;
+    } catch {
+      return null;
+    }
   }
 
   private _buildAdminStyleSection(groupId: string): string {

@@ -20,6 +20,7 @@ import { StickerCaptureService } from './modules/sticker-capture.js';
 import { WelcomeModule } from './modules/welcome.js';
 import { IdCardGuard } from './modules/id-guard.js';
 import { SequenceGuard } from './modules/sequence-guard.js';
+import { SelfReflectionLoop } from './modules/self-reflection.js';
 import { RatingPortalServer } from './server/rating-portal.js';
 import { TuningGenerator } from './server/tuning-generator.js';
 
@@ -74,10 +75,13 @@ const selfLearning = new SelfLearningModule({
 });
 router.setSelfLearning(selfLearning);
 
+const tuningPath = path.join(process.cwd(), 'data', 'tuning.md');
+
 const vision = new VisionService(claude, adapter, db.imageDescriptions);
 const chat = new ChatModule(claude, db, {
   botUserId, deflectCacheEnabled: true, visionService: vision,
   localStickerRepo: db.localStickers, embedder, selfLearning,
+  tuningPath,
 });
 router.setChat(chat);
 
@@ -120,6 +124,17 @@ const sequenceGuard = new SequenceGuard({
 });
 router.setSequenceGuard(sequenceGuard);
 
+const selfReflectionEnabled = process.env['SELF_REFLECTION_ENABLED'] !== '0';
+const selfReflection = ACTIVE_GROUPS[0]
+  ? new SelfReflectionLoop({
+      claude, botReplies: db.botReplies, moderation: db.moderation,
+      learnedFacts: db.learnedFacts,
+      groupId: ACTIVE_GROUPS[0],
+      outputPath: tuningPath,
+      enabled: selfReflectionEnabled,
+    })
+  : null;
+
 // 5. Wire events
 adapter.on('error', (err) => {
   logger.fatal({ err }, 'Adapter fatal error');
@@ -151,6 +166,7 @@ try {
   } else {
     logger.warn('no active groups configured, announcement sync disabled');
   }
+  selfReflection?.start();
 } catch (err) {
   logger.fatal({ err }, 'Failed to connect to NapCat — check NAPCAT_WS_URL and NapCat status');
   process.exit(1);
@@ -165,7 +181,6 @@ if (ratingPortGroup) {
   ratingPortal.start(ratingPort);
 
   // Generate tuning report on SIGUSR1
-  const tuningPath = path.join(process.cwd(), 'data', 'tuning.md');
   const tuner = new TuningGenerator(db.botReplies, claude, ratingPortGroup, tuningPath);
   process.on('SIGUSR1', () => { void tuner.generate(); });
   logger.info({ tuningPath }, 'send SIGUSR1 to generate tuning report');
@@ -175,6 +190,7 @@ if (ratingPortGroup) {
 const shutdown = async () => {
   logger.info('Shutting down...');
   announcementSync.stop();
+  selfReflection?.dispose();
   router.dispose();
   ratingPortal?.stop();
   await adapter.disconnect();
