@@ -22,6 +22,7 @@ import { IdCardGuard } from './modules/id-guard.js';
 import { SequenceGuard } from './modules/sequence-guard.js';
 import { SelfReflectionLoop } from './modules/self-reflection.js';
 import { OpportunisticHarvest } from './modules/opportunistic-harvest.js';
+import { AliasMiner } from './modules/alias-miner.js';
 import { RatingPortalServer } from './server/rating-portal.js';
 import { TuningGenerator } from './server/tuning-generator.js';
 
@@ -134,6 +135,14 @@ const harvest = new OpportunisticHarvest({
   enabled: process.env['OPPORTUNISTIC_HARVEST_ENABLED'] !== '0',
 });
 
+const aliasMiner = new AliasMiner({
+  messages: db.messages,
+  learnedFacts: db.learnedFacts,
+  claude,
+  activeGroups: ACTIVE_GROUPS,
+  enabled: process.env['ALIAS_MINER_ENABLED'] !== '0',
+});
+
 const selfReflectionEnabled = process.env['SELF_REFLECTION_ENABLED'] !== '0';
 const selfReflection = ACTIVE_GROUPS[0]
   ? new SelfReflectionLoop({
@@ -178,6 +187,7 @@ try {
   }
   selfReflection?.start();
   harvest.start();
+  aliasMiner.start();
 } catch (err) {
   logger.fatal({ err }, 'Failed to connect to NapCat — check NAPCAT_WS_URL and NapCat status');
   process.exit(1);
@@ -203,6 +213,7 @@ const shutdown = async () => {
   announcementSync.stop();
   selfReflection?.dispose();
   harvest.dispose();
+  aliasMiner.dispose();
   router.dispose();
   ratingPortal?.stop();
   await adapter.disconnect();
