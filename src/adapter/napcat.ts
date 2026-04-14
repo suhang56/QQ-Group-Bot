@@ -52,7 +52,7 @@ export interface INapCatAdapter {
   getGroupNotices(groupId: string): Promise<GroupNotice[]>;
   /** Resolve a CQ image file token via OneBot get_image — bypasses QQ CDN auth restrictions. */
   getImage(file: string): Promise<{ filename: string; url: string; size: number; base64?: string }>;
-  /** Fetch group metadata including description. Tries _get_group_detail_info first (NapCat), falls back to get_group_info. */
+  /** Fetch group metadata including description via get_group_info. */
   getGroupInfo(groupId: string): Promise<{ groupId: string; name: string; description: string; memberCount: number }>;
 }
 
@@ -229,14 +229,8 @@ export class NapCatAdapter extends EventEmitter implements INapCatAdapter {
   }
 
   async getGroupInfo(groupId: string): Promise<{ groupId: string; name: string; description: string; memberCount: number }> {
-    let data: { group_id?: number; group_name?: string; group_memo?: string; member_count?: number } | undefined;
-    try {
-      const resp = await this.action('_get_group_detail_info', { group_id: Number(groupId) });
-      data = resp.data as typeof data;
-    } catch {
-      const resp = await this.action('get_group_info', { group_id: Number(groupId) });
-      data = resp.data as typeof data;
-    }
+    const resp = await this.action('get_group_info', { group_id: Number(groupId) });
+    const data = resp.data as { group_id?: number; group_name?: string; group_memo?: string; member_count?: number } | undefined;
     return {
       groupId: String(data?.group_id ?? groupId),
       name: data?.group_name ?? '',
