@@ -174,6 +174,11 @@ export class Router implements IRouter {
       // Tick sticker legend refresh counter (rebuilds sticker section every N messages)
       this.chatModule?.tickStickerRefresh(msg.groupId);
 
+      // Admin speech mirroring: record admin/owner messages for tone reference
+      if ((msg.role === 'admin' || msg.role === 'owner') && msg.content.trim()) {
+        this.chatModule?.noteAdminActivity(msg.groupId, msg.userId, msg.nickname, msg.content);
+      }
+
       // Command routing — admin/owner only at router level; /appeal is open to all roles
       const trimmed = msg.content.trim();
       const isAdmin = msg.role === 'admin' || msg.role === 'owner';

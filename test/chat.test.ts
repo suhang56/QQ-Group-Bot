@@ -1944,3 +1944,92 @@ describe('ChatModule — self-repetition avoidance', () => {
     expect(claude).toHaveBeenCalled();
   });
 });
+
+// ── Admin speech mirroring ────────────────────────────────────────────────────
+
+describe('ChatModule — admin speech mirror', () => {
+  let db: Database;
+  let claude: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    claude = vi.fn().mockResolvedValue({
+      text: 'bot reply', inputTokens: 10, outputTokens: 5,
+      cacheReadTokens: 0, cacheWriteTokens: 0,
+    } satisfies ClaudeResponse);
+  });
+
+  function makeChat(opts: Record<string, unknown> = {}): ChatModule {
+    return new ChatModule(
+      { complete: claude } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999, moodProactiveEnabled: false, deflectCacheEnabled: false, ...opts },
+    );
+  }
+
+  function getSystemPrompt(): string {
+    const call = claude.mock.calls[0]![0] as { system: Array<{ text: string }> };
+    return call.system.map(s => s.text).join('\n');
+  }
+
+  it('admin samples appear in system prompt after noteAdminActivity', async () => {
+    const chat = makeChat();
+    chat.noteAdminActivity('g1', 'admin1', '西瓜', '宝宝们 今天合宿到了');
+    chat.noteAdminActivity('g1', 'admin1', '西瓜', 'tm的 又抢不到票');
+    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'hi', timestamp: Math.floor(Date.now() / 1000), deleted: false });
+    await chat.generateReply('g1', makeMsg(), []);
+    const sys = getSystemPrompt();
+    expect(sys).toContain('群管理员的说话风格');
+    expect(sys).toContain('[西瓜]');
+  });
+
+  it('group with no admins: no reference block in system prompt', async () => {
+    const chat = makeChat();
+    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'hi', timestamp: Math.floor(Date.now() / 1000), deleted: false });
+    await chat.generateReply('g1', makeMsg(), []);
+    const sys = getSystemPrompt();
+    expect(sys).not.toContain('群管理员的说话风格');
+  });
+
+  it('messages > 50 chars are excluded from samples', async () => {
+    const chat = makeChat();
+    const longMsg = 'a'.repeat(51);
+    chat.noteAdminActivity('g1', 'admin1', 'Boss', longMsg);
+    // Only long message — should produce no samples
+    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'hi', timestamp: Math.floor(Date.now() / 1000), deleted: false });
+    await chat.generateReply('g1', makeMsg(), []);
+    const sys = getSystemPrompt();
+    expect(sys).not.toContain('群管理员的说话风格');
+  });
+
+  it('messages < 3 chars are excluded from samples', async () => {
+    const chat = makeChat();
+    chat.noteAdminActivity('g1', 'admin1', 'Boss', 'ok');
+    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'hi', timestamp: Math.floor(Date.now() / 1000), deleted: false });
+    await chat.generateReply('g1', makeMsg(), []);
+    const sys = getSystemPrompt();
+    expect(sys).not.toContain('群管理员的说话风格');
+  });
+
+  it('admin samples from multiple admins all appear', async () => {
+    const chat = makeChat();
+    chat.noteAdminActivity('g1', 'a1', '西瓜', '笑死老子了');
+    chat.noteAdminActivity('g1', 'a2', '飞鸟', '几把 真服了');
+    chat.noteAdminActivity('g1', 'a3', '常山', '卧槽 这都行');
+    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'hi', timestamp: Math.floor(Date.now() / 1000), deleted: false });
+    await chat.generateReply('g1', makeMsg(), []);
+    const sys = getSystemPrompt();
+    expect(sys).toContain('[西瓜]');
+    expect(sys).toContain('[飞鸟]');
+    expect(sys).toContain('[常山]');
+  });
+
+  it('admin data is isolated per group', async () => {
+    const chat = makeChat();
+    chat.noteAdminActivity('g1', 'a1', '西瓜', '笑死老子了');
+    db.messages.insert({ groupId: 'g2', userId: 'u1', nickname: 'Alice', content: 'hi', timestamp: Math.floor(Date.now() / 1000), deleted: false });
+    await chat.generateReply('g2', makeMsg({ groupId: 'g2' }), []);
+    const sys = getSystemPrompt();
+    expect(sys).not.toContain('群管理员的说话风格');
+  });
+});

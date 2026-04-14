@@ -22,6 +22,7 @@ export interface IChatModule {
   invalidateLore(groupId: string): void;
   tickStickerRefresh(groupId: string): void;
   getMoodTracker(): MoodTracker;
+  noteAdminActivity(groupId: string, userId: string, nickname: string, content: string): void;
 }
 
 interface ChatOptions {
@@ -73,6 +74,9 @@ interface ChatOptions {
   chatContextWide?: number;
   chatContextMedium?: number;
   chatContextImmediate?: number;
+  chatAdminMirrorEnabled?: boolean;
+  chatAdminMirrorMaxAdmins?: number;
+  chatAdminMirrorSamplesPerAdmin?: number;
 }
 
 interface ScoreFactors {
@@ -354,6 +358,13 @@ export class ChatModule implements IChatModule {
   private readonly chatContextImmediate: number;
   // per-group: bot's last 5 outgoing reply texts (for "avoid repeating" injection)
   private readonly botRecentOutputs = new Map<string, string[]>();
+  // per-group: admin userId → { nickname, samples[] } (populated from live messages)
+  private readonly adminSamples = new Map<string, Map<string, { nickname: string; samples: string[] }>>();
+  // per-group: admin style block cache { text, expiresAt }
+  private readonly adminStyleCache = new Map<string, { text: string; expiresAt: number }>();
+  private readonly chatAdminMirrorEnabled: boolean;
+  private readonly chatAdminMirrorMaxAdmins: number;
+  private readonly chatAdminMirrorSamplesPerAdmin: number;
 
   private readonly loreDirPath: string;
   private readonly loreSizeCapBytes: number;
@@ -405,6 +416,9 @@ export class ChatModule implements IChatModule {
     this.chatContextWide = options.chatContextWide ?? chatHistoryDefaults.chatContextWide;
     this.chatContextMedium = options.chatContextMedium ?? chatHistoryDefaults.chatContextMedium;
     this.chatContextImmediate = options.chatContextImmediate ?? chatHistoryDefaults.chatContextImmediate;
+    this.chatAdminMirrorEnabled = options.chatAdminMirrorEnabled ?? true;
+    this.chatAdminMirrorMaxAdmins = options.chatAdminMirrorMaxAdmins ?? 5;
+    this.chatAdminMirrorSamplesPerAdmin = options.chatAdminMirrorSamplesPerAdmin ?? 5;
 
     if (this.moodProactiveEnabled) {
       this.moodProactiveTimer = setInterval(
@@ -475,6 +489,35 @@ export class ChatModule implements IChatModule {
     arr = [...arr, reply];
     if (arr.length > 5) arr = arr.slice(-5);
     this.botRecentOutputs.set(groupId, arr);
+  }
+
+  /** Record a message from a group admin/owner for speech-style mirroring. */
+  noteAdminActivity(groupId: string, userId: string, nickname: string, content: string): void {
+    if (!this.chatAdminMirrorEnabled) return;
+    const trimmed = content.trim();
+    if (trimmed.length < 3 || trimmed.length > 50) return;
+
+    let groupAdmins = this.adminSamples.get(groupId);
+    if (!groupAdmins) {
+      groupAdmins = new Map();
+      this.adminSamples.set(groupId, groupAdmins);
+    }
+    const entry = groupAdmins.get(userId) ?? { nickname, samples: [] };
+    entry.nickname = nickname;
+    if (!entry.samples.includes(trimmed)) {
+      entry.samples.push(trimmed);
+      if (entry.samples.length > 30) entry.samples = entry.samples.slice(-30);
+      // Invalidate cached admin style block so it rebuilds on next request
+      this.adminStyleCache.delete(groupId);
+    }
+    groupAdmins.set(userId, entry);
+
+    // Cap at max admins (keep most recent)
+    if (groupAdmins.size > this.chatAdminMirrorMaxAdmins) {
+      const oldest = groupAdmins.keys().next().value as string;
+      groupAdmins.delete(oldest);
+      this.adminStyleCache.delete(groupId);
+    }
   }
 
   /** Evict lore + identity caches for a group so next message re-reads the updated file. */
@@ -1134,6 +1177,43 @@ export class ChatModule implements IChatModule {
     return content;
   }
 
+  private _buildAdminStyleSection(groupId: string): string {
+    if (!this.chatAdminMirrorEnabled) return '';
+    const cached = this.adminStyleCache.get(groupId);
+    if (cached && Date.now() < cached.expiresAt) return cached.text;
+
+    const groupAdmins = this.adminSamples.get(groupId);
+    if (!groupAdmins || groupAdmins.size === 0) {
+      this.adminStyleCache.set(groupId, { text: '', expiresAt: Date.now() + this.groupIdentityCacheTtlMs });
+      return '';
+    }
+
+    const lines: string[] = [];
+    for (const { nickname, samples } of groupAdmins.values()) {
+      // Pick up to samplesPerAdmin random samples
+      const pool = samples.filter(s => s.length >= 3 && s.length <= 50);
+      const picked: string[] = [];
+      const indices = [...Array(pool.length).keys()];
+      while (picked.length < this.chatAdminMirrorSamplesPerAdmin && indices.length > 0) {
+        const i = Math.floor(Math.random() * indices.length);
+        picked.push(pool[indices[i]!]!);
+        indices.splice(i, 1);
+      }
+      for (const s of picked) {
+        lines.push(`[${nickname}]: "${s}"`);
+      }
+    }
+
+    if (lines.length === 0) {
+      this.adminStyleCache.set(groupId, { text: '', expiresAt: Date.now() + this.groupIdentityCacheTtlMs });
+      return '';
+    }
+
+    const text = `\n\n# 群管理员的说话风格（参考语气，但你不是他们）\n${lines.join('\n')}\n说话语气可以参考上面群管理员的风格 — 用词、节奏、调侃方式 — 但你的身份和爱好不变（你还是邦批女生，不是他们任何一个）。模仿语气不是模仿身份。`;
+    this.adminStyleCache.set(groupId, { text, expiresAt: Date.now() + this.groupIdentityCacheTtlMs });
+    return text;
+  }
+
   private _getGroupIdentityPrompt(groupId: string): string {
     const cached = this.groupIdentityCache.get(groupId);
     if (cached && Date.now() < cached.expiresAt) {
@@ -1180,7 +1260,9 @@ export class ChatModule implements IChatModule {
       ? '\n\n如果消息里有 [图片: XXX] 的描述，这是群友发的图片内容。你可以基于描述做出反应（夸图、吐槽、问是谁、表情包互怼等），就像真的看到图一样，但不要说"我看到一张图"这种话。'
       : '';
 
-    const text = `${personaBase}${loreSection}${imageAwarenessLine}\n\n---\n简短自然（1-3句话）。群友提到群里的人名、梗、黑话，基于上面资料回答；不知道的就"啥来的"，不要装懂。${faceLine}${stickerSection}${outputRules}`;
+    const adminStyleSection = this._buildAdminStyleSection(groupId);
+
+    const text = `${personaBase}${adminStyleSection}${loreSection}${imageAwarenessLine}\n\n---\n简短自然（1-3句话）。群友提到群里的人名、梗、黑话，基于上面资料回答；不知道的就"啥来的"，不要装懂。${faceLine}${stickerSection}${outputRules}`;
 
     this.groupIdentityCache.set(groupId, { text, expiresAt: Date.now() + this.groupIdentityCacheTtlMs });
     this.logger.debug({ groupId, hasLore: !!lore, hasStickerSection: stickerSection.length > 0 }, 'Group identity prompt cached');
