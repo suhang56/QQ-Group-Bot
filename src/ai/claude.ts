@@ -124,7 +124,8 @@ export class ClaudeClient implements IClaudeClient {
     const text = await this.visionWithPrompt(
       downscaled,
       model,
-      '一句话描述图片内容，10-25字。只输出描述。',
+      '仔细描述这张图：你看到的人物 / 物品 / 场景 / 文字 / 表情 / 动作 / 颜色 / 风格 / 整体氛围。30-80字。如果是截图，把可见的文字内容也读出来。如果是 emoji/贴纸/梗图，说明梗的内容。只输出描述，不要前缀。',
+      280,
     );
     if (!text) throw new ClaudeParseError('No text in vision response');
     return text;
