@@ -232,7 +232,7 @@ export class Router implements IRouter {
       const trimmed = msg.content.trim();
       const isAdmin = msg.role === 'admin' || msg.role === 'owner';
       const peekCmd = trimmed.startsWith('/') ? (trimmed.slice(1).split(/\s+/)[0]?.toLowerCase() ?? '') : '';
-      const openCmds = new Set(['appeal', 'facts', 'fact_reject', 'fact_clear']);
+      const openCmds = new Set(['appeal', 'facts', 'fact_reject', 'fact_clear', 'add', 'add_stop']);
       if (trimmed.startsWith('/') && (isAdmin || openCmds.has(peekCmd))) {
         const parts = trimmed.slice(1).split(/\s+/);
         const cmd = parts[0]?.toLowerCase() ?? '';

@@ -644,9 +644,9 @@ describe('Router — /add name-images integration', () => {
     expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('用法'));
   });
 
-  it('/add by member → silently ignored (admin gate)', async () => {
+  it('/add by member → accepted (open command)', async () => {
     await router.dispatch(makeMsg({ content: '/add 西瓜', role: 'member' }));
-    expect(adapter.send).not.toHaveBeenCalled();
+    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('西瓜'));
   });
 
   function seedImage(db: Database, tmpDir: string, name: string): string {
