@@ -174,6 +174,8 @@ export class Router implements IRouter {
     this.harvestTimers.clear();
     if (this.expiryInterval) { clearInterval(this.expiryInterval); this.expiryInterval = null; }
     if (this.forwardPurgeInterval) { clearInterval(this.forwardPurgeInterval); this.forwardPurgeInterval = null; }
+    this.atMentionQueue.clear();
+    this.atInFlight.clear();
     this.sequenceGuard?.dispose();
   }
 
@@ -280,9 +282,9 @@ export class Router implements IRouter {
         const recent2 = this.db.messages.getRecent(msg.groupId, 2).map(m => m.content).filter(Boolean);
         const { StickerCaptureService: Svc } = await import('../modules/sticker-capture.js');
         const contextSample = Svc.buildContextSample(recent2);
-        void this.stickerCapture.captureFromMessage(
+        this.stickerCapture.captureFromMessage(
           msg.groupId, msg.rawContent, contextSample, msg.userId, this.botUserId ?? '',
-        );
+        ).catch(err => this.logger.warn({ err, groupId: msg.groupId }, 'sticker capture failed'));
       }
 
       // Tick sticker legend refresh counter (rebuilds sticker section every N messages)
@@ -833,12 +835,16 @@ export class Router implements IRouter {
 
 10 分钟内回复 /approve ${pendingId} 或 /reject ${pendingId} 决定，超时自动忽略。`;
 
-    const result = await this.adapter.sendPrivateMessage(MOD_APPROVAL_ADMIN, dmText);
-    if (result === null) {
-      this.logger.error({ pendingId, groupId: msg.groupId }, 'failed to DM admin — pending row queued but admin not notified');
-    } else {
-      this.modDmCount++;
-      this.logger.info({ pendingId, groupId: msg.groupId, userId: msg.userId, severity, proposedAction }, 'moderation queued, admin DM sent');
+    try {
+      const result = await this.adapter.sendPrivateMessage(MOD_APPROVAL_ADMIN, dmText);
+      if (result === null) {
+        this.logger.error({ pendingId, groupId: msg.groupId }, 'failed to DM admin — pending row queued but admin not notified');
+      } else {
+        this.modDmCount++;
+        this.logger.info({ pendingId, groupId: msg.groupId, userId: msg.userId, severity, proposedAction }, 'moderation queued, admin DM sent');
+      }
+    } catch (err) {
+      this.logger.error({ err, pendingId, groupId: msg.groupId }, 'sendPrivateMessage threw — admin not notified');
     }
   }
 
