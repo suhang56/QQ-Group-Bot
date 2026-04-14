@@ -4,12 +4,12 @@ export const RUNTIME_CHAT_MODEL = 'claude-sonnet-4-6' as const;
 export const VISION_MODEL = 'claude-haiku-4-5-20251001' as const;
 
 export const lurkerDefaults = {
-  lurkerReplyChance: 0.15,
-  lurkerCooldownMs: 90_000,
+  lurkerReplyChance: 0.08,
+  lurkerCooldownMs: 180_000,
   burstWindowMs: 10_000,
   burstMinMessages: 5,
-  chatSilenceBonusSec: 300,
-  chatMinScore: 0.25,
+  chatSilenceBonusSec: 600,
+  chatMinScore: 0.7,
   chatBurstWindowMs: 10_000,
   chatBurstCount: 5,
 } as const;

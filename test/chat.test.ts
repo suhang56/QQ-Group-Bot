@@ -1315,8 +1315,8 @@ describe('ChatModule — soft score gate + Claude-driven silence', () => {
     expect(result).toBe('好啊');
   });
 
-  it('chatMinScore default is 0.25 (soft gate)', () => {
-    expect(lurkerDefaults.chatMinScore).toBe(0.25);
+  it('chatMinScore default is 0.7 (raised — bot too eager at 0.25)', () => {
+    expect(lurkerDefaults.chatMinScore).toBe(0.7);
   });
 
   it('system prompt contains participation opt-out instruction', async () => {
