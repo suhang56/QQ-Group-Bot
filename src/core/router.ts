@@ -247,12 +247,15 @@ export class Router implements IRouter {
       // Lore updater tick: increment per-group counter, fire async update if threshold hit
       this.loreUpdater?.tick(msg.groupId, config);
 
-      // Text moderator — runs before persistence, skipped when autoMod off or command message.
+      // Text moderator — fire-and-forget so chat pipeline doesn't wait for the
+      // moderation Claude call. Moderation still reaches admin DM on violation,
+      // just on its own schedule. This halves p50 latency for chat replies.
       if (this.moderatorModule && config.autoMod && !msg.content.trim().startsWith('/')) {
-        const verdict = await this.moderatorModule.assess(msg, config);
-        if (verdict.violation && verdict.severity !== null && verdict.severity >= 1) {
-          void this._queueModerationApproval(msg, verdict.severity, verdict.reason);
-        }
+        this.moderatorModule.assess(msg, config).then(verdict => {
+          if (verdict.violation && verdict.severity !== null && verdict.severity >= 1) {
+            void this._queueModerationApproval(msg, verdict.severity, verdict.reason);
+          }
+        }).catch(err => this.logger.warn({ err, messageId: msg.messageId }, 'moderator assess failed'));
       }
 
       // Image moderator — runs after text check; id-guard already returned if it blocked the message.
