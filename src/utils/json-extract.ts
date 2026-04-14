@@ -6,8 +6,9 @@ export function extractJson<T = unknown>(raw: string): T | null {
   if (!raw) return null;
   let text = raw.trim();
 
-  // Strip markdown fences: ```json ... ``` or ``` ... ```
-  const fenceMatch = text.match(/^```(?:json)?\s*\n([\s\S]*?)\n```/);
+  // Match a markdown fence ANYWHERE in the text (Claude often adds leading prose)
+  // \n? makes the newlines around the content optional for fences without trailing newline
+  const fenceMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
   if (fenceMatch) {
     text = fenceMatch[1]!.trim();
   }

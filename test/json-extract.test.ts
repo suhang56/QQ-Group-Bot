@@ -72,6 +72,26 @@ describe('extractJson', () => {
   it('returns null for empty string', () => {
     expect(extractJson('')).toBeNull();
   });
+
+  it('parses fence with leading English prose', () => {
+    const raw = "Here's the result:\n```json\n{\"a\":1}\n```";
+    expect(extractJson<{ a: number }>(raw)).toEqual({ a: 1 });
+  });
+
+  it('parses fence with leading Chinese prose', () => {
+    const raw = '好的，以下是结果:\n```json\n{"b":2}\n```';
+    expect(extractJson<{ b: number }>(raw)).toEqual({ b: 2 });
+  });
+
+  it('parses fence with trailing prose after closing fence', () => {
+    const raw = '```json\n{"c":3}\n```\n这是结果';
+    expect(extractJson<{ c: number }>(raw)).toEqual({ c: 3 });
+  });
+
+  it('parses fence missing trailing newline before closing fence', () => {
+    const raw = '```json\n{"d":4}```';
+    expect(extractJson<{ d: number }>(raw)).toEqual({ d: 4 });
+  });
 });
 
 describe('extractJson — integration: opportunistic-harvest with fenced response', () => {
