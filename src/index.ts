@@ -18,6 +18,7 @@ import { SelfLearningModule } from './modules/self-learning.js';
 import { VisionService } from './modules/vision.js';
 import { StickerCaptureService } from './modules/sticker-capture.js';
 import { WelcomeModule } from './modules/welcome.js';
+import { IdCardGuard } from './modules/id-guard.js';
 import { RatingPortalServer } from './server/rating-portal.js';
 import { TuningGenerator } from './server/tuning-generator.js';
 
@@ -98,6 +99,15 @@ const stickerCapture = new StickerCaptureService(db.localStickers, adapter);
 router.setStickerCapture(stickerCapture);
 
 const welcome = new WelcomeModule({ welcomeLog: db.welcomeLog, claude, adapter, botUserId });
+
+const idGuard = new IdCardGuard({
+  adapter,
+  moderation: db.moderation,
+  vision,
+  botUserId,
+  enabled: () => true, // per-message config check is in router.dispatch
+});
+router.setIdGuard(idGuard);
 
 // 5. Wire events
 adapter.on('error', (err) => {

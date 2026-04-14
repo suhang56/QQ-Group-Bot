@@ -39,6 +39,8 @@ export interface IClaudeClient {
   complete(req: ClaudeRequest): Promise<ClaudeResponse>;
   /** Describe an image via Claude vision. Returns a short Chinese description. */
   describeImage(imageBytes: Buffer, model: ClaudeModel): Promise<string>;
+  /** Call Claude vision with a custom text prompt. Returns raw model output. */
+  visionWithPrompt(imageBytes: Buffer, model: ClaudeModel, prompt: string, maxTokens?: number): Promise<string>;
 }
 
 export class ClaudeClient implements IClaudeClient {
@@ -138,6 +140,27 @@ export class ClaudeClient implements IClaudeClient {
       return text;
     } catch (err) {
       if (err instanceof ClaudeParseError) throw err;
+      throw new ClaudeApiError(err);
+    }
+  }
+
+  async visionWithPrompt(imageBytes: Buffer, model: ClaudeModel, prompt: string, maxTokens = 100): Promise<string> {
+    const base64 = imageBytes.toString('base64');
+    const mediaType = this._detectMediaType(imageBytes);
+    try {
+      const response = await this.anthropic.messages.create({
+        model,
+        max_tokens: maxTokens,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } },
+            { type: 'text', text: prompt },
+          ],
+        }],
+      });
+      return response.content.find(b => b.type === 'text')?.text?.trim() ?? '';
+    } catch (err) {
       throw new ClaudeApiError(err);
     }
   }

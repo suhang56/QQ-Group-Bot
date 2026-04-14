@@ -76,6 +76,7 @@ export interface GroupConfig {
   stickerLegendRefreshEveryMsgs: number;
   chatPersonaText: string | null;
   welcomeEnabled: boolean;
+  idGuardEnabled: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -360,6 +361,7 @@ interface GroupConfigRow {
   sticker_legend_refresh_every_msgs: number;
   chat_persona_text: string | null;
   welcome_enabled: number;
+  id_guard_enabled: number;
   created_at: string; updated_at: string;
 }
 
@@ -449,6 +451,7 @@ function configFromRow(row: GroupConfigRow): GroupConfig {
     stickerLegendRefreshEveryMsgs: row.sticker_legend_refresh_every_msgs ?? 50,
     chatPersonaText: row.chat_persona_text ?? null,
     welcomeEnabled: (row.welcome_enabled ?? 1) !== 0,
+    idGuardEnabled: (row.id_guard_enabled ?? 1) !== 0,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -671,9 +674,9 @@ class GroupConfigRepository implements IGroupConfigRepository {
         name_images_blocklist,
         lore_update_enabled, lore_update_threshold, lore_update_cooldown_ms,
         live_sticker_capture_enabled, sticker_legend_refresh_every_msgs,
-        chat_persona_text, welcome_enabled,
+        chat_persona_text, welcome_enabled, id_guard_enabled,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(group_id) DO UPDATE SET
         enabled_modules = excluded.enabled_modules,
         auto_mod = excluded.auto_mod,
@@ -702,6 +705,7 @@ class GroupConfigRepository implements IGroupConfigRepository {
         sticker_legend_refresh_every_msgs = excluded.sticker_legend_refresh_every_msgs,
         chat_persona_text = excluded.chat_persona_text,
         welcome_enabled = excluded.welcome_enabled,
+        id_guard_enabled = excluded.id_guard_enabled,
         updated_at = excluded.updated_at
     `).run(
       config.groupId,
@@ -732,6 +736,7 @@ class GroupConfigRepository implements IGroupConfigRepository {
       config.stickerLegendRefreshEveryMsgs ?? 50,
       config.chatPersonaText ?? null,
       (config.welcomeEnabled ?? true) ? 1 : 0,
+      (config.idGuardEnabled ?? true) ? 1 : 0,
       config.createdAt,
       config.updatedAt,
     );
@@ -1401,5 +1406,8 @@ export class Database {
       )
     `);
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_welcome_log_user ON welcome_log(group_id, user_id, welcomed_at DESC)`);
+
+    // id_guard_enabled column on group_config — default ON (strict zero-tolerance).
+    try { this._db.exec(`ALTER TABLE group_config ADD COLUMN id_guard_enabled INTEGER NOT NULL DEFAULT 1`); } catch { /* already exists */ }
   }
 }

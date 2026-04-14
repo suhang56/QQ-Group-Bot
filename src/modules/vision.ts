@@ -118,6 +118,47 @@ export class VisionService {
     return `[图片: ${description}]`;
   }
 
+  /**
+   * Check whether an image (identified by CQ file token) contains a PRC ID card number.
+   * Returns the number string if found, null otherwise. Fail-safe: throws on API error.
+   */
+  async checkIdCard(fileToken: string): Promise<string | null> {
+    let imageBytes: Buffer;
+    try {
+      const imageInfo = await this.adapter.getImage(fileToken);
+      if (imageInfo.base64) {
+        imageBytes = Buffer.from(imageInfo.base64, 'base64');
+      } else if (imageInfo.url) {
+        const resp = await fetch(imageInfo.url);
+        if (!resp.ok) throw new Error(`image fetch failed: ${resp.status}`);
+        imageBytes = Buffer.from(await resp.arrayBuffer());
+      } else {
+        return null;
+      }
+    } catch (err) {
+      logger.warn({ err, fileToken }, 'checkIdCard: image fetch failed');
+      throw err;
+    }
+
+    const idCardPrompt = 'Does this image contain a PRC resident ID card number (18 or 15 digits)? Reply with JSON only: {"found":true,"number":"<the number>"} or {"found":false,"number":null}. Numbers in memes or decorative text still count. No other text.';
+    let raw: string;
+    try {
+      raw = await this.claude.visionWithPrompt(imageBytes, this.model, idCardPrompt, 100);
+    } catch (err) {
+      logger.warn({ err }, 'checkIdCard: Claude call failed');
+      throw err;
+    }
+
+    try {
+      const parsed = JSON.parse(raw.trim()) as { found: boolean; number: string | null };
+      return parsed.found ? (parsed.number ?? 'unknown') : null;
+    } catch {
+      // Claude didn't return valid JSON — treat as no-find
+      logger.debug({ raw }, 'checkIdCard: JSON parse failed, treating as not found');
+      return null;
+    }
+  }
+
   /** Extract the file token from a rawContent string (exposed for testing). */
   static extractFileToken(rawContent: string): string | null {
     const m = IMAGE_CQ_RE.exec(rawContent);

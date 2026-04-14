@@ -66,6 +66,7 @@ export function defaultGroupConfig(groupId: string): GroupConfig {
     stickerLegendRefreshEveryMsgs: 50,
     chatPersonaText: null,
     welcomeEnabled: true,
+    idGuardEnabled: true,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };

@@ -8,6 +8,7 @@ import type { NameImagesModule } from '../modules/name-images.js';
 import type { LoreUpdater } from '../modules/lore-updater.js';
 import type { StickerCaptureService } from '../modules/sticker-capture.js';
 import type { SelfLearningModule } from '../modules/self-learning.js';
+import type { IdCardGuard } from '../modules/id-guard.js';
 import { extractTokens } from '../modules/chat.js';
 import { BotErrorCode } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
@@ -81,6 +82,7 @@ export class Router implements IRouter {
   private loreUpdater: LoreUpdater | null = null;
   private stickerCapture: StickerCaptureService | null = null;
   private selfLearning: SelfLearningModule | null = null;
+  private idGuard: IdCardGuard | null = null;
 
   // Repeater cooldown: key = `${groupId}:${content}`, value = last-triggered timestamp
   private readonly repeaterCooldown = new Map<string, number>();
@@ -141,6 +143,10 @@ export class Router implements IRouter {
     this.selfLearning = sl;
   }
 
+  setIdGuard(guard: IdCardGuard): void {
+    this.idGuard = guard;
+  }
+
   dispose(): void {
     for (const timer of this.harvestTimers.values()) clearTimeout(timer);
     this.harvestTimers.clear();
@@ -152,6 +158,15 @@ export class Router implements IRouter {
       this.logger.trace({ messageId: msg.messageId, groupId: msg.groupId, userId: msg.userId }, 'dispatching message');
 
       const config = this.db.groupConfig.get(msg.groupId) ?? this._defaultConfig(msg.groupId);
+
+      // ID card guard — runs first, before any persistence or downstream modules
+      if (this.idGuard && config.idGuardEnabled) {
+        const blocked = await this.idGuard.check(msg).catch(err => {
+          this.logger.error({ err, messageId: msg.messageId }, 'idGuard check failed');
+          return false;
+        });
+        if (blocked) return;
+      }
 
       // Lore updater tick: increment per-group counter, fire async update if threshold hit
       this.loreUpdater?.tick(msg.groupId, config);
@@ -704,7 +719,7 @@ export class Router implements IRouter {
     }
 
     if (text === '/help') {
-      await reply('/approve <id> — 执行建议处理\n/reject <id> — 拒绝，不处理\n/pending — 查看待处理列表\n/mod_on — 开启所有群的自动审核\n/mod_off — 关闭所有群的自动审核（仅观察）\n/welcome_on <groupId> — 开启该群欢迎消息\n/welcome_off <groupId> — 关闭该群欢迎消息');
+      await reply('/approve <id> — 执行建议处理\n/reject <id> — 拒绝，不处理\n/pending — 查看待处理列表\n/mod_on — 开启所有群的自动审核\n/mod_off — 关闭所有群的自动审核（仅观察）\n/welcome_on <groupId> — 开启该群欢迎消息\n/welcome_off <groupId> — 关闭该群欢迎消息\n/idguard_on <groupId> — 开启该群身份证拦截\n/idguard_off <groupId> — 关闭该群身份证拦截');
       return;
     }
 
@@ -720,6 +735,21 @@ export class Router implements IRouter {
       }
       await reply(`已${enable ? '开启' : '关闭'}所有群的自动审核。`);
       logger.info({ enable, groupCount: groups.length }, 'mod_on/mod_off by admin');
+      return;
+    }
+
+    const idGuardToggleMatch = /^\/idguard_(on|off)\s+(\S+)$/i.exec(text);
+    if (idGuardToggleMatch) {
+      const enable = idGuardToggleMatch[1]!.toLowerCase() === 'on';
+      const groupId = idGuardToggleMatch[2]!;
+      const cfg = this.db.groupConfig.get(groupId);
+      if (!cfg) {
+        await reply(`找不到群 ${groupId} 的配置。`);
+        return;
+      }
+      this.db.groupConfig.upsert({ ...cfg, idGuardEnabled: enable });
+      await reply(`群 ${groupId} 身份证拦截已${enable ? '开启' : '关闭'}。`);
+      logger.info({ groupId, enable }, 'idGuard toggle by admin');
       return;
     }
 
