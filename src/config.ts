@@ -62,7 +62,7 @@ export function defaultGroupConfig(groupId: string): GroupConfig {
     loreUpdateCooldownMs: 30 * 60 * 1000,
     liveStickerCaptureEnabled: true,
     stickerLegendRefreshEveryMsgs: 50,
-    chatPersonaUserId: null,
+    chatPersonaText: null,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };

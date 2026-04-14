@@ -11,6 +11,9 @@ import { sentinelCheck, postProcess, HARDENED_SYSTEM } from '../utils/sentinel.j
 import { buildStickerSection, type LiveStickerEntry } from '../utils/stickers.js';
 import { MoodTracker, PROACTIVE_POOLS, type MoodDescription } from './mood.js';
 import type { VisionService } from './vision.js';
+import type { IEmbeddingService } from '../storage/embeddings.js';
+import type { ILocalStickerRepository } from '../storage/db.js';
+import { cosineSimilarity } from '../storage/embeddings.js';
 
 export interface IChatModule {
   generateReply(groupId: string, triggerMessage: GroupMessage, recentMessages: GroupMessage[]): Promise<string | null>;
@@ -63,6 +66,10 @@ interface ChatOptions {
   visionService?: VisionService;
   chatContinuityWindowMs?: number;
   chatContinuityBoost?: number;
+  stickerTopKForReply?: number;
+  stickerMinScoreFloor?: number;
+  localStickerRepo?: ILocalStickerRepository;
+  embedder?: IEmbeddingService;
 }
 
 interface ScoreFactors {
@@ -331,6 +338,10 @@ export class ChatModule implements IChatModule {
   private readonly chatContinuityBoost: number;
   // groupId:userId → timestamp of bot's last reply to this user
   private readonly lastReplyToUser = new Map<string, number>();
+  private readonly stickerTopKForReply: number;
+  private readonly stickerMinScoreFloor: number;
+  private readonly localStickerRepo: ILocalStickerRepository | null;
+  private readonly embedder: IEmbeddingService | null;
 
   private readonly loreDirPath: string;
   private readonly loreSizeCapBytes: number;
@@ -375,6 +386,10 @@ export class ChatModule implements IChatModule {
     this.visionService = options.visionService ?? null;
     this.chatContinuityWindowMs = options.chatContinuityWindowMs ?? 90_000;
     this.chatContinuityBoost = options.chatContinuityBoost ?? 0.6;
+    this.stickerTopKForReply = options.stickerTopKForReply ?? 5;
+    this.stickerMinScoreFloor = options.stickerMinScoreFloor ?? -3;
+    this.localStickerRepo = options.localStickerRepo ?? null;
+    this.embedder = options.embedder ?? null;
 
     if (this.moodProactiveEnabled) {
       this.moodProactiveTimer = setInterval(
@@ -590,6 +605,7 @@ export class ChatModule implements IChatModule {
 
     const systemPrompt = this._getGroupIdentityPrompt(groupId);
     const moodSection = this._buildMoodSection(groupId);
+    const contextStickerSection = await this._getContextStickers(groupId, triggerMessage.content);
     const userContent = `${historyText}${triggerMessage.nickname}说："${triggerMessage.content}"，你会怎么接？直接写出那句话。`;
 
     const chatRequest = (hardened = false) => this.claude.complete({
@@ -598,7 +614,11 @@ export class ChatModule implements IChatModule {
       // identity prompt is cached; mood section appended (cache:true required by type, API ignores dups)
       system: hardened
         ? [{ text: HARDENED_SYSTEM, cache: true }]
-        : [{ text: systemPrompt, cache: true }, ...(moodSection ? [{ text: moodSection, cache: true as const }] : [])],
+        : [
+            { text: systemPrompt, cache: true },
+            ...(moodSection ? [{ text: moodSection, cache: true as const }] : []),
+            ...(contextStickerSection ? [{ text: contextStickerSection, cache: true as const }] : []),
+          ],
       messages: [{ role: 'user', content: userContent }],
     });
 
@@ -777,6 +797,43 @@ export class ChatModule implements IChatModule {
       msSinceBot < IMPLICIT_BOT_REF_REACTION_WINDOW_MS
     ) return true;
     return false;
+  }
+
+  /** Return a system prompt section with top-K context-matched local stickers, or empty string. */
+  private async _getContextStickers(groupId: string, queryText: string): Promise<string> {
+    if (!this.localStickerRepo) return '';
+    const candidates = this.localStickerRepo.getTopByGroup(groupId, 50)
+      .filter(s => (s.usagePositive - s.usageNegative) >= this.stickerMinScoreFloor);
+    if (candidates.length === 0) return '';
+
+    let ranked = candidates;
+
+    // If embedder is ready, rank by context similarity
+    if (this.embedder?.isReady) {
+      try {
+        const queryVec = await this.embedder.embed(queryText);
+        const scored = await Promise.all(candidates.map(async s => {
+          if (s.contextSamples.length === 0) return { s, sim: 0 };
+          const sampleVecs = await Promise.all(s.contextSamples.map(c => this.embedder!.embed(c)));
+          const maxSim = Math.max(...sampleVecs.map(v => cosineSimilarity(queryVec, v)));
+          return { s, sim: maxSim };
+        }));
+        scored.sort((a, b) => b.sim - a.sim);
+        ranked = scored.slice(0, this.stickerTopKForReply).map(x => x.s);
+      } catch {
+        ranked = candidates.slice(0, this.stickerTopKForReply);
+      }
+    } else {
+      ranked = candidates.slice(0, this.stickerTopKForReply);
+    }
+
+    if (ranked.length === 0) return '';
+    const lines = ranked.map(s => {
+      const label = s.summary ?? s.key;
+      const ctx = s.contextSamples.slice(0, 1).join('');
+      return `- ${label}${ctx ? `（常用于"${ctx.slice(0, 20)}"之类的语境）` : ''} → ${s.cqCode}`;
+    }).join('\n');
+    return `\n【当前语境下推荐使用的群表情（可选，语境合适再用）】\n${lines}`;
   }
 
   private _buildMoodSection(groupId: string): string {
