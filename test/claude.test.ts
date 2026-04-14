@@ -176,4 +176,59 @@ describe('ClaudeClient', () => {
     const call = mockQuery.mock.calls[0]![0] as { options: Record<string, unknown> };
     expect(call.options['hooks']).toEqual({});
   });
+
+  // ── visionWithPrompt ──────────────────────────────────────────────────────
+
+  it('visionWithPrompt: returns text from assistant message', async () => {
+    mockQuery.mockReturnValueOnce(makeSuccessMessages('found image text'));
+    const buf = Buffer.from([0xff, 0xd8, 0x00]); // JPEG magic bytes
+    const result = await client.visionWithPrompt(buf, 'claude-sonnet-4-6', 'describe this');
+    expect(result).toBe('found image text');
+  });
+
+  it('visionWithPrompt: passes image content block and text prompt via SDKUserMessage', async () => {
+    mockQuery.mockReturnValueOnce(makeSuccessMessages('ok'));
+    const buf = Buffer.from([0xff, 0xd8, 0x00]);
+    await client.visionWithPrompt(buf, 'claude-sonnet-4-6', 'my prompt', 50);
+    const call = mockQuery.mock.calls[0]![0] as { prompt: AsyncIterable<{ type: string; message: { content: unknown[] } }> };
+    const msgs: unknown[] = [];
+    for await (const m of call.prompt) msgs.push(m);
+    const userMsg = msgs[0] as { type: string; message: { role: string; content: Array<{ type: string; source?: unknown; text?: string }> } };
+    expect(userMsg.type).toBe('user');
+    expect(userMsg.message.content[0]!.type).toBe('image');
+    expect(userMsg.message.content[1]!.type).toBe('text');
+    expect(userMsg.message.content[1]!.text).toBe('my prompt');
+  });
+
+  it('visionWithPrompt: uses isolation flags matching complete()', async () => {
+    mockQuery.mockReturnValueOnce(makeSuccessMessages('ok'));
+    const buf = Buffer.from([0xff, 0xd8, 0x00]);
+    await client.visionWithPrompt(buf, 'claude-sonnet-4-6', 'test');
+    const call = mockQuery.mock.calls[0]![0] as { options: Record<string, unknown> };
+    expect(call.options['settingSources']).toEqual([]);
+    expect(call.options['persistSession']).toBe(false);
+    expect(call.options['hooks']).toEqual({});
+  });
+
+  it('visionWithPrompt: throws ClaudeApiError on query failure', async () => {
+    mockQuery.mockImplementationOnce(() => { throw new Error('auth failure'); });
+    const buf = Buffer.from([0xff, 0xd8, 0x00]);
+    await expect(client.visionWithPrompt(buf, 'claude-sonnet-4-6', 'test')).rejects.toBeInstanceOf(ClaudeApiError);
+  });
+
+  it('describeImage: returns non-empty text on success', async () => {
+    mockQuery.mockReturnValueOnce(makeSuccessMessages('一只猫在阳光下伸懒腰'));
+    const buf = Buffer.from([0x89, 0x50, 0x00]); // PNG magic bytes
+    const result = await client.describeImage(buf, 'claude-sonnet-4-6');
+    expect(result).toBe('一只猫在阳光下伸懒腰');
+  });
+
+  it('describeImage: throws ClaudeParseError when vision returns empty text', async () => {
+    mockQuery.mockReturnValueOnce(makeAsyncMessages([
+      { type: 'assistant', message: { content: [{ type: 'text', text: '' }] } },
+      { type: 'result', usage: { input_tokens: 1, output_tokens: 0 } },
+    ]));
+    const buf = Buffer.from([0xff, 0xd8, 0x00]);
+    await expect(client.describeImage(buf, 'claude-sonnet-4-6')).rejects.toBeInstanceOf(ClaudeParseError);
+  });
 });

@@ -1,5 +1,4 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import Anthropic from '@anthropic-ai/sdk';
 import { ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
 
@@ -45,7 +44,6 @@ export interface IClaudeClient {
 
 export class ClaudeClient implements IClaudeClient {
   private readonly logger = createLogger('claude');
-  private readonly anthropic = new Anthropic();
 
   async complete(req: ClaudeRequest): Promise<ClaudeResponse> {
     const start = Date.now();
@@ -121,45 +119,55 @@ export class ClaudeClient implements IClaudeClient {
   }
 
   async describeImage(imageBytes: Buffer, model: ClaudeModel): Promise<string> {
-    const base64 = imageBytes.toString('base64');
-    const mediaType = this._detectMediaType(imageBytes);
-    try {
-      const response = await this.anthropic.messages.create({
-        model,
-        max_tokens: 100,
-        messages: [{
-          role: 'user',
-          content: [
-            { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } },
-            { type: 'text', text: '用一句话简短描述这张图的内容和情绪氛围，10-30 字。只输出描述本身，不要解释或前缀。' },
-          ],
-        }],
-      });
-      const text = response.content.find(b => b.type === 'text')?.text?.trim() ?? '';
-      if (!text) throw new ClaudeParseError('No text in vision response');
-      return text;
-    } catch (err) {
-      if (err instanceof ClaudeParseError) throw err;
-      throw new ClaudeApiError(err);
-    }
+    const text = await this.visionWithPrompt(
+      imageBytes,
+      model,
+      '用一句话简短描述这张图的内容和情绪氛围，10-30 字。只输出描述本身，不要解释或前缀。',
+      100,
+    );
+    if (!text) throw new ClaudeParseError('No text in vision response');
+    return text;
   }
 
-  async visionWithPrompt(imageBytes: Buffer, model: ClaudeModel, prompt: string, maxTokens = 100): Promise<string> {
+  async visionWithPrompt(imageBytes: Buffer, model: ClaudeModel, prompt: string, _maxTokens = 100): Promise<string> {
     const base64 = imageBytes.toString('base64');
     const mediaType = this._detectMediaType(imageBytes);
-    try {
-      const response = await this.anthropic.messages.create({
-        model,
-        max_tokens: maxTokens,
-        messages: [{
-          role: 'user',
+
+    async function* input() {
+      yield {
+        type: 'user' as const,
+        message: {
+          role: 'user' as const,
           content: [
-            { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } },
-            { type: 'text', text: prompt },
+            { type: 'image' as const, source: { type: 'base64' as const, media_type: mediaType, data: base64 } },
+            { type: 'text' as const, text: prompt },
           ],
-        }],
+        },
+        parent_tool_use_id: null as null,
+      };
+    }
+
+    try {
+      const result = query({
+        prompt: input(),
+        options: {
+          model,
+          maxTurns: 1,
+          settingSources: [],
+          persistSession: false,
+          hooks: {},
+        },
       });
-      return response.content.find(b => b.type === 'text')?.text?.trim() ?? '';
+
+      let text = '';
+      for await (const msg of result) {
+        if (msg.type === 'assistant') {
+          for (const block of msg.message.content) {
+            if (block.type === 'text') text += block.text;
+          }
+        }
+      }
+      return text.trim();
     } catch (err) {
       throw new ClaudeApiError(err);
     }
