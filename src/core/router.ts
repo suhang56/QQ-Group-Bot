@@ -688,9 +688,44 @@ export class Router implements IRouter {
       return;
     }
 
-    if (verdict.violation && verdict.severity !== null && verdict.severity >= 1) {
-      const imageMsg = { ...msg, content: `[图片] ${verdict.reason}` };
+    if (!verdict.violation || verdict.severity === null || verdict.severity < 1) return;
+
+    const imageMsg = { ...msg, content: `[图片] ${verdict.reason}` };
+
+    if (verdict.severity >= 5) {
+      // Full-ID match: auto-delete immediately, then inform admin
+      try { await this.adapter.deleteMsg(msg.messageId); } catch (err) {
+        this.logger.error({ err, messageId: msg.messageId }, 'image auto-delete failed');
+      }
+      try {
+        this.db.moderation.insert({
+          msgId: msg.messageId, groupId: msg.groupId, userId: msg.userId,
+          violation: true, severity: 5, action: 'delete',
+          reason: verdict.reason, appealed: 0, reversed: false, timestamp: msg.timestamp,
+        });
+      } catch (err) {
+        this.logger.error({ err }, 'image auto-delete moderation insert failed');
+      }
+      const dmText = `[自动删除] 群 ${msg.groupId} 用户 ${msg.nickname}(${msg.userId}) 图片含完整泄露身份证号，已自动删除。\n原因: ${verdict.reason}\n消息ID: ${msg.messageId}`;
+      await this.adapter.sendPrivateMessage(MOD_APPROVAL_ADMIN, dmText).catch(err =>
+        this.logger.error({ err }, 'image auto-delete admin inform DM failed'),
+      );
+      this.logger.info({ groupId: msg.groupId, userId: msg.userId, messageId: msg.messageId }, 'image auto-deleted (severity 5)');
+    } else if (verdict.severity >= 4) {
+      // Region-prefix match: queue for admin approval
       void this._queueModerationApproval(imageMsg, verdict.severity, verdict.reason);
+    } else {
+      // Severity 1-3: log only — record in moderation_log but take no action
+      try {
+        this.db.moderation.insert({
+          msgId: msg.messageId, groupId: msg.groupId, userId: msg.userId,
+          violation: true, severity: verdict.severity, action: 'none',
+          reason: verdict.reason, appealed: 0, reversed: false, timestamp: msg.timestamp,
+        });
+      } catch (err) {
+        this.logger.error({ err }, 'image log-only moderation insert failed');
+      }
+      this.logger.info({ groupId: msg.groupId, userId: msg.userId, severity: verdict.severity, reason: verdict.reason }, 'image mod log-only (sev 1-3)');
     }
   }
 

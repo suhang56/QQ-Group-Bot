@@ -83,8 +83,6 @@ function parseSonnetResponse(text: string): { violation: boolean; severity: numb
   }
 }
 
-const IMAGE_MOD_SEVERITY_CAP = 3; // false positives on images are costly — cap at warn level (unless obfuscation)
-const IMAGE_MOD_OBFUSCATION_SEVERITY_FLOOR = 4; // obfuscated doxxing always enters approval queue
 const IMAGE_MOD_CACHE_HOURS = 1; // 1h TTL so rule-set changes propagate quickly
 const IMAGE_MOD_RATE_LIMIT_PER_HOUR = 10;
 
@@ -272,7 +270,7 @@ ${offenseHistory}${ragSection}`;
         this.logger.debug({ groupId: target.groupId, fileKey: target.fileKey }, 'image mod cache hit');
         return {
           violation: cached.violation,
-          severity: cached.violation ? Math.min(cached.severity, IMAGE_MOD_SEVERITY_CAP) as 1 | 2 | 3 | null : null,
+          severity: cached.violation && cached.severity >= 1 ? Math.min(cached.severity, 5) as 1 | 2 | 3 | 4 | 5 : null,
           reason: cached.reason ?? '',
           confidence: 1,
         };
@@ -288,35 +286,37 @@ ${offenseHistory}${ragSection}`;
     }
     this.imageRateCounts.set(hourKey, count + 1);
 
-    const allRules = this.rules.getAll(target.groupId);
-    const rulesText = allRules.length > 0
-      ? allRules.map(r => `[id:${r.id}] ${r.content}`).join('\n')
-      : '（暂无配置群规）';
+    const prompt = `你在审核 QQ 群的图片，任务非常具体：检查图片中是否出现下列数字片段的任何形式。
 
-    const prompt = `你是北美炸梦同好会的群管理AI。以下是群规（逐条列出）：
+监控清单（这些是某位声优被泄露的身份证号的所有组成部分）：
+- 完整号: 310110199701093724
+- 前 6 位（上海浦东行政区划码）: 310110 / 310 110 / 310-110 / 310/110
+- 出生年: 1997（单独出现不足为据，但若与其它片段同现必须标记）
+- 月日: 0109 / 1-9 / 01-09 / 1.9 / 1月9日
+- 尾部: 3724 / 372 4
 
-${rulesText}
+检查点：
+1. 直接出现（文字、标题、CQ码）
+2. 作为计算/数学题/积分/阶乘的结果（例如"答案是 310110"）
+3. 作为代码片段的输出或注释
+4. 被拆分/换行/倒序
+5. 在截图里（Gemini / ChatGPT / 微信 / 任何应用）
+6. 作为梗图的文字或数字
 
-用户"${target.nickname}"（${target.userId}）发了这张图。请判断是否违反群规。
+判断规则：
+- 出现完整 18 位 → severity 5（全封）
+- 只出现 310110 → severity 4
+- 出现 1997 或 0109 或 3724 任意一个 → severity 2（单独出现可能巧合，但记一笔）
+- 同时出现 2 个或以上片段（例如 310110 + 1997 / 1997 + 0109）→ severity 5
+- 什么都没出现 → violation: false
 
-**重点关注——混淆式人肉搜索（零容忍）**：
-群内有人会通过间接方式泄漏真实人物的个人信息。注意以下模式：
-- PRC行政区划代码：任何以11-85开头的6位数字（如110000、310110、440300）出现在数学计算结果、代码输出、谜题、梗图说明中。这些数字对应城市/区县，常用作身份证前缀。
-- PRC身份证号（18位：地区+YYYYMMDD+序号+校验位），任何形式——字面形式、嵌入代码、多行拆分、截图中的OCR可识别文字
-- 真实人物（非发送者本人账号）的电话、邮箱、QQ号
-- "猜猜谁"类谜题，答案指向某人的真实姓名+地点
-- 其他聊天软件截图（Gemini/ChatGPT/微信），其内容推导出可疑数字
-- Gamma函数/阶乘/数学推导，最终结果为可疑6位代码
-
-**混淆判断标准**：若图中含有行政区划代码样式的数字，且上下文（说明文字、引用回复）涉及特定人物、声优、公众人物或群成员，则视为严重人肉行为（severity 4-5）。
-
-**其他违规**（正常审核——文字、NSFW、侮辱、暴力等）：
-按上方群规判断。注意群友间的日常调侃、梗、粗口属于正常群聊，不要过度误判。
-
-仅返回JSON对象，不要其他文字：
-{"violation": true/false, "severity": 1-5, "reason": "简短中文说明", "ruleId": <规则id或null>, "obfuscation": true/false}
-
-obfuscation=true表示疑似混淆式PII泄漏。violation=false时severity为null。`;
+只返回 JSON:
+{
+  "violation": boolean,
+  "severity": 0-5,
+  "reason": "<中文简述，说明看到了哪个片段>",
+  "components_seen": ["310110", "1997", "0109", "3724"]
+}`;
 
     let raw: string;
     try {
@@ -326,7 +326,7 @@ obfuscation=true表示疑似混淆式PII泄漏。violation=false时severity为nu
       return FAIL_SAFE_VERDICT;
     }
 
-    interface ImageVerdictJson { violation: boolean; severity: number | null; reason: string; ruleId: number | null; obfuscation?: boolean }
+    interface ImageVerdictJson { violation: boolean; severity: number | null; reason: string; components_seen?: string[] }
     let parsed: ImageVerdictJson | null = null;
     try {
       parsed = JSON.parse(extractJson(raw).trim()) as ImageVerdictJson;
@@ -336,23 +336,18 @@ obfuscation=true表示疑似混淆式PII泄漏。violation=false时severity为nu
 
     const violation = parsed?.violation ?? false;
     const rawSeverity = parsed?.severity ?? null;
-    const obfuscation = parsed?.obfuscation ?? false;
     const reason = parsed?.reason ?? '';
-    const ruleId = parsed?.ruleId ?? null;
+    const componentsSeen = parsed?.components_seen ?? [];
 
-    // Severity mapping: obfuscation raises floor to 4; otherwise cap at 3
+    // Severity is taken directly from Claude — watchlist prompt already encodes the correct mapping
     let finalSeverity: 1 | 2 | 3 | 4 | 5 | null = null;
-    if (violation && rawSeverity !== null) {
-      if (obfuscation) {
-        finalSeverity = Math.max(rawSeverity, IMAGE_MOD_OBFUSCATION_SEVERITY_FLOOR) as 4 | 5;
-      } else {
-        finalSeverity = Math.min(rawSeverity, IMAGE_MOD_SEVERITY_CAP) as 1 | 2 | 3;
-      }
+    if (violation && rawSeverity !== null && rawSeverity >= 1) {
+      finalSeverity = Math.min(rawSeverity, 5) as 1 | 2 | 3 | 4 | 5;
     }
 
     // Cache result (TTL 1h — short so rule-set changes propagate quickly)
     if (this.imageModCache) {
-      this.imageModCache.set({ fileKey: target.fileKey, violation, severity: rawSeverity ?? 0, reason: reason || null, ruleId, createdAt: now });
+      this.imageModCache.set({ fileKey: target.fileKey, violation, severity: rawSeverity ?? 0, reason: reason || null, ruleId: null, createdAt: now });
       const cutoff = now - IMAGE_MOD_CACHE_HOURS * 3600;
       void Promise.resolve().then(() => {
         const purged = this.imageModCache!.purgeOlderThan(cutoff);
@@ -360,7 +355,7 @@ obfuscation=true表示疑似混淆式PII泄漏。violation=false时severity为nu
       });
     }
 
-    this.logger.debug({ groupId: target.groupId, fileKey: target.fileKey, violation, severity: finalSeverity, obfuscation, reason }, 'image assessed');
+    this.logger.debug({ groupId: target.groupId, fileKey: target.fileKey, violation, severity: finalSeverity, componentsSeen, reason }, 'image assessed');
     return { violation, severity: finalSeverity, reason, confidence: 1 };
   }
 

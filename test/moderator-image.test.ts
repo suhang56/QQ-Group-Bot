@@ -58,10 +58,10 @@ function makeConfigRepo(): IGroupConfigRepository {
   return { get: vi.fn(), upsert: vi.fn(), incrementPunishments: vi.fn(), resetDailyPunishments: vi.fn() } as unknown as IGroupConfigRepository;
 }
 
-function makeRuleRepo(rules: string[] = []): IRuleRepository {
+function makeRuleRepo(): IRuleRepository {
   return {
     insert: vi.fn(), findById: vi.fn().mockReturnValue(null),
-    getAll: vi.fn().mockReturnValue(rules.map((c, i) => ({ id: i + 1, groupId: GROUP_ID, content: c, type: 'positive' as const, embedding: null }))),
+    getAll: vi.fn().mockReturnValue([]),
     getPage: vi.fn().mockReturnValue({ rules: [], total: 0 }),
   };
 }
@@ -76,10 +76,7 @@ function makeImageCache(cached: ImageModVerdict | null = null): IImageModCacheRe
 
 function makeModule(
   claude: IClaudeClient,
-  opts: {
-    rules?: string[];
-    imageCache?: IImageModCacheRepository | null;
-  } = {},
+  opts: { imageCache?: IImageModCacheRepository | null } = {},
 ): ModeratorModule {
   return new ModeratorModule(
     claude,
@@ -87,27 +84,54 @@ function makeModule(
     makeMessageRepo(),
     makeModerationRepo(),
     makeConfigRepo(),
-    makeRuleRepo(opts.rules ?? ['no NSFW', 'no doxxing']),
+    makeRuleRepo(),
     null,
     opts.imageCache !== undefined ? opts.imageCache : makeImageCache(),
   );
 }
 
-// ── assessImage unit tests ─────────────────────────────────────────────────────
+// ── assessImage watchlist tests ────────────────────────────────────────────────
 
-describe('ModeratorModule.assessImage', () => {
-  it('violation: returns capped severity verdict when Claude returns violation', async () => {
-    const claude = makeClaudeVision({ violation: true, severity: 5, reason: 'NSFW content', ruleId: 1 });
+describe('ModeratorModule.assessImage — watchlist prompt', () => {
+  it('full 18-digit ID detected → severity 5', async () => {
+    const claude = makeClaudeVision({ violation: true, severity: 5, reason: '含完整身份证号', components_seen: ['310110199701093724'] });
     const mod = makeModule(claude);
     const verdict = await mod.assessImage(makeTarget(), makeImageBytes());
 
     expect(verdict.violation).toBe(true);
-    expect(verdict.severity).toBe(3); // capped at IMAGE_MOD_SEVERITY_CAP=3
-    expect(verdict.reason).toBe('NSFW content');
+    expect(verdict.severity).toBe(5);
+    expect(verdict.reason).toBe('含完整身份证号');
   });
 
-  it('no violation: returns violation=false when Claude returns clean', async () => {
-    const claude = makeClaudeVision({ violation: false, severity: null, reason: '', ruleId: null });
+  it('310110 only → severity 4', async () => {
+    const claude = makeClaudeVision({ violation: true, severity: 4, reason: '含310110前缀', components_seen: ['310110'] });
+    const mod = makeModule(claude);
+    const verdict = await mod.assessImage(makeTarget(), makeImageBytes());
+
+    expect(verdict.violation).toBe(true);
+    expect(verdict.severity).toBe(4);
+  });
+
+  it('single fragment (1997 only) → severity 2, log only', async () => {
+    const claude = makeClaudeVision({ violation: true, severity: 2, reason: '出生年1997单独出现', components_seen: ['1997'] });
+    const mod = makeModule(claude);
+    const verdict = await mod.assessImage(makeTarget(), makeImageBytes());
+
+    expect(verdict.violation).toBe(true);
+    expect(verdict.severity).toBe(2);
+  });
+
+  it('two fragments together (310110 + 1997) → severity 5', async () => {
+    const claude = makeClaudeVision({ violation: true, severity: 5, reason: '310110与1997同时出现', components_seen: ['310110', '1997'] });
+    const mod = makeModule(claude);
+    const verdict = await mod.assessImage(makeTarget(), makeImageBytes());
+
+    expect(verdict.violation).toBe(true);
+    expect(verdict.severity).toBe(5);
+  });
+
+  it('no components → violation: false', async () => {
+    const claude = makeClaudeVision({ violation: false, severity: null, reason: '', components_seen: [] });
     const mod = makeModule(claude);
     const verdict = await mod.assessImage(makeTarget(), makeImageBytes());
 
@@ -115,7 +139,7 @@ describe('ModeratorModule.assessImage', () => {
     expect(verdict.severity).toBeNull();
   });
 
-  it('malformed JSON: fail-safe returns violation=false', async () => {
+  it('malformed JSON → fail-safe returns violation=false', async () => {
     const claude = {
       complete: vi.fn(), describeImage: vi.fn(),
       visionWithPrompt: vi.fn().mockResolvedValue('not json at all'),
@@ -127,7 +151,7 @@ describe('ModeratorModule.assessImage', () => {
     expect(verdict.severity).toBeNull();
   });
 
-  it('vision API throws: fail-safe returns violation=false', async () => {
+  it('vision API throws → fail-safe returns violation=false', async () => {
     const claude = {
       complete: vi.fn(), describeImage: vi.fn(),
       visionWithPrompt: vi.fn().mockRejectedValue(new Error('API down')),
@@ -140,22 +164,21 @@ describe('ModeratorModule.assessImage', () => {
   });
 
   it('cache hit: returns cached verdict, no vision call', async () => {
-    const cached: ImageModVerdict = { fileKey: FILE_KEY, violation: true, severity: 2, reason: 'cached reason', ruleId: null, createdAt: Math.floor(Date.now() / 1000) };
+    const cached: ImageModVerdict = { fileKey: FILE_KEY, violation: true, severity: 4, reason: '310110前缀', ruleId: null, createdAt: Math.floor(Date.now() / 1000) };
     const imageCache = makeImageCache(cached);
-    const claude = makeClaudeVision({ violation: false, severity: null, reason: '', ruleId: null });
+    const claude = makeClaudeVision({ violation: false, severity: null, reason: '', components_seen: [] });
     const mod = makeModule(claude, { imageCache });
 
     const verdict = await mod.assessImage(makeTarget(), makeImageBytes());
 
     expect(verdict.violation).toBe(true);
-    expect(verdict.severity).toBe(2);
-    expect(verdict.reason).toBe('cached reason');
+    expect(verdict.reason).toBe('310110前缀');
     expect((claude.visionWithPrompt as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(0);
   });
 
   it('cache miss: calls vision, stores result in cache', async () => {
     const imageCache = makeImageCache(null);
-    const claude = makeClaudeVision({ violation: true, severity: 2, reason: 'doxxing', ruleId: 2 });
+    const claude = makeClaudeVision({ violation: true, severity: 4, reason: '310110', components_seen: ['310110'] });
     const mod = makeModule(claude, { imageCache });
 
     await mod.assessImage(makeTarget(), makeImageBytes());
@@ -169,49 +192,21 @@ describe('ModeratorModule.assessImage', () => {
 
   it('rate limit: 11th uncached check in same group-hour is skipped', async () => {
     const imageCache = makeImageCache(null); // always miss
-    const claude = makeClaudeVision({ violation: false, severity: null, reason: '', ruleId: null });
+    const claude = makeClaudeVision({ violation: false, severity: null, reason: '', components_seen: [] });
     const mod = makeModule(claude, { imageCache });
 
-    // 10 calls should succeed
     for (let i = 0; i < 10; i++) {
       await mod.assessImage({ ...makeTarget(), fileKey: `key-${i}` }, makeImageBytes());
     }
-    // 11th call should be rate-limited
     const verdict = await mod.assessImage({ ...makeTarget(), fileKey: 'key-11' }, makeImageBytes());
 
     expect((claude.visionWithPrompt as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(10);
-    expect(verdict.violation).toBe(false); // fail-safe
-  });
-
-  it('severity cap: severity 4 returned by Claude is capped to 3 when not obfuscation', async () => {
-    const claude = makeClaudeVision({ violation: true, severity: 4, reason: 'severe', ruleId: 1, obfuscation: false });
-    const mod = makeModule(claude);
-    const verdict = await mod.assessImage(makeTarget(), makeImageBytes());
-
-    expect(verdict.severity).toBe(3);
-  });
-
-  it('obfuscation=true: severity floor raised to 4 even if Claude returned 2', async () => {
-    const claude = makeClaudeVision({ violation: true, severity: 2, reason: '310110在计算结果中', ruleId: null, obfuscation: true });
-    const mod = makeModule(claude);
-    const verdict = await mod.assessImage(makeTarget(), makeImageBytes());
-
-    expect(verdict.violation).toBe(true);
-    expect(verdict.severity).toBe(4);
-    expect(verdict.reason).toBe('310110在计算结果中');
-  });
-
-  it('obfuscation=true with severity 5: keeps 5 (floor only, not cap)', async () => {
-    const claude = makeClaudeVision({ violation: true, severity: 5, reason: '确认人肉', ruleId: null, obfuscation: true });
-    const mod = makeModule(claude);
-    const verdict = await mod.assessImage(makeTarget(), makeImageBytes());
-
-    expect(verdict.severity).toBe(5);
+    expect(verdict.violation).toBe(false);
   });
 
   it('cache TTL is ~1h: purgeOlderThan called with cutoff ~3600s ago', async () => {
     const imageCache = makeImageCache(null);
-    const claude = makeClaudeVision({ violation: false, severity: null, reason: '', ruleId: null, obfuscation: false });
+    const claude = makeClaudeVision({ violation: false, severity: null, reason: '', components_seen: [] });
     const mod = makeModule(claude, { imageCache });
 
     const before = Math.floor(Date.now() / 1000);
@@ -234,7 +229,16 @@ import { Router, _extractImageFile } from '../src/core/router.js';
 import type { Database } from '../src/storage/db.js';
 import type { RateLimiter } from '../src/core/rateLimiter.js';
 
-function makeDb(groupConfig?: Partial<GroupConfig>): Database {
+function makeModerationForRouter(): IModerationRepository {
+  return {
+    insert: vi.fn().mockReturnValue({ id: 1 }),
+    findById: vi.fn(), findByMsgId: vi.fn(),
+    findRecentByUser: vi.fn().mockReturnValue([]), findRecentByGroup: vi.fn(),
+    findPendingAppeal: vi.fn(), update: vi.fn(), countWarnsByUser: vi.fn(),
+  } as unknown as IModerationRepository;
+}
+
+function makeDb(groupConfig?: Partial<GroupConfig>, moderationRepo?: IModerationRepository): Database {
   const cfg: GroupConfig = {
     groupId: GROUP_ID, enabledModules: [], autoMod: true,
     dailyPunishmentLimit: 10, punishmentsToday: 0,
@@ -242,12 +246,15 @@ function makeDb(groupConfig?: Partial<GroupConfig>): Database {
     chatTriggerKeywords: [], chatTriggerAtOnly: false, chatDebounceMs: 2000,
     modConfidenceThreshold: 0.7, modWhitelist: [], appealWindowHours: 24,
     kickConfirmModel: 'claude-opus-4-6', createdAt: '', updatedAt: '',
+    idGuardEnabled: false,
+    welcomeEnabled: true,
     ...groupConfig,
   };
   return {
     groupConfig: { get: vi.fn().mockReturnValue(cfg), upsert: vi.fn(), incrementPunishments: vi.fn(), resetDailyPunishments: vi.fn() },
     messages: { insert: vi.fn(), getRecent: vi.fn().mockReturnValue([]), getByUser: vi.fn(), sampleRandomHistorical: vi.fn(), searchByKeywords: vi.fn(), getTopUsers: vi.fn(), softDelete: vi.fn() },
     users: { upsert: vi.fn() },
+    moderation: moderationRepo ?? makeModerationForRouter(),
     pendingModeration: { queue: vi.fn().mockReturnValue(1), getById: vi.fn(), markStatus: vi.fn(), expireOlderThan: vi.fn().mockReturnValue(0), listPending: vi.fn().mockReturnValue([]) },
     botReplies: { insert: vi.fn().mockReturnValue({ id: 1 }), getById: vi.fn(), markEvasive: vi.fn() },
     liveStickers: { upsert: vi.fn(), getTopByGroup: vi.fn().mockReturnValue([]) },
@@ -270,35 +277,100 @@ function makeGroupMsg(overrides: Partial<GroupMessage> = {}): GroupMessage {
   };
 }
 
-describe('Router image moderation integration', () => {
+async function dispatchAndWait(router: Router, msg: GroupMessage, mod: { assessImage: ReturnType<typeof vi.fn> }): Promise<void> {
+  let resolveAssess!: () => void;
+  const assessDone = new Promise<void>(r => { resolveAssess = r; });
+  const origImpl = mod.assessImage.getMockImplementation();
+  mod.assessImage.mockImplementationOnce(async (...args) => {
+    const result = origImpl ? await origImpl(...args) : { violation: false, severity: null, reason: '', confidence: 1 };
+    resolveAssess();
+    return result;
+  });
+  await router.dispatch(msg);
+  await assessDone;
+  await new Promise(r => setImmediate(r));
+}
+
+describe('Router image moderation — severity routing', () => {
   beforeEach(() => { vi.clearAllMocks(); });
 
-  it('message with image + autoMod on + violation detected → assessImage called, pending_moderation queued + DM sent', async () => {
-    const db = makeDb({ autoMod: true });
+  it('severity 5 (full ID): deleteMsg called immediately, moderation.insert, no pendingModeration.queue', async () => {
+    const moderation = makeModerationForRouter();
+    const db = makeDb({ autoMod: true }, moderation);
     const adapter = makeAdapter();
     const router = new Router(db, adapter, makeRateLimiter(), 'bot-id');
 
-    // Capture the assessImage promise so we can await it
-    let resolveAssessImage!: (v: object) => void;
-    const assessImagePromise = new Promise<object>(r => { resolveAssessImage = r; });
     const mod = {
       assess: vi.fn().mockResolvedValue({ violation: false, severity: null, reason: '', confidence: 1 }),
-      assessImage: vi.fn().mockImplementation(() => {
-        resolveAssessImage({ violation: true, severity: 2, reason: 'NSFW', confidence: 1 });
-        return Promise.resolve({ violation: true, severity: 2, reason: 'NSFW', confidence: 1 });
-      }),
+      assessImage: vi.fn().mockResolvedValue({ violation: true, severity: 5, reason: '含完整身份证号', confidence: 1 }),
     } as unknown as ModeratorModule;
     router.setModerator(mod);
 
-    await router.dispatch(makeGroupMsg());
-    // Wait for the fire-and-forget _assessImageAsync to invoke assessImage
-    await assessImagePromise;
-    // One more tick for the _queueModerationApproval to complete
-    await new Promise(r => setImmediate(r));
+    await dispatchAndWait(router, makeGroupMsg(), mod as unknown as { assessImage: ReturnType<typeof vi.fn> });
 
-    expect(mod.assessImage).toHaveBeenCalled();
+    expect((adapter.deleteMsg as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith('msg-img-1');
+    expect((moderation.insert as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(expect.objectContaining({ severity: 5, action: 'delete' }));
+    expect((db.pendingModeration.queue as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    expect((adapter.sendPrivateMessage as ReturnType<typeof vi.fn>)).toHaveBeenCalled();
+  });
+
+  it('severity 4 (310110 prefix): no deleteMsg, pendingModeration.queue, DM sent', async () => {
+    const moderation = makeModerationForRouter();
+    const db = makeDb({ autoMod: true }, moderation);
+    const adapter = makeAdapter();
+    const router = new Router(db, adapter, makeRateLimiter(), 'bot-id');
+
+    const mod = {
+      assess: vi.fn().mockResolvedValue({ violation: false, severity: null, reason: '', confidence: 1 }),
+      assessImage: vi.fn().mockResolvedValue({ violation: true, severity: 4, reason: '310110前缀', confidence: 1 }),
+    } as unknown as ModeratorModule;
+    router.setModerator(mod);
+
+    await dispatchAndWait(router, makeGroupMsg(), mod as unknown as { assessImage: ReturnType<typeof vi.fn> });
+
+    expect((adapter.deleteMsg as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    expect((moderation.insert as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
     expect((db.pendingModeration.queue as ReturnType<typeof vi.fn>)).toHaveBeenCalled();
     expect((adapter.sendPrivateMessage as ReturnType<typeof vi.fn>)).toHaveBeenCalled();
+  });
+
+  it('severity 2 (single fragment): no deleteMsg, no pendingModeration.queue, moderation.insert with action=none', async () => {
+    const moderation = makeModerationForRouter();
+    const db = makeDb({ autoMod: true }, moderation);
+    const adapter = makeAdapter();
+    const router = new Router(db, adapter, makeRateLimiter(), 'bot-id');
+
+    const mod = {
+      assess: vi.fn().mockResolvedValue({ violation: false, severity: null, reason: '', confidence: 1 }),
+      assessImage: vi.fn().mockResolvedValue({ violation: true, severity: 2, reason: '1997单独出现', confidence: 1 }),
+    } as unknown as ModeratorModule;
+    router.setModerator(mod);
+
+    await dispatchAndWait(router, makeGroupMsg(), mod as unknown as { assessImage: ReturnType<typeof vi.fn> });
+
+    expect((adapter.deleteMsg as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    expect((db.pendingModeration.queue as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    expect((moderation.insert as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(expect.objectContaining({ severity: 2, action: 'none' }));
+    expect((adapter.sendPrivateMessage as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+  });
+
+  it('violation: false → no action', async () => {
+    const moderation = makeModerationForRouter();
+    const db = makeDb({ autoMod: true }, moderation);
+    const adapter = makeAdapter();
+    const router = new Router(db, adapter, makeRateLimiter(), 'bot-id');
+
+    const mod = {
+      assess: vi.fn().mockResolvedValue({ violation: false, severity: null, reason: '', confidence: 1 }),
+      assessImage: vi.fn().mockResolvedValue({ violation: false, severity: null, reason: '', confidence: 1 }),
+    } as unknown as ModeratorModule;
+    router.setModerator(mod);
+
+    await dispatchAndWait(router, makeGroupMsg(), mod as unknown as { assessImage: ReturnType<typeof vi.fn> });
+
+    expect((adapter.deleteMsg as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    expect((db.pendingModeration.queue as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    expect((moderation.insert as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
   });
 
   it('message with image + autoMod off → assessImage NOT called', async () => {
