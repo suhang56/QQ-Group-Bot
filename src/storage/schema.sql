@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS users (
   nickname      TEXT    NOT NULL DEFAULT '',
   style_summary TEXT,
   last_seen     INTEGER NOT NULL,
+  role          TEXT    NOT NULL DEFAULT 'member',
   PRIMARY KEY (user_id, group_id)
 );
 

@@ -21,6 +21,7 @@ export interface User {
   nickname: string;
   styleSummary: string | null;
   lastSeen: number;
+  role: 'owner' | 'admin' | 'member';
 }
 
 export interface ModerationRecord {
@@ -128,6 +129,7 @@ export interface IMessageRepository {
 export interface IUserRepository {
   upsert(user: User): void;
   findById(userId: string, groupId: string): User | null;
+  getAdminsByGroup(groupId: string, limit: number): User[];
 }
 
 export interface IModerationRepository {
@@ -250,7 +252,7 @@ interface MessageRow {
 
 interface UserRow {
   user_id: string; group_id: string; nickname: string;
-  style_summary: string | null; last_seen: number;
+  style_summary: string | null; last_seen: number; role: string;
 }
 
 interface ModerationRow {
@@ -318,6 +320,7 @@ function userFromRow(row: UserRow): User {
   return {
     userId: row.user_id, groupId: row.group_id, nickname: row.nickname,
     styleSummary: row.style_summary, lastSeen: row.last_seen,
+    role: (row.role as 'owner' | 'admin' | 'member') ?? 'member',
   };
 }
 
@@ -481,13 +484,14 @@ class UserRepository implements IUserRepository {
 
   upsert(user: User): void {
     this.db.prepare(`
-      INSERT INTO users (user_id, group_id, nickname, style_summary, last_seen)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO users (user_id, group_id, nickname, style_summary, last_seen, role)
+      VALUES (?, ?, ?, ?, ?, ?)
       ON CONFLICT(user_id, group_id) DO UPDATE SET
         nickname = excluded.nickname,
         style_summary = excluded.style_summary,
-        last_seen = excluded.last_seen
-    `).run(user.userId, user.groupId, user.nickname, user.styleSummary, user.lastSeen);
+        last_seen = excluded.last_seen,
+        role = excluded.role
+    `).run(user.userId, user.groupId, user.nickname, user.styleSummary, user.lastSeen, user.role ?? 'member');
   }
 
   findById(userId: string, groupId: string): User | null {
@@ -495,6 +499,13 @@ class UserRepository implements IUserRepository {
       'SELECT * FROM users WHERE user_id = ? AND group_id = ?'
     ).get(userId, groupId) as unknown as UserRow | undefined;
     return row ? userFromRow(row) : null;
+  }
+
+  getAdminsByGroup(groupId: string, limit: number): User[] {
+    const rows = this.db.prepare(
+      "SELECT * FROM users WHERE group_id = ? AND role IN ('admin','owner') LIMIT ?"
+    ).all(groupId, limit) as unknown as UserRow[];
+    return rows.map(userFromRow);
   }
 }
 
@@ -1082,5 +1093,8 @@ export class Database {
       )
     `);
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_live_stickers_group_count ON live_stickers(group_id, count DESC)`);
+
+    // Add role column to users table for existing DBs
+    try { this._db.exec(`ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'member'`); } catch { /* already exists */ }
   }
 }

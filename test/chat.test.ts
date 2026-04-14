@@ -2033,3 +2033,85 @@ describe('ChatModule — admin speech mirror', () => {
     expect(sys).not.toContain('群管理员的说话风格');
   });
 });
+
+// ── Admin DB seeding ──────────────────────────────────────────────────────────
+
+describe('ChatModule — admin DB seeding', () => {
+  let db: Database;
+  let claude: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    claude = vi.fn().mockResolvedValue({
+      text: 'bot reply', inputTokens: 10, outputTokens: 5,
+      cacheReadTokens: 0, cacheWriteTokens: 0,
+    } satisfies ClaudeResponse);
+  });
+
+  function makeChat(opts: Record<string, unknown> = {}): ChatModule {
+    return new ChatModule(
+      { complete: claude } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999, moodProactiveEnabled: false, deflectCacheEnabled: false, ...opts },
+    );
+  }
+
+  function getSystemPrompt(): string {
+    const call = claude.mock.calls[0]![0] as { system: Array<{ text: string }> };
+    return call.system.map(s => s.text).join('\n');
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+
+  it('seeds admin samples from DB messages when no live activity seen yet', async () => {
+    // Insert an admin user into users table
+    db.users.upsert({ userId: 'admin1', groupId: 'g1', nickname: '群管', styleSummary: null, lastSeen: now, role: 'admin' });
+    // Insert messages for that admin
+    db.messages.insert({ groupId: 'g1', userId: 'admin1', nickname: '群管', content: '来了兄弟们', timestamp: now, deleted: false });
+    db.messages.insert({ groupId: 'g1', userId: 'admin1', nickname: '群管', content: '别整这些没用的', timestamp: now, deleted: false });
+    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'hi', timestamp: now, deleted: false });
+
+    const chat = makeChat();
+    await chat.generateReply('g1', makeMsg(), []);
+    const sys = getSystemPrompt();
+    expect(sys).toContain('群管理员的说话风格');
+    expect(sys).toContain('[群管]');
+  });
+
+  it('only seeds admins and owners, not regular members', async () => {
+    db.users.upsert({ userId: 'member1', groupId: 'g1', nickname: '普通', styleSummary: null, lastSeen: now, role: 'member' });
+    db.messages.insert({ groupId: 'g1', userId: 'member1', nickname: '普通', content: '我只是普通成员', timestamp: now, deleted: false });
+    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'hi', timestamp: now, deleted: false });
+
+    const chat = makeChat();
+    await chat.generateReply('g1', makeMsg(), []);
+    const sys = getSystemPrompt();
+    expect(sys).not.toContain('群管理员的说话风格');
+  });
+
+  it('excludes DB messages < 3 chars or > 50 chars from seeded samples', async () => {
+    db.users.upsert({ userId: 'admin1', groupId: 'g1', nickname: '管理', styleSummary: null, lastSeen: now, role: 'admin' });
+    db.messages.insert({ groupId: 'g1', userId: 'admin1', nickname: '管理', content: 'ok', timestamp: now, deleted: false });
+    db.messages.insert({ groupId: 'g1', userId: 'admin1', nickname: '管理', content: 'a'.repeat(51), timestamp: now, deleted: false });
+    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'hi', timestamp: now, deleted: false });
+
+    const chat = makeChat();
+    await chat.generateReply('g1', makeMsg(), []);
+    const sys = getSystemPrompt();
+    expect(sys).not.toContain('群管理员的说话风格');
+  });
+
+  it('live noteAdminActivity takes precedence over DB seed', async () => {
+    db.users.upsert({ userId: 'admin1', groupId: 'g1', nickname: '管理', styleSummary: null, lastSeen: now, role: 'admin' });
+    db.messages.insert({ groupId: 'g1', userId: 'admin1', nickname: '管理', content: '数据库里的消息', timestamp: now, deleted: false });
+    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'hi', timestamp: now, deleted: false });
+
+    const chat = makeChat();
+    // Live activity called before first generateReply — populates adminSamples, prevents DB seed path
+    chat.noteAdminActivity('g1', 'admin1', '管理', '实时消息优先');
+    await chat.generateReply('g1', makeMsg(), []);
+    const sys = getSystemPrompt();
+    expect(sys).toContain('实时消息优先');
+    expect(sys).toContain('[管理]');
+  });
+});

@@ -1182,7 +1182,26 @@ export class ChatModule implements IChatModule {
     const cached = this.adminStyleCache.get(groupId);
     if (cached && Date.now() < cached.expiresAt) return cached.text;
 
-    const groupAdmins = this.adminSamples.get(groupId);
+    let groupAdmins = this.adminSamples.get(groupId);
+    if (!groupAdmins || groupAdmins.size === 0) {
+      // Lazy-seed from DB on first build
+      const dbAdmins = this.db.users.getAdminsByGroup(groupId, this.chatAdminMirrorMaxAdmins);
+      if (dbAdmins.length > 0) {
+        if (!groupAdmins) {
+          groupAdmins = new Map();
+          this.adminSamples.set(groupId, groupAdmins);
+        }
+        for (const admin of dbAdmins) {
+          const msgs = this.db.messages.getByUser(groupId, admin.userId, 60);
+          const samples = msgs
+            .map(m => m.content.trim())
+            .filter(s => s.length >= 3 && s.length <= 50);
+          if (samples.length > 0) {
+            groupAdmins.set(admin.userId, { nickname: admin.nickname, samples });
+          }
+        }
+      }
+    }
     if (!groupAdmins || groupAdmins.size === 0) {
       this.adminStyleCache.set(groupId, { text: '', expiresAt: Date.now() + this.groupIdentityCacheTtlMs });
       return '';

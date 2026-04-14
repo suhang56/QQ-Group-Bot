@@ -154,6 +154,7 @@ export class Router implements IRouter {
         nickname: msg.nickname,
         styleSummary: null,
         lastSeen: msg.timestamp,
+        role: msg.role ?? 'member',
       });
 
       // Live sticker capture: record mface + image stickers (sub_type=1) seen in the wild
