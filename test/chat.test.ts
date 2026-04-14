@@ -3115,3 +3115,95 @@ describe('ChatModule — collective addressing (你们)', () => {
     expect(userContent).not.toContain('可以考虑集体称呼');
   });
 });
+
+// ── Sync vision wait for reply-quoted / context images ───────────────────────
+
+describe('ChatModule — sync vision wait', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('awaits vision for reply-quoted image message before building prompt', async () => {
+    const ts = Math.floor(Date.now() / 1000);
+    // Insert image message with source_message_id 'src-99'
+    db.messages.insert(
+      { groupId: 'g1', userId: 'u2', nickname: 'Bob', content: '(img)', rawContent: '[CQ:image,file=abc.jpg]', timestamp: ts - 5, deleted: false },
+      'src-99',
+    );
+
+    const describeFromMessage = vi.fn().mockResolvedValue('一张猫咪图');
+    const visionService = { describeFromMessage } as never;
+    const claude = makeMockClaude('好看');
+    const chat = makePassthroughChat(claude, db, { visionService });
+
+    const trigger = makeMsg({ rawContent: '[CQ:reply,id=src-99][CQ:at,qq=bot-123] 锐评一下', content: '锐评一下' });
+    await chat.generateReply('g1', trigger, []);
+
+    // describeFromMessage called at least once for the reply-quoted image
+    expect(describeFromMessage).toHaveBeenCalledWith('g1', '[CQ:image,file=abc.jpg]', trigger.userId, BOT_ID);
+  });
+
+  it('awaits vision for most-recent context image when no reply-quote', async () => {
+    const ts = Math.floor(Date.now() / 1000);
+    // Insert image message from another user (no source_message_id needed)
+    db.messages.insert(
+      { groupId: 'g1', userId: 'u2', nickname: 'Carol', content: '(img)', rawContent: '[CQ:image,file=xyz.png]', timestamp: ts - 3, deleted: false },
+    );
+
+    const describeFromMessage = vi.fn().mockResolvedValue('风景照');
+    const visionService = { describeFromMessage } as never;
+    const claude = makeMockClaude('好看呢');
+    const chat = makePassthroughChat(claude, db, { visionService });
+
+    const trigger = makeMsg({ rawContent: '怎么样', content: '怎么样' });
+    await chat.generateReply('g1', trigger, []);
+
+    expect(describeFromMessage).toHaveBeenCalledWith('g1', '[CQ:image,file=xyz.png]', trigger.userId, BOT_ID);
+  });
+
+  it('does not add extra vision wait when trigger itself has an image (no reply-quote, no context image)', async () => {
+    const describeFromMessage = vi.fn().mockResolvedValue('直接图');
+    const visionService = { describeFromMessage } as never;
+    const claude = makeMockClaude('嗯');
+    const chat = makePassthroughChat(claude, db, { visionService });
+
+    // content must be non-empty so the function doesn't early-return at the empty-content guard
+    const trigger = makeMsg({ rawContent: '[CQ:image,file=direct.jpg] 好图', content: '好图' });
+    await chat.generateReply('g1', trigger, []);
+
+    // Called once for trigger image rawContent (DB is empty so context scan finds nothing)
+    expect(describeFromMessage).toHaveBeenCalledWith('g1', '[CQ:image,file=direct.jpg] 好图', trigger.userId, BOT_ID);
+  });
+
+  it('resolves reply only after vision completes (timing check)', async () => {
+    const ts = Math.floor(Date.now() / 1000);
+    db.messages.insert(
+      { groupId: 'g1', userId: 'u2', nickname: 'Dave', content: '(img)', rawContent: '[CQ:image,file=slow.jpg]', timestamp: ts - 2, deleted: false },
+      'slow-99',
+    );
+
+    let visionDone = false;
+    const describeFromMessage = vi.fn().mockImplementation(async () => {
+      await new Promise(r => setTimeout(r, 50));
+      visionDone = true;
+      return '慢图';
+    });
+    const visionService = { describeFromMessage } as never;
+    const claude = makeMockClaude('好');
+    const chat = makePassthroughChat(claude, db, { visionService });
+
+    const trigger = makeMsg({ rawContent: '[CQ:reply,id=slow-99] 看看', content: '看看' });
+    const resultPromise = chat.generateReply('g1', trigger, []);
+    // Before resolving, vision should NOT be done yet (async gap)
+    expect(visionDone).toBe(false);
+    await resultPromise;
+    // After generateReply resolves, vision must have completed
+    expect(visionDone).toBe(true);
+  });
+});

@@ -762,6 +762,37 @@ export class ChatModule implements IChatModule {
       }
     }
 
+    // Vision: sync-await vision for reply-quoted image OR single most-recent context image.
+    // Max 1 wait — correctness > speed, but cap latency to one vision call.
+    if (this.visionService) {
+      let rcToWait: string | null = null;
+
+      // Priority 1: reply-quote target references an image
+      const replyMatch = triggerMessage.rawContent.match(/\[CQ:reply,id=(\d+)/);
+      if (replyMatch) {
+        const quotedMsg = this.db.messages.findBySourceId(replyMatch[1]!);
+        if (quotedMsg && quotedMsg.userId !== this.botUserId && /\[CQ:image,/.test(quotedMsg.rawContent)) {
+          rcToWait = quotedMsg.rawContent;
+        }
+      }
+
+      // Priority 2 (fallback): most recent context message (not from bot, not the trigger) has an image
+      if (!rcToWait) {
+        const recentRaw = this.db.messages.getRecent(groupId, this.chatContextImmediate);
+        for (const m of recentRaw) {
+          if (m.userId !== this.botUserId && m.rawContent !== triggerMessage.rawContent && /\[CQ:image,/.test(m.rawContent)) {
+            rcToWait = m.rawContent;
+            break;
+          }
+        }
+      }
+
+      if (rcToWait) {
+        await this.visionService.describeFromMessage(groupId, rcToWait, triggerMessage.userId, this.botUserId)
+          .catch(err => this.logger.debug({ err }, 'sync vision wait failed'));
+      }
+    }
+
     // ── Weighted participation scoring ───────────────────────────────────
     const recent3 = this.db.messages.getRecent(groupId, 3);
     const recent5 = this.db.messages.getRecent(groupId, this.chatBurstCount);

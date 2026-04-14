@@ -127,6 +127,7 @@ export interface IMessageRepository {
   searchByKeywords(groupId: string, keywords: string[], limit: number): Message[];
   getTopUsers(groupId: string, limit: number): TopUser[];
   softDelete(msgId: string): void;
+  findBySourceId(sourceMessageId: string): Message | null;
 }
 
 export interface IUserRepository {
@@ -576,6 +577,13 @@ class MessageRepository implements IMessageRepository {
 
   softDelete(msgId: string): void {
     this.db.prepare('UPDATE messages SET deleted = 1 WHERE id = ?').run(Number(msgId));
+  }
+
+  findBySourceId(sourceMessageId: string): Message | null {
+    const row = this.db.prepare(
+      'SELECT * FROM messages WHERE source_message_id = ? LIMIT 1'
+    ).get(sourceMessageId) as MessageRow | undefined;
+    return row ? msgFromRow(row) : null;
   }
 }
 
