@@ -70,6 +70,9 @@ interface ChatOptions {
   stickerMinScoreFloor?: number;
   localStickerRepo?: ILocalStickerRepository;
   embedder?: IEmbeddingService;
+  chatContextWide?: number;
+  chatContextMedium?: number;
+  chatContextImmediate?: number;
 }
 
 interface ScoreFactors {
@@ -342,6 +345,9 @@ export class ChatModule implements IChatModule {
   private readonly stickerMinScoreFloor: number;
   private readonly localStickerRepo: ILocalStickerRepository | null;
   private readonly embedder: IEmbeddingService | null;
+  private readonly chatContextWide: number;
+  private readonly chatContextMedium: number;
+  private readonly chatContextImmediate: number;
 
   private readonly loreDirPath: string;
   private readonly loreSizeCapBytes: number;
@@ -390,6 +396,9 @@ export class ChatModule implements IChatModule {
     this.stickerMinScoreFloor = options.stickerMinScoreFloor ?? -3;
     this.localStickerRepo = options.localStickerRepo ?? null;
     this.embedder = options.embedder ?? null;
+    this.chatContextWide = options.chatContextWide ?? chatHistoryDefaults.chatContextWide;
+    this.chatContextMedium = options.chatContextMedium ?? chatHistoryDefaults.chatContextMedium;
+    this.chatContextImmediate = options.chatContextImmediate ?? chatHistoryDefaults.chatContextImmediate;
 
     if (this.moodProactiveEnabled) {
       this.moodProactiveTimer = setInterval(
@@ -570,20 +579,18 @@ export class ChatModule implements IChatModule {
       ? this.db.messages.searchByKeywords(groupId, keywords, this.keywordMatchCount)
       : [];
 
-    const historical = this.db.messages.sampleRandomHistorical(groupId, this.recentMessageCount, this.historicalSampleCount);
+    // ── Tiered 50/20/10 context ───────────────────────────────────────────
+    // All three tiers from the same getRecent(50) call; subsets derived by slicing.
+    // getRecent returns newest-first; we reverse for chronological display.
+    const wideRaw = this.db.messages.getRecent(groupId, this.chatContextWide);
+    const wideChron = [...wideRaw].reverse();
 
-    const recentSlice = recentMessages.length > 0
-      ? recentMessages.slice(0, this.recentMessageCount)
-      : this.db.messages.getRecent(groupId, this.recentMessageCount).map(m => ({
-          messageId: String(m.id),
-          groupId: m.groupId,
-          userId: m.userId,
-          nickname: m.nickname,
-          role: 'member' as const,
-          content: m.content,
-          rawContent: m.content,
-          timestamp: m.timestamp,
-        }));
+    // If DB has no messages yet (trigger not yet stored), synthesize from trigger.
+    const syntheticTrigger = { nickname: triggerMessage.nickname, content: triggerMessage.content };
+    const effectiveWide = wideChron.length > 0 ? wideChron : [syntheticTrigger];
+
+    const mediumChron = effectiveWide.slice(-this.chatContextMedium);
+    const immediateChron = effectiveWide.slice(-this.chatContextImmediate);
 
     // ── Build prompt ──────────────────────────────────────────────────────
 
@@ -591,37 +598,20 @@ export class ChatModule implements IChatModule {
       ? `【相关历史消息】\n${keywordMsgs.map(m => `${m.nickname}: ${m.content}`).join('\n')}\n\n`
       : '';
 
-    const historicalSorted = [...historical].sort((a, b) => a.timestamp - b.timestamp);
-    const historicalSection = historicalSorted.length > 0
-      ? `【群氛围参考】\n${historicalSorted.map(m => `${m.nickname}: ${m.content}`).join('\n')}\n\n`
-      : '';
+    const fmt = (m: { nickname: string; content: string }) => `[${m.nickname}]: ${m.content}`;
 
-    const recentChron = [...recentSlice].reverse();
-    const recentSection = recentChron.length > 0
-      ? `【最近聊天】\n${recentChron.map(m => `${m.nickname}: ${m.content}`).join('\n')}\n\n`
-      : '';
-
-    const historyText = keywordSection + historicalSection + recentSection;
-
-    // ── 5-message trigger context ─────────────────────────────────────────
-    // Fetch up to 5 recent messages; trigger is always the newest (last chronologically).
-    const surroundingRaw = this.db.messages.getRecent(groupId, 5);
-    const surroundingChron = [...surroundingRaw].reverse();
-    // If DB has no messages yet (e.g. trigger not yet stored), synthesize from trigger.
-    const contextEntries: Array<{ nickname: string; content: string }> =
-      surroundingChron.length > 0
-        ? surroundingChron
-        : [{ nickname: triggerMessage.nickname, content: triggerMessage.content }];
-    const triggerContextLines = contextEntries.map((m, i) => {
-      const line = `[${m.nickname}]: ${m.content}`;
-      return i === contextEntries.length - 1 ? `${line}  ← 这是你要接的那条` : line;
+    const wideSection = `# 群最近动向（大范围背景，不用每条都看）\n${effectiveWide.map(fmt).join('\n')}\n\n`;
+    const mediumSection = `# 最近对话流\n${mediumChron.map(fmt).join('\n')}\n\n`;
+    const immediateLines = immediateChron.map((m, i) => {
+      const line = fmt(m);
+      return i === immediateChron.length - 1 ? `${line}  ← 要接的这条` : line;
     });
-    const triggerContextSection = `# 当前对话（最新 ${contextEntries.length} 条）\n${triggerContextLines.join('\n')}\n\n`;
+    const immediateSection = `# 当前 thread 语境\n${immediateLines.join('\n')}\n\n`;
 
     const systemPrompt = this._getGroupIdentityPrompt(groupId);
     const moodSection = this._buildMoodSection(groupId);
     const contextStickerSection = await this._getContextStickers(groupId, triggerMessage.content);
-    const userContent = `${historyText}${triggerContextSection}你要回复的是"←"标记的那条消息，但要结合前面几条一起看语境，不要孤立理解最后一条。直接写出那句回复。`;
+    const userContent = `${keywordSection}${wideSection}${mediumSection}${immediateSection}你要回复的是 ← 那条，但要结合上面三层语境理解。直接写出那句回复。`;
 
     const chatRequest = (hardened = false) => this.claude.complete({
       model: 'claude-haiku-4-5-20251001',

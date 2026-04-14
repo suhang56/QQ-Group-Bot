@@ -492,7 +492,7 @@ describe('ChatModule — keyword retrieval and group identity', () => {
     const call = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { messages: Array<{ content: string }> };
     const promptText = call.messages.map((m: { content: string }) => m.content).join(' ');
     expect(promptText).not.toContain('相关历史消息');
-    expect(promptText).toContain('最近聊天');
+    expect(promptText).toContain('群最近动向');
   });
 
   it('keyword search returns at most chatKeywordMatchCount rows even with many matches', async () => {
@@ -1707,9 +1707,9 @@ describe('ChatModule — pure @-mention reply', () => {
   });
 });
 
-// ── 5-message trigger context ─────────────────────────────────────────────────
+// ── Tiered 50/20/10 context ───────────────────────────────────────────────────
 
-describe('ChatModule — 5-message trigger context in prompt', () => {
+describe('ChatModule — tiered 50/20/10 context scope', () => {
   let db: Database;
   let claude: ReturnType<typeof vi.fn>;
 
@@ -1731,54 +1731,81 @@ describe('ChatModule — 5-message trigger context in prompt', () => {
 
   const ts = Math.floor(Date.now() / 1000);
 
-  it('includes up to 5 recent messages in prompt with arrow marker on last', async () => {
-    for (let i = 0; i < 5; i++) {
-      db.messages.insert({ groupId: 'g1', userId: `u${i}`, nickname: `User${i}`, content: `msg${i}`, timestamp: ts + i, deleted: false });
+  function insertN(n: number) {
+    for (let i = 0; i < n; i++) {
+      db.messages.insert({ groupId: 'g1', userId: `u${i % 5}`, nickname: `U${i}`, content: `m${i}`, timestamp: ts + i, deleted: false });
     }
-    const chat = makeChat();
-    const trigger = makeMsg({ content: 'msg4', nickname: 'User4' });
-    await chat.generateReply('g1', trigger, []);
+  }
+
+  function getPrompt(): string {
     const call = (claude as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { messages: Array<{ content: string }> };
-    const prompt = call.messages[0]!.content as string;
-    expect(prompt).toContain('当前对话（最新 5 条）');
-    expect(prompt).toContain('← 这是你要接的那条');
-    expect(prompt).toContain('[User4]: msg4  ← 这是你要接的那条');
+    return call.messages[0]!.content as string;
+  }
+
+  it('all three tier labels appear in prompt', async () => {
+    insertN(50);
+    await makeChat().generateReply('g1', makeMsg(), []);
+    const prompt = getPrompt();
+    expect(prompt).toContain('群最近动向');
+    expect(prompt).toContain('最近对话流');
+    expect(prompt).toContain('当前 thread 语境');
   });
 
-  it('uses all available messages when fewer than 5 exist', async () => {
-    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'only one', timestamp: ts, deleted: false });
-    const chat = makeChat();
-    await chat.generateReply('g1', makeMsg({ content: 'only one', nickname: 'Alice' }), []);
-    const call = (claude as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { messages: Array<{ content: string }> };
-    const prompt = call.messages[0]!.content as string;
-    expect(prompt).toContain('当前对话（最新 1 条）');
+  it('tier 1 (wide) contains all 50 messages', async () => {
+    insertN(50);
+    await makeChat({ chatContextWide: 50, chatContextMedium: 20, chatContextImmediate: 10 }).generateReply('g1', makeMsg(), []);
+    const prompt = getPrompt();
+    const wideStart = prompt.indexOf('群最近动向');
+    const mediumStart = prompt.indexOf('最近对话流');
+    const wideBlock = prompt.slice(wideStart, mediumStart);
+    // Wide block should contain m0 (oldest) and m49 (newest)
+    expect(wideBlock).toContain('[U0]: m0');
+    expect(wideBlock).toContain('[U49]: m49');
   });
 
-  it('surrounding messages are in chronological order with trigger last', async () => {
-    const nicknames = ['A', 'B', 'C', 'D', 'E'];
-    for (let i = 0; i < 5; i++) {
-      db.messages.insert({ groupId: 'g1', userId: `u${i}`, nickname: nicknames[i]!, content: `m${i}`, timestamp: ts + i, deleted: false });
-    }
-    const chat = makeChat();
-    await chat.generateReply('g1', makeMsg({ content: 'm4', nickname: 'E' }), []);
-    const call = (claude as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { messages: Array<{ content: string }> };
-    const prompt = call.messages[0]!.content as string;
-    const contextStart = prompt.indexOf('当前对话');
-    const contextBlock = prompt.slice(contextStart);
-    const posA = contextBlock.indexOf('[A]');
-    const posE = contextBlock.indexOf('[E]');
-    expect(posA).toBeGreaterThanOrEqual(0);
-    expect(posE).toBeGreaterThan(posA);
-    expect(contextBlock).toContain('[E]: m4  ← 这是你要接的那条');
+  it('tier 2 (medium) contains only last 20, not the oldest', async () => {
+    insertN(50);
+    await makeChat({ chatContextWide: 50, chatContextMedium: 20, chatContextImmediate: 10 }).generateReply('g1', makeMsg(), []);
+    const prompt = getPrompt();
+    const mediumStart = prompt.indexOf('最近对话流');
+    const immediateStart = prompt.indexOf('当前 thread 语境');
+    const mediumBlock = prompt.slice(mediumStart, immediateStart);
+    expect(mediumBlock).not.toContain('[U0]: m0');
+    expect(mediumBlock).toContain('[U49]: m49');
   });
 
-  it('prompt instructs Claude to reply to marked message using surrounding context', async () => {
-    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'hello', timestamp: ts, deleted: false });
-    const chat = makeChat();
-    await chat.generateReply('g1', makeMsg({ content: 'hello', nickname: 'Alice' }), []);
-    const call = (claude as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { messages: Array<{ content: string }> };
-    const prompt = call.messages[0]!.content as string;
-    expect(prompt).toContain('你要回复的是"←"标记的那条消息');
-    expect(prompt).toContain('结合前面几条一起看语境');
+  it('tier 3 (immediate) contains last 10 with arrow on trigger', async () => {
+    insertN(50);
+    await makeChat({ chatContextWide: 50, chatContextMedium: 20, chatContextImmediate: 10 }).generateReply('g1', makeMsg({ content: 'm49', nickname: 'U49' }), []);
+    const prompt = getPrompt();
+    const immediateStart = prompt.indexOf('当前 thread 语境');
+    const immediateBlock = prompt.slice(immediateStart);
+    // Should not contain m39 (that's the 11th from end)
+    expect(immediateBlock).not.toContain('[U39]: m39');
+    expect(immediateBlock).toContain('[U49]: m49  ← 要接的这条');
+  });
+
+  it('arrow marker appears only once (on trigger in tier 3)', async () => {
+    insertN(50);
+    await makeChat().generateReply('g1', makeMsg(), []);
+    const prompt = getPrompt();
+    const arrowCount = (prompt.match(/← 要接的这条/g) ?? []).length;
+    expect(arrowCount).toBe(1);
+  });
+
+  it('fewer than 50 messages: all tiers use what is available', async () => {
+    insertN(5);
+    await makeChat({ chatContextWide: 50, chatContextMedium: 20, chatContextImmediate: 10 }).generateReply('g1', makeMsg({ content: 'm4', nickname: 'U4' }), []);
+    const prompt = getPrompt();
+    expect(prompt).toContain('[U0]: m0');
+    expect(prompt).toContain('[U4]: m4  ← 要接的这条');
+  });
+
+  it('prompt instructs Claude to use all three tiers', async () => {
+    insertN(3);
+    await makeChat().generateReply('g1', makeMsg(), []);
+    const prompt = getPrompt();
+    expect(prompt).toContain('你要回复的是 ← 那条');
+    expect(prompt).toContain('三层语境');
   });
 });

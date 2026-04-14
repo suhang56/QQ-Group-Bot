@@ -15,6 +15,9 @@ export const chatHistoryDefaults = {
   chatRecentCount: 20,
   chatHistoricalSampleCount: 15,
   chatKeywordMatchCount: 15,
+  chatContextWide: 50,
+  chatContextMedium: 20,
+  chatContextImmediate: 10,
   groupIdentityCacheTtlMs: 3_600_000, // 1 hour
   groupIdentityTopUsers: 20,
   loreDirPath: 'data/lore',
