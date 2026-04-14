@@ -92,9 +92,9 @@ function makeModule(
 
 // ── assessImage watchlist tests ────────────────────────────────────────────────
 
-describe('ModeratorModule.assessImage — watchlist prompt', () => {
-  it('full 18-digit ID detected → severity 5', async () => {
-    const claude = makeClaudeVision({ violation: true, severity: 5, reason: '含完整身份证号', components_seen: ['310110199701093724'] });
+describe('ModeratorModule.assessImage — dual-layer prompt', () => {
+  it('full 18-digit ID detected → severity 5, category watchlist', async () => {
+    const claude = makeClaudeVision({ violation: true, severity: 5, reason: '含完整身份证号', category: 'watchlist', components_seen: ['310110199701093724'], rule_id: null });
     const mod = makeModule(claude);
     const verdict = await mod.assessImage(makeTarget(), makeImageBytes());
 
@@ -103,8 +103,8 @@ describe('ModeratorModule.assessImage — watchlist prompt', () => {
     expect(verdict.reason).toBe('含完整身份证号');
   });
 
-  it('310110 only → severity 4', async () => {
-    const claude = makeClaudeVision({ violation: true, severity: 4, reason: '含310110前缀', components_seen: ['310110'] });
+  it('310110 only → severity 4, category watchlist', async () => {
+    const claude = makeClaudeVision({ violation: true, severity: 4, reason: '含310110前缀', category: 'watchlist', components_seen: ['310110'], rule_id: null });
     const mod = makeModule(claude);
     const verdict = await mod.assessImage(makeTarget(), makeImageBytes());
 
@@ -113,7 +113,7 @@ describe('ModeratorModule.assessImage — watchlist prompt', () => {
   });
 
   it('single fragment (1997 only) → severity 2, log only', async () => {
-    const claude = makeClaudeVision({ violation: true, severity: 2, reason: '出生年1997单独出现', components_seen: ['1997'] });
+    const claude = makeClaudeVision({ violation: true, severity: 2, reason: '出生年1997单独出现', category: 'watchlist', components_seen: ['1997'], rule_id: null });
     const mod = makeModule(claude);
     const verdict = await mod.assessImage(makeTarget(), makeImageBytes());
 
@@ -122,7 +122,7 @@ describe('ModeratorModule.assessImage — watchlist prompt', () => {
   });
 
   it('two fragments together (310110 + 1997) → severity 5', async () => {
-    const claude = makeClaudeVision({ violation: true, severity: 5, reason: '310110与1997同时出现', components_seen: ['310110', '1997'] });
+    const claude = makeClaudeVision({ violation: true, severity: 5, reason: '310110与1997同时出现', category: 'watchlist', components_seen: ['310110', '1997'], rule_id: null });
     const mod = makeModule(claude);
     const verdict = await mod.assessImage(makeTarget(), makeImageBytes());
 
@@ -131,12 +131,35 @@ describe('ModeratorModule.assessImage — watchlist prompt', () => {
   });
 
   it('no components → violation: false', async () => {
-    const claude = makeClaudeVision({ violation: false, severity: null, reason: '', components_seen: [] });
+    const claude = makeClaudeVision({ violation: false, severity: null, reason: '', category: null, components_seen: [], rule_id: null });
     const mod = makeModule(claude);
     const verdict = await mod.assessImage(makeTarget(), makeImageBytes());
 
     expect(verdict.violation).toBe(false);
     expect(verdict.severity).toBeNull();
+  });
+
+  it('rules hit (rule 575 黑屁声优) → severity 4, category rules, prompt includes rules list', async () => {
+    const ruleRepo: IRuleRepository = {
+      insert: vi.fn(), findById: vi.fn().mockReturnValue(null),
+      getAll: vi.fn().mockReturnValue([{ id: 575, groupId: GROUP_ID, content: '禁止黑屁声优', type: 'positive', source: 'manual', embedding: null }]),
+      getPage: vi.fn().mockReturnValue({ rules: [], total: 0 }),
+    };
+    const claude: IClaudeClient = {
+      complete: vi.fn(), describeImage: vi.fn(),
+      visionWithPrompt: vi.fn().mockResolvedValue(JSON.stringify({ violation: true, severity: 4, reason: '黑屁声优', category: 'rules', components_seen: [], rule_id: 575 })),
+    } as unknown as IClaudeClient;
+    const mod = new ModeratorModule(claude, makeAdapter(), makeMessageRepo(), makeModerationRepo(), makeConfigRepo(), ruleRepo, null, makeImageCache());
+
+    const verdict = await mod.assessImage(makeTarget(), makeImageBytes());
+
+    expect(verdict.violation).toBe(true);
+    expect(verdict.severity).toBe(4);
+    expect(verdict.reason).toBe('黑屁声优');
+    // Verify rules were included in prompt
+    const promptArg = (claude.visionWithPrompt as ReturnType<typeof vi.fn>).mock.calls[0]![2] as string;
+    expect(promptArg).toContain('禁止黑屁声优');
+    expect(promptArg).toContain('[规则575]');
   });
 
   it('malformed JSON → fail-safe returns violation=false', async () => {
@@ -371,6 +394,25 @@ describe('Router image moderation — severity routing', () => {
     expect((adapter.deleteMsg as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
     expect((db.pendingModeration.queue as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
     expect((moderation.insert as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+  });
+
+  it('rules hit severity 4 (category=rules): no deleteMsg, pendingModeration.queue, DM sent', async () => {
+    const moderation = makeModerationForRouter();
+    const db = makeDb({ autoMod: true }, moderation);
+    const adapter = makeAdapter();
+    const router = new Router(db, adapter, makeRateLimiter(), 'bot-id');
+
+    const mod = {
+      assess: vi.fn().mockResolvedValue({ violation: false, severity: null, reason: '', confidence: 1 }),
+      assessImage: vi.fn().mockResolvedValue({ violation: true, severity: 4, reason: '黑屁声优', confidence: 1 }),
+    } as unknown as ModeratorModule;
+    router.setModerator(mod);
+
+    await dispatchAndWait(router, makeGroupMsg(), mod as unknown as { assessImage: ReturnType<typeof vi.fn> });
+
+    expect((adapter.deleteMsg as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    expect((db.pendingModeration.queue as ReturnType<typeof vi.fn>)).toHaveBeenCalled();
+    expect((adapter.sendPrivateMessage as ReturnType<typeof vi.fn>)).toHaveBeenCalled();
   });
 
   it('message with image + autoMod off → assessImage NOT called', async () => {

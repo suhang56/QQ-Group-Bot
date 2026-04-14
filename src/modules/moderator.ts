@@ -286,37 +286,59 @@ ${offenseHistory}${ragSection}`;
     }
     this.imageRateCounts.set(hourKey, count + 1);
 
-    const prompt = `你在审核 QQ 群的图片，任务非常具体：检查图片中是否出现下列数字片段的任何形式。
+    const allRules = this.rules.getAll(target.groupId);
+    const rulesList = allRules.length > 0
+      ? allRules.map(r => `[规则${r.id}] ${r.content}`).join('\n')
+      : '（暂无规则）';
 
-监控清单（这些是某位声优被泄露的身份证号的所有组成部分）：
-- 完整号: 310110199701093724
-- 前 6 位（上海浦东行政区划码）: 310110 / 310 110 / 310-110 / 310/110
-- 出生年: 1997（单独出现不足为据，但若与其它片段同现必须标记）
-- 月日: 0109 / 1-9 / 01-09 / 1.9 / 1月9日
+    const prompt = `你在审核 QQ 群的图片。任务有两层：
+
+## 一、优先监控（最高优先）—— 声优 PII 泄露 watchlist
+
+检查图片中是否出现下列数字片段的任何形式：
+- 完整 ID: 310110199701093724
+- 行政区划码: 310110 / 310 110 / 310-110
+- 出生年: 1997（独立出现 = 轻度；与其它片段同现 = 严重）
+- 月日: 0109 / 01-09 / 1.9 / 1997-01-09 / 19970109
 - 尾部: 3724 / 372 4
 
-检查点：
-1. 直接出现（文字、标题、CQ码）
-2. 作为计算/数学题/积分/阶乘的结果（例如"答案是 310110"）
-3. 作为代码片段的输出或注释
-4. 被拆分/换行/倒序
-5. 在截图里（Gemini / ChatGPT / 微信 / 任何应用）
-6. 作为梗图的文字或数字
+这些可能作为计算/代码结果、数学题答案、拆分、截图里的文字、梗图数字、别的 AI 截图等形式出现。
 
-判断规则：
-- 出现完整 18 位 → severity 5（全封）
-- 只出现 310110 → severity 4
-- 出现 1997 或 0109 或 3724 任意一个 → severity 2（单独出现可能巧合，但记一笔）
-- 同时出现 2 个或以上片段（例如 310110 + 1997 / 1997 + 0109）→ severity 5
-- 什么都没出现 → violation: false
+完整号 → severity 5
+两个或以上片段同现 → severity 5
+只出现 310110 → severity 4
+单独出现 1997 / 0109 / 3724 → severity 2
 
-只返回 JSON:
+## 二、一般群规审查 —— 所有群规
+
+本群的完整规则（逐条读）：
+
+${rulesList}
+
+判断原则：
+- 文字+图像组合讽刺很重要（例如一张"肥胖女性弹琴"图 + "贾玲还会弹钢琴" caption = 恶意嘲讽声优，触发黑屁规则）
+- 别的 AI 截图（Gemini / ChatGPT / 微信 / 小红书）里的敏感内容 = 转播违规
+- 政治 / 历史 / 同音字 / 下头 / 地图炮 / 黑屁 / 隐写 doxxing 全部包括
+- 善意调侃和恶意嘲讽的边界参考各条规则的"判断原则"部分
+- 群友之间的普通互损、情侣调情、自嘲本命 都不算违规
+
+一般规则命中 → severity 3 或 4 (按规则严重度)
+
+---
+
+返回 ONLY JSON:
 {
   "violation": boolean,
   "severity": 0-5,
-  "reason": "<中文简述，说明看到了哪个片段>",
-  "components_seen": ["310110", "1997", "0109", "3724"]
-}`;
+  "reason": "<中文简述>",
+  "category": "watchlist" | "rules" | null,
+  "components_seen": [],
+  "rule_id": null
+}
+
+watchlist 命中 → category: "watchlist"，components_seen 列出命中片段
+一般规则命中 → category: "rules"，rule_id 填对应规则编号
+没命中 → violation: false，category: null`;
 
     let raw: string;
     try {
@@ -326,7 +348,7 @@ ${offenseHistory}${ragSection}`;
       return FAIL_SAFE_VERDICT;
     }
 
-    interface ImageVerdictJson { violation: boolean; severity: number | null; reason: string; components_seen?: string[] }
+    interface ImageVerdictJson { violation: boolean; severity: number | null; reason: string; category?: string | null; components_seen?: string[]; rule_id?: number | null }
     let parsed: ImageVerdictJson | null = null;
     try {
       parsed = JSON.parse(extractJson(raw).trim()) as ImageVerdictJson;
@@ -338,8 +360,9 @@ ${offenseHistory}${ragSection}`;
     const rawSeverity = parsed?.severity ?? null;
     const reason = parsed?.reason ?? '';
     const componentsSeen = parsed?.components_seen ?? [];
+    const category = parsed?.category ?? null;
+    const ruleId = parsed?.rule_id ?? null;
 
-    // Severity is taken directly from Claude — watchlist prompt already encodes the correct mapping
     let finalSeverity: 1 | 2 | 3 | 4 | 5 | null = null;
     if (violation && rawSeverity !== null && rawSeverity >= 1) {
       finalSeverity = Math.min(rawSeverity, 5) as 1 | 2 | 3 | 4 | 5;
@@ -347,7 +370,7 @@ ${offenseHistory}${ragSection}`;
 
     // Cache result (TTL 1h — short so rule-set changes propagate quickly)
     if (this.imageModCache) {
-      this.imageModCache.set({ fileKey: target.fileKey, violation, severity: rawSeverity ?? 0, reason: reason || null, ruleId: null, createdAt: now });
+      this.imageModCache.set({ fileKey: target.fileKey, violation, severity: rawSeverity ?? 0, reason: reason || null, ruleId: ruleId ?? null, createdAt: now });
       const cutoff = now - IMAGE_MOD_CACHE_HOURS * 3600;
       void Promise.resolve().then(() => {
         const purged = this.imageModCache!.purgeOlderThan(cutoff);
@@ -355,7 +378,7 @@ ${offenseHistory}${ragSection}`;
       });
     }
 
-    this.logger.debug({ groupId: target.groupId, fileKey: target.fileKey, violation, severity: finalSeverity, componentsSeen, reason }, 'image assessed');
+    this.logger.debug({ groupId: target.groupId, fileKey: target.fileKey, violation, severity: finalSeverity, category, componentsSeen, ruleId, reason }, 'image assessed');
     return { violation, severity: finalSeverity, reason, confidence: 1 };
   }
 
