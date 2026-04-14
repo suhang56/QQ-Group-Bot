@@ -16,6 +16,8 @@ const SUBSTR_FORBIDDEN = [
   '根据您', '历史发言', '不当内容', '无法提供',
   '请问您', '您可以提供', '我来模仿', '风格生成', '您希望', '我可以', '需要我帮', '需要我',
   '我是ai', '我是bot', '一个ai', '一个bot',
+  // slurs / group-banned terms — 0 tolerance
+  '药娘',
 ];
 
 // Soft-forbidden: reply STARTS with these → assistant meta-framing
