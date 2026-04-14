@@ -1,6 +1,6 @@
 import type { GroupConfig } from './storage/db.js';
 
-export const RUNTIME_CHAT_MODEL = 'claude-haiku-4-5-20251001' as const;
+export const RUNTIME_CHAT_MODEL = 'claude-sonnet-4-6' as const;
 export const VISION_MODEL = 'claude-haiku-4-5-20251001' as const;
 
 export const lurkerDefaults = {
