@@ -120,9 +120,9 @@ export class ClaudeClient implements IClaudeClient {
   }
 
   async describeImage(imageBytes: Buffer, model: ClaudeModel): Promise<string> {
-    const downscaled = await ClaudeClient.downscale(imageBytes);
+    // Pass original bytes — full resolution gives better text/detail reading
     const text = await this.visionWithPrompt(
-      downscaled,
+      imageBytes,
       model,
       '仔细描述这张图：人物 / 物品 / 场景 / 可见文字 / 表情 / 动作 / 颜色 / 风格 / 整体氛围。30-100 字。如果是聊天截图把可见文字内容读出来。如果是 emoji / 贴纸 / 梗图说明梗内容。如果是动画/游戏角色尽量识别角色名。只输出描述本身。',
       300,
