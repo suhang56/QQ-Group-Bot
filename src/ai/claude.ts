@@ -143,7 +143,7 @@ export class ClaudeClient implements IClaudeClient {
     }
   }
 
-  async visionWithPrompt(imageBytes: Buffer, model: ClaudeModel, prompt: string, maxTokens = 300): Promise<string> {
+  async visionWithPrompt(imageBytes: Buffer, model: ClaudeModel, prompt: string, maxTokens = 400): Promise<string> {
     const base64 = imageBytes.toString('base64');
     const mediaType = this._detectMediaType(imageBytes);
 
