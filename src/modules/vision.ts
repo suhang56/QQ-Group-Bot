@@ -33,7 +33,7 @@ export class VisionService {
   ) {
     this.enabled = opts.enabled ?? true;
     this.model = opts.model ?? VISION_MODEL;
-    this.rateLimitMs = opts.rateLimitMs ?? 10_000;
+    this.rateLimitMs = opts.rateLimitMs ?? 2_000;
     this.cacheDays = opts.cacheDays ?? 30;
   }
 

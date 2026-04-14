@@ -213,17 +213,17 @@ describe('ModeratorModule.assessImage — dual-layer prompt', () => {
     expect(stored.violation).toBe(true);
   });
 
-  it('rate limit: 11th uncached check in same group-hour is skipped', async () => {
+  it('rate limit: 121st uncached check in same group-hour is skipped', async () => {
     const imageCache = makeImageCache(null); // always miss
     const claude = makeClaudeVision({ violation: false, severity: null, reason: '', components_seen: [] });
     const mod = makeModule(claude, { imageCache });
 
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < 120; i++) {
       await mod.assessImage({ ...makeTarget(), fileKey: `key-${i}` }, makeImageBytes());
     }
-    const verdict = await mod.assessImage({ ...makeTarget(), fileKey: 'key-11' }, makeImageBytes());
+    const verdict = await mod.assessImage({ ...makeTarget(), fileKey: 'key-121' }, makeImageBytes());
 
-    expect((claude.visionWithPrompt as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(10);
+    expect((claude.visionWithPrompt as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(120);
     expect(verdict.violation).toBe(false);
   });
 

@@ -84,7 +84,7 @@ function parseSonnetResponse(text: string): { violation: boolean; severity: numb
 }
 
 const IMAGE_MOD_CACHE_HOURS = 1; // 1h TTL so rule-set changes propagate quickly
-const IMAGE_MOD_RATE_LIMIT_PER_HOUR = 10;
+const IMAGE_MOD_RATE_LIMIT_PER_HOUR = 120;
 
 export class ModeratorModule implements IModeratorModule {
   private readonly logger = createLogger('moderator');
