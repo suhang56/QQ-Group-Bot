@@ -1890,6 +1890,43 @@ describe('ChatModule — tiered 50/20/10 context scope', () => {
     expect(prompt).toContain('带箭头的消息值不值得你开口');
     expect(prompt).toContain('只输出一个：<skip> 或 一条自然反应');
   });
+
+  it('bot-authored message in history gets [你(nickname)] prefix', async () => {
+    // Insert one message authored by the bot itself
+    db.messages.insert({ groupId: 'g1', userId: BOT_ID, nickname: 'BotNick', content: 'bot said this', timestamp: ts, deleted: false });
+    await makeChat().generateReply('g1', makeMsg(), []);
+    const prompt = getPrompt();
+    expect(prompt).toContain('[你(BotNick)]: bot said this');
+    expect(prompt).not.toContain('[BotNick]: bot said this');
+  });
+
+  it('non-bot messages do not get [你(] prefix', async () => {
+    db.messages.insert({ groupId: 'g1', userId: 'other-user', nickname: 'Alice', content: 'alice said this', timestamp: ts, deleted: false });
+    await makeChat().generateReply('g1', makeMsg(), []);
+    const prompt = getPrompt();
+    expect(prompt).toContain('[Alice]: alice said this');
+    expect(prompt).not.toContain('[你(Alice)]');
+  });
+
+  it('clarifier "不要把群友的话当成你自己说过的" is present in user content', async () => {
+    insertN(3);
+    await makeChat().generateReply('g1', makeMsg(), []);
+    const prompt = getPrompt();
+    expect(prompt).toContain('不要把群友的话当成你自己说过的');
+  });
+
+  it('regression: arrow marker still attaches to last immediate message regardless of bot-self marking', async () => {
+    // Insert a bot message followed by a peer message as the trigger
+    db.messages.insert({ groupId: 'g1', userId: BOT_ID, nickname: 'BotNick', content: 'i said earlier', timestamp: ts, deleted: false });
+    db.messages.insert({ groupId: 'g1', userId: 'peer', nickname: 'Peer', content: 'peer trigger', timestamp: ts + 1, deleted: false });
+    await makeChat().generateReply('g1', makeMsg({ content: 'peer trigger', nickname: 'Peer' }), []);
+    const prompt = getPrompt();
+    expect(prompt).toContain('← 要接的这条');
+    // Arrow must be on the last immediate line
+    const immediateStart = prompt.indexOf('当前 thread 语境');
+    const immediateBlock = prompt.slice(immediateStart);
+    expect(immediateBlock).toContain('← 要接的这条');
+  });
 });
 
 // ── Bot recent outputs / self-repetition avoidance ───────────────────────────
@@ -1925,7 +1962,7 @@ describe('ChatModule — self-repetition avoidance', () => {
     await chat.generateReply('g1', makeMsg({ content: 'why' }), []);
     const call = claude.mock.calls[0]![0] as { messages: Array<{ content: string }> };
     const prompt = call.messages[0]!.content as string;
-    expect(prompt).toContain('避免重复相同意思');
+    expect(prompt).toContain('别重复这些句式和意思');
     expect(prompt).toContain('bot reply');
   });
 

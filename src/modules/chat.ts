@@ -709,7 +709,7 @@ export class ChatModule implements IChatModule {
     const wideChron = [...wideRaw].reverse();
 
     // If DB has no messages yet (trigger not yet stored), synthesize from trigger.
-    const syntheticTrigger = { nickname: triggerMessage.nickname, content: triggerMessage.content };
+    const syntheticTrigger = { userId: triggerMessage.userId, nickname: triggerMessage.nickname, content: triggerMessage.content };
     const effectiveWide = wideChron.length > 0 ? wideChron : [syntheticTrigger];
 
     const mediumChron = effectiveWide.slice(-this.chatContextMedium);
@@ -717,11 +717,16 @@ export class ChatModule implements IChatModule {
 
     // ── Build prompt ──────────────────────────────────────────────────────
 
+    const fmtMsg = (m: { userId: string; nickname: string; content: string }) =>
+      m.userId === this.botUserId
+        ? `[你(${m.nickname})]: ${m.content}`
+        : `[${m.nickname}]: ${m.content}`;
+
     const keywordSection = keywordMsgs.length > 0
-      ? `【相关历史消息】\n${keywordMsgs.map(m => `${m.nickname}: ${m.content}`).join('\n')}\n\n`
+      ? `【相关历史消息】\n${keywordMsgs.map(m => `${fmtMsg(m)}`).join('\n')}\n\n`
       : '';
 
-    const fmt = (m: { nickname: string; content: string }) => `[${m.nickname}]: ${m.content}`;
+    const fmt = (m: { userId: string; nickname: string; content: string }) => fmtMsg(m);
 
     const wideSection = `# 群最近动向（大范围背景，不用每条都看）\n${effectiveWide.map(fmt).join('\n')}\n\n`;
     const mediumSection = `# 最近对话流\n${mediumChron.map(fmt).join('\n')}\n\n`;
@@ -737,10 +742,12 @@ export class ChatModule implements IChatModule {
 
     const recentOutputs = this.botRecentOutputs.get(groupId) ?? [];
     const avoidSection = recentOutputs.length > 0
-      ? `你最近说过的话（避免重复相同意思或句式）：\n${recentOutputs.map(r => `- ${r}`).join('\n')}\n\n`
+      ? `# 你最近自己发过的话（别重复这些句式和意思）：\n${recentOutputs.map(r => `- ${r}`).join('\n')}\n\n`
       : '';
 
-    const userContent = `${keywordSection}${wideSection}${mediumSection}${immediateSection}${avoidSection}参考以上语境，判断：那条带箭头的消息值不值得你开口。
+    const userContent = `${keywordSection}${wideSection}${mediumSection}${immediateSection}${avoidSection}以下语境里出现 [你(昵称)] 的消息是你自己之前说过的，出现 [别人昵称] 的是群友说的。**不要把群友的话当成你自己说过的**。
+
+参考以上语境，判断：那条带箭头的消息值不值得你开口。
 
 - 如果这话题你不熟、不感兴趣、或硬接会出戏 → 只输出 <skip>
 - 如果是 fandom/曲目/人物拷问但你不确定事实 → 装傻或反问，不要猜答案
