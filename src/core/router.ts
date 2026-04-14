@@ -768,7 +768,7 @@ export class Router implements IRouter {
     }
 
     if (text === '/help') {
-      await reply('/approve <id> — 执行建议处理\n/reject <id> — 拒绝，不处理\n/pending — 查看待处理列表\n/mod_on — 开启所有群的自动审核\n/mod_off — 关闭所有群的自动审核（仅观察）\n/welcome_on <groupId> — 开启该群欢迎消息\n/welcome_off <groupId> — 关闭该群欢迎消息\n/idguard_on <groupId> — 开启该群身份证拦截\n/idguard_off <groupId> — 关闭该群身份证拦截');
+      await reply('/approve <id> — 执行建议处理\n/reject <id> — 拒绝，不处理\n/pending — 查看待处理列表\n/mod_on — 开启所有群的自动审核\n/mod_off — 关闭所有群的自动审核（仅观察）\n/welcome_on <groupId> — 开启该群欢迎消息\n/welcome_off <groupId> — 关闭该群欢迎消息\n/idguard_on <groupId> — 开启该群身份证拦截\n/idguard_off <groupId> — 关闭该群身份证拦截\n/cache_clear_images — 清除图片审核缓存（规则更新后使用）');
       return;
     }
 
@@ -814,6 +814,13 @@ export class Router implements IRouter {
       this.db.groupConfig.upsert({ ...cfg, welcomeEnabled: enable });
       await reply(`群 ${groupId} 欢迎消息已${enable ? '开启' : '关闭'}。`);
       logger.info({ groupId, enable }, 'welcome toggle by admin');
+      return;
+    }
+
+    if (text === '/cache_clear_images') {
+      const purged = this.db.imageModCache.purgeOlderThan(Math.floor(Date.now() / 1000) + 1);
+      await reply(`已清除 ${purged} 条图片审核缓存。`);
+      logger.info({ purged }, 'image mod cache cleared by admin');
       return;
     }
 

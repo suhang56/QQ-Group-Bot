@@ -1,9 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { IdCardGuard, containsIdCardNumber, extractIdCards } from '../src/modules/id-guard.js';
 import type { INapCatAdapter } from '../src/adapter/napcat.js';
 import type { GroupMessage } from '../src/adapter/napcat.js';
 import type { IModerationRepository } from '../src/storage/db.js';
-import type { VisionService } from '../src/modules/vision.js';
 import { initLogger } from '../src/utils/logger.js';
 
 initLogger({ level: 'silent' });
@@ -100,28 +99,20 @@ function makeModeration(): IModerationRepository {
   } as unknown as IModerationRepository;
 }
 
-function makeVision(checkResult: string | null = null): VisionService {
-  return {
-    checkIdCard: vi.fn().mockResolvedValue(checkResult),
-  } as unknown as VisionService;
-}
-
 function makeGuard(opts: {
   adapter?: INapCatAdapter;
   moderation?: IModerationRepository;
-  vision?: VisionService;
   enabled?: boolean;
-} = {}): { guard: IdCardGuard; adapter: INapCatAdapter; moderation: IModerationRepository; vision: VisionService } {
+} = {}): { guard: IdCardGuard; adapter: INapCatAdapter; moderation: IModerationRepository } {
   const adapter = opts.adapter ?? makeAdapter();
   const moderation = opts.moderation ?? makeModeration();
-  const vision = opts.vision ?? makeVision();
   const enabled = opts.enabled ?? true;
   const guard = new IdCardGuard({
-    adapter, moderation, vision,
+    adapter, moderation,
     botUserId: BOT_ID,
     enabled: () => enabled,
   });
-  return { guard, adapter, moderation, vision };
+  return { guard, adapter, moderation };
 }
 
 describe('IdCardGuard', () => {
@@ -164,34 +155,17 @@ describe('IdCardGuard', () => {
     expect(adapter.deleteMsg).not.toHaveBeenCalled();
   });
 
-  it('does not block clean message — no adapter or vision calls', async () => {
-    const { guard, adapter, vision } = makeGuard();
+  it('does not block clean message — no adapter calls', async () => {
+    const { guard, adapter } = makeGuard();
     const msg = makeMsg({ content: '今天天气真好', rawContent: '今天天气真好' });
     const blocked = await guard.check(msg);
 
     expect(blocked).toBe(false);
     expect(adapter.deleteMsg).not.toHaveBeenCalled();
-    expect(vision.checkIdCard).not.toHaveBeenCalled();
   });
 
-  it('blocks image message when vision returns a number', async () => {
-    const vision = makeVision('310110199701093724');
-    const { guard, adapter } = makeGuard({ vision });
-    const fileToken = 'abc.image';
-    const msg = makeMsg({
-      content: '',
-      rawContent: `[CQ:image,file=${fileToken},url=http://example.com/img.jpg]`,
-    });
-    const blocked = await guard.check(msg);
-
-    expect(blocked).toBe(true);
-    expect(vision.checkIdCard).toHaveBeenCalledWith(fileToken);
-    expect(adapter.deleteMsg).toHaveBeenCalled();
-  });
-
-  it('does not block image when vision returns null', async () => {
-    const vision = makeVision(null);
-    const { guard, adapter } = makeGuard({ vision });
+  it('image-only message (no text ID) is not blocked — image moderation is delegated to assessImage', async () => {
+    const { guard, adapter } = makeGuard();
     const msg = makeMsg({
       content: '',
       rawContent: '[CQ:image,file=abc.image,url=http://example.com/img.jpg]',
@@ -221,19 +195,6 @@ describe('IdCardGuard', () => {
 
     expect(blocked).toBe(true);
     expect(adapter.deleteMsg).toHaveBeenCalledTimes(1);
-  });
-
-  it('vision API throws: fail-safe (not blocked, no delete)', async () => {
-    const vision = { checkIdCard: vi.fn().mockRejectedValue(new Error('API down')) } as unknown as VisionService;
-    const { guard, adapter } = makeGuard({ vision });
-    const msg = makeMsg({
-      content: '',
-      rawContent: '[CQ:image,file=abc.image,url=http://example.com/img.jpg]',
-    });
-    const blocked = await guard.check(msg);
-
-    expect(blocked).toBe(false);
-    expect(adapter.deleteMsg).not.toHaveBeenCalled();
   });
 
   it('skips check entirely for bot own messages', async () => {

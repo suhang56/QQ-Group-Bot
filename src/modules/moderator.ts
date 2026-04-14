@@ -83,8 +83,9 @@ function parseSonnetResponse(text: string): { violation: boolean; severity: numb
   }
 }
 
-const IMAGE_MOD_SEVERITY_CAP = 3; // false positives on images are costly — cap at warn level
-const IMAGE_MOD_CACHE_DAYS = 7;
+const IMAGE_MOD_SEVERITY_CAP = 3; // false positives on images are costly — cap at warn level (unless obfuscation)
+const IMAGE_MOD_OBFUSCATION_SEVERITY_FLOOR = 4; // obfuscated doxxing always enters approval queue
+const IMAGE_MOD_CACHE_HOURS = 1; // 1h TTL so rule-set changes propagate quickly
 const IMAGE_MOD_RATE_LIMIT_PER_HOUR = 10;
 
 export class ModeratorModule implements IModeratorModule {
@@ -289,20 +290,43 @@ ${offenseHistory}${ragSection}`;
 
     const allRules = this.rules.getAll(target.groupId);
     const rulesText = allRules.length > 0
-      ? allRules.map((r, i) => `${i + 1}. ${r.content}`).join('\n')
+      ? allRules.map(r => `[id:${r.id}] ${r.content}`).join('\n')
       : '（暂无配置群规）';
 
-    const prompt = `You are moderating a QQ group chat. Group rules:\n${rulesText}\n\nUser "${target.nickname}" sent this image. Does it violate any rule? Reply with JSON only, no other text:\n{"violation": true/false, "severity": 1-5 or null, "reason": "string", "rule_id": number or null}\nseverity: 1=minor, 2=moderate, 3=serious. violation=false means severity and rule_id are null.`;
+    const prompt = `你是北美炸梦同好会的群管理AI。以下是群规（逐条列出）：
+
+${rulesText}
+
+用户"${target.nickname}"（${target.userId}）发了这张图。请判断是否违反群规。
+
+**重点关注——混淆式人肉搜索（零容忍）**：
+群内有人会通过间接方式泄漏真实人物的个人信息。注意以下模式：
+- PRC行政区划代码：任何以11-85开头的6位数字（如110000、310110、440300）出现在数学计算结果、代码输出、谜题、梗图说明中。这些数字对应城市/区县，常用作身份证前缀。
+- PRC身份证号（18位：地区+YYYYMMDD+序号+校验位），任何形式——字面形式、嵌入代码、多行拆分、截图中的OCR可识别文字
+- 真实人物（非发送者本人账号）的电话、邮箱、QQ号
+- "猜猜谁"类谜题，答案指向某人的真实姓名+地点
+- 其他聊天软件截图（Gemini/ChatGPT/微信），其内容推导出可疑数字
+- Gamma函数/阶乘/数学推导，最终结果为可疑6位代码
+
+**混淆判断标准**：若图中含有行政区划代码样式的数字，且上下文（说明文字、引用回复）涉及特定人物、声优、公众人物或群成员，则视为严重人肉行为（severity 4-5）。
+
+**其他违规**（正常审核——文字、NSFW、侮辱、暴力等）：
+按上方群规判断。注意群友间的日常调侃、梗、粗口属于正常群聊，不要过度误判。
+
+仅返回JSON对象，不要其他文字：
+{"violation": true/false, "severity": 1-5, "reason": "简短中文说明", "ruleId": <规则id或null>, "obfuscation": true/false}
+
+obfuscation=true表示疑似混淆式PII泄漏。violation=false时severity为null。`;
 
     let raw: string;
     try {
-      raw = await this.claude.visionWithPrompt(imageBytes, VISION_MODEL, prompt, 150);
+      raw = await this.claude.visionWithPrompt(imageBytes, VISION_MODEL, prompt, 200);
     } catch (err) {
       this.logger.warn({ err, groupId: target.groupId }, 'assessImage claude call failed — fail-safe');
       return FAIL_SAFE_VERDICT;
     }
 
-    interface ImageVerdictJson { violation: boolean; severity: number | null; reason: string; rule_id: number | null }
+    interface ImageVerdictJson { violation: boolean; severity: number | null; reason: string; ruleId: number | null; obfuscation?: boolean }
     let parsed: ImageVerdictJson | null = null;
     try {
       parsed = JSON.parse(extractJson(raw).trim()) as ImageVerdictJson;
@@ -312,25 +336,32 @@ ${offenseHistory}${ragSection}`;
 
     const violation = parsed?.violation ?? false;
     const rawSeverity = parsed?.severity ?? null;
-    const cappedSeverity = violation && rawSeverity !== null
-      ? Math.min(rawSeverity, IMAGE_MOD_SEVERITY_CAP) as 1 | 2 | 3
-      : null;
+    const obfuscation = parsed?.obfuscation ?? false;
     const reason = parsed?.reason ?? '';
-    const ruleId = parsed?.rule_id ?? null;
+    const ruleId = parsed?.ruleId ?? null;
 
-    // Cache result
+    // Severity mapping: obfuscation raises floor to 4; otherwise cap at 3
+    let finalSeverity: 1 | 2 | 3 | 4 | 5 | null = null;
+    if (violation && rawSeverity !== null) {
+      if (obfuscation) {
+        finalSeverity = Math.max(rawSeverity, IMAGE_MOD_OBFUSCATION_SEVERITY_FLOOR) as 4 | 5;
+      } else {
+        finalSeverity = Math.min(rawSeverity, IMAGE_MOD_SEVERITY_CAP) as 1 | 2 | 3;
+      }
+    }
+
+    // Cache result (TTL 1h — short so rule-set changes propagate quickly)
     if (this.imageModCache) {
       this.imageModCache.set({ fileKey: target.fileKey, violation, severity: rawSeverity ?? 0, reason: reason || null, ruleId, createdAt: now });
-      // Async purge stale entries
-      const cutoff = now - IMAGE_MOD_CACHE_DAYS * 86_400;
+      const cutoff = now - IMAGE_MOD_CACHE_HOURS * 3600;
       void Promise.resolve().then(() => {
         const purged = this.imageModCache!.purgeOlderThan(cutoff);
         if (purged > 0) this.logger.debug({ purged }, 'purged stale image mod cache entries');
       });
     }
 
-    this.logger.debug({ groupId: target.groupId, fileKey: target.fileKey, violation, severity: cappedSeverity, reason }, 'image assessed');
-    return { violation, severity: cappedSeverity, reason, confidence: 1 };
+    this.logger.debug({ groupId: target.groupId, fileKey: target.fileKey, violation, severity: finalSeverity, obfuscation, reason }, 'image assessed');
+    return { violation, severity: finalSeverity, reason, confidence: 1 };
   }
 
   /** Execute a punishment for an admin-approved pending moderation row. */

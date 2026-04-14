@@ -97,7 +97,7 @@ function makeModule(
 
 describe('ModeratorModule.assessImage', () => {
   it('violation: returns capped severity verdict when Claude returns violation', async () => {
-    const claude = makeClaudeVision({ violation: true, severity: 5, reason: 'NSFW content', rule_id: 1 });
+    const claude = makeClaudeVision({ violation: true, severity: 5, reason: 'NSFW content', ruleId: 1 });
     const mod = makeModule(claude);
     const verdict = await mod.assessImage(makeTarget(), makeImageBytes());
 
@@ -107,7 +107,7 @@ describe('ModeratorModule.assessImage', () => {
   });
 
   it('no violation: returns violation=false when Claude returns clean', async () => {
-    const claude = makeClaudeVision({ violation: false, severity: null, reason: '', rule_id: null });
+    const claude = makeClaudeVision({ violation: false, severity: null, reason: '', ruleId: null });
     const mod = makeModule(claude);
     const verdict = await mod.assessImage(makeTarget(), makeImageBytes());
 
@@ -142,7 +142,7 @@ describe('ModeratorModule.assessImage', () => {
   it('cache hit: returns cached verdict, no vision call', async () => {
     const cached: ImageModVerdict = { fileKey: FILE_KEY, violation: true, severity: 2, reason: 'cached reason', ruleId: null, createdAt: Math.floor(Date.now() / 1000) };
     const imageCache = makeImageCache(cached);
-    const claude = makeClaudeVision({ violation: false, severity: null, reason: '', rule_id: null });
+    const claude = makeClaudeVision({ violation: false, severity: null, reason: '', ruleId: null });
     const mod = makeModule(claude, { imageCache });
 
     const verdict = await mod.assessImage(makeTarget(), makeImageBytes());
@@ -155,7 +155,7 @@ describe('ModeratorModule.assessImage', () => {
 
   it('cache miss: calls vision, stores result in cache', async () => {
     const imageCache = makeImageCache(null);
-    const claude = makeClaudeVision({ violation: true, severity: 2, reason: 'doxxing', rule_id: 2 });
+    const claude = makeClaudeVision({ violation: true, severity: 2, reason: 'doxxing', ruleId: 2 });
     const mod = makeModule(claude, { imageCache });
 
     await mod.assessImage(makeTarget(), makeImageBytes());
@@ -169,7 +169,7 @@ describe('ModeratorModule.assessImage', () => {
 
   it('rate limit: 11th uncached check in same group-hour is skipped', async () => {
     const imageCache = makeImageCache(null); // always miss
-    const claude = makeClaudeVision({ violation: false, severity: null, reason: '', rule_id: null });
+    const claude = makeClaudeVision({ violation: false, severity: null, reason: '', ruleId: null });
     const mod = makeModule(claude, { imageCache });
 
     // 10 calls should succeed
@@ -183,12 +183,45 @@ describe('ModeratorModule.assessImage', () => {
     expect(verdict.violation).toBe(false); // fail-safe
   });
 
-  it('severity cap: severity 4 returned by Claude is capped to 3', async () => {
-    const claude = makeClaudeVision({ violation: true, severity: 4, reason: 'severe', rule_id: 1 });
+  it('severity cap: severity 4 returned by Claude is capped to 3 when not obfuscation', async () => {
+    const claude = makeClaudeVision({ violation: true, severity: 4, reason: 'severe', ruleId: 1, obfuscation: false });
     const mod = makeModule(claude);
     const verdict = await mod.assessImage(makeTarget(), makeImageBytes());
 
     expect(verdict.severity).toBe(3);
+  });
+
+  it('obfuscation=true: severity floor raised to 4 even if Claude returned 2', async () => {
+    const claude = makeClaudeVision({ violation: true, severity: 2, reason: '310110在计算结果中', ruleId: null, obfuscation: true });
+    const mod = makeModule(claude);
+    const verdict = await mod.assessImage(makeTarget(), makeImageBytes());
+
+    expect(verdict.violation).toBe(true);
+    expect(verdict.severity).toBe(4);
+    expect(verdict.reason).toBe('310110在计算结果中');
+  });
+
+  it('obfuscation=true with severity 5: keeps 5 (floor only, not cap)', async () => {
+    const claude = makeClaudeVision({ violation: true, severity: 5, reason: '确认人肉', ruleId: null, obfuscation: true });
+    const mod = makeModule(claude);
+    const verdict = await mod.assessImage(makeTarget(), makeImageBytes());
+
+    expect(verdict.severity).toBe(5);
+  });
+
+  it('cache TTL is ~1h: purgeOlderThan called with cutoff ~3600s ago', async () => {
+    const imageCache = makeImageCache(null);
+    const claude = makeClaudeVision({ violation: false, severity: null, reason: '', ruleId: null, obfuscation: false });
+    const mod = makeModule(claude, { imageCache });
+
+    const before = Math.floor(Date.now() / 1000);
+    await mod.assessImage(makeTarget(), makeImageBytes());
+    await new Promise(r => setImmediate(r));
+
+    expect((imageCache.purgeOlderThan as ReturnType<typeof vi.fn>)).toHaveBeenCalled();
+    const cutoffArg = (imageCache.purgeOlderThan as ReturnType<typeof vi.fn>).mock.calls[0]![0] as number;
+    expect(cutoffArg).toBeGreaterThan(before - 3602);
+    expect(cutoffArg).toBeLessThan(before - 3598);
   });
 });
 

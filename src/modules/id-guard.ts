@@ -1,7 +1,6 @@
 import type { INapCatAdapter } from '../adapter/napcat.js';
 import type { GroupMessage } from '../adapter/napcat.js';
 import type { IModerationRepository } from '../storage/db.js';
-import { VisionService } from './vision.js';
 import { createLogger } from '../utils/logger.js';
 
 // 18-digit PRC ID: province(6) + YYYYMMDD(8) + seq(3) + check(digit|X)
@@ -26,7 +25,6 @@ export function extractIdCards(text: string): string[] {
 export interface IdGuardOptions {
   adapter: INapCatAdapter;
   moderation: IModerationRepository;
-  vision: VisionService;
   botUserId: string;
   enabled: () => boolean;
 }
@@ -40,27 +38,13 @@ export class IdCardGuard {
     if (msg.userId === this.opts.botUserId) return false;
     if (!this.opts.enabled()) return false;
 
-    // 1. Text check
+    // Text-only check: regex detects literal 18/15-digit PRC ID numbers in message content.
+    // Image-based doxxing detection (including obfuscated forms) is handled by
+    // ModeratorModule.assessImage in the router's image moderation pass.
     if (containsIdCardNumber(msg.content)) {
       const numbers = extractIdCards(msg.content);
       await this._act(msg, 'text', numbers);
       return true;
-    }
-
-    // 2. Image check — only if no text hit (avoid double-act)
-    const fileToken = VisionService.extractFileToken(msg.rawContent);
-    if (fileToken) {
-      let hit: string | null = null;
-      try {
-        hit = await this.opts.vision.checkIdCard(fileToken);
-      } catch (err) {
-        this.logger.error({ err, groupId: msg.groupId, messageId: msg.messageId }, 'id-guard vision check failed — fail-safe, not blocking');
-        return false;
-      }
-      if (hit) {
-        await this._act(msg, 'image', [hit]);
-        return true;
-      }
     }
 
     return false;
