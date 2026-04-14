@@ -974,10 +974,23 @@ export class ChatModule implements IChatModule {
 
     const wideSection = `# 群最近动向（大范围背景，不用每条都看）\n${effectiveWide.map(fmt).join('\n')}\n\n`;
     const mediumSection = `# 最近对话流\n${mediumChron.map(fmt).join('\n')}\n\n`;
+
+    // Pin the actual trigger message explicitly — don't assume immediateChron's
+    // last entry is the trigger. With @-mention queuing, newer messages can
+    // land in DB before the queue processes the @-mention, so getRecent's
+    // "latest" != the message we're actually replying to.
+    const triggerInChron = immediateChron.findIndex(m =>
+      (m as { messageId?: string }).messageId === triggerMessage.messageId
+      || (m.userId === triggerMessage.userId && m.content === triggerMessage.content)
+    );
     const immediateLines = immediateChron.map((m, i) => {
       const line = fmt(m);
-      return i === immediateChron.length - 1 ? `${line}  ← 要接的这条` : line;
+      return i === triggerInChron ? `${line}  ← 要接的这条` : line;
     });
+    // If trigger wasn't found in recent DB (rare), append it explicitly
+    if (triggerInChron === -1) {
+      immediateLines.push(`${fmt(triggerMessage)}  ← 要接的这条`);
+    }
     const distinctSpeakers = new Set(immediateChron.map(m => m.userId)).size;
     const speakerHint = distinctSpeakers >= 3
       ? `\n（最近 ${distinctSpeakers} 个群友在同时聊，可以考虑集体称呼）`
