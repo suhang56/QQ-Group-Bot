@@ -1,4 +1,5 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
+import sharp from 'sharp';
 import { ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
 
@@ -119,17 +120,29 @@ export class ClaudeClient implements IClaudeClient {
   }
 
   async describeImage(imageBytes: Buffer, model: ClaudeModel): Promise<string> {
+    const downscaled = await ClaudeClient.downscale(imageBytes);
     const text = await this.visionWithPrompt(
-      imageBytes,
+      downscaled,
       model,
-      '用一句话简短描述这张图的内容和情绪氛围，10-30 字。只输出描述本身，不要解释或前缀。',
-      100,
+      '一句话描述图片内容，10-25字。只输出描述。',
     );
     if (!text) throw new ClaudeParseError('No text in vision response');
     return text;
   }
 
-  async visionWithPrompt(imageBytes: Buffer, model: ClaudeModel, prompt: string, _maxTokens = 100): Promise<string> {
+  /** Downscale image to 768px max dimension, JPEG 80. Falls back to original on error. */
+  static async downscale(bytes: Buffer): Promise<Buffer> {
+    try {
+      return await sharp(bytes)
+        .resize({ width: 768, height: 768, fit: 'inside', withoutEnlargement: true })
+        .jpeg({ quality: 80 })
+        .toBuffer();
+    } catch {
+      return bytes;
+    }
+  }
+
+  async visionWithPrompt(imageBytes: Buffer, model: ClaudeModel, prompt: string, _maxTokens = 80): Promise<string> {
     const base64 = imageBytes.toString('base64');
     const mediaType = this._detectMediaType(imageBytes);
 

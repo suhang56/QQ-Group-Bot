@@ -231,4 +231,41 @@ describe('ClaudeClient', () => {
     const buf = Buffer.from([0xff, 0xd8, 0x00]);
     await expect(client.describeImage(buf, 'claude-sonnet-4-6')).rejects.toBeInstanceOf(ClaudeParseError);
   });
+
+  it('describeImage: uses shortened prompt (Fix 3)', async () => {
+    mockQuery.mockReturnValueOnce(makeSuccessMessages('挺好看的图'));
+    const buf = Buffer.from([0x89, 0x50, 0x00]);
+    await client.describeImage(buf, 'claude-sonnet-4-6');
+    // Extract the prompt from the SDKUserMessage content
+    const call = mockQuery.mock.calls[0]![0] as { prompt: AsyncIterable<{ type: string; message: { content: Array<{ type: string; text?: string }> } }> };
+    const msgs: Array<{ type: string; message: { content: Array<{ type: string; text?: string }> } }> = [];
+    for await (const m of call.prompt) msgs.push(m as { type: string; message: { content: Array<{ type: string; text?: string }> } });
+    const userMsg = msgs.find(m => m.type === 'user');
+    const textBlock = userMsg?.message.content.find(b => b.type === 'text');
+    expect(textBlock?.text).toBe('一句话描述图片内容，10-25字。只输出描述。');
+  });
+
+  it('downscale: falls back to original bytes on invalid image data', async () => {
+    const fakeBytes = Buffer.from([0x00, 0x01, 0x02]); // not a real image
+    const result = await ClaudeClient.downscale(fakeBytes);
+    // Sharp fails → returns original
+    expect(result).toBe(fakeBytes);
+  });
+
+  it('downscale: returns a buffer for a valid JPEG (integration — real sharp)', async () => {
+    // Minimal 1x1 white JPEG: https://en.wikipedia.org/wiki/JPEG#Syntax_and_structure
+    // Use a known-good minimal JPEG fixture
+    const minimalJpeg = Buffer.from(
+      '/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8U'
+      + 'HRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgN'
+      + 'DRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIy'
+      + 'MjL/wAARCAABAAEDASIAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAA'
+      + 'AAAAAAAAAAAAAP/EABQBAQAAAAAAAAAAAAAAAAAAAAD/xAAUEQEAAAAAAAAAAAAAAAAAAAAA'
+      + '/9oADAMBAAIRAxEAPwCwABmX/9k=',
+      'base64'
+    );
+    const result = await ClaudeClient.downscale(minimalJpeg);
+    expect(result).toBeInstanceOf(Buffer);
+    expect(result.length).toBeGreaterThan(0);
+  });
 });
