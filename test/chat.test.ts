@@ -2620,6 +2620,64 @@ describe('ChatModule — topicStick engagement factor', () => {
   });
 });
 
+// ── Batch B2: metaIdentityProbe factor ────────────────────────────────────────
+
+describe('ChatModule — metaIdentityProbe scoring factor', () => {
+  let db: Database;
+  let claude: IClaudeClient;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    claude = makeMockClaude();
+  });
+
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  function makeScoringChat(overrides: Record<string, unknown> = {}): ChatModule {
+    return new ChatModule(claude, db, {
+      botUserId: BOT_ID,
+      debounceMs: 0,
+      chatMinScore: 0.5,
+      chatSilenceBonusSec: 999999,
+      chatBurstWindowMs: 10_000,
+      chatBurstCount: 99,
+      moodProactiveEnabled: false,
+      deflectCacheEnabled: false,
+      ...overrides,
+    });
+  }
+
+  it('meta-identity probe + bot active < 3min → metaIdentityProbe = 0.6, score passes threshold', async () => {
+    const chat = makeScoringChat({ chatMinScore: 0.5 });
+    // Set lastProactiveReply to 1 min ago
+    chat['lastProactiveReply'].set('g1', Date.now() - 60_000);
+
+    const msg = makeMsg({ content: '现在是哪个人格', rawContent: '现在是哪个人格' });
+    const result = await chat.generateReply('g1', msg, []);
+
+    expect(result).not.toBeNull();
+    expect(claude.complete).toHaveBeenCalled();
+  });
+
+  it('meta-identity probe + bot inactive > 3min → metaIdentityProbe = 0, score fails threshold', async () => {
+    const chat = makeScoringChat({ chatMinScore: 0.5 });
+    // Set lastProactiveReply to 10 min ago
+    chat['lastProactiveReply'].set('g1', Date.now() - 600_000);
+
+    const msg = makeMsg({ content: '现在是哪个人格', rawContent: '现在是哪个人格' });
+    const result = await chat.generateReply('g1', msg, []);
+
+    expect(result).toBeNull();
+    expect(claude.complete).not.toHaveBeenCalled();
+  });
+
+  it('persona string contains "哪个人格" section with response examples', () => {
+    expect(BANGDREAM_PERSONA).toContain('哪个人格你说呢');
+    expect(BANGDREAM_PERSONA).toContain('主人格一直都是我这个');
+    expect(BANGDREAM_PERSONA).toContain('被夸像真人的反应');
+  });
+});
+
 // ── Batch C: self-learning wiring in chat.ts ──────────────────────────────────
 
 import type { SelfLearningModule } from '../src/modules/self-learning.js';

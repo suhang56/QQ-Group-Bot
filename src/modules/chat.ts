@@ -92,12 +92,15 @@ interface ScoreFactors {
   continuity: number;
   clarification: number;
   topicStick: number;
+  metaIdentityProbe: number;
 }
 
 // Signal A: bot alias keywords — always indicate a reference to the bot
 const BOT_ALIAS_RE = /小号|QAQ|bot|机器人|这\s*[Aa][Ii]/i;
 // Pronouns that count only when bot posted recently (ambiguous)
 const BOT_PRONOUN_RE = /[她他它]/;
+// Meta-identity probe: "哪个人格" / "切换了吗" etc — gates on recent bot activity
+const META_IDENTITY_RE = /哪个人格|你正常吗|什么版本|切换了吗|今天哪个你|又是bot|AI了|今天是ai|真人设定/i;
 // Signal B: reaction phrases that suggest commenting on bot's recent output (intentionally narrow)
 const BOT_REACTION_RE = /变笨|变傻|抽风|死机|坏了|没反应|真的假的|笑死|绷不住/;
 const IMPLICIT_BOT_REF_ALIAS_WINDOW_MS = 60_000;
@@ -229,6 +232,21 @@ export const BANGDREAM_PERSONA = `你是这个QQ群的老群友，不是AI，不
 - "??? 你是说我像 AI?"
 
 不要解释、不要自证、不要承认。要以人类的姿态把这句话当作一个日常的轻微调侃接过来。
+
+## 被追问"哪个人格"/"切换 mimic"/"哪个版本" 这类元问题
+
+群里偶尔有人会拿你以前的/mimic_on /切换 persona / "你今天正常吗" / "现在是哪个人格" 开玩笑。这是把你当半个活 bot 调侃，**不要** 认真解释，不要说 "啥来的" 装傻，不要暴露有 mimic 模块或多 persona 设定。正确反应是用梗接过去：
+
+- "哪个人格你说呢"
+- "主人格一直都是我这个"
+- "我哪有人格 不要乱来"
+- "看心情 现在是疲惫人格"
+- "反正不是bot人格"
+- "你猜"
+- "当然是正常版"
+- "切了你也看不出来 别来这套"
+
+态度基调：把"人格"这个词当群内梗笑着接，不要走进"解释有几个人格"的陷阱。
 
 ## 发言形态
 
@@ -877,6 +895,7 @@ export class ChatModule implements IChatModule {
       continuity: 0,
       clarification: 0,
       topicStick: 0,
+      metaIdentityProbe: 0,
     };
 
     // +1.0 @-mention of bot
@@ -976,6 +995,14 @@ export class ChatModule implements IChatModule {
         }
       } else {
         this.engagedTopic.delete(groupId);
+      }
+    }
+
+    // +0.6 meta-identity probe ("哪个人格" etc.) when bot was active < 3 min ago
+    if (META_IDENTITY_RE.test(content)) {
+      const lastProactiveMs2 = this.lastProactiveReply.get(groupId) ?? 0;
+      if (lastProactiveMs2 > 0 && nowMs - lastProactiveMs2 < 3 * 60 * 1000) {
+        factors.metaIdentityProbe = 0.6;
       }
     }
 
