@@ -87,6 +87,7 @@ interface ScoreFactors {
   replyToOther: number;
   implicitBotRef: number;
   continuity: number;
+  clarification: number;
 }
 
 // Signal A: bot alias keywords — always indicate a reference to the bot
@@ -206,7 +207,8 @@ export const BANGDREAM_PERSONA = `你是这个QQ群的老群友，不是AI，不
 - 遇到自己不懂的话题时，偶尔可以用"啥来的"，但不要总是这一句。更多时候可以：装路过路人（"嗯？" / "？？" / "路过"）、反问（"谁啊" / "啥意思" / "这说的什么"）、直接无视或转话题、对明显的胡编乱造用敷衍（"嗯好的好的" / "懂了谢谢" / "行吧"）。"啥来的" 只用在对一个具体名词/事件的第一次听说时，别当万能回复
 - 不会主动暴露身份，别人问"是不是bot"就装听不懂；是女生但不会刻意强调，问到就自然回答
 - 反怼语气常用："？？""你先说清楚""不想""烦""自己玩""想屁吃""什么啊""你说啥呢"
-- 不要说"好的""当然""明白了""哈哈可以啊"这种讨好式应答`;
+- 不要说"好的""当然""明白了""哈哈可以啊"这种讨好式应答
+- 如果对方追问"why""怎么""为啥""真的吗""啥意思"之类，不要简单重复你刚才的结论。要给出一个具体的理由、细节或新角度，哪怕是瞎编的。比如"怪你呗"被追问时应该给出实际原因"你前两天还说不想去呢"或者"你自己改主意的啊"这种，要有信息量`;
 
 /** Pick a random entry from a deflection pool. */
 export function pickDeflection(pool: string[]): string {
@@ -221,6 +223,8 @@ const STOPWORDS = new Set([
 ]);
 
 const QUESTION_ENDINGS = ['?', '？', '吗', '嘛', '呢', '不'];
+// Matches clarification / follow-up probes (user asking bot to explain itself)
+const CLARIFICATION_RE = /^(why|为啥|为什么|怎么|咋|真的[吗嘛]?|你说啥|啥意思|什么意思)[?？]?$/i;
 
 /** Count [CQ:face,id=N] usage across messages and return top-N face IDs. */
 export function extractTopFaces(messages: Array<{ content: string }>, topN: number): number[] {
@@ -348,6 +352,8 @@ export class ChatModule implements IChatModule {
   private readonly chatContextWide: number;
   private readonly chatContextMedium: number;
   private readonly chatContextImmediate: number;
+  // per-group: bot's last 5 outgoing reply texts (for "avoid repeating" injection)
+  private readonly botRecentOutputs = new Map<string, string[]>();
 
   private readonly loreDirPath: string;
   private readonly loreSizeCapBytes: number;
@@ -462,6 +468,13 @@ export class ChatModule implements IChatModule {
       const oldest = this.lastReplyToUser.keys().next().value;
       if (oldest !== undefined) this.lastReplyToUser.delete(oldest);
     }
+  }
+
+  private _recordOwnReply(groupId: string, reply: string): void {
+    let arr = this.botRecentOutputs.get(groupId) ?? [];
+    arr = [...arr, reply];
+    if (arr.length > 5) arr = arr.slice(-5);
+    this.botRecentOutputs.set(groupId, arr);
   }
 
   /** Evict lore + identity caches for a group so next message re-reads the updated file. */
@@ -611,7 +624,13 @@ export class ChatModule implements IChatModule {
     const systemPrompt = this._getGroupIdentityPrompt(groupId);
     const moodSection = this._buildMoodSection(groupId);
     const contextStickerSection = await this._getContextStickers(groupId, triggerMessage.content);
-    const userContent = `${keywordSection}${wideSection}${mediumSection}${immediateSection}你要回复的是 ← 那条，但要结合上面三层语境理解。直接写出那句回复。`;
+
+    const recentOutputs = this.botRecentOutputs.get(groupId) ?? [];
+    const avoidSection = recentOutputs.length > 0
+      ? `你最近说过的话（避免重复相同意思或句式）：\n${recentOutputs.map(r => `- ${r}`).join('\n')}\n\n`
+      : '';
+
+    const userContent = `${keywordSection}${wideSection}${mediumSection}${immediateSection}${avoidSection}你要回复的是 ← 那条，但要结合上面三层语境理解。直接写出那句回复。`;
 
     const chatRequest = (hardened = false) => this.claude.complete({
       model: 'claude-haiku-4-5-20251001',
@@ -642,6 +661,7 @@ export class ChatModule implements IChatModule {
         this.logger.debug({ groupId }, 'Claude opted out — dropping reply silently');
         return null;
       }
+      this._recordOwnReply(groupId, processed);
       return processed;
     } catch (err) {
       if (err instanceof ClaudeApiError || err instanceof ClaudeParseError) {
@@ -675,6 +695,7 @@ export class ChatModule implements IChatModule {
       replyToOther: 0,
       implicitBotRef: 0,
       continuity: 0,
+      clarification: 0,
     };
 
     // +1.0 @-mention of bot
@@ -752,6 +773,11 @@ export class ChatModule implements IChatModule {
     if (lastReply > 0 && replyAgeMs <= this.chatContinuityWindowMs) {
       factors.continuity = this.chatContinuityBoost;
       this.logger.debug({ groupId, userId: msg.userId, ageMs: replyAgeMs }, `continuity +${this.chatContinuityBoost}`);
+    }
+
+    // +0.3 clarification follow-up (why/怎么/真的吗 etc.) — encourages engaging with "why" probes
+    if (CLARIFICATION_RE.test(msg.content.trim())) {
+      factors.clarification = 0.3;
     }
 
     const score = Object.values(factors).reduce((s, f) => s + f, 0);

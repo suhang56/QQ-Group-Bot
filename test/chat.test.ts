@@ -1864,3 +1864,83 @@ describe('ChatModule — tiered 50/20/10 context scope', () => {
     expect(prompt).toContain('三层语境');
   });
 });
+
+// ── Bot recent outputs / self-repetition avoidance ───────────────────────────
+
+describe('ChatModule — self-repetition avoidance', () => {
+  let db: Database;
+  let claude: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    claude = vi.fn().mockResolvedValue({
+      text: 'bot reply', inputTokens: 10, outputTokens: 5,
+      cacheReadTokens: 0, cacheWriteTokens: 0,
+    } satisfies ClaudeResponse);
+  });
+
+  function makeChat(opts: Record<string, unknown> = {}): ChatModule {
+    return new ChatModule(
+      { complete: claude } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999, moodProactiveEnabled: false, deflectCacheEnabled: false, ...opts },
+    );
+  }
+
+  it('after bot replies, avoid-section appears in next prompt', async () => {
+    const chat = makeChat();
+    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'hello', timestamp: Math.floor(Date.now() / 1000), deleted: false });
+    // First call — no avoid section yet
+    await chat.generateReply('g1', makeMsg({ content: 'hello' }), []);
+    claude.mockClear();
+    // Second call — avoid section should appear
+    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'why', timestamp: Math.floor(Date.now() / 1000) + 1, deleted: false });
+    await chat.generateReply('g1', makeMsg({ content: 'why' }), []);
+    const call = claude.mock.calls[0]![0] as { messages: Array<{ content: string }> };
+    const prompt = call.messages[0]!.content as string;
+    expect(prompt).toContain('避免重复相同意思');
+    expect(prompt).toContain('bot reply');
+  });
+
+  it('botRecentOutputs caps at 5 entries', async () => {
+    const chat = makeChat();
+    // Simulate 6 replies by calling with unique content each time
+    for (let i = 0; i < 6; i++) {
+      claude.mockResolvedValueOnce({ text: `reply${i}`, inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 });
+      db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: `msg${i}`, timestamp: Math.floor(Date.now() / 1000) + i, deleted: false });
+      await chat.generateReply('g1', makeMsg({ content: `msg${i}` }), []);
+    }
+    claude.mockClear();
+    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'trigger', timestamp: Math.floor(Date.now() / 1000) + 10, deleted: false });
+    await chat.generateReply('g1', makeMsg({ content: 'trigger' }), []);
+    const prompt = (claude.mock.calls[0]![0] as { messages: Array<{ content: string }> }).messages[0]!.content as string;
+    // reply0 (oldest) should be evicted; reply1-reply5 remain
+    expect(prompt).not.toContain('reply0');
+    expect(prompt).toContain('reply5');
+  });
+
+  it('botRecentOutputs is isolated per group', async () => {
+    const chat = makeChat();
+    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'hello', timestamp: Math.floor(Date.now() / 1000), deleted: false });
+    db.messages.insert({ groupId: 'g2', userId: 'u1', nickname: 'Alice', content: 'hello', timestamp: Math.floor(Date.now() / 1000), deleted: false });
+    await chat.generateReply('g1', makeMsg({ content: 'hello', groupId: 'g1' }), []);
+    claude.mockClear();
+    // g2 reply should have no avoid section (no prior g2 output)
+    await chat.generateReply('g2', makeMsg({ content: 'hello', groupId: 'g2' }), []);
+    const prompt = (claude.mock.calls[0]![0] as { messages: Array<{ content: string }> }).messages[0]!.content as string;
+    expect(prompt).not.toContain('避免重复相同意思');
+  });
+
+  it('clarification message (why/为啥) gets +0.3 score boost', async () => {
+    const chat = new ChatModule(
+      { complete: claude } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID, debounceMs: 0, chatMinScore: 0.25, moodProactiveEnabled: false, deflectCacheEnabled: false },
+    );
+    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'why', timestamp: Math.floor(Date.now() / 1000), deleted: false });
+    // "why" alone scores: question=0.6 (ends with y? no), clarification=0.3 → 0.3 ≥ 0.25 → should reply
+    const result = await chat.generateReply('g1', makeMsg({ content: 'why' }), []);
+    expect(result).not.toBeNull();
+    expect(claude).toHaveBeenCalled();
+  });
+});
