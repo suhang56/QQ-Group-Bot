@@ -2010,7 +2010,7 @@ describe('ChatModule — self-repetition avoidance', () => {
     await chat.generateReply('g1', makeMsg({ content: 'why' }), []);
     const call = claude.mock.calls[0]![0] as { messages: Array<{ content: string }> };
     const prompt = call.messages[0]!.content as string;
-    expect(prompt).toContain('别重复这些句式和意思');
+    expect(prompt).toContain('绝对不要重复以下任何句式或关键词');
     expect(prompt).toContain('bot reply');
   });
 
@@ -3205,5 +3205,49 @@ describe('ChatModule — sync vision wait', () => {
     await resultPromise;
     // After generateReply resolves, vision must have completed
     expect(visionDone).toBe(true);
+  });
+});
+
+// ── 被直接骂 / insult recognition ───────────────────────────────────────────
+
+describe('ChatModule — insult recognition', () => {
+  it('BANGDREAM_PERSONA contains 被直接骂的反应 section', () => {
+    expect(BANGDREAM_PERSONA).toContain('被直接骂的反应');
+    expect(BANGDREAM_PERSONA).toContain('自言自语');
+    expect(BANGDREAM_PERSONA).toContain('你才 sb');
+  });
+
+  it('BANGDREAM_PERSONA explicitly bans 自言自语 used more than once', () => {
+    expect(BANGDREAM_PERSONA).toContain('同一对话用 "自言自语" 这个词超过 1 次');
+  });
+
+  it('userContent tail contains insult-detection reminder', async () => {
+    const db = new Database(':memory:');
+    const ts = Math.floor(Date.now() / 1000);
+    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'msg', timestamp: ts - 1, deleted: false });
+    const claude = makeMockClaude('怼回去');
+    const chat = makePassthroughChat(claude, db);
+    await chat.generateReply('g1', makeMsg({ content: 'sb你怎么了', rawContent: `[CQ:at,qq=${BOT_ID}] sb你怎么了` }), []);
+    const call = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { messages: Array<{ content: string }> };
+    const userContent = call.messages.map(m => m.content).join(' ');
+    expect(userContent).toContain('自言自语吗');
+    expect(userContent).toContain('直接骂你');
+  });
+
+  it('avoidSection uses 绝对不要重复 wording', async () => {
+    const db = new Database(':memory:');
+    const ts = Math.floor(Date.now() / 1000);
+    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'msg', timestamp: ts - 1, deleted: false });
+    const claude = makeMockClaude('好的');
+    const chat = makePassthroughChat(claude, db);
+    // First call to populate botRecentOutputs
+    await chat.generateReply('g1', makeMsg({ content: 'first call' }), []);
+    // Second call: avoidSection should now be present
+    await chat.generateReply('g1', makeMsg({ content: '再问一次' }), []);
+    const calls = (claude.complete as ReturnType<typeof vi.fn>).mock.calls;
+    const lastCall = calls[calls.length - 1]![0] as { messages: Array<{ content: string }> };
+    const userContent = lastCall.messages.map(m => m.content).join(' ');
+    expect(userContent).toContain('绝对不要重复');
+    expect(userContent).toContain('bot tell');
   });
 });
