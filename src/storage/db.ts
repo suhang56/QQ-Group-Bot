@@ -198,6 +198,21 @@ export interface IImageDescriptionRepository {
   purgeOlderThan(cutoffTs: number): number;
 }
 
+export interface ImageModVerdict {
+  fileKey: string;
+  violation: boolean;
+  severity: number;
+  reason: string | null;
+  ruleId: number | null;
+  createdAt: number;
+}
+
+export interface IImageModCacheRepository {
+  get(fileKey: string): ImageModVerdict | null;
+  set(verdict: ImageModVerdict): void;
+  purgeOlderThan(cutoffTs: number): number;
+}
+
 export interface BotReply {
   id: number;
   groupId: string;
@@ -946,6 +961,38 @@ class ImageDescriptionRepository implements IImageDescriptionRepository {
   }
 }
 
+class ImageModCacheRepository implements IImageModCacheRepository {
+  constructor(private readonly db: DatabaseSync) {}
+
+  get(fileKey: string): ImageModVerdict | null {
+    const row = this.db.prepare(
+      'SELECT file_key, violation, severity, reason, rule_id, created_at FROM image_mod_cache WHERE file_key = ?'
+    ).get(fileKey) as unknown as { file_key: string; violation: number; severity: number; reason: string | null; rule_id: number | null; created_at: number } | undefined;
+    if (!row) return null;
+    return {
+      fileKey: row.file_key,
+      violation: row.violation !== 0,
+      severity: row.severity,
+      reason: row.reason,
+      ruleId: row.rule_id,
+      createdAt: row.created_at,
+    };
+  }
+
+  set(verdict: ImageModVerdict): void {
+    this.db.prepare(
+      'INSERT OR REPLACE INTO image_mod_cache (file_key, violation, severity, reason, rule_id, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+    ).run(verdict.fileKey, verdict.violation ? 1 : 0, verdict.severity, verdict.reason, verdict.ruleId, verdict.createdAt);
+  }
+
+  purgeOlderThan(cutoffTs: number): number {
+    const result = this.db.prepare(
+      'DELETE FROM image_mod_cache WHERE created_at < ?'
+    ).run(cutoffTs) as { changes: number };
+    return result.changes;
+  }
+}
+
 interface BotReplyRow {
   id: number; group_id: string; trigger_msg_id: string | null;
   trigger_user_nickname: string | null; trigger_content: string;
@@ -1238,6 +1285,7 @@ export class Database {
   readonly nameImages: INameImageRepository;
   readonly liveStickers: ILiveStickerRepository;
   readonly imageDescriptions: IImageDescriptionRepository;
+  readonly imageModCache: IImageModCacheRepository;
   readonly botReplies: IBotReplyRepository;
   readonly localStickers: ILocalStickerRepository;
   readonly learnedFacts: ILearnedFactsRepository;
@@ -1261,6 +1309,7 @@ export class Database {
     this.nameImages = new NameImageRepository(this._db);
     this.liveStickers = new LiveStickerRepository(this._db);
     this.imageDescriptions = new ImageDescriptionRepository(this._db);
+    this.imageModCache = new ImageModCacheRepository(this._db);
     this.botReplies = new BotReplyRepository(this._db);
     this.localStickers = new LocalStickerRepository(this._db);
     this.learnedFacts = new LearnedFactsRepository(this._db);
@@ -1409,5 +1458,17 @@ export class Database {
 
     // id_guard_enabled column on group_config — default ON (strict zero-tolerance).
     try { this._db.exec(`ALTER TABLE group_config ADD COLUMN id_guard_enabled INTEGER NOT NULL DEFAULT 1`); } catch { /* already exists */ }
+
+    // image_mod_cache — verdicts from assessImage, keyed by sha256 file_key, TTL 7 days.
+    this._db.exec(`
+      CREATE TABLE IF NOT EXISTS image_mod_cache (
+        file_key   TEXT    PRIMARY KEY,
+        violation  INTEGER NOT NULL,
+        severity   INTEGER NOT NULL,
+        reason     TEXT,
+        rule_id    INTEGER,
+        created_at INTEGER NOT NULL
+      )
+    `);
   }
 }

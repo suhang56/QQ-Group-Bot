@@ -171,14 +171,18 @@ export class Router implements IRouter {
       // Lore updater tick: increment per-group counter, fire async update if threshold hit
       this.loreUpdater?.tick(msg.groupId, config);
 
-      // Moderator runs FIRST, before persistence.
-      // Respect config.autoMod: skip entirely when false (observe-only mode).
+      // Text moderator — runs before persistence, skipped when autoMod off or command message.
       if (this.moderatorModule && config.autoMod && !msg.content.trim().startsWith('/')) {
         const verdict = await this.moderatorModule.assess(msg, config);
         if (verdict.violation && verdict.severity !== null && verdict.severity >= 1) {
           void this._queueModerationApproval(msg, verdict.severity, verdict.reason);
-          // Don't return — persist message and let downstream proceed (action gated on admin approval)
         }
+      }
+
+      // Image moderator — runs after text check; id-guard already returned if it blocked the message.
+      const imageFileKey = _extractImageFile(msg.rawContent);
+      if (imageFileKey && this.moderatorModule && config.autoMod) {
+        void this._assessImageAsync(msg, imageFileKey);
       }
 
       // Persist message and upsert user
@@ -643,6 +647,51 @@ export class Router implements IRouter {
     if (severity <= 3) return 'warn';
     if (severity === 4) return 'mute_10m';
     return 'kick';
+  }
+
+  private async _assessImageAsync(msg: GroupMessage, fileKey: string): Promise<void> {
+    if (!this.moderatorModule) return;
+
+    // Download image bytes via adapter
+    let imageBytes: Buffer | null = null;
+    try {
+      const info = await this.adapter.getImage(fileKey);
+      if (info.base64) {
+        imageBytes = Buffer.from(info.base64, 'base64');
+      } else if (info.url) {
+        const resp = await fetch(info.url);
+        if (resp.ok) imageBytes = Buffer.from(await resp.arrayBuffer());
+      }
+    } catch (err) {
+      this.logger.warn({ err, groupId: msg.groupId, fileKey }, 'image download failed — skipping image mod check');
+      return;
+    }
+    if (!imageBytes) {
+      this.logger.warn({ groupId: msg.groupId, fileKey }, 'no image bytes available — skipping image mod check');
+      return;
+    }
+
+    const { createHash } = await import('node:crypto');
+    const hashedKey = createHash('sha256').update(fileKey).digest('hex');
+
+    let verdict;
+    try {
+      verdict = await this.moderatorModule.assessImage({
+        userId: msg.userId,
+        nickname: msg.nickname,
+        messageId: msg.messageId,
+        groupId: msg.groupId,
+        fileKey: hashedKey,
+      }, imageBytes);
+    } catch (err) {
+      this.logger.error({ err, groupId: msg.groupId, fileKey }, 'assessImage failed — fail-safe');
+      return;
+    }
+
+    if (verdict.violation && verdict.severity !== null && verdict.severity >= 1) {
+      const imageMsg = { ...msg, content: `[图片] ${verdict.reason}` };
+      void this._queueModerationApproval(imageMsg, verdict.severity, verdict.reason);
+    }
   }
 
   private async _queueModerationApproval(msg: GroupMessage, severity: number, reason: string): Promise<void> {

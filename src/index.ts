@@ -82,7 +82,7 @@ router.setChat(chat);
 
 const learner = new LearnerModule(embedder, db.rules, db.moderation);
 const mimic = new MimicModule(claude, db.messages, db.groupConfig, botUserId);
-const moderator = new ModeratorModule(claude, adapter, db.messages, db.moderation, db.groupConfig, db.rules, learner);
+const moderator = new ModeratorModule(claude, adapter, db.messages, db.moderation, db.groupConfig, db.rules, learner, db.imageModCache);
 router.setMimic(mimic);
 router.setModerator(moderator);
 

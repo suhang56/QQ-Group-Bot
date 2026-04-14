@@ -2,12 +2,12 @@ import type { IClaudeClient } from '../ai/claude.js';
 import type { INapCatAdapter, GroupMessage } from '../adapter/napcat.js';
 import type {
   IMessageRepository, IModerationRepository, IGroupConfigRepository,
-  IRuleRepository, GroupConfig, PendingModeration,
+  IRuleRepository, IImageModCacheRepository, GroupConfig, PendingModeration,
 } from '../storage/db.js';
 import type { ILearnerModule } from './learner.js';
 import { BotErrorCode, ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
-import { RUNTIME_CHAT_MODEL } from '../config.js';
+import { RUNTIME_CHAT_MODEL, VISION_MODEL } from '../config.js';
 
 // Short banter words/patterns that are normal Chinese group chat — skip moderation entirely
 const BANTER_WHITELIST = new Set([
@@ -25,8 +25,17 @@ export interface ModerationVerdict {
   confidence: number;
 }
 
+export interface ImageAssessTarget {
+  userId: string;
+  nickname: string;
+  messageId: string;
+  groupId: string;
+  fileKey: string;
+}
+
 export interface IModeratorModule {
   assess(msg: GroupMessage, config: GroupConfig): Promise<ModerationVerdict>;
+  assessImage(target: ImageAssessTarget, imageBytes: Buffer): Promise<ModerationVerdict>;
 }
 
 export type AppealResult =
@@ -74,8 +83,14 @@ function parseSonnetResponse(text: string): { violation: boolean; severity: numb
   }
 }
 
+const IMAGE_MOD_SEVERITY_CAP = 3; // false positives on images are costly — cap at warn level
+const IMAGE_MOD_CACHE_DAYS = 7;
+const IMAGE_MOD_RATE_LIMIT_PER_HOUR = 10;
+
 export class ModeratorModule implements IModeratorModule {
   private readonly logger = createLogger('moderator');
+  // per-group uncached image checks this hour: key=`${groupId}:${hourTs}`
+  private readonly imageRateCounts = new Map<string, number>();
 
   constructor(
     private readonly claude: IClaudeClient,
@@ -85,6 +100,7 @@ export class ModeratorModule implements IModeratorModule {
     private readonly configs: IGroupConfigRepository,
     private readonly rules: IRuleRepository,
     private readonly learner: ILearnerModule | null = null,
+    private readonly imageModCache: IImageModCacheRepository | null = null,
   ) {}
 
   async assess(msg: GroupMessage, config: GroupConfig): Promise<ModerationVerdict> {
@@ -243,6 +259,78 @@ ${offenseHistory}${ragSection}`;
     });
     this.logger.info({ groupId: msg.groupId, userId: msg.userId, severity: parsed.severity, reason: parsed.reason }, 'violation queued for admin approval');
     return verdict;
+  }
+
+  async assessImage(target: ImageAssessTarget, imageBytes: Buffer): Promise<ModerationVerdict> {
+    const now = Math.floor(Date.now() / 1000);
+
+    // Cache lookup — before rate limit so cached hits are free
+    if (this.imageModCache) {
+      const cached = this.imageModCache.get(target.fileKey);
+      if (cached) {
+        this.logger.debug({ groupId: target.groupId, fileKey: target.fileKey }, 'image mod cache hit');
+        return {
+          violation: cached.violation,
+          severity: cached.violation ? Math.min(cached.severity, IMAGE_MOD_SEVERITY_CAP) as 1 | 2 | 3 | null : null,
+          reason: cached.reason ?? '',
+          confidence: 1,
+        };
+      }
+    }
+
+    // Rate limit — uncached vision calls only
+    const hourKey = `${target.groupId}:${Math.floor(now / 3600)}`;
+    const count = this.imageRateCounts.get(hourKey) ?? 0;
+    if (count >= IMAGE_MOD_RATE_LIMIT_PER_HOUR) {
+      this.logger.warn({ groupId: target.groupId, count }, 'image mod rate limit exceeded — skipping');
+      return FAIL_SAFE_VERDICT;
+    }
+    this.imageRateCounts.set(hourKey, count + 1);
+
+    const allRules = this.rules.getAll(target.groupId);
+    const rulesText = allRules.length > 0
+      ? allRules.map((r, i) => `${i + 1}. ${r.content}`).join('\n')
+      : '（暂无配置群规）';
+
+    const prompt = `You are moderating a QQ group chat. Group rules:\n${rulesText}\n\nUser "${target.nickname}" sent this image. Does it violate any rule? Reply with JSON only, no other text:\n{"violation": true/false, "severity": 1-5 or null, "reason": "string", "rule_id": number or null}\nseverity: 1=minor, 2=moderate, 3=serious. violation=false means severity and rule_id are null.`;
+
+    let raw: string;
+    try {
+      raw = await this.claude.visionWithPrompt(imageBytes, VISION_MODEL, prompt, 150);
+    } catch (err) {
+      this.logger.warn({ err, groupId: target.groupId }, 'assessImage claude call failed — fail-safe');
+      return FAIL_SAFE_VERDICT;
+    }
+
+    interface ImageVerdictJson { violation: boolean; severity: number | null; reason: string; rule_id: number | null }
+    let parsed: ImageVerdictJson | null = null;
+    try {
+      parsed = JSON.parse(extractJson(raw).trim()) as ImageVerdictJson;
+    } catch {
+      this.logger.warn({ groupId: target.groupId, raw: raw.slice(0, 200) }, 'assessImage JSON parse failed — fail-safe');
+    }
+
+    const violation = parsed?.violation ?? false;
+    const rawSeverity = parsed?.severity ?? null;
+    const cappedSeverity = violation && rawSeverity !== null
+      ? Math.min(rawSeverity, IMAGE_MOD_SEVERITY_CAP) as 1 | 2 | 3
+      : null;
+    const reason = parsed?.reason ?? '';
+    const ruleId = parsed?.rule_id ?? null;
+
+    // Cache result
+    if (this.imageModCache) {
+      this.imageModCache.set({ fileKey: target.fileKey, violation, severity: rawSeverity ?? 0, reason: reason || null, ruleId, createdAt: now });
+      // Async purge stale entries
+      const cutoff = now - IMAGE_MOD_CACHE_DAYS * 86_400;
+      void Promise.resolve().then(() => {
+        const purged = this.imageModCache!.purgeOlderThan(cutoff);
+        if (purged > 0) this.logger.debug({ purged }, 'purged stale image mod cache entries');
+      });
+    }
+
+    this.logger.debug({ groupId: target.groupId, fileKey: target.fileKey, violation, severity: cappedSeverity, reason }, 'image assessed');
+    return { violation, severity: cappedSeverity, reason, confidence: 1 };
   }
 
   /** Execute a punishment for an admin-approved pending moderation row. */
