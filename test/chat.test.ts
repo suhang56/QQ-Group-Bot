@@ -2104,10 +2104,10 @@ describe('ChatModule — echo detection and face stripping', () => {
     expect(result).toContain('笑死');
   });
 
-  it('preserves [CQ:mface,...] in bot output', async () => {
+  it('strips [CQ:mface,...] in bot output (market stickers banned)', async () => {
     const mface = '[CQ:mface,type=6,emoji_id=123,key=abc,summary=哎]';
     const claude = vi.fn().mockResolvedValue({
-      text: mface, inputTokens: 10, outputTokens: 5,
+      text: mface + ' 哈哈', inputTokens: 10, outputTokens: 5,
       cacheReadTokens: 0, cacheWriteTokens: 0,
     } satisfies ClaudeResponse);
     const chat = new ChatModule(
@@ -2117,7 +2117,8 @@ describe('ChatModule — echo detection and face stripping', () => {
     );
     db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'hi', timestamp: Math.floor(Date.now() / 1000), deleted: false });
     const result = await chat.generateReply('g1', makeMsg({ content: 'hi' }), []);
-    expect(result).toContain('[CQ:mface,');
+    expect(result).not.toContain('[CQ:mface,');
+    expect(result).toContain('哈哈');
   });
 
   it('drops reply when Claude echoes a short trigger verbatim (regression: 草/666)', async () => {

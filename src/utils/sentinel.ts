@@ -79,8 +79,11 @@ const SKIP_LINE_RE = /^\s*<\s*skip\s*>\s*$/i;
 export function postProcess(text: string): string {
   return text
     .replace(/\[CQ:face,[^\]]*\]/g, '')    // strip [CQ:face,id=N] — user banned QQ built-in faces
+    .replace(/\[CQ:mface,[^\]]*\]/g, '')   // strip [CQ:mface,...] — user banned QQ market stickers
     .split('\n')
     .filter(line => !SKIP_LINE_RE.test(line))
+    .map(l => l.trim())
+    .filter(l => l.length > 0)
     .join('\n')
     .replace(/[\s。]*。[\s。]*$/, '')
     .trim();

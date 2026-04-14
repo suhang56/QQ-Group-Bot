@@ -131,9 +131,15 @@ describe('postProcess', () => {
     expect(postProcess('[CQ:face,id=178][CQ:face,id=14]')).toBe('');
   });
 
-  it('preserves [CQ:mface,...] codes (mface is allowed)', () => {
+  it('strips [CQ:mface,...] codes (mface is banned — only learned [CQ:image] allowed)', () => {
     const mface = '[CQ:mface,type=6,emoji_id=123,key=abc,summary=哎]';
-    expect(postProcess(mface)).toBe(mface);
+    expect(postProcess(mface)).toBe('');
+    expect(postProcess('哈哈 ' + mface)).toBe('哈哈');
+  });
+
+  it('preserves [CQ:image,file=...] codes (learned stickers are allowed)', () => {
+    const img = '[CQ:image,file=file:///D:/stickers/abc.jpg]';
+    expect(postProcess(img)).toBe(img);
   });
 
   it('strips <skip> line from mixed multi-line reply', () => {
