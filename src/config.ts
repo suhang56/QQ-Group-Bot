@@ -16,13 +16,11 @@ export const lurkerDefaults = {
 
 export const chatHistoryDefaults = {
   chatRecentCount: 20,
-  chatHistoricalSampleCount: 15,
   chatKeywordMatchCount: 15,
   chatContextWide: 50,
   chatContextMedium: 20,
   chatContextImmediate: 10,
   groupIdentityCacheTtlMs: 3_600_000, // 1 hour
-  groupIdentityTopUsers: 20,
   loreDirPath: 'data/lore',
   loreSizeCapBytes: 512 * 1024, // 512 KB hard cap before truncation warning
   chatEmojiTopN: 5,             // top-N most-used faces injected into system prompt

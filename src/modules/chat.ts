@@ -16,7 +16,7 @@ import type { ILocalStickerRepository } from '../storage/db.js';
 import { cosineSimilarity } from '../storage/embeddings.js';
 
 export interface IChatModule {
-  generateReply(groupId: string, triggerMessage: GroupMessage, recentMessages: GroupMessage[]): Promise<string | null>;
+  generateReply(groupId: string, triggerMessage: GroupMessage, _recentMessages: GroupMessage[]): Promise<string | null>;
   recordOutgoingMessage(groupId: string, msgId: number): void;
   markReplyToUser(groupId: string, userId: string): void;
   invalidateLore(groupId: string): void;
@@ -28,9 +28,7 @@ export interface IChatModule {
 interface ChatOptions {
   debounceMs?: number;
   maxGroupRepliesPerMinute?: number;
-  recentMessageCount?: number;
   chatRecentCount?: number;
-  chatHistoricalSampleCount?: number;
   chatKeywordMatchCount?: number;
   botUserId?: string;
   lurkerReplyChance?: number;
@@ -42,7 +40,6 @@ interface ChatOptions {
   chatBurstWindowMs?: number;
   chatBurstCount?: number;
   groupIdentityCacheTtlMs?: number;
-  groupIdentityTopUsers?: number;
   loreDirPath?: string;
   loreSizeCapBytes?: number;
   chatEmojiTopN?: number;
@@ -277,8 +274,6 @@ export class ChatModule implements IChatModule {
   private readonly logger = createLogger('chat');
   private readonly debounceMs: number;
   private readonly maxGroupRepliesPerMinute: number;
-  private readonly recentMessageCount: number;
-  private readonly historicalSampleCount: number;
   private readonly keywordMatchCount: number;
   private readonly botUserId: string;
   private readonly chatSilenceBonusSec: number;
@@ -288,7 +283,6 @@ export class ChatModule implements IChatModule {
   private readonly chatEmojiTopN: number;
   private readonly chatEmojiSampleSize: number;
   private readonly groupIdentityCacheTtlMs: number;
-  private readonly groupIdentityTopUsers: number;
   private readonly chatStickerTopN: number;
   private readonly stickersDirPath: string;
   private readonly stickerLegendRefreshEveryMsgs: number;
@@ -376,8 +370,6 @@ export class ChatModule implements IChatModule {
   ) {
     this.debounceMs = options.debounceMs ?? 2000;
     this.maxGroupRepliesPerMinute = options.maxGroupRepliesPerMinute ?? 20;
-    this.recentMessageCount = options.chatRecentCount ?? options.recentMessageCount ?? chatHistoryDefaults.chatRecentCount;
-    this.historicalSampleCount = options.chatHistoricalSampleCount ?? chatHistoryDefaults.chatHistoricalSampleCount;
     this.keywordMatchCount = options.chatKeywordMatchCount ?? chatHistoryDefaults.chatKeywordMatchCount;
     this.botUserId = options.botUserId ?? '';
     this.chatSilenceBonusSec = options.chatSilenceBonusSec ?? lurkerDefaults.chatSilenceBonusSec;
@@ -387,7 +379,6 @@ export class ChatModule implements IChatModule {
     this.chatEmojiTopN = options.chatEmojiTopN ?? chatHistoryDefaults.chatEmojiTopN;
     this.chatEmojiSampleSize = options.chatEmojiSampleSize ?? chatHistoryDefaults.chatEmojiSampleSize;
     this.groupIdentityCacheTtlMs = options.groupIdentityCacheTtlMs ?? chatHistoryDefaults.groupIdentityCacheTtlMs;
-    this.groupIdentityTopUsers = options.groupIdentityTopUsers ?? chatHistoryDefaults.groupIdentityTopUsers;
     this.loreDirPath = options.loreDirPath ?? chatHistoryDefaults.loreDirPath;
     this.loreSizeCapBytes = options.loreSizeCapBytes ?? chatHistoryDefaults.loreSizeCapBytes;
     this.chatStickerTopN = options.chatStickerTopN ?? chatHistoryDefaults.chatStickerTopN;
@@ -543,7 +534,7 @@ export class ChatModule implements IChatModule {
   async generateReply(
     groupId: string,
     triggerMessage: GroupMessage,
-    recentMessages: GroupMessage[]
+    _recentMessages: GroupMessage[]
   ): Promise<string | null> {
     this.knownGroups.add(groupId);
 
