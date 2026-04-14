@@ -2817,6 +2817,22 @@ describe('ChatModule — formatFactsForPrompt injection into system prompt', () 
   });
 });
 
+// ── Persona: "我是谁" section ─────────────────────────────────────────────────
+
+describe('BANGDREAM_PERSONA — "我是谁" meta-question handling', () => {
+  it('persona contains "我是谁" section with dismissal responses', () => {
+    expect(BANGDREAM_PERSONA).toContain('被问"我是谁');
+    expect(BANGDREAM_PERSONA).toContain('大哲学家是吧');
+    expect(BANGDREAM_PERSONA).toContain('问户口本啊');
+  });
+
+  it('persona explicitly forbids redirecting question to other group members (non-sequitur)', () => {
+    const section = BANGDREAM_PERSONA.slice(BANGDREAM_PERSONA.indexOf('被问"我是谁'));
+    expect(section).toContain('non-sequitur');
+    expect(section).toContain('绝对不要');
+  });
+});
+
 // ── Image context resolution ───────────────────────────────────────────────────
 
 import type { IImageDescriptionRepository } from '../src/storage/db.js';
