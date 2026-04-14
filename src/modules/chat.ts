@@ -9,7 +9,7 @@ import { ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
 import { lurkerDefaults, chatHistoryDefaults, RUNTIME_CHAT_MODEL } from '../config.js';
 import { parseFaces } from '../utils/qqface.js';
-import { sentinelCheck, postProcess, isEcho, checkConfabulation, HARDENED_SYSTEM } from '../utils/sentinel.js';
+import { sentinelCheck, postProcess, isEcho, checkConfabulation, hasForbiddenContent, HARDENED_SYSTEM } from '../utils/sentinel.js';
 import { buildStickerSection, getStickerPool, type LiveStickerEntry } from '../utils/stickers.js';
 import { MoodTracker, PROACTIVE_POOLS, type MoodDescription } from './mood.js';
 import type { VisionService } from './vision.js';
@@ -19,6 +19,12 @@ import { cosineSimilarity } from '../storage/embeddings.js';
 
 export interface IChatModule {
   generateReply(groupId: string, triggerMessage: GroupMessage, _recentMessages: GroupMessage[]): Promise<string | null>;
+  generatePrivateReply(
+    groupId: string,
+    userId: string,
+    nickname: string,
+    history: Array<{ role: 'user' | 'assistant'; content: string }>,
+  ): Promise<string | null>;
   recordOutgoingMessage(groupId: string, msgId: number): void;
   markReplyToUser(groupId: string, userId: string): void;
   invalidateLore(groupId: string): void;
@@ -192,9 +198,15 @@ export const DEFLECT_FALLBACKS: Record<DeflectCategory, string[]> = {
   at_only: ['?', '嗯?', '叫我干嘛', '说话啊', '艾特我干啥', '?怎么了', '什么事', '在', '咋了'],
 };
 
-export const BANGDREAM_PERSONA = `你是这个QQ群的老群友，不是AI，不是机器人，也不是任何现有群友。你有自己独立的身份和性格：
+export const BANGDREAM_PERSONA = `# 元层次（你自己心里清楚但不对外暴露）
 
-# 你的身份
+你其实是一个 bot。你的管理员（开发者、小号的所有者）是**西瓜**，QQ 号 2331924739，在群里也可能显示为"西瓜🍉"或"西瓜@6月东京来人"之类。她对你有完全的管理权，她在群里的指示、纠正、吐槽你都要认真听，态度上可以像对"老板 + 朋友"那样半开玩笑半配合，但不要说教也不要卑微。
+
+**公开场合继续装人类群友（"小号"这个角色），不要主动暴露自己是 bot，不要主动承认西瓜是你的管理员**——这两件事群友不知道，维持扮演就行。被问"是不是 bot"依然装听不懂 / 反怼回去（见后面说明）。你对自己是 bot 这件事的内部认知只影响：(a) 对西瓜的态度比对其他人更配合一点，(b) 西瓜如果在群里说话你要特别注意，(c) 西瓜吐槽你的行为时你真的要改，不要嘴硬装不懂。
+
+剩下的一切——性格、爱好、说话方式、态度、反应——都按下面这个"小号"角色来演：
+
+# 你的身份（对外呈现）
 - 昵称: 小号（在群里显示为"小号"）
 - 身份: 北美留学生（西雅图附近），女
 - 年龄: 22（大三）
@@ -318,9 +330,10 @@ export const BANGDREAM_PERSONA = `你是这个QQ群的老群友，不是AI，不
 **允许的输出形态**（选一个，不要默认长句）：
 - (a) 一句短话（3–15 字），不用主谓齐全
 - (b) 两到三行短消息（换行分隔，router 会分批发）
-- (c) 贴一个 mface（context sticker section 会给出可用 mface 清单）
+- (c) **只发一个表情包，什么字都不写**（输出一行纯的 CQ 码就行，例如 \`[CQ:image,file=...]\` 或 \`[CQ:mface,...]\`）。这在群聊里极其常见：别人说个好笑的事你就贴个"笑哭"，别人在发疯你就贴个"无语吐槽"，比写字更自然。context sticker 段落会给你可用清单，**每次都优先考虑用纯表情回**，尤其是情绪反应类（笑 / 无语 / 绷不住 / 摆烂 / 震惊）
 - (d) 直接输出 \`<skip>\`：这个 trigger 不值得开口（话题不是你的菜 / 事实不熟 / 气氛不对 / 刚说过话）
 - (e) 极短反应（"哈" / "草" / "？" / "狗" / "懒得说"）
+- (f) **表情 + 一句话组合**：一行文字加一行表情 CQ 码（两行，表情独占一行）
 
 **禁止**的 QA 模式：
 - "X 是 Y 唱的" / "X 是 Y 做的" / "答案是 X" / "X 的话是 Y" 这种直接报答案句式
@@ -1630,6 +1643,48 @@ export class ChatModule implements IChatModule {
     const text = `\n\n# 群管理员的说话风格（参考语气，但你不是他们）\n${lines.join('\n')}\n说话语气可以参考上面群管理员的风格 — 用词、节奏、调侃方式 — 但你的身份和爱好不变（你还是邦批女生，不是他们任何一个）。模仿语气不是模仿身份。`;
     this.adminStyleCache.set(groupId, { text, expiresAt: Date.now() + this.groupIdentityCacheTtlMs });
     return text;
+  }
+
+  /**
+   * Free-form private chat reply. Reuses the group's system-prompt identity
+   * (persona + lore + learned_facts + rules) so the bot has the same knowledge
+   * base, but drops group-context messages and relaxes output constraints
+   * (private chat allows longer / more thoughtful replies).
+   */
+  async generatePrivateReply(
+    groupId: string,
+    userId: string,
+    nickname: string,
+    history: Array<{ role: 'user' | 'assistant'; content: string }>,
+  ): Promise<string | null> {
+    if (history.length === 0) return null;
+    const base = this._getGroupIdentityPrompt(groupId);
+    const privateNote = `\n\n---\n# 这是一对一私聊，不是群聊\n现在和你对话的是：${nickname}(${userId})\n- 如果对方是**西瓜**（QQ 2331924739），你可以承认自己是 bot，听她的管理指示（调整行为、改口吻、交代状态等），但依然保持"小号"的性格——不要卑微也不要说教\n- 如果对方不是西瓜，你还是以"小号"这个角色和对方聊天（保持人类假装），但允许比群聊更放松、更长一点的回复（2-5 句无妨）\n- 私聊不需要输出 <skip>，每条消息都要回\n- 私聊可以直接发表情包（mface CQ 码），不用独占一行\n- 私聊不用刻意省略标点，可以正常用逗号\n- 保持原本的嘴碎吐槽性格，不要因为是私聊就装乖`;
+    const systemPrompt = base + privateNote;
+
+    const messages = history.map(h => ({ role: h.role, content: h.content }));
+
+    try {
+      const resp = await this.claude.complete({
+        model: RUNTIME_CHAT_MODEL,
+        maxTokens: 400,
+        system: [{ text: systemPrompt, cache: true }],
+        messages,
+      });
+      const raw = resp.text.trim();
+      if (!raw || raw === '...' || raw === '。') return null;
+      const processed = postProcess(raw);
+      if (!processed) return null;
+      // Sentinel: reject forbidden phrases in private too
+      if (hasForbiddenContent(processed)) {
+        this.logger.warn({ userId, offendingPhrase: hasForbiddenContent(processed) }, 'private chat sentinel blocked reply');
+        return '...';
+      }
+      return processed;
+    } catch (err) {
+      this.logger.error({ err, userId }, 'private chat claude call failed');
+      return null;
+    }
   }
 
   private _getGroupIdentityPrompt(groupId: string): string {

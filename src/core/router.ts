@@ -22,11 +22,17 @@ const MAX_SPLIT_LINES = 3;
 const MOD_APPROVAL_ADMIN = process.env['MOD_APPROVAL_ADMIN'] ?? '2331924739';
 const MOD_DM_HOURLY_CAP = 20;
 const MOD_EXPIRY_SEC = 600; // 10 minutes
-// Users allowed to DM the bot for appeals. Admin is always allowed.
-const APPEAL_ALLOWED_USERS = new Set<string>(
-  (process.env['APPEAL_ALLOWED_USERS']?.split(',').filter(Boolean)) ?? ['1424791852']
+// Users allowed to have free-form private chat with the bot.
+// These users hit the full ChatModule pipeline (using their configured group's knowledge base).
+const PRIVATE_CHAT_USERS = new Map<string, string>(
+  // userId → groupId (which group's lore/facts/persona to use)
+  (process.env['PRIVATE_CHAT_USERS']?.split(',').filter(Boolean).map(p => {
+    const [uid, gid] = p.split(':');
+    return [uid!, gid ?? '958751334'] as [string, string];
+  })) ?? [['1424791852', '958751334']]
 );
 const APPEAL_HOURLY_CAP_PER_USER = 3;
+const PRIVATE_CHAT_HOURLY_CAP_PER_USER = 40;
 const SPLIT_DELAY_MIN_MS = 30;
 const SPLIT_DELAY_MAX_MS = 80;
 
@@ -863,6 +869,64 @@ export class Router implements IRouter {
     }
   }
 
+  /** Returns true if this user has a mute within the last 48 hours. */
+  private _userHasRecentMute(userId: string): boolean {
+    const cutoff = Math.floor(Date.now() / 1000) - 48 * 3600;
+    try {
+      const row = (this.db as unknown as { _db: { prepare(s: string): { get(...a: unknown[]): unknown } } })._db
+        .prepare("SELECT 1 as x FROM moderation_log WHERE user_id = ? AND action LIKE 'mute%' AND timestamp > ? LIMIT 1")
+        .get(userId, cutoff) as { x: number } | undefined;
+      return !!row;
+    } catch { return false; }
+  }
+
+  // Per-user rate limit for private chat
+  private readonly privateChatCounts = new Map<string, number>();
+  private privateChatHour = Math.floor(Date.now() / 3600000);
+  // Per-user short-term DM history (last 12 turns) for conversational context
+  private readonly privateChatHistory = new Map<string, Array<{ role: 'user' | 'assistant'; content: string; ts: number }>>();
+
+  private async _handlePrivateChat(msg: PrivateMessage, groupId: string): Promise<void> {
+    const text = msg.content.trim();
+    if (text.length === 0) return;
+
+    // Rate limit
+    const nowHour = Math.floor(Date.now() / 3600000);
+    if (nowHour !== this.privateChatHour) { this.privateChatCounts.clear(); this.privateChatHour = nowHour; }
+    const cnt = this.privateChatCounts.get(msg.userId) ?? 0;
+    if (cnt >= PRIVATE_CHAT_HOURLY_CAP_PER_USER) {
+      this.logger.info({ userId: msg.userId }, 'private chat rate limited');
+      return;
+    }
+    this.privateChatCounts.set(msg.userId, cnt + 1);
+
+    if (!this.chatModule) {
+      this.logger.warn('private chat: chatModule not set');
+      return;
+    }
+
+    // Append user turn to per-user history
+    const history = this.privateChatHistory.get(msg.userId) ?? [];
+    history.push({ role: 'user', content: text, ts: Date.now() });
+    // Cap history at 12 turns (6 user + 6 assistant)
+    while (history.length > 12) history.shift();
+    this.privateChatHistory.set(msg.userId, history);
+
+    try {
+      const reply = await this.chatModule.generatePrivateReply(groupId, msg.userId, msg.nickname, history);
+      if (!reply) return;
+      // Append assistant turn
+      history.push({ role: 'assistant', content: reply, ts: Date.now() });
+      while (history.length > 12) history.shift();
+      this.privateChatHistory.set(msg.userId, history);
+      // Send as single DM (no split — private chat allows longer replies)
+      await this.adapter.sendPrivateMessage(msg.userId, reply);
+      this.logger.info({ userId: msg.userId, groupId, replyLen: reply.length }, 'private chat reply sent');
+    } catch (err) {
+      this.logger.error({ err, userId: msg.userId }, 'private chat reply failed');
+    }
+  }
+
   private async _handleAppealFromUser(msg: PrivateMessage): Promise<void> {
     const text = msg.content.trim();
     if (text.length === 0) return;
@@ -916,14 +980,21 @@ ${ctxLine}
 
   async dispatchPrivate(msg: PrivateMessage): Promise<void> {
     const isAdmin = msg.userId === MOD_APPROVAL_ADMIN;
-    const isAppealAllowed = APPEAL_ALLOWED_USERS.has(msg.userId);
+    const privateChatGroupId = PRIVATE_CHAT_USERS.get(msg.userId);
+    const hasRecentMute = this._userHasRecentMute(msg.userId);
 
-    if (!isAdmin && !isAppealAllowed) {
+    if (!isAdmin && !privateChatGroupId && !hasRecentMute) {
       this.logger.debug({ userId: msg.userId }, 'private message from unauthorized user — ignored');
       return;
     }
 
-    // Non-admin appeal flow: forward message to admin for decision
+    // Private-chat user: route to conversational chat using their group's knowledge base
+    if (!isAdmin && privateChatGroupId) {
+      await this._handlePrivateChat(msg, privateChatGroupId);
+      return;
+    }
+
+    // Muted user appeal flow: forward message to admin for decision
     if (!isAdmin) {
       await this._handleAppealFromUser(msg);
       return;
