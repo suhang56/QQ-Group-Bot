@@ -768,6 +768,41 @@ describe('ChatModule — sentinel: AI self-disclosure prevention', () => {
     expect(systemText).toContain('邦批');
     expect(systemText).toContain('输出规则');
   });
+
+  it('system prompt contains all 3 rule texts when db.rules has entries', async () => {
+    db.rules.insert({ groupId: 'g1', content: '禁止广告', type: 'negative', source: 'manual', embedding: null });
+    db.rules.insert({ groupId: 'g1', content: '友善发言', type: 'positive', source: 'manual', embedding: null });
+    db.rules.insert({ groupId: 'g1', content: '不得发不雅内容', type: 'negative', source: 'announcement', embedding: null });
+    claude.mockResolvedValue({ text: '好的', inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 });
+    const chat = makeSentinelChat();
+    await chat.generateReply('g1', mentionMsg('群规是什么'), []);
+    const call = claude.mock.calls[0]![0] as { system: Array<{ text: string }> };
+    const systemText = call.system.map((s: { text: string }) => s.text).join('');
+    expect(systemText).toContain('本群的规矩');
+    expect(systemText).toContain('禁止广告');
+    expect(systemText).toContain('友善发言');
+    expect(systemText).toContain('不得发不雅内容');
+  });
+
+  it('system prompt has no "本群的规矩" block when db.rules is empty', async () => {
+    claude.mockResolvedValue({ text: '好的', inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 });
+    const chat = makeSentinelChat();
+    await chat.generateReply('g1', mentionMsg('群规是什么'), []);
+    const call = claude.mock.calls[0]![0] as { system: Array<{ text: string }> };
+    const systemText = call.system.map((s: { text: string }) => s.text).join('');
+    expect(systemText).not.toContain('本群的规矩');
+  });
+
+  it('persona contains "如果有人问群规" instruction when rules exist', async () => {
+    db.rules.insert({ groupId: 'g1', content: '禁止刷屏', type: 'negative', source: 'manual', embedding: null });
+    claude.mockResolvedValue({ text: '好的', inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 });
+    const chat = makeSentinelChat();
+    await chat.generateReply('g1', mentionMsg('群规'), []);
+    const call = claude.mock.calls[0]![0] as { system: Array<{ text: string }> };
+    const systemText = call.system.map((s: { text: string }) => s.text).join('');
+    expect(systemText).toContain('如果有人问');
+    expect(systemText).toContain('绝对不要说');
+  });
 });
 
 describe('IDENTITY_PROBE regex', () => {

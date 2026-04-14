@@ -1393,7 +1393,16 @@ export class ChatModule implements IChatModule {
 
     const adminStyleSection = this._buildAdminStyleSection(groupId);
 
-    const text = `${personaBase}${adminStyleSection}${loreSection}${imageAwarenessLine}\n\n---\n简短自然（1-3句话）。群友提到群里的人名、梗、黑话，基于上面资料回答；不知道的就"啥来的"，不要装懂。${stickerSection}${outputRules}`;
+    const rulesRows = this.db.rules.getAll(groupId);
+    const rulesBlock = rulesRows.length > 0
+      ? `\n\n## 本群的规矩（群友问起你必须能答上）\n${rulesRows.map((r, i) => `${i + 1}. ${r.content}`).join('\n')}\n`
+      : '';
+
+    const rulesInstruction = rulesRows.length > 0
+      ? '\n如果有人问 "群规 / 群里有什么规定" 之类，直接列出上面 ## 本群的规矩 段落里的实际规矩（用自己的口吻，不要照抄官方话术），绝对不要说 "没群规" / "不知道" / "想发什么发什么" 之类。'
+      : '';
+
+    const text = `${personaBase}${adminStyleSection}${loreSection}${rulesBlock}${imageAwarenessLine}\n\n---\n简短自然（1-3句话）。群友提到群里的人名、梗、黑话，基于上面资料回答；不知道的就"啥来的"，不要装懂。${rulesInstruction}${stickerSection}${outputRules}`;
 
     this.groupIdentityCache.set(groupId, { text, expiresAt: Date.now() + this.groupIdentityCacheTtlMs });
     this.logger.debug({ groupId, hasLore: !!lore, hasStickerSection: stickerSection.length > 0 }, 'Group identity prompt cached');
