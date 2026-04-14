@@ -208,13 +208,52 @@ export interface BotReply {
   rating: number | null;
   ratingComment: string | null;
   ratedAt: number | null;
+  wasEvasive: boolean;
 }
 
 export interface IBotReplyRepository {
-  insert(row: Omit<BotReply, 'id' | 'rating' | 'ratingComment' | 'ratedAt'>): BotReply;
+  insert(row: Omit<BotReply, 'id' | 'rating' | 'ratingComment' | 'ratedAt' | 'wasEvasive'>): BotReply;
   getUnrated(groupId: string, limit: number): BotReply[];
   getRecent(groupId: string, limit: number): BotReply[];
   rate(id: number, rating: number, comment: string | null, now: number): void;
+  /** Mark a previously-inserted reply as evasive (bot punted with "忘了" / "考我呢" / etc.). */
+  markEvasive(id: number): void;
+  /** Fetch a single bot reply by primary key. */
+  getById(id: number): BotReply | null;
+  /** List all evasive bot replies in a group emitted since `sinceTs` (epoch seconds), newest-first. */
+  listEvasiveSince(groupId: string, sinceTs: number): BotReply[];
+}
+
+export interface LearnedFact {
+  id: number;
+  groupId: string;
+  topic: string | null;
+  fact: string;
+  sourceUserId: string | null;
+  sourceUserNickname: string | null;
+  sourceMsgId: string | null;
+  botReplyId: number | null;
+  confidence: number;
+  status: 'active' | 'superseded' | 'rejected';
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ILearnedFactsRepository {
+  insert(row: {
+    groupId: string;
+    topic: string | null;
+    fact: string;
+    sourceUserId: string | null;
+    sourceUserNickname: string | null;
+    sourceMsgId: string | null;
+    botReplyId: number | null;
+    confidence?: number;
+  }): number;
+  listActive(groupId: string, limit: number): LearnedFact[];
+  markStatus(id: number, status: LearnedFact['status']): void;
+  clearGroup(groupId: string): number;
+  countActive(groupId: string): number;
 }
 
 export interface LocalSticker {
@@ -865,55 +904,144 @@ class ImageDescriptionRepository implements IImageDescriptionRepository {
   }
 }
 
+interface BotReplyRow {
+  id: number; group_id: string; trigger_msg_id: string | null;
+  trigger_user_nickname: string | null; trigger_content: string;
+  bot_reply: string; module: string; sent_at: number;
+  rating: number | null; rating_comment: string | null; rated_at: number | null;
+  was_evasive: number | null;
+}
+
+function botReplyFromRow(r: BotReplyRow): BotReply {
+  return {
+    id: r.id, groupId: r.group_id, triggerMsgId: r.trigger_msg_id,
+    triggerUserNickname: r.trigger_user_nickname, triggerContent: r.trigger_content,
+    botReply: r.bot_reply, module: r.module, sentAt: r.sent_at,
+    rating: r.rating, ratingComment: r.rating_comment, ratedAt: r.rated_at,
+    wasEvasive: (r.was_evasive ?? 0) !== 0,
+  };
+}
+
 class BotReplyRepository implements IBotReplyRepository {
   constructor(private readonly db: DatabaseSync) {}
 
-  insert(row: Omit<BotReply, 'id' | 'rating' | 'ratingComment' | 'ratedAt'>): BotReply {
+  insert(row: Omit<BotReply, 'id' | 'rating' | 'ratingComment' | 'ratedAt' | 'wasEvasive'>): BotReply {
     const result = this.db.prepare(`
       INSERT INTO bot_replies (group_id, trigger_msg_id, trigger_user_nickname, trigger_content, bot_reply, module, sent_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `).run(row.groupId, row.triggerMsgId ?? null, row.triggerUserNickname ?? null, row.triggerContent, row.botReply, row.module, row.sentAt);
-    return { ...row, id: Number(result.lastInsertRowid), rating: null, ratingComment: null, ratedAt: null };
+    return { ...row, id: Number(result.lastInsertRowid), rating: null, ratingComment: null, ratedAt: null, wasEvasive: false };
   }
 
   getUnrated(groupId: string, limit: number): BotReply[] {
     const rows = this.db.prepare(
       'SELECT * FROM bot_replies WHERE group_id = ? AND rating IS NULL ORDER BY sent_at DESC LIMIT ?'
-    ).all(groupId, limit) as unknown as Array<{
-      id: number; group_id: string; trigger_msg_id: string | null;
-      trigger_user_nickname: string | null; trigger_content: string;
-      bot_reply: string; module: string; sent_at: number;
-      rating: number | null; rating_comment: string | null; rated_at: number | null;
-    }>;
-    return rows.map(r => ({
-      id: r.id, groupId: r.group_id, triggerMsgId: r.trigger_msg_id,
-      triggerUserNickname: r.trigger_user_nickname, triggerContent: r.trigger_content,
-      botReply: r.bot_reply, module: r.module, sentAt: r.sent_at,
-      rating: r.rating, ratingComment: r.rating_comment, ratedAt: r.rated_at,
-    }));
+    ).all(groupId, limit) as unknown as BotReplyRow[];
+    return rows.map(botReplyFromRow);
   }
 
   getRecent(groupId: string, limit: number): BotReply[] {
     const rows = this.db.prepare(
       'SELECT * FROM bot_replies WHERE group_id = ? ORDER BY sent_at DESC LIMIT ?'
-    ).all(groupId, limit) as unknown as Array<{
-      id: number; group_id: string; trigger_msg_id: string | null;
-      trigger_user_nickname: string | null; trigger_content: string;
-      bot_reply: string; module: string; sent_at: number;
-      rating: number | null; rating_comment: string | null; rated_at: number | null;
-    }>;
-    return rows.map(r => ({
-      id: r.id, groupId: r.group_id, triggerMsgId: r.trigger_msg_id,
-      triggerUserNickname: r.trigger_user_nickname, triggerContent: r.trigger_content,
-      botReply: r.bot_reply, module: r.module, sentAt: r.sent_at,
-      rating: r.rating, ratingComment: r.rating_comment, ratedAt: r.rated_at,
-    }));
+    ).all(groupId, limit) as unknown as BotReplyRow[];
+    return rows.map(botReplyFromRow);
   }
 
   rate(id: number, rating: number, comment: string | null, now: number): void {
     this.db.prepare(
       'UPDATE bot_replies SET rating = ?, rating_comment = ?, rated_at = ? WHERE id = ?'
     ).run(rating, comment ?? null, now, id);
+  }
+
+  markEvasive(id: number): void {
+    this.db.prepare('UPDATE bot_replies SET was_evasive = 1 WHERE id = ?').run(id);
+  }
+
+  getById(id: number): BotReply | null {
+    const row = this.db.prepare('SELECT * FROM bot_replies WHERE id = ?').get(id) as unknown as BotReplyRow | undefined;
+    return row ? botReplyFromRow(row) : null;
+  }
+
+  listEvasiveSince(groupId: string, sinceTs: number): BotReply[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM bot_replies WHERE group_id = ? AND was_evasive = 1 AND sent_at >= ? ORDER BY sent_at DESC'
+    ).all(groupId, sinceTs) as unknown as BotReplyRow[];
+    return rows.map(botReplyFromRow);
+  }
+}
+
+interface LearnedFactRow {
+  id: number; group_id: string; topic: string | null; fact: string;
+  source_user_id: string | null; source_user_nickname: string | null;
+  source_msg_id: string | null; bot_reply_id: number | null;
+  confidence: number; status: string;
+  created_at: number; updated_at: number;
+}
+
+function learnedFactFromRow(r: LearnedFactRow): LearnedFact {
+  return {
+    id: r.id, groupId: r.group_id, topic: r.topic, fact: r.fact,
+    sourceUserId: r.source_user_id, sourceUserNickname: r.source_user_nickname,
+    sourceMsgId: r.source_msg_id, botReplyId: r.bot_reply_id,
+    confidence: r.confidence,
+    status: (r.status as LearnedFact['status']) ?? 'active',
+    createdAt: r.created_at, updatedAt: r.updated_at,
+  };
+}
+
+class LearnedFactsRepository implements ILearnedFactsRepository {
+  constructor(private readonly db: DatabaseSync) {}
+
+  insert(row: {
+    groupId: string;
+    topic: string | null;
+    fact: string;
+    sourceUserId: string | null;
+    sourceUserNickname: string | null;
+    sourceMsgId: string | null;
+    botReplyId: number | null;
+    confidence?: number;
+  }): number {
+    const now = Math.floor(Date.now() / 1000);
+    const result = this.db.prepare(`
+      INSERT INTO learned_facts
+        (group_id, topic, fact, source_user_id, source_user_nickname,
+         source_msg_id, bot_reply_id, confidence, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+    `).run(
+      row.groupId, row.topic, row.fact,
+      row.sourceUserId, row.sourceUserNickname, row.sourceMsgId,
+      row.botReplyId, row.confidence ?? 1.0, now, now,
+    );
+    return Number(result.lastInsertRowid);
+  }
+
+  listActive(groupId: string, limit: number): LearnedFact[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM learned_facts WHERE group_id = ? AND status = 'active' ORDER BY created_at DESC, id DESC LIMIT ?`
+    ).all(groupId, limit) as unknown as LearnedFactRow[];
+    return rows.map(learnedFactFromRow);
+  }
+
+  markStatus(id: number, status: LearnedFact['status']): void {
+    const now = Math.floor(Date.now() / 1000);
+    this.db.prepare(
+      'UPDATE learned_facts SET status = ?, updated_at = ? WHERE id = ?'
+    ).run(status, now, id);
+  }
+
+  clearGroup(groupId: string): number {
+    const result = this.db.prepare(
+      'DELETE FROM learned_facts WHERE group_id = ?'
+    ).run(groupId) as { changes: number };
+    return result.changes;
+  }
+
+  countActive(groupId: string): number {
+    const row = this.db.prepare(
+      `SELECT COUNT(*) as count FROM learned_facts WHERE group_id = ? AND status = 'active'`
+    ).get(groupId) as unknown as CountRow;
+    return row.count;
   }
 }
 
@@ -995,6 +1123,7 @@ export class Database {
   readonly imageDescriptions: IImageDescriptionRepository;
   readonly botReplies: IBotReplyRepository;
   readonly localStickers: ILocalStickerRepository;
+  readonly learnedFacts: ILearnedFactsRepository;
 
   private readonly _db: DatabaseSync;
 
@@ -1015,6 +1144,7 @@ export class Database {
     this.imageDescriptions = new ImageDescriptionRepository(this._db);
     this.botReplies = new BotReplyRepository(this._db);
     this.localStickers = new LocalStickerRepository(this._db);
+    this.learnedFacts = new LearnedFactsRepository(this._db);
   }
 
   /** Execute arbitrary SQL — intended for bulk-import scripts and migrations only. */
@@ -1096,5 +1226,30 @@ export class Database {
 
     // Add role column to users table for existing DBs
     try { this._db.exec(`ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'member'`); } catch { /* already exists */ }
+
+    // bot_replies.was_evasive — added for self-learning module (Batch C / Change 4c).
+    // Wrapped in try/catch to be idempotent on existing DBs that already have the column.
+    try { this._db.exec(`ALTER TABLE bot_replies ADD COLUMN was_evasive INTEGER NOT NULL DEFAULT 0`); } catch { /* already exists */ }
+
+    // learned_facts table — repeated here so existing DBs created before Batch C also get it.
+    // schema.sql handles fresh installs; this branch covers upgrade-in-place. See
+    // feedback_sqlite_schema_migration.md for why both paths matter.
+    this._db.exec(`
+      CREATE TABLE IF NOT EXISTS learned_facts (
+        id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id             TEXT    NOT NULL,
+        topic                TEXT,
+        fact                 TEXT    NOT NULL,
+        source_user_id       TEXT,
+        source_user_nickname TEXT,
+        source_msg_id        TEXT,
+        bot_reply_id         INTEGER,
+        confidence           REAL    NOT NULL DEFAULT 1.0,
+        status               TEXT    NOT NULL DEFAULT 'active',
+        created_at           INTEGER NOT NULL,
+        updated_at           INTEGER NOT NULL
+      )
+    `);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_learned_facts_group_active ON learned_facts(group_id, status, created_at DESC)`);
   }
 }
