@@ -50,9 +50,9 @@ describe('OpportunisticHarvest', () => {
     const msgRepo = makeMsgRepo(msgs);
     const factRepo = makeFactRepo();
     const claude = makeClaudeWith(JSON.stringify([
-      { topic: 'T1', fact: '事实A很重要', sourceNickname: 'Alice' },
-      { topic: 'T2', fact: '事实B也重要', sourceNickname: 'Bob' },
-      { topic: 'T3', fact: '事实C同样重要', sourceNickname: 'Carol' },
+      { category: '群友个人信息', topic: 'T1', fact: '事实A很重要', sourceNickname: 'Alice', confidence: 0.9 },
+      { category: 'fandom 事实', topic: 'T2', fact: '事实B也重要', sourceNickname: 'Bob', confidence: 0.8 },
+      { category: '群内梗', topic: 'T3', fact: '事实C同样重要', sourceNickname: 'Carol', confidence: 0.7 },
     ]));
 
     const harvest = new OpportunisticHarvest({
@@ -65,16 +65,16 @@ describe('OpportunisticHarvest', () => {
     expect(factRepo.inserted).toHaveLength(3);
     expect(factRepo.inserted[0]!.fact).toBe('事实A很重要');
     expect(factRepo.inserted[0]!.sourceUserNickname).toBe('[harvest:Alice]');
-    expect(factRepo.inserted[0]!.confidence).toBe(0.7);
+    expect(factRepo.inserted[0]!.confidence).toBe(0.9);
+    // topic should be prefixed with category
+    expect(factRepo.inserted[0]!.topic).toContain('群友个人信息');
   });
 
   it('skips duplicate facts (same prefix already in DB)', async () => {
     const msgs = makeRecentMsgs(15);
     const msgRepo = makeMsgRepo(msgs);
-    // The dupe check: existing.fact.includes(newFact.slice(0, 20))
-    // Make existing fact contain the first 20 chars of the duplicate new fact
     const dupeFact = 'Alice喜欢BanG Dream，最爱Poppin Party乐队的演出';
-    const dupePrefix = dupeFact.slice(0, 20); // 'Alice喜欢BanG Dream，最'
+    const dupePrefix = dupeFact.slice(0, 20);
     const existingFact: LearnedFact = {
       id: 1, groupId: GROUP, topic: 'T1', fact: `${dupePrefix}这里已有记录了`,
       sourceUserId: null, sourceUserNickname: null, sourceMsgId: null,
@@ -82,8 +82,8 @@ describe('OpportunisticHarvest', () => {
     };
     const factRepo = makeFactRepo([existingFact]);
     const claude = makeClaudeWith(JSON.stringify([
-      { topic: 'T1', fact: dupeFact, sourceNickname: 'Alice' },
-      { topic: 'T2', fact: '全新的事实B内容这里，Bob住在东京', sourceNickname: 'Bob' },
+      { topic: 'T1', fact: dupeFact, sourceNickname: 'Alice', confidence: 0.8 },
+      { topic: 'T2', fact: '全新的事实B内容这里，Bob住在东京', sourceNickname: 'Bob', confidence: 0.9 },
     ]));
 
     const harvest = new OpportunisticHarvest({
@@ -143,24 +143,19 @@ describe('OpportunisticHarvest', () => {
     });
 
     harvest.start();
-    // Access private timer via bracket notation for test
     expect((harvest as unknown as { timer: unknown }).timer).toBeNull();
+    expect((harvest as unknown as { deepTimer: unknown }).deepTimer).toBeNull();
     harvest.dispose();
   });
 
-  it('skips group when fewer than 10 new messages since last run', async () => {
-    let callCount = 0;
-    const now = vi.fn().mockImplementation(() => {
-      callCount++;
-      // First call returns base time; second returns +5s (same hour)
-      return callCount === 1 ? 1700000000000 : 1700000005000;
-    });
+  it('skips group when fewer than 8 new messages since last run', async () => {
+    const now = vi.fn().mockReturnValueOnce(1700001000000);
 
     const msgs = makeRecentMsgs(15);
     const msgRepo = makeMsgRepo(msgs);
     const factRepo = makeFactRepo();
     const claude = makeClaudeWith(JSON.stringify([
-      { topic: 'T', fact: '新事实内容在这里', sourceNickname: 'X' },
+      { topic: 'T', fact: '新事实内容在这里', sourceNickname: 'X', confidence: 0.8 },
     ]));
 
     const harvest = new OpportunisticHarvest({
@@ -168,18 +163,36 @@ describe('OpportunisticHarvest', () => {
       activeGroups: [GROUP], logger: silentLogger, enabled: true, now,
     });
 
-    // First run: all 15 msgs are new (lastRunTs=0) → inserts
+    // First run: all 15 msgs are new → inserts
     await harvest._run();
     expect(factRepo.inserted).toHaveLength(1);
 
-    // Second run: msgs timestamps (1700000000+i seconds) → *1000 ms ≈ 1700000000000ms
-    // lastRunTs is now 1700000005000ms, messages at ~1700000000000ms → older → 0 new msgs
+    // Second run: lastRunTs = 1700001000000ms > all msg timestamps → 0 new → skipped
     await harvest._run();
-    // Should be skipped, no additional inserts
     expect(factRepo.inserted).toHaveLength(1);
   });
 
-  it('dispose() clears interval so no further runs occur', async () => {
+  it('dispose() clears all intervals and timeouts', () => {
+    const msgRepo = makeMsgRepo([]);
+    const factRepo = makeFactRepo();
+    const claude = makeClaudeWith('[]');
+
+    const harvest = new OpportunisticHarvest({
+      messages: msgRepo, learnedFacts: factRepo, claude,
+      activeGroups: [GROUP], logger: silentLogger, enabled: true,
+      intervalMs: 50_000, deepIntervalMs: 100_000,
+    });
+
+    harvest.start();
+    harvest.dispose();
+
+    expect((harvest as unknown as { timer: unknown }).timer).toBeNull();
+    expect((harvest as unknown as { firstTimer: unknown }).firstTimer).toBeNull();
+    expect((harvest as unknown as { deepTimer: unknown }).deepTimer).toBeNull();
+    expect((harvest as unknown as { deepFirstTimer: unknown }).deepFirstTimer).toBeNull();
+  });
+
+  it('prompt contains all 8 extraction category labels', async () => {
     const msgs = makeRecentMsgs(15);
     const msgRepo = makeMsgRepo(msgs);
     const factRepo = makeFactRepo();
@@ -188,13 +201,122 @@ describe('OpportunisticHarvest', () => {
     const harvest = new OpportunisticHarvest({
       messages: msgRepo, learnedFacts: factRepo, claude,
       activeGroups: [GROUP], logger: silentLogger, enabled: true,
-      intervalMs: 50_000,
+    });
+
+    await harvest._run();
+
+    const call = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { messages: Array<{ content: string }> };
+    const prompt = call.messages[0]!.content;
+    expect(prompt).toContain('群友个人信息');
+    expect(prompt).toContain('群友关系');
+    expect(prompt).toContain('群内梗');
+    expect(prompt).toContain('fandom 事实');
+    expect(prompt).toContain('群友态度');
+    expect(prompt).toContain('群文化');
+    expect(prompt).toContain('新事件');
+    expect(prompt).toContain('群友的纠正');
+  });
+
+  it('max facts limit is 12 in regular prompt', async () => {
+    const msgs = makeRecentMsgs(15);
+    const msgRepo = makeMsgRepo(msgs);
+    const factRepo = makeFactRepo();
+    const claude = makeClaudeWith('[]');
+
+    const harvest = new OpportunisticHarvest({
+      messages: msgRepo, learnedFacts: factRepo, claude,
+      activeGroups: [GROUP], logger: silentLogger, enabled: true,
+    });
+
+    await harvest._run();
+
+    const call = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { messages: Array<{ content: string }> };
+    const prompt = call.messages[0]!.content;
+    expect(prompt).toContain('最多 12 条');
+  });
+
+  it('window size defaults to 150 for regular cycle', async () => {
+    const msgs = makeRecentMsgs(15);
+    const msgRepo = makeMsgRepo(msgs);
+    const factRepo = makeFactRepo();
+    const claude = makeClaudeWith('[]');
+
+    const harvest = new OpportunisticHarvest({
+      messages: msgRepo, learnedFacts: factRepo, claude,
+      activeGroups: [GROUP], logger: silentLogger, enabled: true,
+    });
+
+    await harvest._run();
+
+    expect(msgRepo.getRecent).toHaveBeenCalledWith(GROUP, 150);
+  });
+
+  it('deep cycle uses 1000-message window and 30 max facts', async () => {
+    const msgs = makeRecentMsgs(15);
+    const msgRepo = makeMsgRepo(msgs);
+    const factRepo = makeFactRepo();
+    const claude = makeClaudeWith('[]');
+
+    const harvest = new OpportunisticHarvest({
+      messages: msgRepo, learnedFacts: factRepo, claude,
+      activeGroups: [GROUP], logger: silentLogger, enabled: true,
+    });
+
+    await harvest._runDeep();
+
+    expect(msgRepo.getRecent).toHaveBeenCalledWith(GROUP, 1000);
+    const call = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { messages: Array<{ content: string }> };
+    const prompt = call.messages[0]!.content;
+    expect(prompt).toContain('最多 30 条');
+    expect(prompt).toContain('反复出现 3+ 次');
+  });
+
+  it('deep cycle runs on its own independent timer', () => {
+    const msgRepo = makeMsgRepo([]);
+    const factRepo = makeFactRepo();
+    const claude = makeClaudeWith('[]');
+
+    const harvest = new OpportunisticHarvest({
+      messages: msgRepo, learnedFacts: factRepo, claude,
+      activeGroups: [GROUP], logger: silentLogger, enabled: true,
+      intervalMs: 50_000, deepIntervalMs: 200_000,
     });
 
     harvest.start();
+    expect((harvest as unknown as { deepTimer: unknown }).deepTimer).not.toBeNull();
+    expect((harvest as unknown as { deepFirstTimer: unknown }).deepFirstTimer).not.toBeNull();
     harvest.dispose();
+  });
 
-    expect((harvest as unknown as { timer: unknown }).timer).toBeNull();
-    expect((harvest as unknown as { firstTimer: unknown }).firstTimer).toBeNull();
+  it('log message after run contains insert/dedup counts and total active facts', async () => {
+    const msgs = makeRecentMsgs(15);
+    const msgRepo = makeMsgRepo(msgs);
+    const dupeFact = 'Alice喜欢BanG Dream，已经存在的事实前缀';
+    const dupePrefix = dupeFact.slice(0, 20);
+    const existingFact: LearnedFact = {
+      id: 1, groupId: GROUP, topic: 'existing', fact: `${dupePrefix}在库里`,
+      sourceUserId: null, sourceUserNickname: null, sourceMsgId: null,
+      botReplyId: null, confidence: 0.9, status: 'active', createdAt: 0, updatedAt: 0,
+    };
+    const factRepo = makeFactRepo([existingFact]);
+    const claude = makeClaudeWith(JSON.stringify([
+      { topic: 'new', fact: '全新的事实不重复的内容，详细描述', sourceNickname: 'A', confidence: 0.8 },
+      { topic: 'dupe', fact: dupeFact, sourceNickname: 'B', confidence: 0.9 },
+    ]));
+
+    const harvest = new OpportunisticHarvest({
+      messages: msgRepo, learnedFacts: factRepo, claude,
+      activeGroups: [GROUP], logger: silentLogger, enabled: true,
+    });
+
+    await harvest._run();
+
+    // inserted=1, dedupped=1, totalActiveFacts=2 (1 existing + 1 new)
+    const infoCalls = (silentLogger.info as ReturnType<typeof vi.fn>).mock.calls;
+    const logCall = infoCalls.find(c => typeof c[0] === 'object' && 'inserted' in c[0]);
+    expect(logCall).toBeDefined();
+    expect(logCall![0].inserted).toBe(1);
+    expect(logCall![0].dedupped).toBe(1);
+    expect(logCall![0].totalActiveFacts).toBe(2);
   });
 });
