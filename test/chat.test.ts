@@ -3015,3 +3015,75 @@ describe('ChatModule — mface rotation', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 });
+
+// ── Collective addressing (你们) ───────────────────────────────────────────────
+
+describe('ChatModule — collective addressing (你们)', () => {
+  it('BANGDREAM_PERSONA contains 集体称呼 section', () => {
+    expect(BANGDREAM_PERSONA).toContain('集体称呼');
+    expect(BANGDREAM_PERSONA).toContain('你们');
+    expect(BANGDREAM_PERSONA).toContain('看你们唐的');
+  });
+
+  it('userContent tail contains collective-addressing reminder', async () => {
+    const db = new Database(':memory:');
+    const ts = Math.floor(Date.now() / 1000);
+    // Insert 4 messages from 4 different users to a single group
+    for (let i = 0; i < 4; i++) {
+      db.messages.insert({
+        groupId: 'g1', userId: `ua${i}`, nickname: `Speaker${i}`,
+        content: `msg ${i}`, timestamp: ts - 10 + i, deleted: false,
+      });
+    }
+    const claude = makeMockClaude('测试回复');
+    const chat = makePassthroughChat(claude, db);
+    const recentMsgs = db.messages.getRecent('g1', 20);
+    await chat.generateReply('g1', makeMsg(), recentMsgs);
+
+    const call = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { messages: Array<{ content: string }> };
+    const userContent = call.messages.map(m => m.content).join(' ');
+    expect(userContent).toContain('你们');
+    expect(userContent).toContain('集体称呼');
+  });
+
+  it('speakerHint appears in immediateSection when 3+ distinct speakers', async () => {
+    const db = new Database(':memory:');
+    const ts = Math.floor(Date.now() / 1000);
+    // Insert 3 messages from 3 different users
+    for (let i = 0; i < 3; i++) {
+      db.messages.insert({
+        groupId: 'g1', userId: `ub${i}`, nickname: `Multi${i}`,
+        content: `话题内容 ${i}`, timestamp: ts - 5 + i, deleted: false,
+      });
+    }
+    const claude = makeMockClaude('测试回复');
+    const chat = makePassthroughChat(claude, db);
+    const recentMsgs = db.messages.getRecent('g1', 20);
+    await chat.generateReply('g1', makeMsg(), recentMsgs);
+
+    const call = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { messages: Array<{ content: string }> };
+    const userContent = call.messages.map(m => m.content).join(' ');
+    expect(userContent).toContain('个群友在同时聊');
+    expect(userContent).toContain('可以考虑集体称呼');
+  });
+
+  it('speakerHint absent when fewer than 3 distinct speakers', async () => {
+    const db = new Database(':memory:');
+    const ts = Math.floor(Date.now() / 1000);
+    // Insert 4 messages but from only 2 users
+    for (let i = 0; i < 4; i++) {
+      db.messages.insert({
+        groupId: 'g1', userId: i % 2 === 0 ? 'uc0' : 'uc1', nickname: i % 2 === 0 ? 'UserA' : 'UserB',
+        content: `msg ${i}`, timestamp: ts - 10 + i, deleted: false,
+      });
+    }
+    const claude = makeMockClaude('测试回复');
+    const chat = makePassthroughChat(claude, db);
+    const recentMsgs = db.messages.getRecent('g1', 20);
+    await chat.generateReply('g1', makeMsg(), recentMsgs);
+
+    const call = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { messages: Array<{ content: string }> };
+    const userContent = call.messages.map(m => m.content).join(' ');
+    expect(userContent).not.toContain('可以考虑集体称呼');
+  });
+});
