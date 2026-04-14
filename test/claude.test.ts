@@ -232,19 +232,19 @@ describe('ClaudeClient', () => {
     await expect(client.describeImage(buf, 'claude-sonnet-4-6')).rejects.toBeInstanceOf(ClaudeParseError);
   });
 
-  it('describeImage: uses detailed prompt with 仔细描述 / 可见文字 / 30-100字', async () => {
+  it('describeImage: uses two-section prompt with intent inference', async () => {
     mockQuery.mockReturnValueOnce(makeSuccessMessages('挺好看的图'));
     const buf = Buffer.from([0x89, 0x50, 0x00]);
     await client.describeImage(buf, 'claude-sonnet-4-6');
-    // Extract the prompt from the SDKUserMessage content
     const call = mockQuery.mock.calls[0]![0] as { prompt: AsyncIterable<{ type: string; message: { content: Array<{ type: string; text?: string }> } }> };
     const msgs: Array<{ type: string; message: { content: Array<{ type: string; text?: string }> } }> = [];
     for await (const m of call.prompt) msgs.push(m as { type: string; message: { content: Array<{ type: string; text?: string }> } });
     const userMsg = msgs.find(m => m.type === 'user');
     const textBlock = userMsg?.message.content.find(b => b.type === 'text');
-    expect(textBlock?.text).toContain('仔细描述');
-    expect(textBlock?.text).toContain('可见文字');
-    expect(textBlock?.text).toContain('30-100');
+    expect(textBlock?.text).toContain('图里有什么');
+    expect(textBlock?.text).toContain('发的人想表达');
+    expect(textBlock?.text).toContain('30-80 字');
+    expect(textBlock?.text).toContain('10-40 字');
     expect(textBlock?.text).toContain('角色名');
   });
 
