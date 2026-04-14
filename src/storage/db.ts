@@ -75,6 +75,7 @@ export interface GroupConfig {
   liveStickerCaptureEnabled: boolean;
   stickerLegendRefreshEveryMsgs: number;
   chatPersonaText: string | null;
+  welcomeEnabled: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -283,6 +284,11 @@ export interface IPendingModerationRepository {
   listPending(limit: number): PendingModeration[];
 }
 
+export interface IWelcomeLogRepository {
+  record(groupId: string, userId: string, nowSec: number): void;
+  lastWelcomeAt(groupId: string, userId: string): number | null;
+}
+
 export interface LocalSticker {
   id: number;
   groupId: string;
@@ -353,6 +359,7 @@ interface GroupConfigRow {
   live_sticker_capture_enabled: number;
   sticker_legend_refresh_every_msgs: number;
   chat_persona_text: string | null;
+  welcome_enabled: number;
   created_at: string; updated_at: string;
 }
 
@@ -441,6 +448,7 @@ function configFromRow(row: GroupConfigRow): GroupConfig {
     liveStickerCaptureEnabled: (row.live_sticker_capture_enabled ?? 1) !== 0,
     stickerLegendRefreshEveryMsgs: row.sticker_legend_refresh_every_msgs ?? 50,
     chatPersonaText: row.chat_persona_text ?? null,
+    welcomeEnabled: (row.welcome_enabled ?? 1) !== 0,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -663,9 +671,9 @@ class GroupConfigRepository implements IGroupConfigRepository {
         name_images_blocklist,
         lore_update_enabled, lore_update_threshold, lore_update_cooldown_ms,
         live_sticker_capture_enabled, sticker_legend_refresh_every_msgs,
-        chat_persona_text,
+        chat_persona_text, welcome_enabled,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(group_id) DO UPDATE SET
         enabled_modules = excluded.enabled_modules,
         auto_mod = excluded.auto_mod,
@@ -693,6 +701,7 @@ class GroupConfigRepository implements IGroupConfigRepository {
         live_sticker_capture_enabled = excluded.live_sticker_capture_enabled,
         sticker_legend_refresh_every_msgs = excluded.sticker_legend_refresh_every_msgs,
         chat_persona_text = excluded.chat_persona_text,
+        welcome_enabled = excluded.welcome_enabled,
         updated_at = excluded.updated_at
     `).run(
       config.groupId,
@@ -722,6 +731,7 @@ class GroupConfigRepository implements IGroupConfigRepository {
       (config.liveStickerCaptureEnabled ?? true) ? 1 : 0,
       config.stickerLegendRefreshEveryMsgs ?? 50,
       config.chatPersonaText ?? null,
+      (config.welcomeEnabled ?? true) ? 1 : 0,
       config.createdAt,
       config.updatedAt,
     );
@@ -1194,6 +1204,23 @@ class PendingModerationRepository implements IPendingModerationRepository {
   }
 }
 
+class WelcomeLogRepository implements IWelcomeLogRepository {
+  constructor(private readonly db: DatabaseSync) {}
+
+  record(groupId: string, userId: string, nowSec: number): void {
+    this.db.prepare(
+      'INSERT INTO welcome_log (group_id, user_id, welcomed_at) VALUES (?, ?, ?)'
+    ).run(groupId, userId, nowSec);
+  }
+
+  lastWelcomeAt(groupId: string, userId: string): number | null {
+    const row = this.db.prepare(
+      'SELECT welcomed_at FROM welcome_log WHERE group_id = ? AND user_id = ? ORDER BY welcomed_at DESC LIMIT 1'
+    ).get(groupId, userId) as { welcomed_at: number } | undefined;
+    return row?.welcomed_at ?? null;
+  }
+}
+
 // ---- Main Database class ----
 
 export class Database {
@@ -1210,6 +1237,7 @@ export class Database {
   readonly localStickers: ILocalStickerRepository;
   readonly learnedFacts: ILearnedFactsRepository;
   readonly pendingModeration: IPendingModerationRepository;
+  readonly welcomeLog: IWelcomeLogRepository;
 
   private readonly _db: DatabaseSync;
 
@@ -1232,6 +1260,7 @@ export class Database {
     this.localStickers = new LocalStickerRepository(this._db);
     this.learnedFacts = new LearnedFactsRepository(this._db);
     this.pendingModeration = new PendingModerationRepository(this._db);
+    this.welcomeLog = new WelcomeLogRepository(this._db);
   }
 
   /** Execute arbitrary SQL — intended for bulk-import scripts and migrations only. */
@@ -1358,5 +1387,19 @@ export class Database {
       )
     `);
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_pending_moderation_status ON pending_moderation(status, created_at)`);
+
+    // welcome_enabled column on group_config — default on for all groups.
+    try { this._db.exec(`ALTER TABLE group_config ADD COLUMN welcome_enabled INTEGER NOT NULL DEFAULT 1`); } catch { /* already exists */ }
+
+    // welcome_log table — schema.sql handles fresh installs; migration covers existing DBs.
+    this._db.exec(`
+      CREATE TABLE IF NOT EXISTS welcome_log (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id     TEXT    NOT NULL,
+        user_id      TEXT    NOT NULL,
+        welcomed_at  INTEGER NOT NULL
+      )
+    `);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_welcome_log_user ON welcome_log(group_id, user_id, welcomed_at DESC)`);
   }
 }

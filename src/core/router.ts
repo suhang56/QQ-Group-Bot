@@ -706,7 +706,7 @@ export class Router implements IRouter {
     }
 
     if (text === '/help') {
-      await reply('/approve <id> — 执行建议处理\n/reject <id> — 拒绝，不处理\n/pending — 查看待处理列表\n/mod_on — 开启所有群的自动审核\n/mod_off — 关闭所有群的自动审核（仅观察）');
+      await reply('/approve <id> — 执行建议处理\n/reject <id> — 拒绝，不处理\n/pending — 查看待处理列表\n/mod_on — 开启所有群的自动审核\n/mod_off — 关闭所有群的自动审核（仅观察）\n/welcome_on <groupId> — 开启该群欢迎消息\n/welcome_off <groupId> — 关闭该群欢迎消息');
       return;
     }
 
@@ -722,6 +722,21 @@ export class Router implements IRouter {
       }
       await reply(`已${enable ? '开启' : '关闭'}所有群的自动审核。`);
       logger.info({ enable, groupCount: groups.length }, 'mod_on/mod_off by admin');
+      return;
+    }
+
+    const welcomeToggleMatch = /^\/welcome_(on|off)\s+(\S+)$/i.exec(text);
+    if (welcomeToggleMatch) {
+      const enable = welcomeToggleMatch[1]!.toLowerCase() === 'on';
+      const groupId = welcomeToggleMatch[2]!;
+      const cfg = this.db.groupConfig.get(groupId);
+      if (!cfg) {
+        await reply(`找不到群 ${groupId} 的配置。`);
+        return;
+      }
+      this.db.groupConfig.upsert({ ...cfg, welcomeEnabled: enable });
+      await reply(`群 ${groupId} 欢迎消息已${enable ? '开启' : '关闭'}。`);
+      logger.info({ groupId, enable }, 'welcome toggle by admin');
       return;
     }
 

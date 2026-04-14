@@ -17,6 +17,7 @@ import { LoreUpdater } from './modules/lore-updater.js';
 import { SelfLearningModule } from './modules/self-learning.js';
 import { VisionService } from './modules/vision.js';
 import { StickerCaptureService } from './modules/sticker-capture.js';
+import { WelcomeModule } from './modules/welcome.js';
 import { RatingPortalServer } from './server/rating-portal.js';
 import { TuningGenerator } from './server/tuning-generator.js';
 
@@ -96,6 +97,8 @@ router.setLoreUpdater(loreUpdater);
 const stickerCapture = new StickerCaptureService(db.localStickers, adapter);
 router.setStickerCapture(stickerCapture);
 
+const welcome = new WelcomeModule({ welcomeLog: db.welcomeLog, claude, adapter, botUserId });
+
 // 5. Wire events
 adapter.on('error', (err) => {
   logger.fatal({ err }, 'Adapter fatal error');
@@ -108,6 +111,13 @@ adapter.on('message.group', (msg) => {
 
 adapter.on('message.private', (msg) => {
   void router.dispatchPrivate(msg);
+});
+
+adapter.on('notice.group_increase', (groupId, userId) => {
+  const cfg = db.groupConfig.get(groupId);
+  if (cfg && !cfg.welcomeEnabled) return;
+  if (ACTIVE_GROUPS.length > 0 && !ACTIVE_GROUPS.includes(groupId)) return;
+  void welcome.handleJoin(groupId, userId).catch(err => logger.error({ err, groupId, userId }, 'welcome failed'));
 });
 
 // 6. Connect

@@ -205,3 +205,11 @@ CREATE TABLE IF NOT EXISTS pending_moderation (
 
 CREATE INDEX IF NOT EXISTS idx_pending_moderation_status
   ON pending_moderation(status, created_at);
+
+CREATE TABLE IF NOT EXISTS welcome_log (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id     TEXT    NOT NULL,
+  user_id      TEXT    NOT NULL,
+  welcomed_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_welcome_log_user ON welcome_log(group_id, user_id, welcomed_at DESC);
