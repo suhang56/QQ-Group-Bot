@@ -232,7 +232,7 @@ describe('ClaudeClient', () => {
     await expect(client.describeImage(buf, 'claude-sonnet-4-6')).rejects.toBeInstanceOf(ClaudeParseError);
   });
 
-  it('describeImage: uses shortened prompt (Fix 3)', async () => {
+  it('describeImage: uses detailed prompt with 仔细描述 / 可见文字 / 30-100字', async () => {
     mockQuery.mockReturnValueOnce(makeSuccessMessages('挺好看的图'));
     const buf = Buffer.from([0x89, 0x50, 0x00]);
     await client.describeImage(buf, 'claude-sonnet-4-6');
@@ -242,7 +242,10 @@ describe('ClaudeClient', () => {
     for await (const m of call.prompt) msgs.push(m as { type: string; message: { content: Array<{ type: string; text?: string }> } });
     const userMsg = msgs.find(m => m.type === 'user');
     const textBlock = userMsg?.message.content.find(b => b.type === 'text');
-    expect(textBlock?.text).toBe('仔细描述这张图：你看到的人物 / 物品 / 场景 / 文字 / 表情 / 动作 / 颜色 / 风格 / 整体氛围。30-80字。如果是截图，把可见的文字内容也读出来。如果是 emoji/贴纸/梗图，说明梗的内容。只输出描述，不要前缀。');
+    expect(textBlock?.text).toContain('仔细描述');
+    expect(textBlock?.text).toContain('可见文字');
+    expect(textBlock?.text).toContain('30-100');
+    expect(textBlock?.text).toContain('角色名');
   });
 
   it('downscale: falls back to original bytes on invalid image data', async () => {
