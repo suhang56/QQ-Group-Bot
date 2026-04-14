@@ -603,10 +603,25 @@ export class ChatModule implements IChatModule {
 
     const historyText = keywordSection + historicalSection + recentSection;
 
+    // ── 5-message trigger context ─────────────────────────────────────────
+    // Fetch up to 5 recent messages; trigger is always the newest (last chronologically).
+    const surroundingRaw = this.db.messages.getRecent(groupId, 5);
+    const surroundingChron = [...surroundingRaw].reverse();
+    // If DB has no messages yet (e.g. trigger not yet stored), synthesize from trigger.
+    const contextEntries: Array<{ nickname: string; content: string }> =
+      surroundingChron.length > 0
+        ? surroundingChron
+        : [{ nickname: triggerMessage.nickname, content: triggerMessage.content }];
+    const triggerContextLines = contextEntries.map((m, i) => {
+      const line = `[${m.nickname}]: ${m.content}`;
+      return i === contextEntries.length - 1 ? `${line}  ← 这是你要接的那条` : line;
+    });
+    const triggerContextSection = `# 当前对话（最新 ${contextEntries.length} 条）\n${triggerContextLines.join('\n')}\n\n`;
+
     const systemPrompt = this._getGroupIdentityPrompt(groupId);
     const moodSection = this._buildMoodSection(groupId);
     const contextStickerSection = await this._getContextStickers(groupId, triggerMessage.content);
-    const userContent = `${historyText}${triggerMessage.nickname}说："${triggerMessage.content}"，你会怎么接？直接写出那句话。`;
+    const userContent = `${historyText}${triggerContextSection}你要回复的是"←"标记的那条消息，但要结合前面几条一起看语境，不要孤立理解最后一条。直接写出那句回复。`;
 
     const chatRequest = (hardened = false) => this.claude.complete({
       model: 'claude-haiku-4-5-20251001',

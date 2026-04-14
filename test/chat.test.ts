@@ -1706,3 +1706,79 @@ describe('ChatModule — pure @-mention reply', () => {
     expect(second).toBeNull();
   });
 });
+
+// ── 5-message trigger context ─────────────────────────────────────────────────
+
+describe('ChatModule — 5-message trigger context in prompt', () => {
+  let db: Database;
+  let claude: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    claude = vi.fn().mockResolvedValue({
+      text: 'bot reply', inputTokens: 10, outputTokens: 5,
+      cacheReadTokens: 0, cacheWriteTokens: 0,
+    } satisfies ClaudeResponse);
+  });
+
+  function makeChat(opts: Record<string, unknown> = {}): ChatModule {
+    return new ChatModule(
+      { complete: claude } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999, moodProactiveEnabled: false, deflectCacheEnabled: false, ...opts },
+    );
+  }
+
+  const ts = Math.floor(Date.now() / 1000);
+
+  it('includes up to 5 recent messages in prompt with arrow marker on last', async () => {
+    for (let i = 0; i < 5; i++) {
+      db.messages.insert({ groupId: 'g1', userId: `u${i}`, nickname: `User${i}`, content: `msg${i}`, timestamp: ts + i, deleted: false });
+    }
+    const chat = makeChat();
+    const trigger = makeMsg({ content: 'msg4', nickname: 'User4' });
+    await chat.generateReply('g1', trigger, []);
+    const call = (claude as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { messages: Array<{ content: string }> };
+    const prompt = call.messages[0]!.content as string;
+    expect(prompt).toContain('当前对话（最新 5 条）');
+    expect(prompt).toContain('← 这是你要接的那条');
+    expect(prompt).toContain('[User4]: msg4  ← 这是你要接的那条');
+  });
+
+  it('uses all available messages when fewer than 5 exist', async () => {
+    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'only one', timestamp: ts, deleted: false });
+    const chat = makeChat();
+    await chat.generateReply('g1', makeMsg({ content: 'only one', nickname: 'Alice' }), []);
+    const call = (claude as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { messages: Array<{ content: string }> };
+    const prompt = call.messages[0]!.content as string;
+    expect(prompt).toContain('当前对话（最新 1 条）');
+  });
+
+  it('surrounding messages are in chronological order with trigger last', async () => {
+    const nicknames = ['A', 'B', 'C', 'D', 'E'];
+    for (let i = 0; i < 5; i++) {
+      db.messages.insert({ groupId: 'g1', userId: `u${i}`, nickname: nicknames[i]!, content: `m${i}`, timestamp: ts + i, deleted: false });
+    }
+    const chat = makeChat();
+    await chat.generateReply('g1', makeMsg({ content: 'm4', nickname: 'E' }), []);
+    const call = (claude as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { messages: Array<{ content: string }> };
+    const prompt = call.messages[0]!.content as string;
+    const contextStart = prompt.indexOf('当前对话');
+    const contextBlock = prompt.slice(contextStart);
+    const posA = contextBlock.indexOf('[A]');
+    const posE = contextBlock.indexOf('[E]');
+    expect(posA).toBeGreaterThanOrEqual(0);
+    expect(posE).toBeGreaterThan(posA);
+    expect(contextBlock).toContain('[E]: m4  ← 这是你要接的那条');
+  });
+
+  it('prompt instructs Claude to reply to marked message using surrounding context', async () => {
+    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'hello', timestamp: ts, deleted: false });
+    const chat = makeChat();
+    await chat.generateReply('g1', makeMsg({ content: 'hello', nickname: 'Alice' }), []);
+    const call = (claude as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { messages: Array<{ content: string }> };
+    const prompt = call.messages[0]!.content as string;
+    expect(prompt).toContain('你要回复的是"←"标记的那条消息');
+    expect(prompt).toContain('结合前面几条一起看语境');
+  });
+});
