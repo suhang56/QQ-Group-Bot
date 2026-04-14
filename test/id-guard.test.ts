@@ -2,7 +2,8 @@ import { describe, it, expect, vi } from 'vitest';
 import { IdCardGuard, containsIdCardNumber, extractIdCards } from '../src/modules/id-guard.js';
 import type { INapCatAdapter } from '../src/adapter/napcat.js';
 import type { GroupMessage } from '../src/adapter/napcat.js';
-import type { IModerationRepository } from '../src/storage/db.js';
+import type { IModerationRepository, IPendingModerationRepository } from '../src/storage/db.js';
+import type { VisionService } from '../src/modules/vision.js';
 import { initLogger } from '../src/utils/logger.js';
 
 initLogger({ level: 'silent' });
@@ -66,6 +67,7 @@ describe('extractIdCards', () => {
 // ── IdCardGuard integration tests ─────────────────────────────────────────────
 
 const BOT_ID = 'bot-42';
+const ADMIN_ID = 'admin-99';
 const GROUP_ID = 'g1';
 
 function makeMsg(overrides: Partial<GroupMessage> = {}): GroupMessage {
@@ -99,23 +101,45 @@ function makeModeration(): IModerationRepository {
   } as unknown as IModerationRepository;
 }
 
+function makePendingModeration(): IPendingModerationRepository {
+  return {
+    queue: vi.fn().mockReturnValue(1),
+    getById: vi.fn(), markStatus: vi.fn(),
+    expireOlderThan: vi.fn(), listPending: vi.fn(),
+  } as unknown as IPendingModerationRepository;
+}
+
+function makeVision(result: { what: 'full-id' | 'region-prefix'; evidence: string } | null = null): VisionService {
+  return {
+    checkKnownLeaks: vi.fn().mockResolvedValue(result),
+    describeFromMessage: vi.fn().mockResolvedValue(''),
+    extractFileToken: vi.fn(),
+    fileKey: vi.fn(),
+  } as unknown as VisionService;
+}
+
 function makeGuard(opts: {
   adapter?: INapCatAdapter;
   moderation?: IModerationRepository;
+  pendingModeration?: IPendingModerationRepository;
+  vision?: VisionService;
   enabled?: boolean;
-} = {}): { guard: IdCardGuard; adapter: INapCatAdapter; moderation: IModerationRepository } {
+} = {}): { guard: IdCardGuard; adapter: INapCatAdapter; moderation: IModerationRepository; pendingModeration: IPendingModerationRepository; vision: VisionService } {
   const adapter = opts.adapter ?? makeAdapter();
   const moderation = opts.moderation ?? makeModeration();
+  const pendingModeration = opts.pendingModeration ?? makePendingModeration();
+  const vision = opts.vision ?? makeVision();
   const enabled = opts.enabled ?? true;
   const guard = new IdCardGuard({
-    adapter, moderation,
+    adapter, moderation, pendingModeration, vision,
+    adminUserId: ADMIN_ID,
     botUserId: BOT_ID,
     enabled: () => enabled,
   });
-  return { guard, adapter, moderation };
+  return { guard, adapter, moderation, pendingModeration, vision };
 }
 
-describe('IdCardGuard', () => {
+describe('IdCardGuard — text path', () => {
   it('blocks text with 18-digit ID: deleteMsg called, moderation_log written', async () => {
     const { guard, adapter, moderation } = makeGuard();
     const msg = makeMsg({ content: '我的身份证是310110199701093724', rawContent: '我的身份证是310110199701093724' });
@@ -164,18 +188,6 @@ describe('IdCardGuard', () => {
     expect(adapter.deleteMsg).not.toHaveBeenCalled();
   });
 
-  it('image-only message (no text ID) is not blocked — image moderation is delegated to assessImage', async () => {
-    const { guard, adapter } = makeGuard();
-    const msg = makeMsg({
-      content: '',
-      rawContent: '[CQ:image,file=abc.image,url=http://example.com/img.jpg]',
-    });
-    const blocked = await guard.check(msg);
-
-    expect(blocked).toBe(false);
-    expect(adapter.deleteMsg).not.toHaveBeenCalled();
-  });
-
   it('does not block when guard is disabled via config', async () => {
     const { guard, adapter } = makeGuard({ enabled: false });
     const msg = makeMsg({ content: '310110199701093724', rawContent: '310110199701093724' });
@@ -203,6 +215,71 @@ describe('IdCardGuard', () => {
     const blocked = await guard.check(msg);
 
     expect(blocked).toBe(false);
+    expect(adapter.deleteMsg).not.toHaveBeenCalled();
+  });
+});
+
+describe('IdCardGuard — image path', () => {
+  const IMAGE_RAW = '[CQ:image,file=abc.image,url=http://example.com/img.jpg]';
+
+  it('full-id hit: deleteMsg called, moderation insert, no pendingModeration.queue', async () => {
+    const vision = makeVision({ what: 'full-id', evidence: '图中含完整身份证号' });
+    const { guard, adapter, moderation, pendingModeration } = makeGuard({ vision });
+    const msg = makeMsg({ content: '', rawContent: IMAGE_RAW });
+    const blocked = await guard.check(msg);
+
+    expect(blocked).toBe(true);
+    expect(adapter.deleteMsg).toHaveBeenCalledWith('m1');
+    expect(moderation.insert).toHaveBeenCalledWith(expect.objectContaining({ severity: 5, action: 'delete' }));
+    expect(pendingModeration.queue).not.toHaveBeenCalled();
+  });
+
+  it('region-prefix hit: no deleteMsg, pendingModeration.queue(severity:4), sendPrivateMessage to admin', async () => {
+    const vision = makeVision({ what: 'region-prefix', evidence: '图中含310110前缀' });
+    const { guard, adapter, moderation, pendingModeration } = makeGuard({ vision });
+    const msg = makeMsg({ content: '', rawContent: IMAGE_RAW });
+    const blocked = await guard.check(msg);
+
+    expect(blocked).toBe(true);
+    expect(adapter.deleteMsg).not.toHaveBeenCalled();
+    expect(moderation.insert).not.toHaveBeenCalled();
+    expect(pendingModeration.queue).toHaveBeenCalledWith(expect.objectContaining({ severity: 4, proposedAction: 'delete' }));
+    expect(adapter.sendPrivateMessage).toHaveBeenCalledWith(ADMIN_ID, expect.stringContaining('310110'));
+  });
+
+  it('vision returns null: message not blocked', async () => {
+    const vision = makeVision(null);
+    const { guard, adapter, pendingModeration } = makeGuard({ vision });
+    const msg = makeMsg({ content: '', rawContent: IMAGE_RAW });
+    const blocked = await guard.check(msg);
+
+    expect(blocked).toBe(false);
+    expect(adapter.deleteMsg).not.toHaveBeenCalled();
+    expect(pendingModeration.queue).not.toHaveBeenCalled();
+  });
+
+  it('vision throws: fail-safe, message not blocked', async () => {
+    const vision = {
+      checkKnownLeaks: vi.fn().mockRejectedValue(new Error('vision API error')),
+      describeFromMessage: vi.fn(),
+    } as unknown as VisionService;
+    const { guard, adapter, pendingModeration } = makeGuard({ vision });
+    const msg = makeMsg({ content: '', rawContent: IMAGE_RAW });
+    const blocked = await guard.check(msg);
+
+    expect(blocked).toBe(false);
+    expect(adapter.deleteMsg).not.toHaveBeenCalled();
+    expect(pendingModeration.queue).not.toHaveBeenCalled();
+  });
+
+  it('image-only message with no CQ code is not checked via vision', async () => {
+    const vision = makeVision({ what: 'full-id', evidence: 'test' });
+    const { guard, adapter } = makeGuard({ vision });
+    const msg = makeMsg({ content: '', rawContent: 'just plain text no image' });
+    const blocked = await guard.check(msg);
+
+    expect(blocked).toBe(false);
+    expect(vision.checkKnownLeaks).not.toHaveBeenCalled();
     expect(adapter.deleteMsg).not.toHaveBeenCalled();
   });
 });

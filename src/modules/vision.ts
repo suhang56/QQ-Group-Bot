@@ -119,10 +119,11 @@ export class VisionService {
   }
 
   /**
-   * Check whether an image (identified by CQ file token) contains a PRC ID card number.
-   * Returns the number string if found, null otherwise. Fail-safe: throws on API error.
+   * Check whether an image contains specific leaked ID numbers or their region prefix.
+   * Targets: full ID "310110199701093724" or 6-digit prefix "310110".
+   * Returns hit descriptor or null. Throws on fetch/API error (fail-safe).
    */
-  async checkIdCard(fileToken: string): Promise<string | null> {
+  async checkKnownLeaks(fileToken: string): Promise<{ what: 'full-id' | 'region-prefix'; evidence: string } | null> {
     let imageBytes: Buffer;
     try {
       const imageInfo = await this.adapter.getImage(fileToken);
@@ -136,25 +137,36 @@ export class VisionService {
         return null;
       }
     } catch (err) {
-      logger.warn({ err, fileToken }, 'checkIdCard: image fetch failed');
+      logger.warn({ err, fileToken }, 'checkKnownLeaks: image fetch failed');
       throw err;
     }
 
-    const idCardPrompt = 'Does this image contain a PRC resident ID card number (18 or 15 digits)? Reply with JSON only: {"found":true,"number":"<the number>"} or {"found":false,"number":null}. Numbers in memes or decorative text still count. No other text.';
+    const prompt = `Examine this image for ANY appearance of these specific numbers, in any form (printed, handwritten, partially obscured, rotated, split across lines, or embedded in other text):
+1. The exact sequence "310110199701093724" (an 18-digit PRC ID card number)
+2. The 6-digit sequence "310110" (a PRC administrative code for 上海浦东新区)
+
+Rules:
+- If you see the full 18-digit number "310110199701093724" → what: "full-id"
+- If you see only the 6-digit prefix "310110" without the full ID → what: "region-prefix"
+- If neither is visible → hit: false
+
+Return ONLY JSON (no other text):
+{"hit": boolean, "what": "full-id" | "region-prefix" | null, "evidence": "<brief explanation in Chinese, max 50 chars>"}`;
+
     let raw: string;
     try {
-      raw = await this.claude.visionWithPrompt(imageBytes, this.model, idCardPrompt, 100);
+      raw = await this.claude.visionWithPrompt(imageBytes, this.model, prompt, 150);
     } catch (err) {
-      logger.warn({ err }, 'checkIdCard: Claude call failed');
+      logger.warn({ err }, 'checkKnownLeaks: Claude call failed');
       throw err;
     }
 
     try {
-      const parsed = JSON.parse(raw.trim()) as { found: boolean; number: string | null };
-      return parsed.found ? (parsed.number ?? 'unknown') : null;
+      const parsed = JSON.parse(raw.trim()) as { hit: boolean; what: 'full-id' | 'region-prefix' | null; evidence: string };
+      if (!parsed.hit || !parsed.what) return null;
+      return { what: parsed.what, evidence: parsed.evidence ?? '' };
     } catch {
-      // Claude didn't return valid JSON — treat as no-find
-      logger.debug({ raw }, 'checkIdCard: JSON parse failed, treating as not found');
+      logger.debug({ raw }, 'checkKnownLeaks: JSON parse failed, treating as not found');
       return null;
     }
   }

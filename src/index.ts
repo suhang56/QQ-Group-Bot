@@ -103,8 +103,11 @@ const welcome = new WelcomeModule({ welcomeLog: db.welcomeLog, claude, adapter, 
 const idGuard = new IdCardGuard({
   adapter,
   moderation: db.moderation,
+  pendingModeration: db.pendingModeration,
+  vision,
+  adminUserId: process.env['MOD_APPROVAL_ADMIN'] ?? '2331924739',
   botUserId,
-  enabled: () => true, // per-message config check is in router.dispatch
+  enabled: () => true,
 });
 router.setIdGuard(idGuard);
 
