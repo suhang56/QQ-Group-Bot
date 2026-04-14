@@ -1170,6 +1170,19 @@ describe('ChatModule — persona 啥来的 instruction (Fix 1)', () => {
   });
 });
 
+describe('ChatModule — image fallback marker (Fix 8)', () => {
+  it('BANGDREAM_PERSONA contains 看不清这张图 image-blur rule', () => {
+    expect(BANGDREAM_PERSONA).toContain('看不清这张图');
+  });
+
+  it('BANGDREAM_PERSONA bans "图没描述" and "未描述" leak phrases', () => {
+    expect(BANGDREAM_PERSONA).toContain('图没描述');
+    expect(BANGDREAM_PERSONA).toContain('未描述');
+    // Both terms appear only inside the prohibition clause — verify the prohibition is present
+    expect(BANGDREAM_PERSONA).toContain('绝对不要说');
+  });
+});
+
 describe('pickDeflection helper', () => {
   it('returns an item from the pool', () => {
     const pool = ['a', 'b', 'c'];
@@ -2862,7 +2875,7 @@ describe('ChatModule — image context in recent messages', () => {
     expect(result).toBe('一张截图，显示有牛的图片');
   });
 
-  it('_resolveImageDesc: CQ:image with no cached description → returns "(未描述)"', () => {
+  it('_resolveImageDesc: CQ:image with no cached description → returns "看不清这张图"', () => {
     const imageDescRepo = makeImageDescRepo({});
     const chat = new ChatModule(
       { complete: vi.fn() } as unknown as IClaudeClient,
@@ -2870,7 +2883,7 @@ describe('ChatModule — image context in recent messages', () => {
       { botUserId: BOT_ID, imageDescriptions: imageDescRepo },
     );
     const result = chat['_resolveImageDesc']('[CQ:image,file=unknown.image,url=http://example.com/img.jpg]');
-    expect(result).toBe('(未描述)');
+    expect(result).toBe('看不清这张图');
   });
 
   it('_resolveImageDesc: no image in rawContent → returns null', () => {
