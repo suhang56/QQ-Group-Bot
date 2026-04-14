@@ -2183,6 +2183,56 @@ describe('ChatModule — confabulation guard', () => {
     checkConfabulation('我都说过了有啥区别', '你说过什么', { groupId: 'g1' });
     warnSpy.mockRestore();
   });
+
+  it('persona contains self-consistency and fandom-fabrication rules', () => {
+    expect(BANGDREAM_PERSONA).toContain('说过的话要认账，不能自相矛盾');
+    expect(BANGDREAM_PERSONA).toContain('别瞎编 fandom/文化细节');
+  });
+});
+
+// ── Reply-to-bot context clarifier ───────────────────────────────────────────
+
+describe('ChatModule — reply-to-bot context clarifier', () => {
+  let db: Database;
+  let claude: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    claude = vi.fn().mockResolvedValue({
+      text: '随便说的', inputTokens: 10, outputTokens: 5,
+      cacheReadTokens: 0, cacheWriteTokens: 0,
+    } satisfies ClaudeResponse);
+    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'hi', timestamp: Math.floor(Date.now() / 1000), deleted: false });
+  });
+
+  function makeChat(): ChatModule {
+    return new ChatModule(
+      { complete: claude } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999, moodProactiveEnabled: false, deflectCacheEnabled: false },
+    );
+  }
+
+  function getUserContent(): string {
+    const call = claude.mock.calls[0]![0] as { messages: Array<{ content: string }> };
+    return call.messages.map(m => m.content).join('\n');
+  }
+
+  it('injects reply-to-bot clarifier when trigger is a reply-quote to a bot message', async () => {
+    const chat = makeChat();
+    // Register a fake outgoing message id so _isReplyToBot returns true
+    chat.recordOutgoingMessage('g1', 9999);
+    const trigger = makeMsg({ content: '你说的是什么意思', rawContent: '[CQ:reply,id=9999]你说的是什么意思' });
+    await chat.generateReply('g1', trigger, []);
+    expect(getUserContent()).toContain('这条消息引用了你刚才说的话来追问');
+  });
+
+  it('does NOT inject clarifier when trigger is not a reply-quote to bot', async () => {
+    const chat = makeChat();
+    const trigger = makeMsg({ content: '你说的是什么意思', rawContent: '你说的是什么意思' });
+    await chat.generateReply('g1', trigger, []);
+    expect(getUserContent()).not.toContain('这条消息引用了你刚才说的话来追问');
+  });
 });
 
 // ── Admin speech mirroring ────────────────────────────────────────────────────
