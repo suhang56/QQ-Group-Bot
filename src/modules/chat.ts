@@ -87,6 +87,7 @@ interface ScoreFactors {
   implicitBotRef: number;
   continuity: number;
   clarification: number;
+  topicStick: number;
 }
 
 // Signal A: bot alias keywords — always indicate a reference to the bot
@@ -208,7 +209,28 @@ export const BANGDREAM_PERSONA = `你是这个QQ群的老群友，不是AI，不
 - 不会主动暴露身份，别人问"是不是bot"就装听不懂；是女生但不会刻意强调，问到就自然回答
 - 反怼语气常用："？？""你先说清楚""不想""烦""自己玩""想屁吃""什么啊""你说啥呢"
 - 不要说"好的""当然""明白了""哈哈可以啊"这种讨好式应答
-- 如果对方追问"why""怎么""为啥""真的吗""啥意思"之类，不要简单重复你刚才的结论。要给出一个具体的理由、细节或新角度，哪怕是瞎编的。比如"怪你呗"被追问时应该给出实际原因"你前两天还说不想去呢"或者"你自己改主意的啊"这种，要有信息量`;
+- 如果对方追问"why""怎么""为啥""真的吗""啥意思"之类，不要简单重复你刚才的结论。要给出一个具体的理由、细节或新角度，哪怕是瞎编的。比如"怪你呗"被追问时应该给出实际原因"你前两天还说不想去呢"或者"你自己改主意的啊"这种，要有信息量
+
+## 发言形态
+
+**允许的输出形态**（选一个，不要默认长句）：
+- (a) 一句短话（3–15 字），不用主谓齐全
+- (b) 两到三行短消息（换行分隔，router 会分批发）
+- (c) 贴一个 mface（context sticker section 会给出可用 mface 清单）
+- (d) 直接输出 \`<skip>\`：这个 trigger 不值得开口（话题不是你的菜 / 事实不熟 / 气氛不对 / 刚说过话）
+- (e) 极短反应（"哈" / "草" / "？" / "狗" / "懒得说"）
+
+**禁止**的 QA 模式：
+- "X 是 Y 唱的" / "X 是 Y 做的" / "答案是 X" / "X 的话是 Y" 这种直接报答案句式
+- 任何 "作为一个" / "我觉得应该" / "我建议" / "首先" / "其次" 开头
+- 任何一本正经的解释（超过 20 字的陈述句 = 红灯）
+
+**面对 fandom 拷问**的正确反应：
+- 不熟 → "忘了" / "考我呢" / "记不得" / 懵逼贴图
+- 熟也懒得答 → "啊？" / "这还要问" / "自己听"
+- **绝对不要**为了 "显得懂" 而猜。猜错比装傻伤害大十倍。
+
+**话题不感兴趣也允许 skip**：两个人在聊股票 / 转码 / 美签，直接 \`<skip>\`。`;
 
 /** Pick a random entry from a deflection pool. */
 export function pickDeflection(pool: string[]): string {
@@ -225,6 +247,42 @@ const STOPWORDS = new Set([
 const QUESTION_ENDINGS = ['?', '？', '吗', '嘛', '呢', '不'];
 // Matches clarification / follow-up probes (user asking bot to explain itself)
 const CLARIFICATION_RE = /^(why|为啥|为什么|怎么|咋|真的[吗嘛]?|你说啥|啥意思|什么意思)[?？]?$/i;
+
+const TOPIC_STOPWORDS = new Set([
+  '的','了','是','吗','啊','呢','吧','哦','嗯','哈','哇','么','嘛',
+  '我','你','他','她','它','我们','你们','他们',
+  '在','有','和','就','也','都','不','没','很','太',
+  '什么','怎么','这','那','啥','谁',
+]);
+
+/**
+ * Extract topic tokens from a message for engagement tracking.
+ * English words → lowercase whole-word token; Chinese chars → sliding 2-grams.
+ * CQ codes and stopwords are excluded.
+ */
+export function extractTokens(content: string): Set<string> {
+  // Strip CQ codes
+  const clean = content.replace(/\[CQ:[^\]]*\]/g, ' ').trim();
+  const result = new Set<string>();
+  // Split on whitespace/punctuation into segments
+  const segments = clean.split(/[\s，。？！、…「」『』【】《》""''【】\u3000\uff0c\uff01\uff1f\uff1a\u300a\u300b\uff08\uff09]+/).filter(Boolean);
+  for (const seg of segments) {
+    if (/^[a-z0-9]+$/i.test(seg)) {
+      // ASCII word — keep as lowercase token
+      const w = seg.toLowerCase();
+      if (!TOPIC_STOPWORDS.has(w) && w.length > 1) result.add(w);
+    } else {
+      // Chinese/mixed — run 2-gram slide
+      for (let i = 0; i < seg.length - 1; i++) {
+        const gram = seg.slice(i, i + 2);
+        if (!TOPIC_STOPWORDS.has(gram[0]!) && !TOPIC_STOPWORDS.has(gram[1]!)) {
+          result.add(gram);
+        }
+      }
+    }
+  }
+  return result;
+}
 
 /** Count [CQ:face,id=N] usage across messages and return top-N face IDs. */
 export function extractTopFaces(messages: Array<{ content: string }>, topN: number): number[] {
@@ -349,6 +407,8 @@ export class ChatModule implements IChatModule {
   private readonly chatContextImmediate: number;
   // per-group: bot's last 5 outgoing reply texts (for "avoid repeating" injection)
   private readonly botRecentOutputs = new Map<string, string[]>();
+  // per-group: active topic engagement state (set when bot replies, consumed in scoring)
+  private readonly engagedTopic = new Map<string, { tokens: Set<string>; until: number; msgCount: number }>();
   // per-group: admin userId → { nickname, samples[] } (populated from live messages)
   private readonly adminSamples = new Map<string, Map<string, { nickname: string; samples: string[] }>>();
   // per-group: admin style block cache { text, expiresAt }
@@ -659,7 +719,14 @@ export class ChatModule implements IChatModule {
       ? `你最近说过的话（避免重复相同意思或句式）：\n${recentOutputs.map(r => `- ${r}`).join('\n')}\n\n`
       : '';
 
-    const userContent = `${keywordSection}${wideSection}${mediumSection}${immediateSection}${avoidSection}你要回复的是 ← 那条，但要结合上面三层语境理解。直接写出那句回复。`;
+    const userContent = `${keywordSection}${wideSection}${mediumSection}${immediateSection}${avoidSection}参考以上语境，判断：那条带箭头的消息值不值得你开口。
+
+- 如果这话题你不熟、不感兴趣、或硬接会出戏 → 只输出 <skip>
+- 如果是 fandom/曲目/人物拷问但你不确定事实 → 装傻或反问，不要猜答案
+- 如果只想扔个短反应就够 → 就短一句，不要凑字数
+- 如果要接就接，别摆成 "X 是 Y" 这种答题腔
+
+只输出一个：<skip> 或 一条自然反应（可多行）。`;
 
     const chatRequest = (hardened = false) => this.claude.complete({
       model: RUNTIME_CHAT_MODEL,
@@ -685,6 +752,11 @@ export class ChatModule implements IChatModule {
         async () => (await chatRequest(true)).text,
       );
       const processed = postProcess(text);
+      // Claude explicitly skips this trigger
+      if (/^<skip>\s*$/i.test(processed)) {
+        this.logger.debug({ groupId, trigger: triggerMessage.content }, 'Claude explicitly skipped');
+        return null;
+      }
       // Claude signals disinterest via "...", "。", or empty — drop silently
       if (!processed || processed === '...' || processed === '。') {
         this.logger.debug({ groupId }, 'Claude opted out — dropping reply silently');
@@ -696,6 +768,11 @@ export class ChatModule implements IChatModule {
         return null;
       }
       this._recordOwnReply(groupId, processed);
+      this.engagedTopic.set(groupId, {
+        tokens: extractTokens(triggerMessage.content),
+        until: Date.now() + 90_000,
+        msgCount: 0,
+      });
       return processed;
     } catch (err) {
       if (err instanceof ClaudeApiError || err instanceof ClaudeParseError) {
@@ -730,6 +807,7 @@ export class ChatModule implements IChatModule {
       implicitBotRef: 0,
       continuity: 0,
       clarification: 0,
+      topicStick: 0,
     };
 
     // +1.0 @-mention of bot
@@ -812,6 +890,24 @@ export class ChatModule implements IChatModule {
     // +0.3 clarification follow-up (why/怎么/真的吗 etc.) — encourages engaging with "why" probes
     if (CLARIFICATION_RE.test(msg.content.trim())) {
       factors.clarification = 0.3;
+    }
+
+    // topic stick: if bot recently replied on this topic, boost same-topic follow-ups
+    const engaged = this.engagedTopic.get(groupId);
+    if (engaged) {
+      if (nowMs < engaged.until) {
+        const msgTokens = extractTokens(msg.content);
+        let overlap = 0;
+        for (const t of msgTokens) if (engaged.tokens.has(t)) overlap++;
+        if (overlap >= 2) {
+          factors.topicStick = engaged.msgCount < 3 ? 0.4 : 0.2;
+          engaged.msgCount++;
+          engaged.until = Math.min(engaged.until + 60_000, nowMs + 300_000);
+          if (engaged.msgCount >= 5) this.engagedTopic.delete(groupId);
+        }
+      } else {
+        this.engagedTopic.delete(groupId);
+      }
     }
 
     const score = Object.values(factors).reduce((s, f) => s + f, 0);
