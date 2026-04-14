@@ -3,6 +3,7 @@ import type { IMessageRepository, ILearnedFactsRepository } from '../storage/db.
 import type { SelfLearningModule } from './self-learning.js';
 import type { Logger } from 'pino';
 import { createLogger } from '../utils/logger.js';
+import { extractJson } from '../utils/json-extract.js';
 
 const MIN_NEW_MESSAGES = 8;
 const MAX_FACTS_PER_RUN = 12;
@@ -222,15 +223,12 @@ export class OpportunisticHarvest {
       return;
     }
 
-    let items: HarvestItem[];
-    try {
-      const jsonMatch = responseText.match(/\[[\s\S]*\]/);
-      items = jsonMatch ? (JSON.parse(jsonMatch[0]) as HarvestItem[]) : [];
-      if (!Array.isArray(items)) items = [];
-    } catch {
+    const parsedItems = extractJson<HarvestItem[]>(responseText);
+    if (parsedItems === null) {
       this.logger.warn({ groupId, responseText }, `${cycleLabel} JSON parse failed`);
       return;
     }
+    const items: HarvestItem[] = Array.isArray(parsedItems) ? parsedItems : [];
 
     if (items.length === 0) {
       this.logger.info({ groupId }, `${cycleLabel}: no facts extracted`);
@@ -344,15 +342,12 @@ ${messagesList}
       return;
     }
 
-    let terms: UnknownTermItem[];
-    try {
-      const jsonMatch = responseText.match(/\[[\s\S]*\]/);
-      terms = jsonMatch ? (JSON.parse(jsonMatch[0]) as UnknownTermItem[]) : [];
-      if (!Array.isArray(terms)) terms = [];
-    } catch {
+    const parsedTerms = extractJson<UnknownTermItem[]>(responseText);
+    if (parsedTerms === null) {
       this.logger.warn({ groupId, responseText }, 'unknown-term JSON parse failed');
       return;
     }
+    const terms: UnknownTermItem[] = Array.isArray(parsedTerms) ? parsedTerms : [];
 
     let researched = 0;
     for (const item of terms) {

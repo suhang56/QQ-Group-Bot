@@ -2,6 +2,7 @@ import type { Logger } from 'pino';
 import type { IClaudeClient, ClaudeModel } from '../ai/claude.js';
 import type { Database } from '../storage/db.js';
 import { createLogger } from '../utils/logger.js';
+import { extractJson } from '../utils/json-extract.js';
 
 /**
  * Configuration for {@link SelfLearningModule}.
@@ -503,17 +504,8 @@ export class SelfLearningModule {
   }
 
   private _parseJson(raw: string): Record<string, unknown> | null {
-    const trimmed = raw.trim();
-    // Some models wrap JSON in ```json fences — strip a single layer if present.
-    const stripped = trimmed.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
-    try {
-      const obj = JSON.parse(stripped) as unknown;
-      if (obj && typeof obj === 'object') {
-        return obj as Record<string, unknown>;
-      }
-      return null;
-    } catch {
-      return null;
-    }
+    const val = extractJson<Record<string, unknown>>(raw);
+    if (val && typeof val === 'object' && !Array.isArray(val)) return val;
+    return null;
   }
 }

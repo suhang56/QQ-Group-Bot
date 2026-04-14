@@ -2,6 +2,7 @@ import type { IClaudeClient } from '../ai/claude.js';
 import type { IMessageRepository, ILearnedFactsRepository } from '../storage/db.js';
 import type { Logger } from 'pino';
 import { createLogger } from '../utils/logger.js';
+import { extractJson } from '../utils/json-extract.js';
 
 const MIN_NEW_MESSAGES = 50;
 const ALIAS_MODEL = 'claude-sonnet-4-6' as const;
@@ -139,15 +140,12 @@ ${messagesList}
       return;
     }
 
-    let entries: AliasEntry[];
-    try {
-      const jsonMatch = responseText.match(/\[[\s\S]*\]/);
-      entries = jsonMatch ? (JSON.parse(jsonMatch[0]) as AliasEntry[]) : [];
-      if (!Array.isArray(entries)) entries = [];
-    } catch {
+    const parsedEntries = extractJson<AliasEntry[]>(responseText);
+    if (parsedEntries === null) {
       this.logger.warn({ groupId, responseText }, 'alias-miner JSON parse failed');
       return;
     }
+    const entries: AliasEntry[] = Array.isArray(parsedEntries) ? parsedEntries : [];
 
     if (entries.length === 0) {
       this.logger.info({ groupId }, 'alias-miner: no aliases found');
