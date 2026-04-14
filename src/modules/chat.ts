@@ -1,4 +1,5 @@
 import { readFileSync, existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import type { IClaudeClient } from '../ai/claude.js';
 import type { GroupMessage } from '../adapter/napcat.js';
@@ -1477,7 +1478,8 @@ export class ChatModule implements IChatModule {
     if (!rawContent) return null;
     const m = rawContent.match(/\[CQ:image,[^\]]*\bfile=([^\],]+)/);
     if (!m) return null;
-    const fileKey = m[1]!.trim();
+    const fileToken = m[1]!.trim();
+    const fileKey = createHash('sha256').update(fileToken).digest('hex');
     if (!this.imageDescriptions) return '(未描述)';
     const desc = this.imageDescriptions.get(fileKey);
     return desc ?? '(未描述)';

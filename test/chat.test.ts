@@ -2851,7 +2851,8 @@ describe('ChatModule — image context in recent messages', () => {
   }
 
   it('_resolveImageDesc: CQ:image with cached description → returns description', () => {
-    const imageDescRepo = makeImageDescRepo({ 'abc123.image': '一张截图，显示有牛的图片' });
+    // key must be sha256('abc123.image') to match vision.ts write path
+    const imageDescRepo = makeImageDescRepo({ '3964a0b4c36cab272beb712db2d207d5993d53221fe85662777a45702306f7c6': '一张截图，显示有牛的图片' });
     const chat = new ChatModule(
       { complete: vi.fn() } as unknown as IClaudeClient,
       db,
@@ -2883,8 +2884,22 @@ describe('ChatModule — image context in recent messages', () => {
     expect(chat['_resolveImageDesc']('')).toBeNull();
   });
 
+  it('_resolveImageDesc: cache keyed by sha256(fileToken) matches vision.ts write path', () => {
+    // vision.ts writes with sha256('XXX.jpg') — chat must hash before lookup
+    const hashedKey = 'c9382d2e9dff6e552d0b4cb760f45a509e262bc180d4a424b54ebbdffb84958a'; // sha256('XXX.jpg')
+    const imageDescRepo = makeImageDescRepo({ [hashedKey]: '一只猫坐在桌子上' });
+    const chat = new ChatModule(
+      { complete: vi.fn() } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID, imageDescriptions: imageDescRepo },
+    );
+    const result = chat['_resolveImageDesc']('[CQ:image,file=XXX.jpg]');
+    expect(result).toBe('一只猫坐在桌子上');
+  });
+
   it('integration: prior context message with image description appears in Claude prompt', async () => {
-    const imageDescRepo = makeImageDescRepo({ 'pic123.image': '有一头牛站在草地上' });
+    // key must be sha256('pic123.image') to match vision.ts write path
+    const imageDescRepo = makeImageDescRepo({ 'f543304dbc22e986fe62896585b827522e734ecbb06c09d9863f68f35a43018a': '有一头牛站在草地上' });
     const claude = vi.fn().mockResolvedValue({
       text: '是头牛哈哈', inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0,
     } satisfies ClaudeResponse);
