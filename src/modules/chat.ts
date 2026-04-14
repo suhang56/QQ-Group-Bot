@@ -13,7 +13,7 @@ import { buildStickerSection, type LiveStickerEntry } from '../utils/stickers.js
 import { MoodTracker, PROACTIVE_POOLS, type MoodDescription } from './mood.js';
 import type { VisionService } from './vision.js';
 import type { IEmbeddingService } from '../storage/embeddings.js';
-import type { ILocalStickerRepository } from '../storage/db.js';
+import type { ILocalStickerRepository, IImageDescriptionRepository } from '../storage/db.js';
 import { cosineSimilarity } from '../storage/embeddings.js';
 
 export interface IChatModule {
@@ -76,6 +76,7 @@ interface ChatOptions {
   chatAdminMirrorSamplesPerAdmin?: number;
   selfLearning?: SelfLearningModule;
   tuningPath?: string;
+  imageDescriptions?: IImageDescriptionRepository;
 }
 
 interface ScoreFactors {
@@ -463,6 +464,7 @@ export class ChatModule implements IChatModule {
   private readonly chatAdminMirrorMaxAdmins: number;
   private readonly chatAdminMirrorSamplesPerAdmin: number;
   private readonly selfLearning: SelfLearningModule | null;
+  private readonly imageDescriptions: IImageDescriptionRepository | null;
   // per-group: whether the last generateReply call returned an evasive reply
   private readonly lastEvasiveReply = new Map<string, boolean>();
 
@@ -517,6 +519,7 @@ export class ChatModule implements IChatModule {
     this.chatAdminMirrorMaxAdmins = options.chatAdminMirrorMaxAdmins ?? 5;
     this.chatAdminMirrorSamplesPerAdmin = options.chatAdminMirrorSamplesPerAdmin ?? 5;
     this.selfLearning = options.selfLearning ?? null;
+    this.imageDescriptions = options.imageDescriptions ?? null;
 
     if (this.moodProactiveEnabled) {
       this.moodProactiveTimer = setInterval(
@@ -761,16 +764,18 @@ export class ChatModule implements IChatModule {
 
     // ── Build prompt ──────────────────────────────────────────────────────
 
-    const fmtMsg = (m: { userId: string; nickname: string; content: string }) =>
-      m.userId === this.botUserId
-        ? `[你(${m.nickname})]: ${m.content}`
-        : `[${m.nickname}]: ${m.content}`;
+    const fmtMsg = (m: { userId: string; nickname: string; content: string; rawContent?: string }) => {
+      const imgDesc = this._resolveImageDesc(m.rawContent ?? '');
+      const imgPart = imgDesc !== null ? ` [图片: ${imgDesc}]` : '';
+      const prefix = m.userId === this.botUserId ? `[你(${m.nickname})]:` : `[${m.nickname}]:`;
+      return `${prefix} ${m.content}${imgPart}`;
+    };
 
     const keywordSection = keywordMsgs.length > 0
       ? `【相关历史消息】\n${keywordMsgs.map(m => `${fmtMsg(m)}`).join('\n')}\n\n`
       : '';
 
-    const fmt = (m: { userId: string; nickname: string; content: string }) => fmtMsg(m);
+    const fmt = (m: { userId: string; nickname: string; content: string; rawContent?: string }) => fmtMsg(m);
 
     const wideSection = `# 群最近动向（大范围背景，不用每条都看）\n${effectiveWide.map(fmt).join('\n')}\n\n`;
     const mediumSection = `# 最近对话流\n${mediumChron.map(fmt).join('\n')}\n\n`;
@@ -1370,6 +1375,17 @@ export class ChatModule implements IChatModule {
     } catch {
       return null;
     }
+  }
+
+  /** Returns cached image description for a message's rawContent, or '(未描述)' if there's an image but no cache hit, or null if no image at all. */
+  _resolveImageDesc(rawContent: string): string | null {
+    if (!rawContent) return null;
+    const m = rawContent.match(/\[CQ:image,[^\]]*\bfile=([^\],]+)/);
+    if (!m) return null;
+    const fileKey = m[1]!.trim();
+    if (!this.imageDescriptions) return '(未描述)';
+    const desc = this.imageDescriptions.get(fileKey);
+    return desc ?? '(未描述)';
   }
 
   private _buildAdminStyleSection(groupId: string): string {

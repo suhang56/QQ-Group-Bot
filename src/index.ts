@@ -81,7 +81,7 @@ const vision = new VisionService(claude, adapter, db.imageDescriptions);
 const chat = new ChatModule(claude, db, {
   botUserId, deflectCacheEnabled: true, visionService: vision,
   localStickerRepo: db.localStickers, embedder, selfLearning,
-  tuningPath,
+  tuningPath, imageDescriptions: db.imageDescriptions,
 });
 router.setChat(chat);
 

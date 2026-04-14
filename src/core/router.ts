@@ -207,6 +207,7 @@ export class Router implements IRouter {
         userId: msg.userId,
         nickname: msg.nickname,
         content: msg.content,
+        rawContent: msg.rawContent,
         timestamp: msg.timestamp,
         deleted: false,
       });

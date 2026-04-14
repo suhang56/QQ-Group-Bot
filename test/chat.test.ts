@@ -2816,3 +2816,83 @@ describe('ChatModule — formatFactsForPrompt injection into system prompt', () 
     await expect(chat.generateReply('g1', msg, [])).resolves.toBe('好啊');
   });
 });
+
+// ── Image context resolution ───────────────────────────────────────────────────
+
+import type { IImageDescriptionRepository } from '../src/storage/db.js';
+
+describe('ChatModule — image context in recent messages', () => {
+  let db: Database;
+
+  beforeEach(() => { db = new Database(':memory:'); });
+
+  function makeImageDescRepo(entries: Record<string, string> = {}): IImageDescriptionRepository {
+    return {
+      get: vi.fn((key: string) => entries[key] ?? null),
+      set: vi.fn(),
+      purgeOlderThan: vi.fn().mockReturnValue(0),
+    };
+  }
+
+  it('_resolveImageDesc: CQ:image with cached description → returns description', () => {
+    const imageDescRepo = makeImageDescRepo({ 'abc123.image': '一张截图，显示有牛的图片' });
+    const chat = new ChatModule(
+      { complete: vi.fn() } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID, imageDescriptions: imageDescRepo },
+    );
+    const result = chat['_resolveImageDesc']('[CQ:image,file=abc123.image,url=http://example.com/img.jpg]');
+    expect(result).toBe('一张截图，显示有牛的图片');
+  });
+
+  it('_resolveImageDesc: CQ:image with no cached description → returns "(未描述)"', () => {
+    const imageDescRepo = makeImageDescRepo({});
+    const chat = new ChatModule(
+      { complete: vi.fn() } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID, imageDescriptions: imageDescRepo },
+    );
+    const result = chat['_resolveImageDesc']('[CQ:image,file=unknown.image,url=http://example.com/img.jpg]');
+    expect(result).toBe('(未描述)');
+  });
+
+  it('_resolveImageDesc: no image in rawContent → returns null', () => {
+    const imageDescRepo = makeImageDescRepo({});
+    const chat = new ChatModule(
+      { complete: vi.fn() } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID, imageDescriptions: imageDescRepo },
+    );
+    expect(chat['_resolveImageDesc']('普通文字消息')).toBeNull();
+    expect(chat['_resolveImageDesc']('')).toBeNull();
+  });
+
+  it('integration: prior context message with image description appears in Claude prompt', async () => {
+    const imageDescRepo = makeImageDescRepo({ 'pic123.image': '有一头牛站在草地上' });
+    const claude = vi.fn().mockResolvedValue({
+      text: '是头牛哈哈', inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0,
+    } satisfies ClaudeResponse);
+    const chat = new ChatModule(
+      { complete: claude } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999, moodProactiveEnabled: false, deflectCacheEnabled: false, imageDescriptions: imageDescRepo },
+    );
+
+    // Insert a prior message with a CQ image into DB
+    db.messages.insert({
+      groupId: 'g1', userId: 'u2', nickname: 'Bob',
+      content: '',
+      rawContent: '[CQ:image,file=pic123.image,url=http://example.com/pic.jpg]',
+      timestamp: Math.floor(Date.now() / 1000) - 30,
+      deleted: false,
+    });
+
+    const triggerMsg = makeMsg({ content: '有牛吗', rawContent: '有牛吗' });
+    await chat.generateReply('g1', triggerMsg, []);
+
+    expect(claude).toHaveBeenCalled();
+    const callArg = (claude as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { messages: Array<{ content: string }> };
+    const userContent = callArg.messages[0]!.content as string;
+    expect(userContent).toContain('[图片: 有一头牛站在草地上]');
+  });
+});

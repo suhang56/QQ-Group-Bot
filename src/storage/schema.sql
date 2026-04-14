@@ -4,6 +4,7 @@ CREATE TABLE IF NOT EXISTS messages (
   user_id           TEXT    NOT NULL,
   nickname          TEXT    NOT NULL DEFAULT '',
   content           TEXT    NOT NULL,
+  raw_content       TEXT,
   timestamp         INTEGER NOT NULL,
   deleted           INTEGER NOT NULL DEFAULT 0,
   source_message_id TEXT

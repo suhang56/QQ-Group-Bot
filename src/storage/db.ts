@@ -11,6 +11,7 @@ export interface Message {
   userId: string;
   nickname: string;
   content: string;
+  rawContent: string;
   timestamp: number;
   deleted: boolean;
 }
@@ -335,7 +336,7 @@ export interface ILocalStickerRepository {
 
 interface MessageRow {
   id: number; group_id: string; user_id: string; nickname: string;
-  content: string; timestamp: number; deleted: number; source_message_id: string | null;
+  content: string; raw_content: string | null; timestamp: number; deleted: number; source_message_id: string | null;
 }
 
 interface UserRow {
@@ -402,6 +403,7 @@ function msgFromRow(row: MessageRow): Message {
   return {
     id: row.id, groupId: row.group_id, userId: row.user_id,
     nickname: row.nickname, content: row.content,
+    rawContent: row.raw_content ?? row.content,
     timestamp: row.timestamp, deleted: row.deleted !== 0,
   };
 }
@@ -510,9 +512,9 @@ class MessageRepository implements IMessageRepository {
   insert(msg: Omit<Message, 'id'>, sourceMessageId?: string): Message {
     const sid = sourceMessageId ?? null;
     const stmt = this.db.prepare(
-      'INSERT OR IGNORE INTO messages (group_id, user_id, nickname, content, timestamp, deleted, source_message_id) VALUES (?, ?, ?, ?, ?, ?, ?)'
+      'INSERT OR IGNORE INTO messages (group_id, user_id, nickname, content, raw_content, timestamp, deleted, source_message_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
     );
-    const result = stmt.run(msg.groupId, msg.userId, msg.nickname, msg.content, msg.timestamp, msg.deleted ? 1 : 0, sid);
+    const result = stmt.run(msg.groupId, msg.userId, msg.nickname, msg.content, msg.rawContent ?? null, msg.timestamp, msg.deleted ? 1 : 0, sid);
     // id=0 signals the row was ignored (duplicate source_message_id)
     const id = (result as { changes: number }).changes > 0 ? Number(result.lastInsertRowid) : 0;
     return { ...msg, id };
@@ -1470,5 +1472,8 @@ export class Database {
         created_at INTEGER NOT NULL
       )
     `);
+
+    // messages.raw_content — stores original CQ-code content for image context resolution.
+    try { this._db.exec(`ALTER TABLE messages ADD COLUMN raw_content TEXT`); } catch { /* already exists */ }
   }
 }
