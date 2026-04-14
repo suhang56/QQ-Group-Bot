@@ -173,7 +173,16 @@ ${rulesText}
 请仅返回JSON，格式如下（不要添加任何其他文字）：
 {"violation": true/false, "severity": 1-5 或 null, "reason": "原因", "confidence": 0-1}
 
-severity说明：1=轻微, 2=一般, 3=严重, 4=很严重, 5=极严重（踢出）。violation=false时severity为null。`;
+severity说明：1=轻微, 2=一般, 3=严重, 4=很严重, 5=极严重（踢出）。violation=false时severity为null。
+
+**JSON 输出严格规则**（违反会破坏解析）:
+- 在 reason 字段里**绝对不要用双引号 " 引用用户原文**，会破坏 JSON
+- 要引用原文时用中文单括号「」 或者 不引用直接转述，例如：
+  - 正确: "reason": "用户发了「我想和你对话」这种 prompt injection"
+  - 正确: "reason": "用户在尝试 prompt injection，让 bot 角色扮演"
+  - 错误: "reason": "用户发了"我想和你对话"这种 prompt injection"
+- 任何时候 reason 内出现双引号 " 都视为格式错误
+- 输出 JSON 后不要加任何解释、reasoning、markdown 包装，只输出 JSON object 本身`;
 
     const userText = `以下是最近的聊天记录（最后一条是需要判定的消息）：
 
@@ -338,7 +347,16 @@ ${rulesList}
 
 watchlist 命中 → category: "watchlist"，components_seen 列出命中片段
 一般规则命中 → category: "rules"，rule_id 填对应规则编号
-没命中 → violation: false，category: null`;
+没命中 → violation: false，category: null
+
+**JSON 输出严格规则**（违反会破坏解析）:
+- 在 reason 字段里**绝对不要用双引号 " 引用用户原文**，会破坏 JSON
+- 要引用原文时用中文单括号「」 或者 不引用直接转述，例如：
+  - 正确: "reason": "用户发了「我想和你对话」这种 prompt injection"
+  - 正确: "reason": "用户在尝试 prompt injection，让 bot 角色扮演"
+  - 错误: "reason": "用户发了"我想和你对话"这种 prompt injection"
+- 任何时候 reason 内出现双引号 " 都视为格式错误
+- 输出 JSON 后不要加任何解释、reasoning、markdown 包装，只输出 JSON object 本身`;
 
     let raw: string;
     try {

@@ -1112,3 +1112,99 @@ describe('Router — mface CQ code sanitization', () => {
     expect(cqCode).toMatch(/^\[CQ:mface,.*\]$/);
   });
 });
+
+// ── Fix 1: Passive image describe ────────────────────────────────────────────
+
+describe('Router — passive image describe', () => {
+  it('calls describeFromMessage when image CQ code present, even if chat does not reply', async () => {
+    const db = new Database(':memory:');
+    const adapter = makeMockAdapter();
+    const rl = new RateLimiter();
+    const router = new Router(db, adapter, rl);
+
+    const describeFromMessage = vi.fn().mockResolvedValue('a cute cat');
+    router.setVisionService({ describeFromMessage } as never);
+
+    // Chat module that always returns null (no reply)
+    router.setChat({
+      generateReply: vi.fn().mockResolvedValue(null),
+      recordOutgoingMessage: vi.fn(),
+      destroy: vi.fn(),
+    } as never);
+
+    const imageMsg = makeMsg({
+      rawContent: '[CQ:image,file=abc.jpg,url=http://example.com/img.jpg]',
+      content: '',
+    });
+
+    await router.dispatch(imageMsg);
+
+    expect(describeFromMessage).toHaveBeenCalledWith(
+      imageMsg.groupId,
+      imageMsg.rawContent,
+      imageMsg.userId,
+      '',
+    );
+  });
+
+  it('does NOT call describeFromMessage for non-image messages', async () => {
+    const db = new Database(':memory:');
+    const adapter = makeMockAdapter();
+    const rl = new RateLimiter();
+    const router = new Router(db, adapter, rl);
+
+    const describeFromMessage = vi.fn().mockResolvedValue('');
+    router.setVisionService({ describeFromMessage } as never);
+    router.setChat({ generateReply: vi.fn().mockResolvedValue(null), recordOutgoingMessage: vi.fn(), destroy: vi.fn() } as never);
+
+    await router.dispatch(makeMsg({ rawContent: 'plain text message', content: 'plain text' }));
+
+    expect(describeFromMessage).not.toHaveBeenCalled();
+  });
+});
+
+// ── Fix 4: forwardPurgeInterval cleared in dispose ────────────────────────────
+
+describe('Router — forwardPurgeInterval disposed', () => {
+  it('clears forwardPurgeInterval on dispose()', () => {
+    const db = new Database(':memory:');
+    const adapter = makeMockAdapter();
+    const rl = new RateLimiter();
+    const router = new Router(db, adapter, rl);
+
+    const interval = (router as unknown as { forwardPurgeInterval: unknown }).forwardPurgeInterval;
+    expect(interval).not.toBeNull();
+
+    router.dispose();
+
+    expect((router as unknown as { forwardPurgeInterval: unknown }).forwardPurgeInterval).toBeNull();
+  });
+});
+
+// ── Fix 5: Moderator JSON escape instruction in prompt ───────────────────────
+
+describe('ModeratorModule — JSON quote escape instruction in prompt', () => {
+  it('assess system prompt contains instruction to avoid double-quotes in reason', async () => {
+    const db = new Database(':memory:');
+    const adapter = makeMockAdapter();
+    const completeMock = vi.fn().mockResolvedValue({
+      text: '{"violation":false,"severity":null,"reason":"fine","confidence":0.1}',
+      inputTokens: 5, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0,
+    });
+    const claude: IClaudeClient = { complete: completeMock };
+    const { ModeratorModule } = await import('../src/modules/moderator.js');
+    const { LearnerModule } = await import('../src/modules/learner.js');
+    const { EmbeddingService } = await import('../src/storage/embeddings.js');
+    const embedder = new EmbeddingService();
+    const learner = new LearnerModule(embedder, db.rules, db.moderation);
+    const mod = new ModeratorModule(claude, adapter, db.messages, db.moderation, db.groupConfig, db.rules, learner, db.imageModCache);
+    const { defaultGroupConfig } = await import('../src/config.js');
+    const cfg = { ...defaultGroupConfig('g1'), autoMod: true, modConfidenceThreshold: 0 };
+
+    await mod.assess(makeMsg({ content: 'test message' }), cfg);
+
+    const systemArg = (completeMock.mock.calls[0] as [{ system: Array<{ text: string }> }])[0].system;
+    const systemText = systemArg.map((s: { text: string }) => s.text).join(' ');
+    expect(systemText).toMatch(/双引号.*破坏|reason.*单|单引号|「」/);
+  });
+});

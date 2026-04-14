@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import path from 'node:path';
+import fs from 'node:fs';
 import { initLogger, createLogger } from './utils/logger.js';
 import { NapCatAdapter } from './adapter/napcat.js';
 import { Database } from './storage/db.js';
@@ -54,6 +55,21 @@ if (!NAPCAT_WS_URL) {
   process.exit(1);
 }
 
+// 2b. PID lock — prevent duplicate instances
+const pidPath = path.join(process.cwd(), 'data', 'bot.pid');
+if (fs.existsSync(pidPath)) {
+  const oldPid = parseInt(fs.readFileSync(pidPath, 'utf8').trim(), 10);
+  if (!isNaN(oldPid)) {
+    try {
+      process.kill(oldPid, 0); // throws ESRCH if dead
+      logger.fatal({ oldPid }, 'another bot instance is running — refusing to start');
+      process.exit(1);
+    } catch { /* dead process — ok to take over */ }
+  }
+}
+fs.writeFileSync(pidPath, String(process.pid));
+process.on('exit', () => { try { fs.unlinkSync(pidPath); } catch { /* ignore */ } });
+
 // 3. Open DB (step 2 of bootstrap order per architecture.md)
 const dbPath = process.env['DB_PATH'] ?? 'data/bot.db';
 const db = new Database(dbPath);
@@ -87,6 +103,7 @@ const chat = new ChatModule(claude, db, {
   forwardCache: db.forwardCache,
 });
 router.setChat(chat);
+router.setVisionService(vision);
 
 const learner = new LearnerModule(embedder, db.rules, db.moderation);
 const mimic = new MimicModule(claude, db.messages, db.groupConfig, botUserId);
@@ -215,6 +232,7 @@ const shutdown = async () => {
   selfReflection?.dispose();
   harvest.dispose();
   aliasMiner.dispose();
+  chat.destroy();
   router.dispose();
   ratingPortal?.stop();
   await adapter.disconnect();

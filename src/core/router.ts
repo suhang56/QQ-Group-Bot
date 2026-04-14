@@ -10,6 +10,7 @@ import type { StickerCaptureService } from '../modules/sticker-capture.js';
 import type { SelfLearningModule } from '../modules/self-learning.js';
 import type { IdCardGuard } from '../modules/id-guard.js';
 import type { SequenceGuard } from '../modules/sequence-guard.js';
+import type { VisionService } from '../modules/vision.js';
 import { extractTokens } from '../modules/chat.js';
 import { BotErrorCode } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
@@ -88,6 +89,8 @@ export class Router implements IRouter {
   private selfLearning: SelfLearningModule | null = null;
   private idGuard: IdCardGuard | null = null;
   private sequenceGuard: SequenceGuard | null = null;
+  private visionService: VisionService | null = null;
+  private forwardPurgeInterval: ReturnType<typeof setInterval> | null = null;
 
   // Repeater cooldown: key = `${groupId}:${content}`, value = last-triggered timestamp
   private readonly repeaterCooldown = new Map<string, number>();
@@ -119,11 +122,11 @@ export class Router implements IRouter {
     }, 60_000);
     this.expiryInterval.unref?.();
 
-    const forwardPurgeInterval = setInterval(() => {
+    this.forwardPurgeInterval = setInterval(() => {
       const purged = purgeExpiredForwardCache(this.db.forwardCache);
       if (purged > 0) this.logger.info({ purged }, 'forward cache entries purged');
     }, 3_600_000);
-    forwardPurgeInterval.unref?.();
+    this.forwardPurgeInterval.unref?.();
   }
 
   setChat(chat: IChatModule): void {
@@ -162,10 +165,15 @@ export class Router implements IRouter {
     this.sequenceGuard = guard;
   }
 
+  setVisionService(vision: VisionService): void {
+    this.visionService = vision;
+  }
+
   dispose(): void {
     for (const timer of this.harvestTimers.values()) clearTimeout(timer);
     this.harvestTimers.clear();
     if (this.expiryInterval) { clearInterval(this.expiryInterval); this.expiryInterval = null; }
+    if (this.forwardPurgeInterval) { clearInterval(this.forwardPurgeInterval); this.forwardPurgeInterval = null; }
     this.sequenceGuard?.dispose();
   }
 
@@ -195,6 +203,13 @@ export class Router implements IRouter {
           return false;
         });
         if (blocked) return;
+      }
+
+      // Passive image describe — fire-and-forget so all images get cached regardless of chat reply
+      if (this.visionService && /\[CQ:image,/.test(msg.rawContent)) {
+        void this.visionService.describeFromMessage(
+          msg.groupId, msg.rawContent, msg.userId, this.botUserId ?? '',
+        ).catch(err => this.logger.debug({ err, messageId: msg.messageId }, 'passive describe failed'));
       }
 
       // Sequence guard — cross-message 接龙 relay detection
