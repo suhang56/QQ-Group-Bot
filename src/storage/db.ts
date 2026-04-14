@@ -215,6 +215,32 @@ export interface IBotReplyRepository {
   rate(id: number, rating: number, comment: string | null, now: number): void;
 }
 
+export interface LocalSticker {
+  id: number;
+  groupId: string;
+  key: string;
+  type: 'image' | 'mface';
+  localPath: string | null;
+  cqCode: string;
+  summary: string | null;
+  contextSamples: string[];
+  count: number;
+  firstSeen: number;
+  lastSeen: number;
+  usagePositive: number;
+  usageNegative: number;
+}
+
+export interface ILocalStickerRepository {
+  upsert(
+    groupId: string, key: string, type: LocalSticker['type'],
+    localPath: string | null, cqCode: string, summary: string | null,
+    contextSample: string | null, now: number, maxSamples: number,
+  ): 'inserted' | 'updated';
+  getTopByGroup(groupId: string, limit: number): LocalSticker[];
+  recordUsage(groupId: string, key: string, positive: boolean): void;
+}
+
 // ---- Raw row types from SQLite ----
 
 interface MessageRow {
@@ -880,6 +906,70 @@ class BotReplyRepository implements IBotReplyRepository {
   }
 }
 
+class LocalStickerRepository implements ILocalStickerRepository {
+  constructor(private readonly db: DatabaseSync) {}
+
+  upsert(
+    groupId: string, key: string, type: LocalSticker['type'],
+    localPath: string | null, cqCode: string, summary: string | null,
+    contextSample: string | null, now: number, maxSamples: number,
+  ): 'inserted' | 'updated' {
+    const existing = this.db.prepare(
+      'SELECT context_samples FROM local_stickers WHERE group_id = ? AND key = ?'
+    ).get(groupId, key) as { context_samples: string } | undefined;
+
+    if (!existing) {
+      const samples = contextSample ? JSON.stringify([contextSample]) : '[]';
+      this.db.prepare(`
+        INSERT INTO local_stickers
+          (group_id, key, type, local_path, cq_code, summary, context_samples, count, first_seen, last_seen)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+      `).run(groupId, key, type, localPath ?? null, cqCode, summary ?? null, samples, now, now);
+      return 'inserted';
+    }
+
+    // Update count, last_seen, and roll context_samples (cap at maxSamples)
+    let samples: string[] = [];
+    try { samples = JSON.parse(existing.context_samples) as string[]; } catch { /* ok */ }
+    if (contextSample) {
+      samples.push(contextSample);
+      if (samples.length > maxSamples) samples = samples.slice(samples.length - maxSamples);
+    }
+    this.db.prepare(`
+      UPDATE local_stickers SET count = count + 1, last_seen = ?, context_samples = ?
+      WHERE group_id = ? AND key = ?
+    `).run(now, JSON.stringify(samples), groupId, key);
+    return 'updated';
+  }
+
+  getTopByGroup(groupId: string, limit: number): LocalSticker[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM local_stickers WHERE group_id = ?
+      ORDER BY (usage_positive - usage_negative) DESC, count DESC LIMIT ?
+    `).all(groupId, limit) as unknown as Array<{
+      id: number; group_id: string; key: string; type: string;
+      local_path: string | null; cq_code: string; summary: string | null;
+      context_samples: string; count: number; first_seen: number; last_seen: number;
+      usage_positive: number; usage_negative: number;
+    }>;
+    return rows.map(r => ({
+      id: r.id, groupId: r.group_id, key: r.key,
+      type: r.type as LocalSticker['type'],
+      localPath: r.local_path, cqCode: r.cq_code, summary: r.summary,
+      contextSamples: (() => { try { return JSON.parse(r.context_samples) as string[]; } catch { return []; } })(),
+      count: r.count, firstSeen: r.first_seen, lastSeen: r.last_seen,
+      usagePositive: r.usage_positive, usageNegative: r.usage_negative,
+    }));
+  }
+
+  recordUsage(groupId: string, key: string, positive: boolean): void {
+    const col = positive ? 'usage_positive' : 'usage_negative';
+    this.db.prepare(
+      `UPDATE local_stickers SET ${col} = ${col} + 1 WHERE group_id = ? AND key = ?`
+    ).run(groupId, key);
+  }
+}
+
 // ---- Main Database class ----
 
 export class Database {
@@ -893,6 +983,7 @@ export class Database {
   readonly liveStickers: ILiveStickerRepository;
   readonly imageDescriptions: IImageDescriptionRepository;
   readonly botReplies: IBotReplyRepository;
+  readonly localStickers: ILocalStickerRepository;
 
   private readonly _db: DatabaseSync;
 
@@ -912,6 +1003,7 @@ export class Database {
     this.liveStickers = new LiveStickerRepository(this._db);
     this.imageDescriptions = new ImageDescriptionRepository(this._db);
     this.botReplies = new BotReplyRepository(this._db);
+    this.localStickers = new LocalStickerRepository(this._db);
   }
 
   /** Execute arbitrary SQL — intended for bulk-import scripts and migrations only. */

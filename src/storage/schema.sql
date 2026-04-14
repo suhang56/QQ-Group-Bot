@@ -145,3 +145,22 @@ CREATE TABLE IF NOT EXISTS bot_replies (
 
 CREATE INDEX IF NOT EXISTS idx_bot_replies_group ON bot_replies(group_id, sent_at DESC);
 CREATE INDEX IF NOT EXISTS idx_bot_replies_unrated ON bot_replies(rating) WHERE rating IS NULL;
+
+CREATE TABLE IF NOT EXISTS local_stickers (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id          TEXT    NOT NULL,
+  key               TEXT    NOT NULL,
+  type              TEXT    NOT NULL,
+  local_path        TEXT,
+  cq_code           TEXT    NOT NULL,
+  summary           TEXT,
+  context_samples   TEXT    NOT NULL DEFAULT '[]',
+  count             INTEGER NOT NULL DEFAULT 1,
+  first_seen        INTEGER NOT NULL,
+  last_seen         INTEGER NOT NULL,
+  usage_positive    INTEGER NOT NULL DEFAULT 0,
+  usage_negative    INTEGER NOT NULL DEFAULT 0,
+  UNIQUE(group_id, key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_local_stickers_group ON local_stickers(group_id, count DESC);
