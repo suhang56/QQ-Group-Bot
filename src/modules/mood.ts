@@ -12,7 +12,7 @@ export interface MoodDescription {
   hints: string[];
 }
 
-const DECAY_PER_MINUTE = 0.05;
+const DECAY_PER_MINUTE = 0.10;
 
 // Keyword nudge patterns — order matters for clarity, not for matching
 const HAPPY_RE = /哈哈|笑死|绷不住|tql|牛逼|爽|舒服/i;
@@ -60,12 +60,12 @@ export class MoodTracker {
     let dv = 0;
     let da = 0;
 
-    if (HAPPY_RE.test(content))       { dv += 0.05; }
-    if (ANNOYED_RE.test(content))     { dv -= 0.02; da += 0.03; }
-    if (BANGDREAM_RE.test(content))   { dv += 0.08; }
-    if (BOT_CRITICISM_RE.test(content)) { dv -= 0.08; }
-    if (TIRED_RE.test(content))       { da -= 0.05; }
-    if (PRAISE_RE.test(content))      { dv += 0.04; }
+    if (HAPPY_RE.test(content))       { dv += 0.025; }
+    if (ANNOYED_RE.test(content))     { dv -= 0.01; da += 0.015; }
+    if (BANGDREAM_RE.test(content))   { dv += 0.04; }
+    if (BOT_CRITICISM_RE.test(content)) { dv -= 0.04; }
+    if (TIRED_RE.test(content))       { da -= 0.025; }
+    if (PRAISE_RE.test(content))      { dv += 0.02; }
 
     state = {
       valence: clamp(state.valence + dv),
