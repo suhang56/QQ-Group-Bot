@@ -15,6 +15,7 @@ import { AnnouncementSyncModule } from './modules/announcement-sync.js';
 import { NameImagesModule } from './modules/name-images.js';
 import { LoreUpdater } from './modules/lore-updater.js';
 import { VisionService } from './modules/vision.js';
+import { StickerCaptureService } from './modules/sticker-capture.js';
 import { RatingPortalServer } from './server/rating-portal.js';
 import { TuningGenerator } from './server/tuning-generator.js';
 
@@ -57,15 +58,18 @@ const adapter = new NapCatAdapter(NAPCAT_WS_URL, process.env['NAPCAT_ACCESS_TOKE
 const claude = new ClaudeClient();
 const rateLimiter = new RateLimiter();
 const router = new Router(db, adapter, rateLimiter, botUserId);
-const vision = new VisionService(claude, adapter, db.imageDescriptions);
-const chat = new ChatModule(claude, db, { botUserId, deflectCacheEnabled: true, visionService: vision });
-router.setChat(chat);
-
 // Embedding service: fire-and-forget init — bot must not block on model load
 const embedder = new EmbeddingService();
 void embedder.waitReady().then(() => {
   if (embedder.isReady) logger.info('Embedding model ready');
 });
+
+const vision = new VisionService(claude, adapter, db.imageDescriptions);
+const chat = new ChatModule(claude, db, {
+  botUserId, deflectCacheEnabled: true, visionService: vision,
+  localStickerRepo: db.localStickers, embedder,
+});
+router.setChat(chat);
 
 const learner = new LearnerModule(embedder, db.rules, db.moderation);
 const mimic = new MimicModule(claude, db.messages, db.groupConfig, botUserId);
@@ -81,6 +85,9 @@ router.setNameImages(nameImages);
 
 const loreUpdater = new LoreUpdater(claude, db.messages, chat);
 router.setLoreUpdater(loreUpdater);
+
+const stickerCapture = new StickerCaptureService(db.localStickers, adapter);
+router.setStickerCapture(stickerCapture);
 
 // 5. Wire events
 adapter.on('error', (err) => {
@@ -112,7 +119,7 @@ const ratingPortGroup = ACTIVE_GROUPS[0] ?? '';
 let ratingPortal: RatingPortalServer | null = null;
 if (ratingPortGroup) {
   const ratingPort = parseInt(process.env['RATING_PORT'] ?? '4000', 10);
-  ratingPortal = new RatingPortalServer(db.botReplies, ratingPortGroup);
+  ratingPortal = new RatingPortalServer(db.botReplies, ratingPortGroup, db.localStickers);
   ratingPortal.start(ratingPort);
 
   // Generate tuning report on SIGUSR1

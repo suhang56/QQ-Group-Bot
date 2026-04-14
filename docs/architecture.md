@@ -64,11 +64,16 @@ export interface INapCatAdapter {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
   on<K extends keyof AdapterEvents>(event: K, handler: AdapterEvents[K]): void;
-  send(groupId: string, text: string): Promise<void>;
+  /** Send a group message, optionally quoting replyToMsgId. Returns the OneBot message_id, or null if unavailable. */
+  send(groupId: string, text: string, replyToMsgId?: number): Promise<number | null>;
   ban(groupId: string, userId: string, durationSeconds: number): Promise<void>;
   kick(groupId: string, userId: string): Promise<void>;
   deleteMsg(messageId: string): Promise<void>;
   sendPrivate(userId: string, text: string): Promise<void>;
+  /** Resolve a CQ image file token via OneBot get_image — bypasses QQ CDN auth restrictions. */
+  getImage(file: string): Promise<{ filename: string; url: string; size: number; base64?: string }>;
+  /** Fetch group metadata including description. Tries _get_group_detail_info first (NapCat), falls back to get_group_info. */
+  getGroupInfo(groupId: string): Promise<{ groupId: string; name: string; description: string; memberCount: number }>;
 }
 ```
 
