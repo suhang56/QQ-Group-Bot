@@ -339,4 +339,52 @@ describe('NapCatAdapter', () => {
     expect(params['user_id']).toBe(789);
     expect(params['message']).toBe('hey');
   });
+
+  // --- getForwardMessages ---
+  it('getForwardMessages() returns parsed ForwardMessage array', async () => {
+    adapter = new NapCatAdapter(`ws://localhost:${getPort(server)}`);
+    await adapter.connect();
+
+    serverSocket!.on('message', (data) => {
+      const req = JSON.parse(data.toString()) as { echo: string; action: string };
+      if (req.action === 'get_forward_msg') {
+        serverSocket!.send(JSON.stringify({
+          status: 'ok', retcode: 0, echo: req.echo,
+          data: {
+            messages: [
+              {
+                message_id: 42,
+                sender: { user_id: 100, nickname: 'Alice' },
+                time: 1700000001,
+                message: [{ type: 'text', data: { text: 'hello from forward' } }],
+                raw_message: 'hello from forward',
+              },
+            ],
+          },
+        }));
+      }
+    });
+
+    const msgs = await adapter.getForwardMessages('fwd123');
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]!.messageId).toBe('42');
+    expect(msgs[0]!.senderNickname).toBe('Alice');
+    expect(msgs[0]!.senderId).toBe('100');
+    expect(msgs[0]!.content).toBe('hello from forward');
+    expect(msgs[0]!.rawContent).toBe('hello from forward');
+    expect(msgs[0]!.timestamp).toBe(1700000001);
+  });
+
+  it('getForwardMessages() returns empty array when action fails', async () => {
+    adapter = new NapCatAdapter(`ws://localhost:${getPort(server)}`);
+    await adapter.connect();
+
+    serverSocket!.on('message', (data) => {
+      const req = JSON.parse(data.toString()) as { echo: string };
+      serverSocket!.send(JSON.stringify({ status: 'failed', retcode: 100, echo: req.echo }));
+    });
+
+    const msgs = await adapter.getForwardMessages('fwd_fail');
+    expect(msgs).toEqual([]);
+  });
 });

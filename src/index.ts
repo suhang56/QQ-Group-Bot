@@ -82,6 +82,7 @@ const chat = new ChatModule(claude, db, {
   botUserId, deflectCacheEnabled: true, visionService: vision,
   localStickerRepo: db.localStickers, embedder, selfLearning,
   tuningPath, imageDescriptions: db.imageDescriptions,
+  forwardCache: db.forwardCache,
 });
 router.setChat(chat);
 

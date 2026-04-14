@@ -13,7 +13,7 @@ import { buildStickerSection, type LiveStickerEntry } from '../utils/stickers.js
 import { MoodTracker, PROACTIVE_POOLS, type MoodDescription } from './mood.js';
 import type { VisionService } from './vision.js';
 import type { IEmbeddingService } from '../storage/embeddings.js';
-import type { ILocalStickerRepository, IImageDescriptionRepository } from '../storage/db.js';
+import type { ILocalStickerRepository, IImageDescriptionRepository, IForwardCacheRepository } from '../storage/db.js';
 import { cosineSimilarity } from '../storage/embeddings.js';
 
 export interface IChatModule {
@@ -77,6 +77,7 @@ interface ChatOptions {
   selfLearning?: SelfLearningModule;
   tuningPath?: string;
   imageDescriptions?: IImageDescriptionRepository;
+  forwardCache?: IForwardCacheRepository;
 }
 
 interface ScoreFactors {
@@ -476,6 +477,7 @@ export class ChatModule implements IChatModule {
   private readonly chatAdminMirrorSamplesPerAdmin: number;
   private readonly selfLearning: SelfLearningModule | null;
   private readonly imageDescriptions: IImageDescriptionRepository | null;
+  private readonly forwardCache: IForwardCacheRepository | null;
   // per-group: whether the last generateReply call returned an evasive reply
   private readonly lastEvasiveReply = new Map<string, boolean>();
 
@@ -531,6 +533,7 @@ export class ChatModule implements IChatModule {
     this.chatAdminMirrorSamplesPerAdmin = options.chatAdminMirrorSamplesPerAdmin ?? 5;
     this.selfLearning = options.selfLearning ?? null;
     this.imageDescriptions = options.imageDescriptions ?? null;
+    this.forwardCache = options.forwardCache ?? null;
 
     if (this.moodProactiveEnabled) {
       this.moodProactiveTimer = setInterval(
@@ -778,8 +781,9 @@ export class ChatModule implements IChatModule {
     const fmtMsg = (m: { userId: string; nickname: string; content: string; rawContent?: string }) => {
       const imgDesc = this._resolveImageDesc(m.rawContent ?? '');
       const imgPart = imgDesc !== null ? ` [图片: ${imgDesc}]` : '';
+      const fwdPart = this._resolveForwardText(m.rawContent ?? '');
       const prefix = m.userId === this.botUserId ? `[你(${m.nickname})]:` : `[${m.nickname}]:`;
-      return `${prefix} ${m.content}${imgPart}`;
+      return `${prefix} ${m.content}${imgPart}${fwdPart}`;
     };
 
     const keywordSection = keywordMsgs.length > 0
@@ -1386,6 +1390,16 @@ export class ChatModule implements IChatModule {
     } catch {
       return null;
     }
+  }
+
+  /** Returns cached forward expansion text for rawContent, or empty string if not in cache or no forward. */
+  _resolveForwardText(rawContent: string): string {
+    if (!rawContent || !this.forwardCache) return '';
+    const m = rawContent.match(/\[CQ:forward,id=([^\],]+)/);
+    if (!m) return '';
+    const forwardId = m[1]!.trim();
+    const cached = this.forwardCache.get(forwardId);
+    return cached ? `\n${cached.expandedText}` : '';
   }
 
   /** Returns cached image description for a message's rawContent, or '(未描述)' if there's an image but no cache hit, or null if no image at all. */

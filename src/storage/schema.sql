@@ -214,3 +214,11 @@ CREATE TABLE IF NOT EXISTS welcome_log (
   welcomed_at  INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_welcome_log_user ON welcome_log(group_id, user_id, welcomed_at DESC);
+
+CREATE TABLE IF NOT EXISTS forward_cache (
+  forward_id        TEXT    PRIMARY KEY,
+  expanded_text     TEXT    NOT NULL,
+  nested_image_keys TEXT    NOT NULL DEFAULT '[]',
+  fetched_at        INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_forward_cache_fetched ON forward_cache(fetched_at);

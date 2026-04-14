@@ -15,6 +15,7 @@ import { BotErrorCode } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
 import { defaultGroupConfig } from '../config.js';
 import { resolveAtTarget } from '../utils/cqcode.js';
+import { expandForwards, purgeExpiredForwardCache } from './forward-expand.js';
 
 const MAX_SPLIT_LINES = 3;
 const MOD_APPROVAL_ADMIN = process.env['MOD_APPROVAL_ADMIN'] ?? '2331924739';
@@ -115,6 +116,12 @@ export class Router implements IRouter {
       if (expired > 0) this.logger.info({ expired }, 'pending moderation rows expired');
     }, 60_000);
     this.expiryInterval.unref?.();
+
+    const forwardPurgeInterval = setInterval(() => {
+      const purged = purgeExpiredForwardCache(this.db.forwardCache);
+      if (purged > 0) this.logger.info({ purged }, 'forward cache entries purged');
+    }, 3_600_000);
+    forwardPurgeInterval.unref?.();
   }
 
   setChat(chat: IChatModule): void {
@@ -166,6 +173,19 @@ export class Router implements IRouter {
 
       const config = this.db.groupConfig.get(msg.groupId) ?? this._defaultConfig(msg.groupId);
 
+      // Expand 合并转发 blocks so downstream pipeline sees message text
+      if (msg.rawContent.includes('[CQ:forward,')) {
+        try {
+          const expanded = await expandForwards(
+            msg.rawContent, this.adapter, this.db.forwardCache, msg.groupId, this.logger,
+          );
+          const expandedText = expanded.replace(/\[CQ:[^\]]+\]/g, '').trim();
+          if (expandedText) msg = { ...msg, content: msg.content ? `${msg.content}\n${expandedText}` : expandedText };
+        } catch (err) {
+          this.logger.warn({ err, messageId: msg.messageId }, 'forward expand in dispatch failed — ignored');
+        }
+      }
+
       // ID card guard — runs first, before any persistence or downstream modules
       if (this.idGuard && config.idGuardEnabled) {
         const blocked = await this.idGuard.check(msg).catch(err => {
@@ -199,6 +219,18 @@ export class Router implements IRouter {
       const imageFileKey = _extractImageFile(msg.rawContent);
       if (imageFileKey && this.moderatorModule && config.autoMod) {
         void this._assessImageAsync(msg, imageFileKey);
+      }
+
+      // Nested images inside expanded forwards
+      if (msg.rawContent.includes('[CQ:forward,') && this.moderatorModule && config.autoMod) {
+        const cachedExpanded = this.db.forwardCache.get(
+          (msg.rawContent.match(/\[CQ:forward,id=([^\],]+)/)?.[1] ?? '').trim(),
+        );
+        if (cachedExpanded?.nestedImageKeys?.length) {
+          for (const key of cachedExpanded.nestedImageKeys) {
+            void this._assessImageAsync(msg, key);
+          }
+        }
       }
 
       // Persist message and upsert user
@@ -359,7 +391,7 @@ export class Router implements IRouter {
         nickname: m.nickname,
         role: 'member' as const,
         content: m.content,
-        rawContent: m.content,
+        rawContent: m.rawContent,
         timestamp: m.timestamp,
       }));
 

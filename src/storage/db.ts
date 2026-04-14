@@ -199,6 +199,12 @@ export interface IImageDescriptionRepository {
   purgeOlderThan(cutoffTs: number): number;
 }
 
+export interface IForwardCacheRepository {
+  get(forwardId: string): { expandedText: string; nestedImageKeys: string[] } | null;
+  put(forwardId: string, expandedText: string, nestedImageKeys: string[], now: number): void;
+  deleteExpired(beforeTs: number): number;
+}
+
 export interface ImageModVerdict {
   fileKey: string;
   violation: boolean;
@@ -995,6 +1001,34 @@ class ImageModCacheRepository implements IImageModCacheRepository {
   }
 }
 
+class ForwardCacheRepository implements IForwardCacheRepository {
+  constructor(private readonly db: DatabaseSync) {}
+
+  get(forwardId: string): { expandedText: string; nestedImageKeys: string[] } | null {
+    const row = this.db.prepare(
+      'SELECT expanded_text, nested_image_keys FROM forward_cache WHERE forward_id = ?'
+    ).get(forwardId) as unknown as { expanded_text: string; nested_image_keys: string } | undefined;
+    if (!row) return null;
+    return {
+      expandedText: row.expanded_text,
+      nestedImageKeys: JSON.parse(row.nested_image_keys) as string[],
+    };
+  }
+
+  put(forwardId: string, expandedText: string, nestedImageKeys: string[], now: number): void {
+    this.db.prepare(
+      'INSERT OR REPLACE INTO forward_cache (forward_id, expanded_text, nested_image_keys, fetched_at) VALUES (?, ?, ?, ?)'
+    ).run(forwardId, expandedText, JSON.stringify(nestedImageKeys), now);
+  }
+
+  deleteExpired(beforeTs: number): number {
+    const result = this.db.prepare(
+      'DELETE FROM forward_cache WHERE fetched_at < ?'
+    ).run(beforeTs) as { changes: number };
+    return result.changes;
+  }
+}
+
 interface BotReplyRow {
   id: number; group_id: string; trigger_msg_id: string | null;
   trigger_user_nickname: string | null; trigger_content: string;
@@ -1288,6 +1322,7 @@ export class Database {
   readonly liveStickers: ILiveStickerRepository;
   readonly imageDescriptions: IImageDescriptionRepository;
   readonly imageModCache: IImageModCacheRepository;
+  readonly forwardCache: IForwardCacheRepository;
   readonly botReplies: IBotReplyRepository;
   readonly localStickers: ILocalStickerRepository;
   readonly learnedFacts: ILearnedFactsRepository;
@@ -1312,6 +1347,7 @@ export class Database {
     this.liveStickers = new LiveStickerRepository(this._db);
     this.imageDescriptions = new ImageDescriptionRepository(this._db);
     this.imageModCache = new ImageModCacheRepository(this._db);
+    this.forwardCache = new ForwardCacheRepository(this._db);
     this.botReplies = new BotReplyRepository(this._db);
     this.localStickers = new LocalStickerRepository(this._db);
     this.learnedFacts = new LearnedFactsRepository(this._db);
@@ -1475,5 +1511,16 @@ export class Database {
 
     // messages.raw_content — stores original CQ-code content for image context resolution.
     try { this._db.exec(`ALTER TABLE messages ADD COLUMN raw_content TEXT`); } catch { /* already exists */ }
+
+    // forward_cache — pre-expanded 合并转发 content, keyed by forward_id, TTL 24h.
+    this._db.exec(`
+      CREATE TABLE IF NOT EXISTS forward_cache (
+        forward_id        TEXT    PRIMARY KEY,
+        expanded_text     TEXT    NOT NULL,
+        nested_image_keys TEXT    NOT NULL DEFAULT '[]',
+        fetched_at        INTEGER NOT NULL
+      )
+    `);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_forward_cache_fetched ON forward_cache(fetched_at)`);
   }
 }

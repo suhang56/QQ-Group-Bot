@@ -38,6 +38,15 @@ export interface GroupNotice {
   message: string;
 }
 
+export interface ForwardMessage {
+  messageId: string;
+  senderId: string;
+  senderNickname: string;
+  content: string;
+  rawContent: string;
+  timestamp: number;
+}
+
 export interface INapCatAdapter {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
@@ -54,6 +63,8 @@ export interface INapCatAdapter {
   getImage(file: string): Promise<{ filename: string; url: string; size: number; base64?: string }>;
   /** Fetch group metadata including description via get_group_info. */
   getGroupInfo(groupId: string): Promise<{ groupId: string; name: string; description: string; memberCount: number }>;
+  /** Fetch nested messages inside a 合并转发 card. Returns empty array on error. */
+  getForwardMessages(forwardId: string): Promise<ForwardMessage[]>;
 }
 
 interface OneBotFrame {
@@ -237,6 +248,34 @@ export class NapCatAdapter extends EventEmitter implements INapCatAdapter {
       description: data?.group_memo ?? '',
       memberCount: data?.member_count ?? 0,
     };
+  }
+
+  async getForwardMessages(forwardId: string): Promise<ForwardMessage[]> {
+    try {
+      const resp = await this.action('get_forward_msg', { message_id: forwardId });
+      const data = resp.data as { messages?: Array<{
+        message_id?: number | string;
+        sender?: { user_id?: number; nickname?: string };
+        time?: number;
+        message?: string | Array<{ type: string; data: Record<string, string> }>;
+        raw_message?: string;
+      }> } | undefined;
+      if (!Array.isArray(data?.messages)) return [];
+      return data!.messages!.map(m => {
+        const raw = typeof m.message === 'string' ? m.message : (m.raw_message ?? '');
+        return {
+          messageId: String(m.message_id ?? ''),
+          senderId: String(m.sender?.user_id ?? ''),
+          senderNickname: m.sender?.nickname ?? '',
+          content: extractText(m.message),
+          rawContent: raw,
+          timestamp: m.time ?? 0,
+        };
+      });
+    } catch (err) {
+      this.logger.warn({ err, forwardId }, 'getForwardMessages failed — returning empty');
+      return [];
+    }
   }
 
   async getGroupNotices(groupId: string): Promise<GroupNotice[]> {
