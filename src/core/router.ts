@@ -18,8 +18,8 @@ const MAX_SPLIT_LINES = 3;
 const MOD_APPROVAL_ADMIN = process.env['MOD_APPROVAL_ADMIN'] ?? '2331924739';
 const MOD_DM_HOURLY_CAP = 20;
 const MOD_EXPIRY_SEC = 600; // 10 minutes
-const SPLIT_DELAY_MIN_MS = 0;
-const SPLIT_DELAY_MAX_MS = 50;
+const SPLIT_DELAY_MIN_MS = 30;
+const SPLIT_DELAY_MAX_MS = 80;
 
 /** Split a reply on newlines, cap at MAX_SPLIT_LINES, drop empty lines. */
 export function splitReply(text: string): string[] {
@@ -399,12 +399,10 @@ export class Router implements IRouter {
       this.logger.info({ groupId, totalLines: text.split('\n').length }, 'reply truncated to 3 lines');
     }
     for (let i = 0; i < lines.length; i++) {
+      await new Promise(r => setTimeout(r, randomDelay()));
       const msgId = await this.adapter.send(groupId, lines[i]!, i === 0 ? replyToMsgId : undefined);
       if (msgId !== null && this.chatModule) {
         this.chatModule.recordOutgoingMessage(groupId, msgId);
-      }
-      if (i < lines.length - 1) {
-        await new Promise(r => setTimeout(r, randomDelay()));
       }
     }
     if (logCtx) {

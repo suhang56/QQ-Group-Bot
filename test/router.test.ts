@@ -875,8 +875,8 @@ describe('Router — @-mention queue with quote-reply', () => {
     const p1 = router.dispatch(makeAtMsg({ messageId: '10', userId: 'u1' }));
     const p2 = router.dispatch(makeAtMsg({ messageId: '11', userId: 'u2' }));
     await Promise.all([p1, p2]);
-    // Allow async queue drain
-    await new Promise(r => setTimeout(r, 50));
+    // Allow async queue drain — each send now waits up to 80ms, so 300ms covers both
+    await new Promise(r => setTimeout(r, 300));
 
     const calls = vi.mocked(adapter.send).mock.calls;
     // Both messages replied to (at least 2 send calls)

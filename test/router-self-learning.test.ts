@@ -180,7 +180,7 @@ describe('Router — evasive reply + harvest scheduling', () => {
   });
 
   it('schedules harvest timer after evasive reply (fires after 60s)', async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ shouldAdvanceTime: true, advanceTimeDelta: 20 });
     const dispatchTime = Math.floor(Date.now() / 1000);
     const msg = makeMsg({ content: 'fire bird 是谁唱的', rawContent: 'fire bird 是谁唱的', timestamp: dispatchTime });
     await router.dispatch(msg);
@@ -200,7 +200,7 @@ describe('Router — evasive reply + harvest scheduling', () => {
   });
 
   it('dispose() cancels pending harvest timers', async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ shouldAdvanceTime: true, advanceTimeDelta: 20 });
     const msg = makeMsg({ content: '啥来的', rawContent: '啥来的' });
     await router.dispatch(msg);
 
@@ -212,7 +212,7 @@ describe('Router — evasive reply + harvest scheduling', () => {
   });
 
   it('evasive path calls BOTH harvestPassiveKnowledge (via timer) AND researchOnline (immediate)', async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ shouldAdvanceTime: true, advanceTimeDelta: 20 });
     const researchOnline = vi.fn().mockResolvedValue(null);
     // Attach researchOnline to the mock SelfLearningModule (method dev-5 is adding)
     (sl as unknown as Record<string, unknown>)['researchOnline'] = researchOnline;
