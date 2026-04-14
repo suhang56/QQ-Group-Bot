@@ -55,6 +55,23 @@ describe('hasForbiddenContent', () => {
   it('does not false-positive "好的" without comma', () => {
     expect(hasForbiddenContent('好的哦然后呢')).toBeNull();
   });
+
+  it('detects 描述太模糊 image leak', () => {
+    expect(hasForbiddenContent('描述太模糊了锐评不了啥')).toBe('描述太模糊');
+  });
+
+  it('detects 图描述 image leak', () => {
+    expect(hasForbiddenContent('图描述呢你发一下')).toBe('图描述');
+  });
+
+  it('detects 描述呢 image leak', () => {
+    expect(hasForbiddenContent('这图描述呢你发一下')).toBeTruthy();
+  });
+
+  it('does not false-positive normal use of 描述', () => {
+    // "描述" alone is not forbidden — only specific leak phrases
+    expect(hasForbiddenContent('他描述得很清楚')).toBeNull();
+  });
 });
 
 describe('stripEcho', () => {

@@ -319,7 +319,8 @@ export const BANGDREAM_PERSONA = `你是这个QQ群的老群友，不是AI，不
 - **别瞎编 fandom/文化细节**。遇到你不熟的人名、角色、作品、梗 → 直接装傻（"谁啊" / "没听过" / "忘了" / "你讲讲"），**绝对不要**编造配偶/关系/剧情/出处。特别是群内专有名词（谭博人 / ygfn 这种），不确定就承认不确定。Context 里没有明确出现过的具体断言 = 红灯。
 
 **话题不感兴趣也允许 skip**：两个人在聊股票 / 转码 / 美签，直接 \`<skip>\`。
-- 看到 context 里出现 [图片: 看不清这张图] 时，意思是你**确实看不清那张图的内容**。这种情况下：装傻接过去（"图我看不清"/"这图糊的吧"/"啥图啊看不到"/"截图没出来"），或者反问对方让他文字描述。**绝对不要说"图没描述"/"图描述呢"/"未描述"**这种话——那暴露了你内部识别图片的机制，是 bot tell。也不要继续硬接图片内容假装看到了。
+- 看到 context 里出现 〔你看到那张图是：看不清这张图〕 时，意思是你**确实看不清那张图的内容**。这种情况下：装傻接过去（"图我看不清"/"这图糊的吧"/"啥图啊看不到"/"截图没出来"），或者反问对方让他文字描述。**绝对不要说"图没描述"/"图描述呢"/"未描述"**这种话——那暴露了你内部识别图片的机制，是 bot tell。也不要继续硬接图片内容假装看到了。
+- 当 context 出现 〔你看到那张图是：X〕 这种格式，那是**你自己亲眼看到的图的内容**，不是别人发的文字。可以直接用 X 来评论这张图，比如"这粉粉的也太可爱"/"这图我看着像 ygfn"/"挺好看的啊"，**绝对不要反问"X 是什么意思"或"你发的什么东西"** — 那就承认你没看到图。也不要说"描述太模糊"/"描述呢"等任何带"描述"二字的回复，那暴露了你内部用文字识别图片的机制。
 
 ## 被直接骂的反应（@ 你 + 脏话 = 直接攻击）
 
@@ -878,7 +879,7 @@ export class ChatModule implements IChatModule {
 
     const fmtMsg = (m: { userId: string; nickname: string; content: string; rawContent?: string }) => {
       const imgDesc = this._resolveImageDesc(m.rawContent ?? '');
-      const imgPart = imgDesc !== null ? ` [图片: ${imgDesc}]` : '';
+      const imgPart = imgDesc !== null ? ` 〔你看到那张图是：${imgDesc}〕` : '';
       const fwdPart = this._resolveForwardText(m.rawContent ?? '');
       const prefix = m.userId === this.botUserId ? `[你(${m.nickname})]:` : `[${m.nickname}]:`;
       return `${prefix} ${m.content}${imgPart}${fwdPart}`;
@@ -1636,7 +1637,7 @@ export class ChatModule implements IChatModule {
       : '';
 
     const imageAwarenessLine = this.visionService
-      ? '\n\n如果消息里有 [图片: XXX] 的描述，这是群友发的图片内容。你可以基于描述做出反应（夸图、吐槽、问是谁、表情包互怼等），就像真的看到图一样，但不要说"我看到一张图"这种话。'
+      ? '\n\n如果消息里有 〔你看到那张图是：XXX〕 格式，那是**你自己看到的图的内容**，直接基于它做反应，不要反问"XXX 是什么"，不要说"描述"二字。'
       : '';
 
     const adminStyleSection = this._buildAdminStyleSection(groupId);

@@ -1170,16 +1170,24 @@ describe('ChatModule — persona 啥来的 instruction (Fix 1)', () => {
   });
 });
 
-describe('ChatModule — image fallback marker (Fix 8)', () => {
-  it('BANGDREAM_PERSONA contains 看不清这张图 image-blur rule', () => {
-    expect(BANGDREAM_PERSONA).toContain('看不清这张图');
+describe('ChatModule — image fallback marker (Fix 8 + Fix 9)', () => {
+  it('BANGDREAM_PERSONA references new 〔你看到那张图是〕 format', () => {
+    expect(BANGDREAM_PERSONA).toContain('〔你看到那张图是');
   });
 
   it('BANGDREAM_PERSONA bans "图没描述" and "未描述" leak phrases', () => {
     expect(BANGDREAM_PERSONA).toContain('图没描述');
     expect(BANGDREAM_PERSONA).toContain('未描述');
-    // Both terms appear only inside the prohibition clause — verify the prohibition is present
     expect(BANGDREAM_PERSONA).toContain('绝对不要说');
+  });
+
+  it('BANGDREAM_PERSONA bans "描述" in image reply context', () => {
+    expect(BANGDREAM_PERSONA).toContain('描述太模糊');
+    expect(BANGDREAM_PERSONA).toContain('描述呢');
+  });
+
+  it('BANGDREAM_PERSONA bans reflexive "X是什么意思" question on image content', () => {
+    expect(BANGDREAM_PERSONA).toContain('绝对不要反问');
   });
 });
 
@@ -2937,7 +2945,7 @@ describe('ChatModule — image context in recent messages', () => {
     expect(claude).toHaveBeenCalled();
     const callArg = (claude as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { messages: Array<{ content: string }> };
     const userContent = callArg.messages[0]!.content as string;
-    expect(userContent).toContain('[图片: 有一头牛站在草地上]');
+    expect(userContent).toContain('〔你看到那张图是：有一头牛站在草地上〕');
   });
 });
 

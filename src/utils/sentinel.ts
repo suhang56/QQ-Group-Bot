@@ -18,6 +18,12 @@ const SUBSTR_FORBIDDEN = [
   '我是ai', '我是bot', '一个ai', '一个bot',
   // slurs / group-banned terms — 0 tolerance
   '药娘',
+  // image marker leak phrases — bot telling user it has a text description
+  '描述太模糊',
+  '图描述',
+  '图没描述',
+  '描述呢',
+  '描述不出来',
 ];
 
 // Soft-forbidden: reply STARTS with these → assistant meta-framing
