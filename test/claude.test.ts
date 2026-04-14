@@ -246,6 +246,7 @@ describe('ClaudeClient', () => {
     expect(textBlock?.text).toContain('30-80 字');
     expect(textBlock?.text).toContain('10-40 字');
     expect(textBlock?.text).toContain('角色名');
+    expect(textBlock?.text).toContain('聊天截图');
   });
 
   it('downscale: falls back to original bytes on invalid image data', async () => {
