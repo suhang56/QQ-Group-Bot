@@ -77,6 +77,15 @@ export class ClaudeClient implements IClaudeClient {
           settingSources: [],
           persistSession: false,
           hooks: {},
+          // Disable extended thinking — we're doing single-shot chat replies,
+          // not agent reasoning. Without this the model burns thousands of
+          // output tokens on internal reasoning before the actual reply,
+          // causing 10-25s latency per call.
+          thinking: { type: 'disabled' },
+          // Minimal effort = fastest path
+          effort: 'low',
+          // One-shot: no agent loop
+          maxTurns: 1,
           ...(req.allowedTools ? { allowedTools: req.allowedTools } : {}),
         },
       });
