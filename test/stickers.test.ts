@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { buildStickerSection, clearStickerSectionCache } from '../src/utils/stickers.js';
+import { buildStickerSection, clearStickerSectionCache, getStickerPool } from '../src/utils/stickers.js';
 import type { IClaudeClient, ClaudeResponse } from '../src/ai/claude.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -110,5 +110,32 @@ describe('buildStickerSection', () => {
     const r2 = await buildStickerSection('g-mem', tmpDir, 5, claude);
     expect(r1).toBe(r2);
     expect((claude.complete as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
+  });
+
+  it('getStickerPool returns null before buildStickerSection runs', () => {
+    expect(getStickerPool('g-never-built')).toBeNull();
+  });
+
+  it('getStickerPool returns labeled pool after buildStickerSection', async () => {
+    writeStickerJsonl(tmpDir, 'g-pool', [
+      { key: 'mface:500:c1', type: 'market_face', cqCode: '[CQ:mface,emoji_id=c1,emoji_package_id=500,key=kc1,summary=[笑]]', summary: '[笑]', count: 10, lastSeen: 0, samples: [] },
+      { key: 'mface:500:c2', type: 'market_face', cqCode: '[CQ:mface,emoji_id=c2,emoji_package_id=500,key=kc2,summary=[哭]]', summary: '[哭]', count: 5, lastSeen: 0, samples: [] },
+    ]);
+    const claude = makeMockClaude('标签');
+    await buildStickerSection('g-pool', tmpDir, 5, claude);
+    const pool = getStickerPool('g-pool');
+    expect(pool).not.toBeNull();
+    expect(pool!.length).toBe(2);
+    expect(pool!.every(s => typeof s.label === 'string' && typeof s.cqCode === 'string')).toBe(true);
+  });
+
+  it('clearStickerSectionCache also clears pool cache', async () => {
+    writeStickerJsonl(tmpDir, 'g-clear', [
+      { key: 'mface:600:d1', type: 'market_face', cqCode: '[CQ:mface,emoji_id=d1,emoji_package_id=600,key=kd,summary=[呢]]', summary: '[呢]', count: 3, lastSeen: 0, samples: [] },
+    ]);
+    await buildStickerSection('g-clear', tmpDir, 5, makeMockClaude('呢'));
+    expect(getStickerPool('g-clear')).not.toBeNull();
+    clearStickerSectionCache();
+    expect(getStickerPool('g-clear')).toBeNull();
   });
 });

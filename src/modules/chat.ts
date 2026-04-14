@@ -9,7 +9,7 @@ import { createLogger } from '../utils/logger.js';
 import { lurkerDefaults, chatHistoryDefaults, RUNTIME_CHAT_MODEL } from '../config.js';
 import { parseFaces } from '../utils/qqface.js';
 import { sentinelCheck, postProcess, isEcho, checkConfabulation, HARDENED_SYSTEM } from '../utils/sentinel.js';
-import { buildStickerSection, type LiveStickerEntry } from '../utils/stickers.js';
+import { buildStickerSection, getStickerPool, type LiveStickerEntry } from '../utils/stickers.js';
 import { MoodTracker, PROACTIVE_POOLS, type MoodDescription } from './mood.js';
 import type { VisionService } from './vision.js';
 import type { IEmbeddingService } from '../storage/embeddings.js';
@@ -108,6 +108,16 @@ const BOT_REACTION_RE = /变笨|变傻|抽风|死机|坏了|没反应|真的假�
 const IMPLICIT_BOT_REF_ALIAS_WINDOW_MS = 60_000;
 const IMPLICIT_BOT_REF_REACTION_WINDOW_MS = 30_000;
 const IMPLICIT_BOT_REF_REACTION_MAX_CHARS = 15;
+
+/** Fisher-Yates reservoir sample: pick k items from arr without replacement. */
+function _reservoirSample<T>(arr: T[], k: number): T[] {
+  const result = arr.slice(0, k);
+  for (let i = k; i < arr.length; i++) {
+    const j = Math.floor(Math.random() * (i + 1));
+    if (j < k) result[j] = arr[i]!;
+  }
+  return result;
+}
 
 // Matches DIRECT second-person identity questions only.
 // Patterns: 你是...bot/ai/机器人, bot吧, 真人吗, 这不是机器人, are you a/an bot/ai/human.
@@ -415,6 +425,8 @@ export class ChatModule implements IChatModule {
   private readonly loreKeywordsCache = new Map<string, Set<string>>();
   // sticker section: groupId -> formatted section string (loaded async once)
   private readonly stickerSectionCache = new Map<string, string>();
+  // recent mface keys bot has sent per group: capped at 8, used for rotation cooldown
+  private readonly recentMfaceByGroup = new Map<string, string[]>();
   // outgoing message IDs per group (capped at MAX_OUTGOING_IDS)
   private readonly outgoingMsgIds = new Map<string, Set<number>>();
   // last proactive reply timestamp per group (for silence factor)
@@ -604,6 +616,14 @@ export class ChatModule implements IChatModule {
     arr = [...arr, reply];
     if (arr.length > 5) arr = arr.slice(-5);
     this.botRecentOutputs.set(groupId, arr);
+
+    // Track mface keys for rotation cooldown
+    const mfaceKeys = [...reply.matchAll(/\[CQ:mface,[^\]]*\bemoji_id=([^,\]]+)/g)].map(m => m[1]!.trim());
+    if (mfaceKeys.length > 0) {
+      let recent = this.recentMfaceByGroup.get(groupId) ?? [];
+      recent = [...recent, ...mfaceKeys].slice(-8);
+      this.recentMfaceByGroup.set(groupId, recent);
+    }
   }
 
   /** Returns true if the reply is a known 装傻 (evasive) phrase. */
@@ -803,6 +823,7 @@ export class ChatModule implements IChatModule {
     const systemPrompt = this._getGroupIdentityPrompt(groupId);
     const moodSection = this._buildMoodSection(groupId);
     const contextStickerSection = await this._getContextStickers(groupId, triggerMessage.content);
+    const rotatedStickerSection = this._buildRotatedStickerSection(groupId);
 
     const recentOutputs = this.botRecentOutputs.get(groupId) ?? [];
     const avoidSection = recentOutputs.length > 0
@@ -840,6 +861,7 @@ export class ChatModule implements IChatModule {
             { text: systemPrompt, cache: true },
             ...(moodSection ? [{ text: moodSection, cache: true as const }] : []),
             ...(contextStickerSection ? [{ text: contextStickerSection, cache: true as const }] : []),
+            ...(rotatedStickerSection ? [{ text: rotatedStickerSection, cache: true as const }] : []),
             ...(factsBlock ? [{ text: factsBlock, cache: true as const }] : []),
             ...(tuningBlock ? [{ text: tuningBlock, cache: true as const }] : []),
           ],
@@ -1077,6 +1099,29 @@ export class ChatModule implements IChatModule {
   }
 
   /** Return a system prompt section with top-K context-matched local stickers, or empty string. */
+  /** Build a per-call rotated sticker section from the cached labeled pool. */
+  private _buildRotatedStickerSection(groupId: string): string {
+    const pool = getStickerPool(groupId);
+    if (!pool || pool.length === 0) return '';
+
+    const recentKeys = new Set(this.recentMfaceByGroup.get(groupId) ?? []);
+    // Extract emoji_id from each cqCode for cooldown comparison
+    const filtered = pool.filter(s => {
+      const m = s.cqCode.match(/\bemoji_id=([^,\]]+)/);
+      return !m || !recentKeys.has(m[1]!.trim());
+    });
+
+    // Random-sample up to 20 from filtered remainder (or all if fewer)
+    const sampleSize = Math.min(20, filtered.length);
+    const sampled = filtered.length <= sampleSize
+      ? filtered
+      : _reservoirSample(filtered, sampleSize);
+
+    if (sampled.length === 0) return '';
+    const lines = sampled.map(({ label, cqCode }) => `- ${label} → ${cqCode}`).join('\n');
+    return `\n这个群常用的表情包（当语境合适时直接用CQ码发送，就像群友一样）：\n${lines}`;
+  }
+
   private async _getContextStickers(groupId: string, queryText: string): Promise<string> {
     if (!this.localStickerRepo) return '';
     const candidates = this.localStickerRepo.getTopByGroup(groupId, 50)
@@ -1518,7 +1563,7 @@ export class ChatModule implements IChatModule {
       ? '\n如果有人问 "群规 / 群里有什么规定" 之类，直接列出上面 ## 本群的规矩 段落里的实际规矩（用自己的口吻，不要照抄官方话术），绝对不要说 "没群规" / "不知道" / "想发什么发什么" 之类。'
       : '';
 
-    const text = `${personaBase}${adminStyleSection}${loreSection}${rulesBlock}${imageAwarenessLine}\n\n---\n简短自然（1-3句话）。群友提到群里的人名、梗、黑话，基于上面资料回答；不知道的就"啥来的"，不要装懂。${rulesInstruction}${stickerSection}${outputRules}`;
+    const text = `${personaBase}${adminStyleSection}${loreSection}${rulesBlock}${imageAwarenessLine}\n\n---\n简短自然（1-3句话）。群友提到群里的人名、梗、黑话，基于上面资料回答；不知道的就"啥来的"，不要装懂。${rulesInstruction}${outputRules}`;
 
     this.groupIdentityCache.set(groupId, { text, expiresAt: Date.now() + this.groupIdentityCacheTtlMs });
     this.logger.debug({ groupId, hasLore: !!lore, hasStickerSection: stickerSection.length > 0 }, 'Group identity prompt cached');

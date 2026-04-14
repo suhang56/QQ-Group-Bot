@@ -23,6 +23,8 @@ export interface LabeledSticker {
 
 // In-memory cache: groupId -> formatted section string
 const sectionCache = new Map<string, string>();
+// In-memory cache: groupId -> full labeled pool (all stickers, for rotation)
+const poolCache = new Map<string, LabeledSticker[]>();
 
 export interface LiveStickerEntry {
   key: string;
@@ -95,6 +97,7 @@ export async function buildStickerSection(
   const section = `\n这个群常用的表情包（当语境合适时直接用CQ码发送，就像群友一样）：\n${lines2}`;
 
   sectionCache.set(groupId, section);
+  poolCache.set(groupId, labels);
   logger.info({ groupId, count: labels.length, liveCount: liveStickers.length }, 'Sticker section built');
   return section;
 }
@@ -102,6 +105,12 @@ export async function buildStickerSection(
 /** Clear the in-memory section cache (for testing). */
 export function clearStickerSectionCache(): void {
   sectionCache.clear();
+  poolCache.clear();
+}
+
+/** Return the full labeled sticker pool for a group, or null if not yet built. */
+export function getStickerPool(groupId: string): LabeledSticker[] | null {
+  return poolCache.get(groupId) ?? null;
 }
 
 async function _getOrGenerateLabels(

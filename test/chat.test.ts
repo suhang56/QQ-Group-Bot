@@ -2912,3 +2912,106 @@ describe('ChatModule — image context in recent messages', () => {
     expect(userContent).toContain('[图片: 有一头牛站在草地上]');
   });
 });
+
+import { getStickerPool, clearStickerSectionCache } from '../src/utils/stickers.js';
+
+describe('ChatModule — mface rotation', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    clearStickerSectionCache();
+  });
+
+  afterEach(() => {
+    clearStickerSectionCache();
+    vi.restoreAllMocks();
+  });
+
+  function seedPool(groupId: string, keys: string[]): void {
+    // Seed getStickerPool by calling buildStickerSection indirectly via the pool cache
+    // We inject directly via the module's poolCache through clearStickerSectionCache + rebuildStickerSection.
+    // Instead, expose the pool through the internal poolCache by calling buildStickerSection with mocked sticker file.
+    // For simplicity in tests, directly set via a re-import trick; easier: call _buildRotatedStickerSection on an
+    // instance and verify behaviour by seeding recentMfaceByGroup through recordOwnReply.
+    void groupId; void keys; // unused — done inline per test
+  }
+  void seedPool; // suppress unused warning
+
+  it('_buildRotatedStickerSection returns empty string when pool is empty', () => {
+    const chat = new ChatModule(
+      { complete: vi.fn() } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID },
+    );
+    // No pool loaded → should return ''
+    const section = (chat as unknown as { _buildRotatedStickerSection: (g: string) => string })._buildRotatedStickerSection('g1');
+    expect(section).toBe('');
+  });
+
+  it('recentMfaceByGroup: _recordOwnReply extracts mface emoji_ids', () => {
+    const chat = new ChatModule(
+      { complete: vi.fn() } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID },
+    );
+    const reply = '来了 [CQ:mface,emoji_id=abc123,emoji_package_id=100,key=k1,summary=[笑]]';
+    (chat as unknown as { _recordOwnReply: (g: string, r: string) => void })._recordOwnReply('g1', reply);
+
+    const recentMap = (chat as unknown as { recentMfaceByGroup: Map<string, string[]> }).recentMfaceByGroup;
+    expect(recentMap.get('g1')).toContain('abc123');
+  });
+
+  it('recentMfaceByGroup: capped at 8 after many replies', () => {
+    const chat = new ChatModule(
+      { complete: vi.fn() } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID },
+    );
+    const record = (chat as unknown as { _recordOwnReply: (g: string, r: string) => void })._recordOwnReply.bind(chat);
+    for (let i = 0; i < 12; i++) {
+      record('g1', `[CQ:mface,emoji_id=id${i},emoji_package_id=100,key=k${i},summary=[面]]`);
+    }
+    const recent = (chat as unknown as { recentMfaceByGroup: Map<string, string[]> }).recentMfaceByGroup.get('g1') ?? [];
+    expect(recent.length).toBe(8);
+    // Should have the last 8 keys
+    expect(recent).toContain('id11');
+    expect(recent).not.toContain('id0');
+    expect(recent).not.toContain('id3');
+  });
+
+  it('_buildRotatedStickerSection excludes recently-used mfaces', async () => {
+    // Build a pool with 3 stickers using the sticker module
+    const { buildStickerSection } = await import('../src/utils/stickers.js');
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mface-rotation-'));
+    const groupId = 'g-rotate';
+
+    const stickers = ['x1', 'x2', 'x3'].map((id, i) => ({
+      key: `mface:100:${id}`, type: 'market_face',
+      cqCode: `[CQ:mface,emoji_id=${id},emoji_package_id=100,key=k${i},summary=[面${i}]]`,
+      summary: `[面${i}]`, count: 10 - i, lastSeen: 0, samples: [],
+    }));
+    fs.mkdirSync(tmpDir, { recursive: true });
+    fs.writeFileSync(path.join(tmpDir, `${groupId}.jsonl`), stickers.map(s => JSON.stringify(s)).join('\n'), 'utf8');
+
+    const claude = { complete: vi.fn().mockResolvedValue({ text: '标', inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 }) } as unknown as IClaudeClient;
+    await buildStickerSection(groupId, tmpDir, 10, claude);
+
+    const chat = new ChatModule(claude, db, { botUserId: BOT_ID });
+    // Mark x1 and x2 as recently used
+    const record = (chat as unknown as { _recordOwnReply: (g: string, r: string) => void })._recordOwnReply.bind(chat);
+    record(groupId, '[CQ:mface,emoji_id=x1,emoji_package_id=100,key=k0,summary=[面0]]');
+    record(groupId, '[CQ:mface,emoji_id=x2,emoji_package_id=100,key=k1,summary=[面1]]');
+
+    const section = (chat as unknown as { _buildRotatedStickerSection: (g: string) => string })._buildRotatedStickerSection(groupId);
+
+    expect(section).not.toContain('emoji_id=x1');
+    expect(section).not.toContain('emoji_id=x2');
+    expect(section).toContain('emoji_id=x3');
+
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+});
