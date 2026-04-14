@@ -118,6 +118,30 @@ describe('postProcess', () => {
     const mface = '[CQ:mface,type=6,emoji_id=123,key=abc,summary=哎]';
     expect(postProcess(mface)).toBe(mface);
   });
+
+  it('strips <skip> line from mixed multi-line reply', () => {
+    expect(postProcess('又开始了\n<skip>')).toBe('又开始了');
+  });
+
+  it('strips all-<skip> reply to empty string', () => {
+    expect(postProcess('<skip>\n<skip>\n<skip>')).toBe('');
+  });
+
+  it('strips <skip> line from middle of reply', () => {
+    expect(postProcess('不接\n<skip>\n草')).toBe('不接\n草');
+  });
+
+  it('strips uppercase <SKIP>', () => {
+    expect(postProcess('<SKIP>')).toBe('');
+  });
+
+  it('strips padded < skip >', () => {
+    expect(postProcess('< skip >')).toBe('');
+  });
+
+  it('leaves normal reply unchanged', () => {
+    expect(postProcess('正常回复')).toBe('正常回复');
+  });
 });
 
 describe('isEcho', () => {

@@ -68,9 +68,14 @@ export function stripEcho(reply: string, lastUserMessage: string): string {
 /**
  * Post-process a generated reply: strip QQ built-in face codes and trailing 。.
  */
+const SKIP_LINE_RE = /^\s*<\s*skip\s*>\s*$/i;
+
 export function postProcess(text: string): string {
   return text
     .replace(/\[CQ:face,[^\]]*\]/g, '')    // strip [CQ:face,id=N] — user banned QQ built-in faces
+    .split('\n')
+    .filter(line => !SKIP_LINE_RE.test(line))
+    .join('\n')
     .replace(/[\s。]*。[\s。]*$/, '')
     .trim();
 }

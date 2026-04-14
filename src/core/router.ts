@@ -37,6 +37,8 @@ export function splitReply(text: string): string[] {
     if (l.length === 0) return false;
     // Drop lines that are only brackets, parens, punctuation, or whitespace
     if (/^[\s\[\]()（）【】｜|\-—\.。,，!！?？「」『』〔〕［］]+$/.test(l)) return false;
+    // Belt-and-suspenders: drop any <skip> line that postProcess may have missed
+    if (/^\s*<\s*skip\s*>\s*$/i.test(l)) return false;
     return true;
   });
   return lines.slice(0, MAX_SPLIT_LINES);

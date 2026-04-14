@@ -547,6 +547,14 @@ describe('splitReply', () => {
   it('multiple stray ]]]]] after one CQ stripped to single ]', () => {
     expect(splitReply('[CQ:mface,emoji_id=x,key=y]]]]]')).toEqual(['[CQ:mface,emoji_id=x,key=y]']);
   });
+
+  it('strips <skip> line from mixed multi-line reply', () => {
+    expect(splitReply('line1\n<skip>\nline2')).toEqual(['line1', 'line2']);
+  });
+
+  it('returns empty array when all lines are <skip>', () => {
+    expect(splitReply('<skip>\n<skip>')).toEqual([]);
+  });
 });
 
 describe('Router — multi-line chat reply dispatch', () => {
