@@ -558,6 +558,7 @@ describe('Router — multi-line chat reply dispatch', () => {
       invalidateLore: vi.fn(),
       tickStickerRefresh: vi.fn(),
       noteAdminActivity: vi.fn(),
+      getEvasiveFlagForLastReply: vi.fn().mockReturnValue(false),
     });
     await router.dispatch(makeMsg({ content: 'hello', rawContent: 'hello' }));
     expect(adapter.send).toHaveBeenCalledTimes(1);
@@ -573,6 +574,7 @@ describe('Router — multi-line chat reply dispatch', () => {
       invalidateLore: vi.fn(),
       tickStickerRefresh: vi.fn(),
       noteAdminActivity: vi.fn(),
+      getEvasiveFlagForLastReply: vi.fn().mockReturnValue(false),
     });
     await router.dispatch(makeMsg({ content: 'hello', rawContent: 'hello' }));
     expect(adapter.send).toHaveBeenCalledTimes(2);
@@ -589,6 +591,7 @@ describe('Router — multi-line chat reply dispatch', () => {
       invalidateLore: vi.fn(),
       tickStickerRefresh: vi.fn(),
       noteAdminActivity: vi.fn(),
+      getEvasiveFlagForLastReply: vi.fn().mockReturnValue(false),
     });
     await router.dispatch(makeMsg({ content: 'hello', rawContent: 'hello' }));
     expect(adapter.send).toHaveBeenCalledTimes(3);
@@ -596,7 +599,7 @@ describe('Router — multi-line chat reply dispatch', () => {
 
   it('null chat reply → adapter.send not called', async () => {
     const router = new Router(db, adapter, new RateLimiter());
-    router.setChat({ generateReply: vi.fn().mockResolvedValue(null), recordOutgoingMessage: vi.fn(), markReplyToUser: vi.fn(), invalidateLore: vi.fn(), tickStickerRefresh: vi.fn(), noteAdminActivity: vi.fn() });
+    router.setChat({ generateReply: vi.fn().mockResolvedValue(null), recordOutgoingMessage: vi.fn(), markReplyToUser: vi.fn(), invalidateLore: vi.fn(), tickStickerRefresh: vi.fn(), noteAdminActivity: vi.fn(), getEvasiveFlagForLastReply: vi.fn().mockReturnValue(false) });
     await router.dispatch(makeMsg({ content: 'hello', rawContent: 'hello' }));
     expect(adapter.send).not.toHaveBeenCalled();
   });

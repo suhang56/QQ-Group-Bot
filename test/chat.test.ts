@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ChatModule, extractKeywords, extractTopFaces, tokenizeLore, IDENTITY_PROBE, IDENTITY_DEFLECTIONS, TASK_REQUEST, TASK_DEFLECTIONS, MEMORY_INJECT, MEMORY_INJECT_DEFLECTIONS, pickDeflection, BANGDREAM_PERSONA, CURSE_DEFLECTIONS, DEFLECT_FALLBACKS, type DeflectCategory } from '../src/modules/chat.js';
+import { ChatModule, extractKeywords, extractTopFaces, extractTokens, tokenizeLore, IDENTITY_PROBE, IDENTITY_DEFLECTIONS, TASK_REQUEST, TASK_DEFLECTIONS, MEMORY_INJECT, MEMORY_INJECT_DEFLECTIONS, pickDeflection, BANGDREAM_PERSONA, CURSE_DEFLECTIONS, DEFLECT_FALLBACKS, type DeflectCategory } from '../src/modules/chat.js';
 import { lurkerDefaults, defaultGroupConfig } from '../src/config.js';
 import type { IClaudeClient, ClaudeResponse } from '../src/ai/claude.js';
 import type { GroupMessage } from '../src/adapter/napcat.js';
@@ -2169,5 +2169,177 @@ describe('ChatModule — admin DB seeding', () => {
     const sys = getSystemPrompt();
     expect(sys).toContain('实时消息优先');
     expect(sys).toContain('[管理]');
+  });
+});
+
+// ── Batch C: _isEvasiveReply ──────────────────────────────────────────────────
+
+import type { SelfLearningModule } from '../src/modules/self-learning.js';
+
+function makeMockSelfLearning(factsOutput = ''): SelfLearningModule {
+  return {
+    detectCorrection: vi.fn().mockResolvedValue(null),
+    harvestPassiveKnowledge: vi.fn().mockResolvedValue(null),
+    formatFactsForPrompt: vi.fn().mockReturnValue(factsOutput),
+    getModel: vi.fn().mockReturnValue('claude-sonnet-4-6'),
+  } as unknown as SelfLearningModule;
+}
+
+describe('ChatModule — _isEvasiveReply', () => {
+  let db: Database;
+  let claude: IClaudeClient;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    claude = { complete: vi.fn() } as IClaudeClient;
+  });
+
+  function makeChat() {
+    return new ChatModule(claude, db, {
+      botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999,
+      moodProactiveEnabled: false, deflectCacheEnabled: false,
+    });
+  }
+
+  it.each([
+    ['忘了', true],
+    ['考我呢', true],
+    ['记不得', true],
+    ['没听过', true],
+    ['啥来的', true],
+    ['？？？', true],
+    ['啊？', true],
+    ['不知道', true],
+    ['我哪知道', true],
+  ])('"%s" → evasive=%s', (text, expected) => {
+    const chat = makeChat();
+    expect(chat._isEvasiveReply(text)).toBe(expected);
+  });
+
+  it('normal reply text → not evasive', () => {
+    const chat = makeChat();
+    expect(chat._isEvasiveReply('是Roselia唱的')).toBe(false);
+  });
+
+  it('evasive phrase with leading whitespace → still detected', () => {
+    const chat = makeChat();
+    expect(chat._isEvasiveReply('  忘了')).toBe(true);
+  });
+});
+
+// ── Batch C: getEvasiveFlagForLastReply ───────────────────────────────────────
+
+describe('ChatModule — getEvasiveFlagForLastReply', () => {
+  let db: Database;
+  let claude: IClaudeClient;
+
+  function makeChat() {
+    return new ChatModule(claude, db, {
+      botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999,
+      moodProactiveEnabled: false, deflectCacheEnabled: false,
+    });
+  }
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    claude = {
+      complete: vi.fn().mockResolvedValue({
+        text: '忘了', inputTokens: 10, outputTokens: 5,
+        cacheReadTokens: 0, cacheWriteTokens: 0,
+      } satisfies ClaudeResponse),
+    };
+  });
+
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('returns false before any reply', () => {
+    const chat = makeChat();
+    expect(chat.getEvasiveFlagForLastReply('g1')).toBe(false);
+  });
+
+  it('returns true after evasive reply', async () => {
+    const chat = makeChat();
+    await chat.generateReply('g1', { messageId: 'm1', groupId: 'g1', userId: 'u1', nickname: 'A', role: 'member', content: '谁唱的', rawContent: '谁唱的', timestamp: Math.floor(Date.now() / 1000) }, []);
+    expect(chat.getEvasiveFlagForLastReply('g1')).toBe(true);
+  });
+
+  it('returns false after non-evasive reply', async () => {
+    (claude.complete as ReturnType<typeof vi.fn>).mockResolvedValue({
+      text: '是Roselia唱的', inputTokens: 10, outputTokens: 5,
+      cacheReadTokens: 0, cacheWriteTokens: 0,
+    } satisfies ClaudeResponse);
+    const chat = makeChat();
+    await chat.generateReply('g1', { messageId: 'm1', groupId: 'g1', userId: 'u1', nickname: 'A', role: 'member', content: '谁唱的', rawContent: '谁唱的', timestamp: Math.floor(Date.now() / 1000) }, []);
+    expect(chat.getEvasiveFlagForLastReply('g1')).toBe(false);
+  });
+
+  it('flag is per-group (g1 evasive, g2 not set)', async () => {
+    const chat = makeChat();
+    await chat.generateReply('g1', { messageId: 'm1', groupId: 'g1', userId: 'u1', nickname: 'A', role: 'member', content: '谁唱的', rawContent: '谁唱的', timestamp: Math.floor(Date.now() / 1000) }, []);
+    expect(chat.getEvasiveFlagForLastReply('g1')).toBe(true);
+    expect(chat.getEvasiveFlagForLastReply('g2')).toBe(false);
+  });
+});
+
+// ── Batch C: formatFactsForPrompt injection ───────────────────────────────────
+
+describe('ChatModule — formatFactsForPrompt injection into system prompt', () => {
+  let db: Database;
+  let capturedSystems: Parameters<IClaudeClient['complete']>[0]['system'][] = [];
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    capturedSystems = [];
+  });
+
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  function makeClaude(text = '随便说说') {
+    const client: IClaudeClient = {
+      complete: vi.fn().mockImplementation((req) => {
+        capturedSystems.push(req.system);
+        return Promise.resolve({ text, inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 } satisfies ClaudeResponse);
+      }),
+    };
+    return client;
+  }
+
+  it('injects facts block into system when selfLearning returns non-empty', async () => {
+    const sl = makeMockSelfLearning('【已学习知识】\n- fire bird 是Roselia的歌');
+    const chat = new ChatModule(makeClaude(), db, {
+      botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999,
+      moodProactiveEnabled: false, deflectCacheEnabled: false,
+      selfLearning: sl,
+    });
+    await chat.generateReply('g1', { messageId: 'm1', groupId: 'g1', userId: 'u1', nickname: 'A', role: 'member', content: '谁唱的', rawContent: '谁唱的', timestamp: Math.floor(Date.now() / 1000) }, []);
+    const sys = capturedSystems[0];
+    const systemText = (sys ?? []).map((s: { text: string }) => s.text).join('\n');
+    expect(systemText).toContain('fire bird 是Roselia的歌');
+  });
+
+  it('does NOT inject facts block when selfLearning returns empty string', async () => {
+    const sl = makeMockSelfLearning('');
+    const chat = new ChatModule(makeClaude(), db, {
+      botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999,
+      moodProactiveEnabled: false, deflectCacheEnabled: false,
+      selfLearning: sl,
+    });
+    await chat.generateReply('g1', { messageId: 'm1', groupId: 'g1', userId: 'u1', nickname: 'A', role: 'member', content: '谁唱的', rawContent: '谁唱的', timestamp: Math.floor(Date.now() / 1000) }, []);
+    const sys = capturedSystems[0];
+    const count = (sys ?? []).filter((s: { text: string }) => s.text === '').length;
+    expect(count).toBe(0);
+  });
+
+  it('does NOT inject facts when no selfLearning module configured', async () => {
+    const chat = new ChatModule(makeClaude(), db, {
+      botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999,
+      moodProactiveEnabled: false, deflectCacheEnabled: false,
+    });
+    await chat.generateReply('g1', { messageId: 'm1', groupId: 'g1', userId: 'u1', nickname: 'A', role: 'member', content: '谁唱的', rawContent: '谁唱的', timestamp: Math.floor(Date.now() / 1000) }, []);
+    const sys = capturedSystems[0];
+    expect(sys).toBeDefined();
+    expect(sys!.length).toBeGreaterThan(0);
+    const hasEmpty = (sys ?? []).some((s: { text: string }) => s.text === '');
+    expect(hasEmpty).toBe(false);
   });
 });

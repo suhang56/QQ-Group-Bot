@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { IClaudeClient } from '../ai/claude.js';
 import type { GroupMessage } from '../adapter/napcat.js';
 import type { Database } from '../storage/db.js';
+import type { SelfLearningModule } from './self-learning.js';
 import { ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
 import { lurkerDefaults, chatHistoryDefaults, RUNTIME_CHAT_MODEL } from '../config.js';
@@ -23,6 +24,7 @@ export interface IChatModule {
   tickStickerRefresh(groupId: string): void;
   getMoodTracker(): MoodTracker;
   noteAdminActivity(groupId: string, userId: string, nickname: string, content: string): void;
+  getEvasiveFlagForLastReply(groupId: string): boolean;
 }
 
 interface ChatOptions {
@@ -72,6 +74,7 @@ interface ChatOptions {
   chatAdminMirrorEnabled?: boolean;
   chatAdminMirrorMaxAdmins?: number;
   chatAdminMirrorSamplesPerAdmin?: number;
+  selfLearning?: SelfLearningModule;
 }
 
 interface ScoreFactors {
@@ -253,6 +256,20 @@ export function extractKeywords(text: string): string[] {
 }
 
 /**
+ * Extract tokens from a message for harvest overlap detection.
+ * Strips CQ codes, splits on whitespace/punctuation, deduplicates, filters stopwords.
+ */
+export function extractTokens(text: string): Set<string> {
+  const stripped = text.replace(/\[CQ:[^\]]+\]/g, ' ');
+  const tokens = new Set<string>();
+  for (const chunk of stripped.split(/[\s\p{P}！？。，、；：""''【】《》（）…—\-_/\\|]+/u)) {
+    const t = chunk.trim();
+    if (t.length >= 2 && !STOPWORDS.has(t)) tokens.add(t);
+  }
+  return tokens;
+}
+
+/**
  * Tokenize lore text into a Set of meaningful tokens (length ≥ 2).
  * Splits on whitespace/punctuation; includes CJK character runs individually.
  */
@@ -359,6 +376,9 @@ export class ChatModule implements IChatModule {
 
   private readonly loreDirPath: string;
   private readonly loreSizeCapBytes: number;
+  private readonly selfLearning: SelfLearningModule | null;
+  // per-group: was the last generateReply result an evasive phrase?
+  private readonly lastEvasiveReply = new Map<string, boolean>();
 
   constructor(
     private readonly claude: IClaudeClient,
@@ -405,6 +425,7 @@ export class ChatModule implements IChatModule {
     this.chatAdminMirrorEnabled = options.chatAdminMirrorEnabled ?? true;
     this.chatAdminMirrorMaxAdmins = options.chatAdminMirrorMaxAdmins ?? 5;
     this.chatAdminMirrorSamplesPerAdmin = options.chatAdminMirrorSamplesPerAdmin ?? 5;
+    this.selfLearning = options.selfLearning ?? null;
 
     if (this.moodProactiveEnabled) {
       this.moodProactiveTimer = setInterval(
@@ -475,6 +496,14 @@ export class ChatModule implements IChatModule {
     arr = [...arr, reply];
     if (arr.length > 5) arr = arr.slice(-5);
     this.botRecentOutputs.set(groupId, arr);
+  }
+
+  _isEvasiveReply(text: string): boolean {
+    return /^(忘了|考我呢|记不得|没听过|啥来的|？+|啊？|这还要问|自己听|不知道|我哪知道)/.test(text.trim());
+  }
+
+  getEvasiveFlagForLastReply(groupId: string): boolean {
+    return this.lastEvasiveReply.get(groupId) ?? false;
   }
 
   /** Record a message from a group admin/owner for speech-style mirroring. */
@@ -661,6 +690,8 @@ export class ChatModule implements IChatModule {
 
     const userContent = `${keywordSection}${wideSection}${mediumSection}${immediateSection}${avoidSection}你要回复的是 ← 那条，但要结合上面三层语境理解。直接写出那句回复。`;
 
+    const factsBlock = this.selfLearning?.formatFactsForPrompt(groupId, 50) ?? '';
+
     const chatRequest = (hardened = false) => this.claude.complete({
       model: RUNTIME_CHAT_MODEL,
       maxTokens: 300,
@@ -671,6 +702,7 @@ export class ChatModule implements IChatModule {
             { text: systemPrompt, cache: true },
             ...(moodSection ? [{ text: moodSection, cache: true as const }] : []),
             ...(contextStickerSection ? [{ text: contextStickerSection, cache: true as const }] : []),
+            ...(factsBlock ? [{ text: factsBlock, cache: true as const }] : []),
           ],
       messages: [{ role: 'user', content: userContent }],
     });
@@ -696,6 +728,7 @@ export class ChatModule implements IChatModule {
         return null;
       }
       this._recordOwnReply(groupId, processed);
+      this.lastEvasiveReply.set(groupId, this._isEvasiveReply(processed));
       return processed;
     } catch (err) {
       if (err instanceof ClaudeApiError || err instanceof ClaudeParseError) {

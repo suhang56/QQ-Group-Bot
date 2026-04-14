@@ -14,6 +14,7 @@ import { LearnerModule } from './modules/learner.js';
 import { AnnouncementSyncModule } from './modules/announcement-sync.js';
 import { NameImagesModule } from './modules/name-images.js';
 import { LoreUpdater } from './modules/lore-updater.js';
+import { SelfLearningModule } from './modules/self-learning.js';
 import { VisionService } from './modules/vision.js';
 import { StickerCaptureService } from './modules/sticker-capture.js';
 import { RatingPortalServer } from './server/rating-portal.js';
@@ -64,10 +65,19 @@ void embedder.waitReady().then(() => {
   if (embedder.isReady) logger.info('Embedding model ready');
 });
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const selfLearningOpts: any = {
+  db, claude, botUserId,
+  // researchEnabled: dev-5 is adding this option; forwarded now so it takes effect once SelfLearningModule supports it
+  researchEnabled: process.env['SELF_LEARN_ONLINE'] !== '0',
+};
+const selfLearning = new SelfLearningModule(selfLearningOpts);
+router.setSelfLearning(selfLearning);
+
 const vision = new VisionService(claude, adapter, db.imageDescriptions);
 const chat = new ChatModule(claude, db, {
   botUserId, deflectCacheEnabled: true, visionService: vision,
-  localStickerRepo: db.localStickers, embedder,
+  localStickerRepo: db.localStickers, embedder, selfLearning,
 });
 router.setChat(chat);
 
@@ -133,6 +143,7 @@ if (ratingPortGroup) {
 const shutdown = async () => {
   logger.info('Shutting down...');
   announcementSync.stop();
+  router.dispose();
   ratingPortal?.stop();
   await adapter.disconnect();
   db.close();

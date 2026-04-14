@@ -7,6 +7,8 @@ import type { ModeratorModule } from '../modules/moderator.js';
 import type { NameImagesModule } from '../modules/name-images.js';
 import type { LoreUpdater } from '../modules/lore-updater.js';
 import type { StickerCaptureService } from '../modules/sticker-capture.js';
+import type { SelfLearningModule } from '../modules/self-learning.js';
+import { extractTokens } from '../modules/chat.js';
 import { BotErrorCode } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
 import { defaultGroupConfig } from '../config.js';
@@ -75,6 +77,7 @@ export class Router implements IRouter {
   private nameImagesModule: NameImagesModule | null = null;
   private loreUpdater: LoreUpdater | null = null;
   private stickerCapture: StickerCaptureService | null = null;
+  private selfLearning: SelfLearningModule | null = null;
 
   // Repeater cooldown: key = `${groupId}:${content}`, value = last-triggered timestamp
   private readonly repeaterCooldown = new Map<string, number>();
@@ -85,6 +88,8 @@ export class Router implements IRouter {
   private readonly atReplyTimestamps = new Map<string, number[]>();
   // in-flight lock for @-mention queue processing (separate from ChatModule's lock)
   private readonly atInFlight = new Set<string>();
+  // pending harvest timers per group: prevents overlap
+  private readonly harvestTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(
     private readonly db: Database,
@@ -117,6 +122,15 @@ export class Router implements IRouter {
 
   setStickerCapture(svc: StickerCaptureService): void {
     this.stickerCapture = svc;
+  }
+
+  setSelfLearning(sl: SelfLearningModule): void {
+    this.selfLearning = sl;
+  }
+
+  dispose(): void {
+    for (const timer of this.harvestTimers.values()) clearTimeout(timer);
+    this.harvestTimers.clear();
   }
 
   async dispatch(msg: GroupMessage): Promise<void> {
@@ -180,11 +194,32 @@ export class Router implements IRouter {
         this.chatModule?.noteAdminActivity(msg.groupId, msg.userId, msg.nickname, msg.content);
       }
 
-      // Command routing — admin/owner only at router level; /appeal is open to all roles
+      // Self-learning: detect corrections when user reply-quotes a bot_reply row
+      if (this.selfLearning) {
+        const replyMatch = msg.rawContent.match(/\[CQ:reply,id=(\d+)\]/);
+        if (replyMatch) {
+          const quotedId = parseInt(replyMatch[1]!, 10);
+          const botReply = this.db.botReplies.getById(quotedId);
+          if (botReply && botReply.groupId === msg.groupId) {
+            void this.selfLearning.detectCorrection({
+              groupId: msg.groupId,
+              botReplyId: botReply.id,
+              correctionMsg: { content: msg.content, userId: msg.userId, nickname: msg.nickname, messageId: msg.messageId },
+            }).then(result => {
+              if (result) this.logger.info({ groupId: msg.groupId, factId: result }, 'correction learned');
+            }).catch(err => {
+              this.logger.warn({ err, groupId: msg.groupId }, 'detectCorrection failed — ignored');
+            });
+          }
+        }
+      }
+
+      // Command routing — admin/owner only at router level; /appeal and read-only fact commands open to all
       const trimmed = msg.content.trim();
       const isAdmin = msg.role === 'admin' || msg.role === 'owner';
       const peekCmd = trimmed.startsWith('/') ? (trimmed.slice(1).split(/\s+/)[0]?.toLowerCase() ?? '') : '';
-      if (trimmed.startsWith('/') && (isAdmin || peekCmd === 'appeal')) {
+      const openCmds = new Set(['appeal', 'facts', 'fact_reject', 'fact_clear']);
+      if (trimmed.startsWith('/') && (isAdmin || openCmds.has(peekCmd))) {
         const parts = trimmed.slice(1).split(/\s+/);
         const cmd = parts[0]?.toLowerCase() ?? '';
         const args = parts.slice(1);
@@ -305,13 +340,29 @@ export class Router implements IRouter {
         } else {
           const reply = await this.chatModule.generateReply(msg.groupId, msg, recentMsgs);
           if (reply) {
-            await this._sendReply(msg.groupId, reply, undefined, {
+            const wasEvasive = this.chatModule.getEvasiveFlagForLastReply(msg.groupId);
+            const botReplyId = await this._sendReply(msg.groupId, reply, undefined, {
               module: 'chat',
               triggerMsgId: msg.messageId,
               triggerUserId: msg.userId,
               triggerUserNickname: msg.nickname,
               triggerContent: msg.content,
             });
+            if (wasEvasive && botReplyId !== null && this.selfLearning) {
+              if (botReplyId !== null) {
+                try { this.db.botReplies.markEvasive(botReplyId); } catch { /* non-fatal */ }
+              }
+              this._scheduleHarvest(msg.groupId, botReplyId, msg.content);
+              // Online lookup fires immediately in parallel with the 60s harvest timer
+              const sl = this.selfLearning as SelfLearningModule & {
+                researchOnline?(p: { groupId: string; evasiveBotReplyId: number; originalTrigger: string }): Promise<unknown>;
+              };
+              void sl.researchOnline?.({
+                groupId: msg.groupId,
+                evasiveBotReplyId: botReplyId,
+                originalTrigger: msg.content,
+              }).catch(err => this.logger.debug({ err, groupId: msg.groupId }, 'researchOnline rejected'));
+            }
           }
         }
       }
@@ -323,15 +374,16 @@ export class Router implements IRouter {
 
   /** Send a reply as one or more messages (split on newlines), with typing delay between lines.
    *  replyToMsgId is only prepended to the FIRST send (quote-reply), continuation lines go plain.
-   *  logCtx, when provided, logs the reply to bot_replies and marks continuity for the trigger user. */
+   *  logCtx, when provided, logs the reply to bot_replies and marks continuity for the trigger user.
+   *  Returns the bot_replies row id when logCtx is provided, otherwise null. */
   private async _sendReply(
     groupId: string,
     text: string,
     replyToMsgId?: number,
     logCtx?: { module: string; triggerMsgId?: string; triggerUserId?: string; triggerUserNickname?: string; triggerContent: string },
-  ): Promise<void> {
+  ): Promise<number | null> {
     const lines = splitReply(text);
-    if (lines.length === 0) return;
+    if (lines.length === 0) return null;
     if (lines.length > MAX_SPLIT_LINES) {
       this.logger.info({ groupId, totalLines: text.split('\n').length }, 'reply truncated to 3 lines');
     }
@@ -349,7 +401,7 @@ export class Router implements IRouter {
         this.chatModule.markReplyToUser(groupId, logCtx.triggerUserId);
       }
       try {
-        this.db.botReplies.insert({
+        const row = this.db.botReplies.insert({
           groupId,
           triggerMsgId: logCtx.triggerMsgId ?? null,
           triggerUserNickname: logCtx.triggerUserNickname ?? null,
@@ -358,8 +410,10 @@ export class Router implements IRouter {
           module: logCtx.module,
           sentAt: Math.floor(Date.now() / 1000),
         });
+        return row.id;
       } catch { /* non-fatal */ }
     }
+    return null;
   }
 
   /** Enqueue an @-mention for serial processing, enforcing queue cap and burst skip. */
@@ -479,6 +533,46 @@ export class Router implements IRouter {
     return true;
   }
 
+  private _scheduleHarvest(groupId: string, botReplyId: number, originalTrigger: string): void {
+    // Dedup: cancel any existing harvest timer for this group
+    const existing = this.harvestTimers.get(groupId);
+    if (existing !== undefined) clearTimeout(existing);
+
+    const evasiveSentAt = Math.floor(Date.now() / 1000);
+    const timer = setTimeout(() => {
+      this.harvestTimers.delete(groupId);
+      if (!this.selfLearning) return;
+
+      const recent = this.db.messages.getRecent(groupId, 30).filter(m =>
+        m.timestamp > evasiveSentAt && m.userId !== (this.botUserId ?? ''),
+      );
+
+      const triggerTokens = extractTokens(originalTrigger);
+      const overlapping = recent.filter(m => {
+        const mTokens = extractTokens(m.content);
+        let overlap = 0;
+        for (const t of triggerTokens) {
+          if (mTokens.has(t)) overlap++;
+        }
+        return overlap >= 2;
+      });
+
+      if (overlapping.length === 0) return;
+
+      void this.selfLearning.harvestPassiveKnowledge({
+        groupId,
+        evasiveBotReplyId: botReplyId,
+        originalTrigger,
+        followups: overlapping.map(m => ({ content: m.content, userId: m.userId, nickname: m.nickname, messageId: String(m.id) })),
+      }).catch(err => {
+        this.logger.warn({ err, groupId }, 'harvestPassiveKnowledge failed — ignored');
+      });
+    }, 60_000);
+
+    timer.unref?.();
+    this.harvestTimers.set(groupId, timer);
+  }
+
   private _captureLiveStickers(msg: GroupMessage): void {
     const now = Math.floor(Date.now() / 1000);
     const raw = msg.rawContent;
@@ -542,6 +636,11 @@ export class Router implements IRouter {
 【查看信息】
 /rules                — 查看本群当前所有群规
 /stats                — 查看本群近7天的统计数据
+/facts                — 查看我学到的群知识
+
+【知识管理】（仅管理员）
+/fact_reject <ID>     — 拒绝某条知识条目
+/fact_clear           — 清空本群所有知识
 
 如有疑问请联系群管理员。`);
     });
@@ -882,6 +981,39 @@ export class Router implements IRouter {
       } else {
         await this.adapter.send(msg.groupId, '操作失败，请稍后再试。');
       }
+    });
+
+    this.commands.set('facts', async (msg, _args, _config) => {
+      const facts = this.db.learnedFacts.listActive(msg.groupId, 50);
+      if (facts.length === 0) {
+        await this.adapter.send(msg.groupId, '本群还没有学到任何知识，等群友来纠正我吧。');
+        return;
+      }
+      const lines = facts.map(f => `[${f.id}] ${f.fact}`).join('\n');
+      await this.adapter.send(msg.groupId, `本群已学到的知识（共 ${facts.length} 条）：\n${lines}`);
+    });
+
+    this.commands.set('fact_reject', async (msg, args, _config) => {
+      if (msg.role !== 'admin' && msg.role !== 'owner') {
+        await this.adapter.send(msg.groupId, '没有权限。只有管理员可以拒绝知识条目。');
+        return;
+      }
+      const id = parseInt(args[0] ?? '', 10);
+      if (isNaN(id)) {
+        await this.adapter.send(msg.groupId, '用法：/fact_reject <ID>');
+        return;
+      }
+      this.db.learnedFacts.markStatus(id, 'rejected');
+      await this.adapter.send(msg.groupId, `已拒绝知识条目 #${id}，不再纳入参考。`);
+    });
+
+    this.commands.set('fact_clear', async (msg, _args, _config) => {
+      if (msg.role !== 'admin' && msg.role !== 'owner') {
+        await this.adapter.send(msg.groupId, '没有权限。只有管理员可以清空知识库。');
+        return;
+      }
+      const count = this.db.learnedFacts.clearGroup(msg.groupId);
+      await this.adapter.send(msg.groupId, `已清空本群知识库（共删除 ${count} 条）。`);
     });
   }
 }
