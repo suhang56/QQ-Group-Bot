@@ -1,5 +1,5 @@
-import type { GroupMessage, INapCatAdapter } from '../adapter/napcat.js';
-import type { Database, GroupConfig } from '../storage/db.js';
+import type { GroupMessage, PrivateMessage, INapCatAdapter } from '../adapter/napcat.js';
+import type { Database, GroupConfig, ProposedAction } from '../storage/db.js';
 import type { RateLimiter } from './rateLimiter.js';
 import type { IChatModule } from '../modules/chat.js';
 import type { MimicModule } from '../modules/mimic.js';
@@ -15,6 +15,9 @@ import { defaultGroupConfig } from '../config.js';
 import { resolveAtTarget } from '../utils/cqcode.js';
 
 const MAX_SPLIT_LINES = 3;
+const MOD_APPROVAL_ADMIN = process.env['MOD_APPROVAL_ADMIN'] ?? '2331924739';
+const MOD_DM_HOURLY_CAP = 20;
+const MOD_EXPIRY_SEC = 600; // 10 minutes
 const SPLIT_DELAY_MIN_MS = 0;
 const SPLIT_DELAY_MAX_MS = 50;
 
@@ -90,6 +93,11 @@ export class Router implements IRouter {
   private readonly atInFlight = new Set<string>();
   // pending harvest timers per group: prevents overlap
   private readonly harvestTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  // D7: rate limit — track DMs sent to admin this hour
+  private modDmCount = 0;
+  private modDmHourStart = Math.floor(Date.now() / 3600000);
+  // D5: expiry sweep interval
+  private expiryInterval: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     private readonly db: Database,
@@ -98,6 +106,11 @@ export class Router implements IRouter {
     private readonly botUserId?: string,
   ) {
     this._registerCommands();
+    this.expiryInterval = setInterval(() => {
+      const expired = this.db.pendingModeration.expireOlderThan(Math.floor(Date.now() / 1000) - MOD_EXPIRY_SEC);
+      if (expired > 0) this.logger.info({ expired }, 'pending moderation rows expired');
+    }, 60_000);
+    this.expiryInterval.unref?.();
   }
 
   setChat(chat: IChatModule): void {
@@ -131,6 +144,7 @@ export class Router implements IRouter {
   dispose(): void {
     for (const timer of this.harvestTimers.values()) clearTimeout(timer);
     this.harvestTimers.clear();
+    if (this.expiryInterval) { clearInterval(this.expiryInterval); this.expiryInterval = null; }
   }
 
   async dispatch(msg: GroupMessage): Promise<void> {
@@ -147,8 +161,8 @@ export class Router implements IRouter {
       if (this.moderatorModule && config.autoMod && !msg.content.trim().startsWith('/')) {
         const verdict = await this.moderatorModule.assess(msg, config);
         if (verdict.violation && verdict.severity !== null && verdict.severity >= 1) {
-          // Message was deleted — do not persist or route downstream
-          return;
+          void this._queueModerationApproval(msg, verdict.severity, verdict.reason);
+          // Don't return — persist message and let downstream proceed (action gated on admin approval)
         }
       }
 
@@ -610,6 +624,150 @@ export class Router implements IRouter {
       const key = `image:${fileUnique}`;
       this.db.liveStickers.upsert(msg.groupId, key, 'image', match[0]!, null, now);
     }
+  }
+
+  private _mapSeverityToAction(severity: number): ProposedAction {
+    if (severity <= 3) return 'warn';
+    if (severity === 4) return 'mute_10m';
+    return 'kick';
+  }
+
+  private async _queueModerationApproval(msg: GroupMessage, severity: number, reason: string): Promise<void> {
+    // D7: rate limit — reset hourly
+    const nowHour = Math.floor(Date.now() / 3600000);
+    if (nowHour !== this.modDmHourStart) { this.modDmCount = 0; this.modDmHourStart = nowHour; }
+    if (this.modDmCount >= MOD_DM_HOURLY_CAP) {
+      this.logger.info({ groupId: msg.groupId, userId: msg.userId }, 'mod DM hourly cap reached — observe only');
+      return;
+    }
+
+    const proposedAction = this._mapSeverityToAction(severity);
+    const nowSec = Math.floor(Date.now() / 1000);
+    let pendingId: number;
+    try {
+      pendingId = this.db.pendingModeration.queue({
+        groupId: msg.groupId, msgId: msg.messageId,
+        userId: msg.userId, userNickname: msg.nickname,
+        content: msg.content, severity, reason,
+        proposedAction, createdAt: nowSec,
+      });
+    } catch (err) {
+      this.logger.error({ err, groupId: msg.groupId }, 'failed to queue pending moderation');
+      return;
+    }
+
+    const groupName = msg.groupId;
+    const actionLabel: Record<ProposedAction, string> = {
+      warn: '删除+警告', delete: '仅删除', mute_10m: '禁言10分钟', mute_1h: '禁言1小时', kick: '移出群聊',
+    };
+    const dmText = `[审核 #${pendingId}] 群 ${groupName}(${msg.groupId})
+用户 ${msg.nickname}(${msg.userId}) 发了：
+> ${msg.content}
+
+疑似违规：${reason}
+严重度 ${severity}/5
+建议处理：${actionLabel[proposedAction]}
+
+10 分钟内回复 /approve ${pendingId} 或 /reject ${pendingId} 决定，超时自动忽略。`;
+
+    const result = await this.adapter.sendPrivateMessage(MOD_APPROVAL_ADMIN, dmText);
+    if (result === null) {
+      this.logger.error({ pendingId, groupId: msg.groupId }, 'failed to DM admin — pending row queued but admin not notified');
+    } else {
+      this.modDmCount++;
+      this.logger.info({ pendingId, groupId: msg.groupId, userId: msg.userId, severity, proposedAction }, 'moderation queued, admin DM sent');
+    }
+  }
+
+  async dispatchPrivate(msg: PrivateMessage): Promise<void> {
+    if (msg.userId !== MOD_APPROVAL_ADMIN) {
+      this.logger.debug({ userId: msg.userId }, 'private message from non-admin — ignored');
+      return;
+    }
+
+    const text = msg.content.trim();
+    const logger = this.logger;
+
+    const reply = async (t: string) => {
+      await this.adapter.sendPrivateMessage(MOD_APPROVAL_ADMIN, t);
+    };
+
+    if (text === '/pending') {
+      const rows = this.db.pendingModeration.listPending(10);
+      if (rows.length === 0) {
+        await reply('无待处理审核。');
+      } else {
+        const lines = rows.map(r =>
+          `#${r.id} [严重度${r.severity}] 群${r.groupId} 用户${r.userNickname ?? r.userId}: ${r.content.slice(0, 30)}…`
+        ).join('\n');
+        await reply(`待处理审核（最近10条）：\n${lines}`);
+      }
+      return;
+    }
+
+    if (text === '/help') {
+      await reply('/approve <id> — 执行建议处理\n/reject <id> — 拒绝，不处理\n/pending — 查看待处理列表\n/mod_on — 开启所有群的自动审核\n/mod_off — 关闭所有群的自动审核（仅观察）');
+      return;
+    }
+
+    if (text === '/mod_on' || text === '/mod_off') {
+      const enable = text === '/mod_on';
+      const configs = this.db.groupConfig;
+      // Fetch all known groups from messages table and update their config
+      const groups = (this.db as unknown as { _db: { prepare(s: string): { all(): { group_id: string }[] } } })._db
+        .prepare('SELECT DISTINCT group_id FROM group_config').all() as { group_id: string }[];
+      for (const { group_id } of groups) {
+        const cfg = configs.get(group_id);
+        if (cfg) configs.upsert({ ...cfg, autoMod: enable });
+      }
+      await reply(`已${enable ? '开启' : '关闭'}所有群的自动审核。`);
+      logger.info({ enable, groupCount: groups.length }, 'mod_on/mod_off by admin');
+      return;
+    }
+
+    const approveMatch = /^\/approve\s+(\d+)$/i.exec(text);
+    const rejectMatch = /^\/reject\s+(\d+)$/i.exec(text);
+
+    if (approveMatch ?? rejectMatch) {
+      const id = parseInt((approveMatch ?? rejectMatch)![1]!, 10);
+      const row = this.db.pendingModeration.getById(id);
+
+      if (!row) {
+        await reply(`找不到审核 #${id}。`);
+        return;
+      }
+      if (row.status !== 'pending') {
+        await reply(`审核 #${id} 已失效（状态：${row.status}）。`);
+        return;
+      }
+
+      if (rejectMatch) {
+        this.db.pendingModeration.markStatus(id, 'rejected', MOD_APPROVAL_ADMIN);
+        await reply(`已拒绝审核 #${id}。`);
+        logger.info({ id, groupId: row.groupId, userId: row.userId }, 'moderation rejected by admin');
+        return;
+      }
+
+      // Approve: execute action
+      this.db.pendingModeration.markStatus(id, 'approved', MOD_APPROVAL_ADMIN);
+      const config = this.db.groupConfig.get(row.groupId) ?? this._defaultConfig(row.groupId);
+      if (!this.moderatorModule) {
+        await reply(`审核 #${id} 已批准，但 moderatorModule 未加载，无法执行。`);
+        return;
+      }
+      try {
+        await this.moderatorModule.executePunishment(row, config);
+        await reply(`已执行审核 #${id}：${row.proposedAction}（用户 ${row.userNickname ?? row.userId}）。`);
+        logger.info({ id, groupId: row.groupId, userId: row.userId, action: row.proposedAction }, 'moderation approved + executed');
+      } catch (err) {
+        logger.error({ err, id }, 'executePunishment failed after approval');
+        await reply(`审核 #${id} 已批准但执行失败，请手动处理。`);
+      }
+      return;
+    }
+
+    // Non-command private message from admin — ignore silently
+    logger.debug({ userId: msg.userId, text: text.slice(0, 50) }, 'admin private non-command — ignored');
   }
 
   private _registerCommands(): void {

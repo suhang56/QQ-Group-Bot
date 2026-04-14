@@ -256,6 +256,33 @@ export interface ILearnedFactsRepository {
   countActive(groupId: string): number;
 }
 
+export type ProposedAction = 'warn' | 'delete' | 'mute_10m' | 'mute_1h' | 'kick';
+export type PendingStatus = 'pending' | 'approved' | 'rejected' | 'expired';
+
+export interface PendingModeration {
+  id: number;
+  groupId: string;
+  msgId: string;
+  userId: string;
+  userNickname: string | null;
+  content: string;
+  severity: number;
+  reason: string;
+  proposedAction: ProposedAction;
+  status: PendingStatus;
+  createdAt: number;
+  decidedAt: number | null;
+  decidedBy: string | null;
+}
+
+export interface IPendingModerationRepository {
+  queue(row: Omit<PendingModeration, 'id' | 'status' | 'decidedAt' | 'decidedBy'>): number;
+  getById(id: number): PendingModeration | null;
+  markStatus(id: number, status: PendingStatus, decidedBy?: string): void;
+  expireOlderThan(cutoffSec: number): number;
+  listPending(limit: number): PendingModeration[];
+}
+
 export interface LocalSticker {
   id: number;
   groupId: string;
@@ -1109,6 +1136,64 @@ class LocalStickerRepository implements ILocalStickerRepository {
   }
 }
 
+interface PendingModerationRow {
+  id: number; group_id: string; msg_id: string; user_id: string;
+  user_nickname: string | null; content: string; severity: number;
+  reason: string; proposed_action: string; status: string;
+  created_at: number; decided_at: number | null; decided_by: string | null;
+}
+
+class PendingModerationRepository implements IPendingModerationRepository {
+  constructor(private readonly db: DatabaseSync) {}
+
+  private _row(r: PendingModerationRow): PendingModeration {
+    return {
+      id: r.id, groupId: r.group_id, msgId: r.msg_id, userId: r.user_id,
+      userNickname: r.user_nickname, content: r.content, severity: r.severity,
+      reason: r.reason, proposedAction: r.proposed_action as ProposedAction,
+      status: r.status as PendingStatus, createdAt: r.created_at,
+      decidedAt: r.decided_at, decidedBy: r.decided_by,
+    };
+  }
+
+  queue(row: Omit<PendingModeration, 'id' | 'status' | 'decidedAt' | 'decidedBy'>): number {
+    const result = this.db.prepare(
+      `INSERT INTO pending_moderation
+         (group_id, msg_id, user_id, user_nickname, content, severity, reason, proposed_action, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      row.groupId, row.msgId, row.userId, row.userNickname ?? null,
+      row.content, row.severity, row.reason, row.proposedAction, row.createdAt,
+    ) as { lastInsertRowid: number };
+    return Number(result.lastInsertRowid);
+  }
+
+  getById(id: number): PendingModeration | null {
+    const r = this.db.prepare('SELECT * FROM pending_moderation WHERE id = ?').get(id) as PendingModerationRow | undefined;
+    return r ? this._row(r) : null;
+  }
+
+  markStatus(id: number, status: PendingStatus, decidedBy?: string): void {
+    this.db.prepare(
+      `UPDATE pending_moderation SET status = ?, decided_at = ?, decided_by = ? WHERE id = ?`
+    ).run(status, Math.floor(Date.now() / 1000), decidedBy ?? null, id);
+  }
+
+  expireOlderThan(cutoffSec: number): number {
+    const result = this.db.prepare(
+      `UPDATE pending_moderation SET status = 'expired', decided_at = ?
+       WHERE status = 'pending' AND created_at < ?`
+    ).run(Math.floor(Date.now() / 1000), cutoffSec) as { changes: number };
+    return result.changes;
+  }
+
+  listPending(limit: number): PendingModeration[] {
+    return (this.db.prepare(
+      `SELECT * FROM pending_moderation WHERE status = 'pending' ORDER BY created_at DESC LIMIT ?`
+    ).all(limit) as unknown as PendingModerationRow[]).map(r => this._row(r));
+  }
+}
+
 // ---- Main Database class ----
 
 export class Database {
@@ -1124,6 +1209,7 @@ export class Database {
   readonly botReplies: IBotReplyRepository;
   readonly localStickers: ILocalStickerRepository;
   readonly learnedFacts: ILearnedFactsRepository;
+  readonly pendingModeration: IPendingModerationRepository;
 
   private readonly _db: DatabaseSync;
 
@@ -1145,6 +1231,7 @@ export class Database {
     this.botReplies = new BotReplyRepository(this._db);
     this.localStickers = new LocalStickerRepository(this._db);
     this.learnedFacts = new LearnedFactsRepository(this._db);
+    this.pendingModeration = new PendingModerationRepository(this._db);
   }
 
   /** Execute arbitrary SQL — intended for bulk-import scripts and migrations only. */
@@ -1251,5 +1338,25 @@ export class Database {
       )
     `);
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_learned_facts_group_active ON learned_facts(group_id, status, created_at DESC)`);
+
+    // pending_moderation table — Batch D human-in-loop approval flow.
+    this._db.exec(`
+      CREATE TABLE IF NOT EXISTS pending_moderation (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id         TEXT    NOT NULL,
+        msg_id           TEXT    NOT NULL,
+        user_id          TEXT    NOT NULL,
+        user_nickname    TEXT,
+        content          TEXT    NOT NULL,
+        severity         INTEGER NOT NULL,
+        reason           TEXT    NOT NULL,
+        proposed_action  TEXT    NOT NULL,
+        status           TEXT    NOT NULL DEFAULT 'pending',
+        created_at       INTEGER NOT NULL,
+        decided_at       INTEGER,
+        decided_by       TEXT
+      )
+    `);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_pending_moderation_status ON pending_moderation(status, created_at)`);
   }
 }

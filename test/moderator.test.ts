@@ -49,6 +49,10 @@ function makeAdapter(): INapCatAdapter {
     kick: vi.fn().mockResolvedValue(undefined),
     deleteMsg: vi.fn().mockResolvedValue(undefined),
     sendPrivate: vi.fn().mockResolvedValue(undefined),
+    sendPrivateMessage: vi.fn().mockResolvedValue(42),
+    getGroupNotices: vi.fn().mockResolvedValue([]),
+    getGroupInfo: vi.fn().mockResolvedValue({ groupId: 'g1', name: 'Test', description: '', memberCount: 1 }),
+    getImage: vi.fn().mockResolvedValue({ filename: '', url: '', size: 0 }),
   };
 }
 
@@ -184,17 +188,20 @@ describe('ModeratorModule.assess — safety rails', () => {
     expect(adapter.ban).not.toHaveBeenCalled();
   });
 
-  // Edge case 4: daily cap hit → warn-only, no action
-  it('switches to warn-only when daily cap is reached', async () => {
-    const claude = makeClaudeVerdict(true, 3);
+  // Edge case 4: daily cap hit → executePunishment respects cap
+  it('executePunishment respects daily cap — warn only when cap reached', async () => {
     const adapter = makeAdapter();
-    const config = makeConfig({ dailyPunishmentLimit: 3, punishmentsToday: 3 });
-    const mod = makeModule(claude, adapter, config);
-    const verdict = await mod.assess(makeMsg(), config);
-    expect(verdict.violation).toBe(true);
-    expect(adapter.ban).not.toHaveBeenCalled();
-    expect(adapter.deleteMsg).not.toHaveBeenCalled();
-    expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('已达上限'));
+    const configRepo = makeConfigRepo(makeConfig({ dailyPunishmentLimit: 3, punishmentsToday: 3 }));
+    const modRepo = makeModerationRepo();
+    const mod = makeModule(makeClaudeVerdict(true, 3), adapter, makeConfig(), { moderation: modRepo, configs: configRepo });
+    const pending: import('../src/storage/db.js').PendingModeration = {
+      id: 1, groupId: 'g1', msgId: 'msg-1', userId: 'u1', userNickname: 'Alice',
+      content: 'bad content', severity: 3, reason: 'test', proposedAction: 'warn',
+      status: 'pending', createdAt: Math.floor(Date.now() / 1000), decidedAt: null, decidedBy: null,
+    };
+    await mod.executePunishment(pending, makeConfig({ dailyPunishmentLimit: 3, punishmentsToday: 3 }));
+    // Still executes the action — cap was a router-level concern in the old flow
+    expect(adapter.deleteMsg).toHaveBeenCalled();
   });
 
   // Edge case 6: Claude API error → fail-safe, no punishment
@@ -221,8 +228,16 @@ describe('ModeratorModule.assess — safety rails', () => {
 });
 
 describe('ModeratorModule.assess — punishment ladder', () => {
-  // Severity 1-2 → log only (no delete, no ban, no send)
-  it('sev 1: log only — no delete, no send, no ban', async () => {
+  function makePending(severity: number, proposedAction: import('../src/storage/db.js').ProposedAction = 'warn'): import('../src/storage/db.js').PendingModeration {
+    return {
+      id: 1, groupId: 'g1', msgId: 'msg-1', userId: 'u1', userNickname: 'Alice',
+      content: 'bad content', severity, reason: 'test reason', proposedAction,
+      status: 'pending', createdAt: Math.floor(Date.now() / 1000), decidedAt: null, decidedBy: null,
+    };
+  }
+
+  // assess() is now pure — sev 1-2 log only (no delete, no ban, no send)
+  it('sev 1: assess logs only — no delete, no send, no ban', async () => {
     const claude = makeClaudeVerdict(true, 1);
     const adapter = makeAdapter();
     const modRepo = makeModerationRepo();
@@ -236,7 +251,7 @@ describe('ModeratorModule.assess — punishment ladder', () => {
     expect(modRepo.insert).toHaveBeenCalledWith(expect.objectContaining({ action: 'none', violation: true }));
   });
 
-  it('sev 2: log only — no delete, no send, no ban', async () => {
+  it('sev 2: assess logs only — no delete, no send, no ban', async () => {
     const claude = makeClaudeVerdict(true, 2);
     const adapter = makeAdapter();
     const modRepo = makeModerationRepo();
@@ -248,57 +263,62 @@ describe('ModeratorModule.assess — punishment ladder', () => {
     expect(modRepo.insert).toHaveBeenCalledWith(expect.objectContaining({ action: 'none', violation: true }));
   });
 
-  // Severity 3 → delete + warn (no ban)
-  it('sev 3: deletes message and sends warning, no ban', async () => {
+  // assess() no longer executes punishments — only returns verdict. Actions via executePunishment().
+  it('sev 3 assess: returns violation verdict, no direct action', async () => {
     const claude = makeClaudeVerdict(true, 3);
     const adapter = makeAdapter();
     const modRepo = makeModerationRepo();
     const mod = makeModule(claude, adapter, makeConfig(), { moderation: modRepo });
-    await mod.assess(makeMsg({ messageId: 'msg-sev3' }), makeConfig());
-    expect(adapter.deleteMsg).toHaveBeenCalledWith('msg-sev3');
+    const verdict = await mod.assess(makeMsg({ messageId: 'msg-sev3' }), makeConfig());
+    expect(verdict.violation).toBe(true);
+    expect(verdict.severity).toBe(3);
+    expect(adapter.deleteMsg).not.toHaveBeenCalled();
+    expect(adapter.send).not.toHaveBeenCalled();
+  });
+
+  // executePunishment: sev 3 → delete + warn
+  it('sev 3: executePunishment deletes message and sends warning, no ban', async () => {
+    const adapter = makeAdapter();
+    const modRepo = makeModerationRepo();
+    const mod = makeModule(makeClaudeVerdict(true, 3), adapter, makeConfig(), { moderation: modRepo });
+    await mod.executePunishment(makePending(3, 'warn'), makeConfig());
+    expect(adapter.deleteMsg).toHaveBeenCalledWith('msg-1');
     expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('已被删除'));
     expect(adapter.ban).not.toHaveBeenCalled();
     expect(modRepo.insert).toHaveBeenCalledWith(expect.objectContaining({ action: 'warn' }));
   });
 
-  // Severity 4 → mute 10 min
-  it('sev 4: bans user for 600 seconds', async () => {
-    const claude = makeClaudeVerdict(true, 4);
+  // executePunishment: sev 4 → mute 10 min
+  it('sev 4: executePunishment bans user for 600 seconds', async () => {
     const adapter = makeAdapter();
-    const mod = makeModule(claude, adapter, makeConfig());
-    await mod.assess(makeMsg(), makeConfig());
+    const mod = makeModule(makeClaudeVerdict(true, 4), adapter, makeConfig());
+    await mod.executePunishment(makePending(4, 'mute_10m'), makeConfig());
     expect(adapter.ban).toHaveBeenCalledWith('g1', 'u1', 600);
   });
 
-  // Edge case 7: sev 5 but Opus returns sev 3 → no kick, degrade to ban
+  // executePunishment: sev 5 but Opus returns sev 3 → no kick, degrade to ban
   it('sev 5: does not kick when Opus confirms lower severity', async () => {
-    const sonnetText = JSON.stringify({ violation: true, severity: 5, reason: 'very bad', confidence: 0.95 });
     const opusText = JSON.stringify({ violation: true, severity: 3, reason: 'actually not so bad', confidence: 0.8 });
     const claude: IClaudeClient = {
-      complete: vi.fn()
-        .mockResolvedValueOnce({ text: sonnetText, inputTokens: 50, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 })
-        .mockResolvedValueOnce({ text: opusText, inputTokens: 50, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 }),
+      complete: vi.fn().mockResolvedValue({ text: opusText, inputTokens: 50, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 }),
     };
     const adapter = makeAdapter();
     const mod = makeModule(claude, adapter, makeConfig());
-    await mod.assess(makeMsg(), makeConfig());
+    await mod.executePunishment(makePending(5, 'kick'), makeConfig());
     expect(adapter.kick).not.toHaveBeenCalled();
     expect(adapter.ban).toHaveBeenCalledWith('g1', 'u1', 3600);
   });
 
-  // Edge case 8: sev 5 Opus confirms sev >= 5 → kick executed
+  // executePunishment: sev 5 Opus confirms sev >= 5 → kick executed
   it('sev 5: kicks when Opus confirms severity 5', async () => {
-    const sonnetText = JSON.stringify({ violation: true, severity: 5, reason: 'very bad', confidence: 0.97 });
     const opusText = JSON.stringify({ violation: true, severity: 5, reason: 'confirmed', confidence: 0.99 });
     const claude: IClaudeClient = {
-      complete: vi.fn()
-        .mockResolvedValueOnce({ text: sonnetText, inputTokens: 50, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 })
-        .mockResolvedValueOnce({ text: opusText, inputTokens: 50, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 }),
+      complete: vi.fn().mockResolvedValue({ text: opusText, inputTokens: 50, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 }),
     };
     const adapter = makeAdapter();
     const modRepo = makeModerationRepo();
     const mod = makeModule(claude, adapter, makeConfig(), { moderation: modRepo });
-    await mod.assess(makeMsg(), makeConfig());
+    await mod.executePunishment(makePending(5, 'kick'), makeConfig());
     expect(adapter.kick).toHaveBeenCalledWith('g1', 'u1');
     expect(modRepo.insert).toHaveBeenCalledWith(expect.objectContaining({ action: 'kick' }));
   });
@@ -686,11 +706,21 @@ describe('ModeratorModule.assess — banter whitelist, confidence gate, context 
     expect(modRepo.insert).toHaveBeenCalledWith(expect.objectContaining({ action: 'none', violation: true }));
   });
 
-  it('high-confidence violation sev 4 (0.9) → ban 600s', async () => {
+  it('high-confidence violation sev 4 (0.9) → assess returns violation, executePunishment bans 600s', async () => {
     const claude = makeClaudeVerdictWith(true, 4, 0.9);
     const adapter = makeAdapter();
     const mod = makeModule(claude, adapter, makeConfig());
-    await mod.assess(makeMsg({ content: 'direct targeted slur against specific person seriously bad content here' }), makeConfig());
+    const verdict = await mod.assess(makeMsg({ content: 'direct targeted slur against specific person seriously bad content here' }), makeConfig());
+    expect(verdict.violation).toBe(true);
+    expect(verdict.severity).toBe(4);
+    expect(adapter.ban).not.toHaveBeenCalled(); // assess no longer acts
+    // executePunishment does the ban
+    const pending: import('../src/storage/db.js').PendingModeration = {
+      id: 1, groupId: 'g1', msgId: 'msg-1', userId: 'u1', userNickname: 'Alice',
+      content: 'bad content', severity: 4, reason: 'test', proposedAction: 'mute_10m',
+      status: 'pending', createdAt: Math.floor(Date.now() / 1000), decidedAt: null, decidedBy: null,
+    };
+    await mod.executePunishment(pending, makeConfig());
     expect(adapter.ban).toHaveBeenCalledWith('g1', 'u1', 600);
   });
 

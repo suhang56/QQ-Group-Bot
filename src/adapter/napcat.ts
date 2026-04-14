@@ -14,8 +14,17 @@ export interface GroupMessage {
   timestamp: number;
 }
 
+export interface PrivateMessage {
+  messageId: string;
+  userId: string;
+  nickname: string;
+  content: string;
+  timestamp: number;
+}
+
 export interface AdapterEvents {
   'message.group': (msg: GroupMessage) => void;
+  'message.private': (msg: PrivateMessage) => void;
   'notice.group_increase': (groupId: string, userId: string) => void;
   'notice.group_decrease': (groupId: string, userId: string) => void;
   'error': (err: Error) => void;
@@ -39,6 +48,7 @@ export interface INapCatAdapter {
   kick(groupId: string, userId: string): Promise<void>;
   deleteMsg(messageId: string): Promise<void>;
   sendPrivate(userId: string, text: string): Promise<void>;
+  sendPrivateMessage(userId: string, text: string): Promise<number | null>;
   getGroupNotices(groupId: string): Promise<GroupNotice[]>;
   /** Resolve a CQ image file token via OneBot get_image — bypasses QQ CDN auth restrictions. */
   getImage(file: string): Promise<{ filename: string; url: string; size: number; base64?: string }>;
@@ -193,6 +203,20 @@ export class NapCatAdapter extends EventEmitter implements INapCatAdapter {
     });
   }
 
+  async sendPrivateMessage(userId: string, text: string): Promise<number | null> {
+    try {
+      const resp = await this.action('send_private_msg', {
+        user_id: Number(userId),
+        message: text,
+      });
+      const data = resp.data as { message_id?: number } | undefined;
+      return data?.message_id ?? null;
+    } catch (err) {
+      this.logger.warn({ err, userId }, 'sendPrivateMessage failed');
+      return null;
+    }
+  }
+
   async getImage(file: string): Promise<{ filename: string; url: string; size: number; base64?: string }> {
     const resp = await this.action('get_image', { file });
     const data = resp.data as { filename?: string; url?: string; size?: number; base64?: string } | undefined;
@@ -283,6 +307,20 @@ export class NapCatAdapter extends EventEmitter implements INapCatAdapter {
 
       this.logger.trace({ messageId: msg.messageId, groupId: msg.groupId, userId: msg.userId }, 'group message received');
       super.emit('message.group', msg);
+      return;
+    }
+
+    if (evt.post_type === 'message' && evt.message_type === 'private') {
+      const content = extractText(evt.message);
+      const msg: PrivateMessage = {
+        messageId: String(evt.message_id ?? ''),
+        userId: String(evt.user_id ?? ''),
+        nickname: evt.sender?.nickname ?? '',
+        content,
+        timestamp: evt.time ?? Math.floor(Date.now() / 1000),
+      };
+      this.logger.trace({ messageId: msg.messageId, userId: msg.userId }, 'private message received');
+      super.emit('message.private', msg);
       return;
     }
 

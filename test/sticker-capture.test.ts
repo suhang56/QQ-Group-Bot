@@ -18,7 +18,7 @@ function makeAdapter(): INapCatAdapter {
   return {
     connect: vi.fn(), disconnect: vi.fn(), on: vi.fn(),
     send: vi.fn().mockResolvedValue(1),
-    ban: vi.fn(), kick: vi.fn(), deleteMsg: vi.fn(), sendPrivate: vi.fn(),
+    ban: vi.fn(), kick: vi.fn(), deleteMsg: vi.fn(), sendPrivate: vi.fn(), sendPrivateMessage: vi.fn().mockResolvedValue(42),
     getGroupNotices: vi.fn(),
     getImage: vi.fn().mockResolvedValue({
       filename: 'sticker.jpg', url: 'http://example.com/img.jpg', size: 100,

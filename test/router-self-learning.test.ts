@@ -32,6 +32,10 @@ function makeMockAdapter(): INapCatAdapter {
     kick: vi.fn().mockResolvedValue(undefined),
     deleteMsg: vi.fn().mockResolvedValue(undefined),
     sendPrivate: vi.fn().mockResolvedValue(undefined),
+    sendPrivateMessage: vi.fn().mockResolvedValue(42),
+    getGroupNotices: vi.fn().mockResolvedValue([]),
+    getGroupInfo: vi.fn().mockResolvedValue({ groupId: 'g1', name: 'Test', description: '', memberCount: 1 }),
+    getImage: vi.fn().mockResolvedValue({ filename: '', url: '', size: 0 }),
   };
 }
 

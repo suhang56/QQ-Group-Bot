@@ -35,6 +35,7 @@ function makeMockAdapter(base64Data?: string): INapCatAdapter {
     kick: vi.fn(),
     deleteMsg: vi.fn(),
     sendPrivate: vi.fn(),
+    sendPrivateMessage: vi.fn().mockResolvedValue(42),
     getGroupNotices: vi.fn().mockResolvedValue([]),
     getImage: vi.fn().mockResolvedValue({
       filename: 'abc123.jpg',

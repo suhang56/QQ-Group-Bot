@@ -39,6 +39,10 @@ function makeMockAdapter(): INapCatAdapter {
     kick: vi.fn().mockResolvedValue(undefined),
     deleteMsg: vi.fn().mockResolvedValue(undefined),
     sendPrivate: vi.fn().mockResolvedValue(undefined),
+    sendPrivateMessage: vi.fn().mockResolvedValue(42),
+    getGroupNotices: vi.fn().mockResolvedValue([]),
+    getGroupInfo: vi.fn().mockResolvedValue({ groupId: 'g1', name: 'Test', description: '', memberCount: 1 }),
+    getImage: vi.fn().mockResolvedValue({ filename: '', url: '', size: 0 }),
   };
 }
 
@@ -107,18 +111,23 @@ describe('Router', () => {
     expect(sendSpy).not.toHaveBeenCalled();
   });
 
-  it('moderator runs before persist — violation message is not saved to messages table', async () => {
-    // Wire a moderator that returns violation=true, severity=2
-    const violationText = JSON.stringify({ violation: true, severity: 2, reason: 'spam', confidence: 0.9 });
+  it('moderator runs and violation message is persisted (queued for admin approval, not auto-deleted)', async () => {
+    // Wire a moderator that returns violation=true, severity=3
+    const violationText = JSON.stringify({ violation: true, severity: 3, reason: 'spam', confidence: 0.9 });
     const mockClaude: IClaudeClient = {
       complete: vi.fn().mockResolvedValue({ text: violationText, inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 }),
     };
     const mod = new ModeratorModule(mockClaude, adapter, db.messages, db.moderation, db.groupConfig, db.rules);
     router.setModerator(mod);
-    await router.dispatch(makeMsg({ content: 'bad content here', messageId: 'bad-msg' }));
-    // Message should NOT be in messages table (moderation stopped pipeline)
+    await router.dispatch(makeMsg({ content: 'bad content here but long enough', messageId: 'bad-msg' }));
+    // Message IS saved (pipeline continues — action gated on admin approval)
     const stored = db.messages.getRecent('g1', 10);
-    expect(stored.every(m => m.content !== 'bad content here')).toBe(true);
+    expect(stored.some(m => m.content === 'bad content here but long enough')).toBe(true);
+    // A pending row was queued
+    expect(db.pendingModeration.listPending(10).length).toBeGreaterThan(0);
+    // No direct ban/kick/delete executed
+    expect(adapter.ban).not.toHaveBeenCalled();
+    expect(adapter.deleteMsg).not.toHaveBeenCalled();
   });
 });
 

@@ -106,6 +106,10 @@ adapter.on('message.group', (msg) => {
   void router.dispatch(msg);
 });
 
+adapter.on('message.private', (msg) => {
+  void router.dispatchPrivate(msg);
+});
+
 // 6. Connect
 try {
   await adapter.connect();

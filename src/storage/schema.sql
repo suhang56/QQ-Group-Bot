@@ -186,3 +186,22 @@ CREATE INDEX IF NOT EXISTS idx_learned_facts_group_active
 
 -- bot_replies.was_evasive: 1 when bot emitted an evasive reply (e.g. "忘了" / "考我呢").
 -- Existing DBs are migrated via runtime ALTER TABLE in db.ts._runMigrations.
+
+CREATE TABLE IF NOT EXISTS pending_moderation (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id         TEXT    NOT NULL,
+  msg_id           TEXT    NOT NULL,
+  user_id          TEXT    NOT NULL,
+  user_nickname    TEXT,
+  content          TEXT    NOT NULL,
+  severity         INTEGER NOT NULL,
+  reason           TEXT    NOT NULL,
+  proposed_action  TEXT    NOT NULL,
+  status           TEXT    NOT NULL DEFAULT 'pending',
+  created_at       INTEGER NOT NULL,
+  decided_at       INTEGER,
+  decided_by       TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_pending_moderation_status
+  ON pending_moderation(status, created_at);

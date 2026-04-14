@@ -18,6 +18,7 @@ function makeMockAdapter(notices: GroupNotice[] = [], description = ''): INapCat
     kick: vi.fn(),
     deleteMsg: vi.fn(),
     sendPrivate: vi.fn(),
+    sendPrivateMessage: vi.fn().mockResolvedValue(42),
     getGroupNotices: vi.fn().mockResolvedValue(notices),
     getGroupInfo: vi.fn().mockResolvedValue({ groupId: 'g1', name: 'Test Group', description, memberCount: 10 }),
     getImage: vi.fn(),

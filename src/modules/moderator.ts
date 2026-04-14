@@ -2,7 +2,7 @@ import type { IClaudeClient } from '../ai/claude.js';
 import type { INapCatAdapter, GroupMessage } from '../adapter/napcat.js';
 import type {
   IMessageRepository, IModerationRepository, IGroupConfigRepository,
-  IRuleRepository, GroupConfig,
+  IRuleRepository, GroupConfig, PendingModeration,
 } from '../storage/db.js';
 import type { ILearnerModule } from './learner.js';
 import { BotErrorCode, ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
@@ -233,31 +233,31 @@ ${offenseHistory}${ragSection}`;
       return verdict;
     }
 
-    // Safety rail 2: daily cap check (read fresh from config)
-    const freshConfig = this.configs.get(msg.groupId) ?? config;
-    const today = new Date().toISOString().slice(0, 10);
-    if (freshConfig.punishmentsResetDate !== today) {
-      this.configs.resetDailyPunishments(msg.groupId);
-      freshConfig.punishmentsToday = 0;
-    }
-    const atCap = freshConfig.punishmentsToday >= freshConfig.dailyPunishmentLimit;
-
-    if (atCap) {
-      this.logger.warn({ groupId: msg.groupId, userId: msg.userId }, 'daily cap reached — warn only');
-      await this.adapter.send(msg.groupId,
-        `@${msg.nickname} 今日自动处罚已达上限，你的违规行为（${parsed.reason}）已记录，请等待管理员处理。`);
-      this.moderation.insert({
-        msgId: msg.messageId, groupId: msg.groupId, userId: msg.userId,
-        violation: true, severity: parsed.severity, action: 'none',
-        reason: parsed.reason, appealed: 0, reversed: false,
-        timestamp: msg.timestamp,
-      });
-      return verdict;
-    }
-
-    // Execute punishment
-    await this._executePunishment(msg, parsed.severity, parsed.reason, config);
+    // Violation confirmed with sufficient confidence and severity — log and return.
+    // Action execution is now delegated to the admin-approval flow in the router.
+    this.moderation.insert({
+      msgId: msg.messageId, groupId: msg.groupId, userId: msg.userId,
+      violation: true, severity: parsed.severity, action: 'none',
+      reason: parsed.reason, appealed: 0, reversed: false,
+      timestamp: msg.timestamp,
+    });
+    this.logger.info({ groupId: msg.groupId, userId: msg.userId, severity: parsed.severity, reason: parsed.reason }, 'violation queued for admin approval');
     return verdict;
+  }
+
+  /** Execute a punishment for an admin-approved pending moderation row. */
+  async executePunishment(pending: PendingModeration, config: GroupConfig): Promise<void> {
+    const fakeMsg: GroupMessage = {
+      messageId: pending.msgId,
+      groupId: pending.groupId,
+      userId: pending.userId,
+      nickname: pending.userNickname ?? pending.userId,
+      role: 'member',
+      content: pending.content,
+      rawContent: pending.content,
+      timestamp: pending.createdAt,
+    };
+    await this._executePunishment(fakeMsg, pending.severity, pending.reason, config);
   }
 
   private async _executePunishment(
