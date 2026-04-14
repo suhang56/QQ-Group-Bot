@@ -5,6 +5,7 @@ import { MimicModule } from '../src/modules/mimic.js';
 import { ModeratorModule } from '../src/modules/moderator.js';
 import { NameImagesModule } from '../src/modules/name-images.js';
 import { Database } from '../src/storage/db.js';
+import { defaultGroupConfig } from '../src/config.js';
 import type { GroupMessage, INapCatAdapter } from '../src/adapter/napcat.js';
 import type { IClaudeClient } from '../src/ai/claude.js';
 import { initLogger } from '../src/utils/logger.js';
@@ -1063,5 +1064,31 @@ describe('Router — 复读机 repeater', () => {
     // Last 3 messages are: u3=hello, u2=world, u1=hello — not all equal → no trigger
     await router.dispatch(makeRepeaterMsg({ userId: 'u4', content: 'hello', rawContent: 'hello' }));
     expect(adapter.send).not.toHaveBeenCalledWith('g1', 'hello');
+  });
+});
+
+describe('Router — mface CQ code sanitization', () => {
+  let db: Database;
+  let adapter: ReturnType<typeof makeMockAdapter>;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    adapter = makeMockAdapter();
+  });
+
+  it('mface with bracket-wrapped summary stored with clean cqCode', async () => {
+    const router = new Router(db, adapter, new RateLimiter());
+    // Enable live sticker capture via group config upsert
+    db.groupConfig.upsert({ ...defaultGroupConfig('g1'), liveStickerCaptureEnabled: true });
+    // Dispatch a message with bracket-wrapped summary in mface
+    const rawContent = '[CQ:mface,type=6,emoji_id=456,emoji_package_id=789,key=abc123,summary=[哎]]';
+    await router.dispatch(makeMsg({ rawContent, content: '' }));
+    const stored = db.liveStickers.getTopByGroup('g1', 10);
+    expect(stored.length).toBeGreaterThan(0);
+    const cqCode = stored[0]!.cqCode;
+    // Should not have bracket-wrapped summary
+    expect(cqCode).not.toMatch(/summary=\[/);
+    // Should be a properly closed CQ code
+    expect(cqCode).toMatch(/^\[CQ:mface,.*\]$/);
   });
 });

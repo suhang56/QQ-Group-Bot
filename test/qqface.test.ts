@@ -82,25 +82,27 @@ describe('ChatModule — QQ face emoji integration', () => {
     db = new Database(':memory:');
   });
 
-  // Bot reply contains [CQ:face,id=178] — passes through unchanged
-  it('reply containing CQ:face code is returned as-is', async () => {
+  // Bot reply contains [CQ:face,id=178] — stripped by postProcess (user banned QQ built-in faces)
+  it('reply containing CQ:face code has face stripped before return', async () => {
     const claude = makeMockClaude('[CQ:face,id=178] 哈哈');
     const chat = new ChatModule(claude, db, {
       botUserId: BOT_ID, lurkerReplyChance: 1.0, lurkerCooldownMs: 0, debounceMs: 0,
     });
     const msg = makeMsg({ rawContent: `[CQ:at,qq=${BOT_ID}] hi` });
     const result = await chat.generateReply('g1', msg, []);
-    expect(result).toBe('[CQ:face,id=178] 哈哈');
+    expect(result).not.toContain('[CQ:face,id=');
+    expect(result).toContain('哈哈');
   });
 
-  // Reply with invalid face id — no throw (adapter handles gracefully)
-  it('reply with unknown face id does not throw', async () => {
-    const claude = makeMockClaude('[CQ:face,id=99999] huh');
+  // Reply with only face codes → stripped → empty → dropped silently
+  it('reply with only CQ:face codes is dropped as empty after stripping', async () => {
+    const claude = makeMockClaude('[CQ:face,id=99999]');
     const chat = new ChatModule(claude, db, {
       botUserId: BOT_ID, lurkerReplyChance: 1.0, lurkerCooldownMs: 0, debounceMs: 0,
     });
     const msg = makeMsg({ rawContent: `[CQ:at,qq=${BOT_ID}] hi` });
-    await expect(chat.generateReply('g1', msg, [])).resolves.toBe('[CQ:face,id=99999] huh');
+    const result = await chat.generateReply('g1', msg, []);
+    expect(result).toBeNull();
   });
 
   // User message with faces → parseFaces extracts them (for future use)
@@ -111,8 +113,8 @@ describe('ChatModule — QQ face emoji integration', () => {
     expect(ids).toContain(14);
   });
 
-  // System prompt includes face legend
-  it('system prompt includes CQ face legend with face references', async () => {
+  // System prompt must NOT include face legend (QQ built-in faces are banned)
+  it('system prompt does NOT include CQ face legend — bot is banned from using built-in faces', async () => {
     const claude = makeMockClaude('hi');
     const chat = new ChatModule(claude, db, {
       botUserId: BOT_ID, lurkerReplyChance: 1.0, lurkerCooldownMs: 0, debounceMs: 0,
@@ -121,9 +123,10 @@ describe('ChatModule — QQ face emoji integration', () => {
     await chat.generateReply('g1', msg, []);
     const call = vi.mocked(claude.complete).mock.calls[0]![0];
     const systemText = call.system.map(s => s.text).join(' ');
-    expect(systemText).toContain('[CQ:face,id=N]');
-    expect(systemText).toContain('[14]');
-    expect(systemText).toContain('[178]');
+    expect(systemText).not.toContain('[CQ:face,id=N]');
+    expect(systemText).not.toContain('FACE_LEGEND');
+    // mface stickers are still allowed
+    expect(systemText).toContain('mface');
   });
 });
 

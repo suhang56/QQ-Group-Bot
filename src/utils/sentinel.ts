@@ -64,11 +64,27 @@ export function stripEcho(reply: string, lastUserMessage: string): string {
 }
 
 /**
- * Post-process a generated reply: strip trailing 。 (Chinese period, never used in group chat).
+ * Post-process a generated reply: strip QQ built-in face codes and trailing 。.
  */
 export function postProcess(text: string): string {
-  // Strip trailing whitespace, then any trailing Chinese periods (with optional surrounding whitespace)
-  return text.replace(/[\s。]*。[\s。]*$/, '').trimEnd();
+  return text
+    .replace(/\[CQ:face,[^\]]*\]/g, '')    // strip [CQ:face,id=N] — user banned QQ built-in faces
+    .replace(/[\s。]*。[\s。]*$/, '')
+    .trim();
+}
+
+/**
+ * True when the bot reply is essentially an echo of the trigger with little new content.
+ * Used to silently drop echo replies rather than regenerating.
+ */
+export function isEcho(reply: string, trigger: string): boolean {
+  const t = trigger.trim().toLowerCase();
+  const r = reply.trim().toLowerCase();
+  if (!t || !r) return false;
+  if (r === t) return true;
+  if (r.includes(t) && r.length < t.length * 1.5) return true;
+  if (t.includes(r) && t.length > r.length) return true;
+  return false;
 }
 
 /** Hardened system prompt used for sentinel regen calls. */

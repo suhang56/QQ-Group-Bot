@@ -483,17 +483,29 @@ export class Router implements IRouter {
     const now = Math.floor(Date.now() / 1000);
     const raw = msg.rawContent;
 
-    // Match all [CQ:mface,...] segments
-    for (const match of raw.matchAll(/\[CQ:mface,([^\]]+)\]/g)) {
-      const attrs = Object.fromEntries(
-        match[1]!.split(',').map(p => p.split('=') as [string, string])
-      );
-      const pkg = attrs['package_id'] ?? attrs['pkg'] ?? '';
+    // Match all [CQ:mface,...] segments.
+    // summary= values may contain brackets (e.g. summary=[哎]) which break [^\]]+ matching.
+    // We use a greedy match up to the last ] on the same line and then rebuild a clean cqCode.
+    for (const match of raw.matchAll(/\[CQ:mface,(.*?)\](?!\])/g)) {
+      const attrStr = match[1]!;
+      const attrs: Record<string, string> = {};
+      // Parse key=value pairs; values may contain [ or ] so split on comma only before known keys
+      for (const part of attrStr.split(/,(?=[a-z_]+=)/)) {
+        const eq = part.indexOf('=');
+        if (eq === -1) continue;
+        attrs[part.slice(0, eq)!] = part.slice(eq + 1);
+      }
+      const pkg = attrs['package_id'] ?? attrs['emoji_package_id'] ?? attrs['pkg'] ?? '';
       const id = attrs['emoji_id'] ?? attrs['id'] ?? '';
       if (!pkg || !id) continue;
       const key = `mface:${pkg}:${id}`;
-      const summary = attrs['summary'] ?? attrs['text'] ?? null;
-      this.db.liveStickers.upsert(msg.groupId, key, 'mface', match[0]!, summary, now);
+      // Strip brackets from summary so it doesn't break CQ syntax when echoed back
+      const rawSummary = attrs['summary'] ?? attrs['text'] ?? null;
+      const summary = rawSummary ? rawSummary.replace(/^\[|\]$/g, '') : null;
+      // Rebuild a well-formed cqCode without bracket-wrapped summary
+      const cleanAttrs = attrStr.replace(/(?<=(?:^|,)(?:summary|text)=)\[([^\]]*)\](?=,|$)/g, '$1');
+      const cleanCqCode = `[CQ:mface,${cleanAttrs}]`;
+      this.db.liveStickers.upsert(msg.groupId, key, 'mface', cleanCqCode, summary, now);
     }
 
     // Match [CQ:image,...] with sub_type=1 (sticker subtype only)

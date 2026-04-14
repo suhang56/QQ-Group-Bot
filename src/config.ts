@@ -23,8 +23,6 @@ export const chatHistoryDefaults = {
   groupIdentityCacheTtlMs: 3_600_000, // 1 hour
   loreDirPath: 'data/lore',
   loreSizeCapBytes: 512 * 1024, // 512 KB hard cap before truncation warning
-  chatEmojiTopN: 5,             // top-N most-used faces injected into system prompt
-  chatEmojiSampleSize: 200,     // how many recent messages to scan for emoji stats
   chatStickerTopN: 20,          // top-N market_face stickers injected into system prompt
   stickersDirPath: 'data/stickers',
 } as const;

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { hasForbiddenContent, stripEcho, postProcess } from '../src/utils/sentinel.js';
+import { hasForbiddenContent, stripEcho, postProcess, isEcho } from '../src/utils/sentinel.js';
 
 describe('hasForbiddenContent', () => {
   it('returns null for clean Chinese group reply', () => {
@@ -106,5 +106,44 @@ describe('postProcess', () => {
 
   it('does not strip mid-sentence period', () => {
     expect(postProcess('他说。然后走了')).toBe('他说。然后走了');
+  });
+
+  it('strips [CQ:face,...] codes from output', () => {
+    expect(postProcess('[CQ:face,id=178] 哈哈')).toBe('哈哈');
+    expect(postProcess('哈哈 [CQ:face,id=14]')).toBe('哈哈');
+    expect(postProcess('[CQ:face,id=178][CQ:face,id=14]')).toBe('');
+  });
+
+  it('preserves [CQ:mface,...] codes (mface is allowed)', () => {
+    const mface = '[CQ:mface,type=6,emoji_id=123,key=abc,summary=哎]';
+    expect(postProcess(mface)).toBe(mface);
+  });
+});
+
+describe('isEcho', () => {
+  it('exact match → true', () => {
+    expect(isEcho('abc', 'abc')).toBe(true);
+    expect(isEcho('瞧你糖的', '瞧你糖的')).toBe(true);
+  });
+
+  it('reply contains trigger with little extra content → true', () => {
+    expect(isEcho('哈哈哈哈西瓜你好狠哈', '哈哈哈哈西瓜你好狠')).toBe(true);
+  });
+
+  it('reply is substring of trigger → true', () => {
+    expect(isEcho('你好狠', '哈哈哈哈西瓜你好狠')).toBe(true);
+  });
+
+  it('genuinely different reply → false', () => {
+    expect(isEcho('哈哈哈哈不是吧', '哈哈哈哈西瓜你好狠')).toBe(false);
+  });
+
+  it('reply is much longer than trigger → false', () => {
+    expect(isEcho('瞧你糖的，其实今天发生了很多事情我都不知道怎么说', '瞧你糖的')).toBe(false);
+  });
+
+  it('empty trigger or reply → false', () => {
+    expect(isEcho('', 'hello')).toBe(false);
+    expect(isEcho('hello', '')).toBe(false);
   });
 });

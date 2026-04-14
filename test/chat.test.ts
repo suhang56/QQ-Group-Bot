@@ -143,7 +143,7 @@ describe('ChatModule — core behavior', () => {
     await new Promise(r => setTimeout(r, 10));
     const p2 = concurrentChat.generateReply('g1', atMsg, []);
 
-    resolveFirst('咪');
+    resolveFirst('哈哈好的');  // different from trigger '咪' so echo detector doesn't drop it
     const [r1, r2] = await Promise.all([p1, p2]);
 
     const replies = [r1, r2].filter(r => r !== null);
@@ -589,36 +589,17 @@ describe('ChatModule — keyword retrieval and group identity', () => {
     expect(extractTopFaces(messages, 10)).toHaveLength(2);
   });
 
-  it('emoji: group with face usage has top faces injected into system prompt', async () => {
+  it('emoji: system prompt never contains face legend or face injection line', async () => {
     const ts = Math.floor(Date.now() / 1000);
-    for (let i = 0; i < 5; i++) {
-      db.messages.insert({ groupId: 'g1', userId: `u${i}`, nickname: `U${i}`,
-        content: `[CQ:face,id=14] msg ${i}`, timestamp: ts - (i + 1) * 60, deleted: false });
-    }
-    db.messages.insert({ groupId: 'g1', userId: 'u5', nickname: 'U5',
-      content: '[CQ:face,id=21]', timestamp: ts - 360, deleted: false });
-
-    const chat = makeChat({ chatEmojiTopN: 2, chatEmojiSampleSize: 50 });
+    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'hi', timestamp: ts - 60, deleted: false });
+    const chat = makeChat();
     const msg = makeMsg({ content: '有人吗', rawContent: `[CQ:at,qq=${BOT_ID}] 有人吗` });
     await chat.generateReply('g1', msg, []);
-
     const call = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { system: Array<{ text: string }> };
     const systemText = call.system.map((s: { text: string }) => s.text).join(' ');
-    expect(systemText).toContain('[CQ:face,id=14]');
-    expect(systemText).toContain('最近常用的表情');
-  });
-
-  it('emoji: group with no faces → no emoji injection line', async () => {
-    const ts = Math.floor(Date.now() / 1000);
-    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: '纯文字消息', timestamp: ts - 60, deleted: false });
-
-    const chat = makeChat({ chatEmojiTopN: 5, chatEmojiSampleSize: 50 });
-    const msg = makeMsg({ content: '有人吗', rawContent: `[CQ:at,qq=${BOT_ID}] 有人吗` });
-    await chat.generateReply('g1', msg, []);
-
-    const call = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { system: Array<{ text: string }> };
-    const systemText = call.system.map((s: { text: string }) => s.text).join(' ');
+    expect(systemText).not.toContain('[CQ:face,id=');
     expect(systemText).not.toContain('最近常用的表情');
+    expect(systemText).not.toContain('FACE_LEGEND');
   });
 });
 
@@ -936,6 +917,16 @@ describe('TASK_REQUEST regex', () => {
   it('does NOT match "你好"', () => expect(match('你好')).toBe(false));
   it('does NOT match "@QAQ 吃饭了吗"', () => expect(match('@QAQ 吃饭了吗')).toBe(false));
   it('does NOT match "背包" (standalone unrelated use)', () => expect(match('背包')).toBe(false));
+
+  // Tech-help deflections
+  it('matches "教教我怎么写 swift"', () => expect(match('教教我怎么写 swift')).toBe(true));
+  it('matches "教我python"', () => expect(match('教我python')).toBe(true));
+  it('matches "怎么实现代码"', () => expect(match('怎么实现代码')).toBe(true));
+  it('matches "帮我写代码"', () => expect(match('帮我写代码')).toBe(true));
+  it('matches "transformer怎么原理"', () => expect(match('transformer怎么原理')).toBe(true));
+  it('matches "神经网络如何"', () => expect(match('神经网络如何')).toBe(true));
+  it('does NOT match "我在学习"', () => expect(match('我在学习')).toBe(false));
+  it('does NOT match "代码是什么" (conversational curiosity, no action verb)', () => expect(match('代码是什么')).toBe(false));
 });
 
 describe('ChatModule — task request deflection', () => {
@@ -1340,6 +1331,15 @@ describe('ChatModule — 邦批 persona', () => {
 
   it('BANGDREAM_PERSONA bans sycophantic phrases via 不讨好 instruction', () => {
     expect(BANGDREAM_PERSONA).toContain('不讨好');
+  });
+
+  it('BANGDREAM_PERSONA contains CS-incompetence deflection rule', () => {
+    expect(BANGDREAM_PERSONA).toContain('CS 学得很烂');
+    expect(BANGDREAM_PERSONA).toContain('让 GPT 教你');
+  });
+
+  it('BANGDREAM_PERSONA bans QQ built-in face usage', () => {
+    expect(BANGDREAM_PERSONA).toContain('禁止使用 QQ 自带表情');
   });
 
   it('system prompt contains attitude phrases when injected', async () => {
@@ -1942,6 +1942,62 @@ describe('ChatModule — self-repetition avoidance', () => {
     const result = await chat.generateReply('g1', makeMsg({ content: 'why' }), []);
     expect(result).not.toBeNull();
     expect(claude).toHaveBeenCalled();
+  });
+});
+
+// ── Echo detection + QQ face stripping ───────────────────────────────────────
+
+describe('ChatModule — echo detection and face stripping', () => {
+  let db: Database;
+
+  beforeEach(() => { db = new Database(':memory:'); });
+
+  it('drops reply silently when Claude echoes the trigger verbatim', async () => {
+    const trigger = '瞧你糖的';
+    const claude = vi.fn().mockResolvedValue({
+      text: trigger, inputTokens: 10, outputTokens: 5,
+      cacheReadTokens: 0, cacheWriteTokens: 0,
+    } satisfies ClaudeResponse);
+    const chat = new ChatModule(
+      { complete: claude } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999, moodProactiveEnabled: false, deflectCacheEnabled: false },
+    );
+    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: trigger, timestamp: Math.floor(Date.now() / 1000), deleted: false });
+    const result = await chat.generateReply('g1', makeMsg({ content: trigger }), []);
+    expect(result).toBeNull();
+  });
+
+  it('strips [CQ:face,id=N] from bot output before returning', async () => {
+    const claude = vi.fn().mockResolvedValue({
+      text: '[CQ:face,id=178] 笑死', inputTokens: 10, outputTokens: 5,
+      cacheReadTokens: 0, cacheWriteTokens: 0,
+    } satisfies ClaudeResponse);
+    const chat = new ChatModule(
+      { complete: claude } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999, moodProactiveEnabled: false, deflectCacheEnabled: false },
+    );
+    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'hi', timestamp: Math.floor(Date.now() / 1000), deleted: false });
+    const result = await chat.generateReply('g1', makeMsg({ content: 'hi' }), []);
+    expect(result).not.toContain('[CQ:face,id=');
+    expect(result).toContain('笑死');
+  });
+
+  it('preserves [CQ:mface,...] in bot output', async () => {
+    const mface = '[CQ:mface,type=6,emoji_id=123,key=abc,summary=哎]';
+    const claude = vi.fn().mockResolvedValue({
+      text: mface, inputTokens: 10, outputTokens: 5,
+      cacheReadTokens: 0, cacheWriteTokens: 0,
+    } satisfies ClaudeResponse);
+    const chat = new ChatModule(
+      { complete: claude } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999, moodProactiveEnabled: false, deflectCacheEnabled: false },
+    );
+    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'hi', timestamp: Math.floor(Date.now() / 1000), deleted: false });
+    const result = await chat.generateReply('g1', makeMsg({ content: 'hi' }), []);
+    expect(result).toContain('[CQ:mface,');
   });
 });
 
