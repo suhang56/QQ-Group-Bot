@@ -1922,7 +1922,7 @@ describe('ChatModule — tiered 50/20/10 context scope', () => {
     insertN(3);
     await makeChat().generateReply('g1', makeMsg(), []);
     const prompt = getPrompt();
-    expect(prompt).toContain('带箭头的消息值不值得你开口');
+    expect(prompt).toContain('标了 ← 的那条消息值不值得你开口');
     expect(prompt).toContain('只输出一个：<skip> 或 一条自然反应');
   });
 
@@ -2097,6 +2097,39 @@ describe('ChatModule — echo detection and face stripping', () => {
     db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'hi', timestamp: Math.floor(Date.now() / 1000), deleted: false });
     const result = await chat.generateReply('g1', makeMsg({ content: 'hi' }), []);
     expect(result).toContain('[CQ:mface,');
+  });
+
+  it('drops reply when Claude echoes a short trigger verbatim (regression: 草/666)', async () => {
+    for (const shortTrigger of ['草', '666', '哈']) {
+      const claude = vi.fn().mockResolvedValue({
+        text: shortTrigger, inputTokens: 10, outputTokens: 5,
+        cacheReadTokens: 0, cacheWriteTokens: 0,
+      } satisfies ClaudeResponse);
+      const chat = new ChatModule(
+        { complete: claude } as unknown as IClaudeClient,
+        db,
+        { botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999, moodProactiveEnabled: false, deflectCacheEnabled: false },
+      );
+      db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: shortTrigger, timestamp: Math.floor(Date.now() / 1000), deleted: false });
+      const result = await chat.generateReply('g1', makeMsg({ content: shortTrigger }), []);
+      expect(result, `short trigger "${shortTrigger}" echo should be dropped`).toBeNull();
+    }
+  });
+
+  it('passes through a non-echo reply even for short triggers', async () => {
+    const trigger = '草';
+    const claude = vi.fn().mockResolvedValue({
+      text: '哈哈笑死', inputTokens: 10, outputTokens: 5,
+      cacheReadTokens: 0, cacheWriteTokens: 0,
+    } satisfies ClaudeResponse);
+    const chat = new ChatModule(
+      { complete: claude } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999, moodProactiveEnabled: false, deflectCacheEnabled: false },
+    );
+    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: trigger, timestamp: Math.floor(Date.now() / 1000), deleted: false });
+    const result = await chat.generateReply('g1', makeMsg({ content: trigger }), []);
+    expect(result).toBe('哈哈笑死');
   });
 });
 
