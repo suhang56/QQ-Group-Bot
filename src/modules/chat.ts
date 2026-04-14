@@ -1254,9 +1254,28 @@ export class ChatModule implements IChatModule {
     return `\n这个群常用的表情包（当语境合适时直接用CQ码发送，就像群友一样）：\n${lines}`;
   }
 
+  // Embedding cache: text → vec. Bounded by LRU-ish turnover at the call site.
+  private readonly embedCache = new Map<string, number[]>();
+  private async _cachedEmbed(text: string): Promise<number[] | null> {
+    if (!this.embedder?.isReady) return null;
+    const cached = this.embedCache.get(text);
+    if (cached) return cached;
+    try {
+      const vec = await this.embedder.embed(text);
+      // Cap cache at 2000 entries to avoid unbounded growth
+      if (this.embedCache.size >= 2000) {
+        const firstKey = this.embedCache.keys().next().value;
+        if (firstKey !== undefined) this.embedCache.delete(firstKey);
+      }
+      this.embedCache.set(text, vec);
+      return vec;
+    } catch { return null; }
+  }
+
   private async _getContextStickers(groupId: string, queryText: string): Promise<string> {
     if (!this.localStickerRepo) return '';
-    const candidates = this.localStickerRepo.getTopByGroup(groupId, 50)
+    // Cap candidate pool at 20 (was 50). Top-20 by usage is plenty — we only show 5.
+    const candidates = this.localStickerRepo.getTopByGroup(groupId, 20)
       // Only image stickers captured from the group (exclude mface market stickers)
       .filter(s => s.type === 'image')
       // Must have a real vision-generated summary — otherwise bot sees hash garbage
@@ -1266,19 +1285,26 @@ export class ChatModule implements IChatModule {
 
     let ranked = candidates;
 
-    // If embedder is ready, rank by context similarity
+    // If embedder is ready, rank by context similarity. All embeds are cached
+    // by text, so after the first chat call the sticker contexts are free.
     if (this.embedder?.isReady) {
-      try {
-        const queryVec = await this.embedder.embed(queryText);
+      const queryVec = await this._cachedEmbed(queryText);
+      if (queryVec) {
         const scored = await Promise.all(candidates.map(async s => {
           if (s.contextSamples.length === 0) return { s, sim: 0 };
-          const sampleVecs = await Promise.all(s.contextSamples.map(c => this.embedder!.embed(c)));
-          const maxSim = Math.max(...sampleVecs.map(v => cosineSimilarity(queryVec, v)));
+          let maxSim = 0;
+          for (const c of s.contextSamples) {
+            const v = await this._cachedEmbed(c);
+            if (v) {
+              const sim = cosineSimilarity(queryVec, v);
+              if (sim > maxSim) maxSim = sim;
+            }
+          }
           return { s, sim: maxSim };
         }));
         scored.sort((a, b) => b.sim - a.sim);
         ranked = scored.slice(0, this.stickerTopKForReply).map(x => x.s);
-      } catch {
+      } else {
         ranked = candidates.slice(0, this.stickerTopKForReply);
       }
     } else {
