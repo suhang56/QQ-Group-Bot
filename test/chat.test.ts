@@ -2133,6 +2133,58 @@ describe('ChatModule — echo detection and face stripping', () => {
   });
 });
 
+// ── Confabulation guard ───────────────────────────────────────────────────────
+
+describe('ChatModule — confabulation guard', () => {
+  it('BANGDREAM_PERSONA contains 诚实底线 section with 绝对不能 rule', () => {
+    expect(BANGDREAM_PERSONA).toContain('诚实底线');
+    expect(BANGDREAM_PERSONA).toContain('绝对不能');
+    expect(BANGDREAM_PERSONA).toContain('我都说过了');
+  });
+
+  it('user-content tail contains anti-confabulation warning', () => {
+    const db = new Database(':memory:');
+    const claude = vi.fn().mockResolvedValue({
+      text: '好', inputTokens: 10, outputTokens: 5,
+      cacheReadTokens: 0, cacheWriteTokens: 0,
+    } satisfies ClaudeResponse);
+    const chat = new ChatModule(
+      { complete: claude } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999, moodProactiveEnabled: false, deflectCacheEnabled: false },
+    );
+    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'hi', timestamp: Math.floor(Date.now() / 1000), deleted: false });
+    return chat.generateReply('g1', makeMsg({ content: 'hi' }), []).then(() => {
+      const call = claude.mock.calls[0]![0] as { messages: Array<{ content: string }> };
+      const userContent = call.messages.find(m => m.content.includes('绝对禁止'))?.content ?? '';
+      expect(userContent).toContain('不要假装说过你实际没说过的话');
+      expect(userContent).toContain('绝对禁止');
+    });
+  });
+
+  it('confabulation pattern in reply triggers warn log', async () => {
+    const { checkConfabulation } = await import('../src/utils/sentinel.js');
+    const db = new Database(':memory:');
+    const claude = vi.fn().mockResolvedValue({
+      text: '我都说过了有啥区别', inputTokens: 10, outputTokens: 5,
+      cacheReadTokens: 0, cacheWriteTokens: 0,
+    } satisfies ClaudeResponse);
+    const chat = new ChatModule(
+      { complete: claude } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999, moodProactiveEnabled: false, deflectCacheEnabled: false },
+    );
+    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: '你说过什么', timestamp: Math.floor(Date.now() / 1000), deleted: false });
+    // Should still return the reply (confabulation logs but doesn't drop)
+    const result = await chat.generateReply('g1', makeMsg({ content: '你说过什么' }), []);
+    expect(result).toBe('我都说过了有啥区别');
+    // Verify checkConfabulation detects the pattern
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    checkConfabulation('我都说过了有啥区别', '你说过什么', { groupId: 'g1' });
+    warnSpy.mockRestore();
+  });
+});
+
 // ── Admin speech mirroring ────────────────────────────────────────────────────
 
 describe('ChatModule — admin speech mirror', () => {

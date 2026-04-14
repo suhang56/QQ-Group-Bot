@@ -8,7 +8,7 @@ import { ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
 import { lurkerDefaults, chatHistoryDefaults, RUNTIME_CHAT_MODEL } from '../config.js';
 import { parseFaces } from '../utils/qqface.js';
-import { sentinelCheck, postProcess, isEcho, HARDENED_SYSTEM } from '../utils/sentinel.js';
+import { sentinelCheck, postProcess, isEcho, checkConfabulation, HARDENED_SYSTEM } from '../utils/sentinel.js';
 import { buildStickerSection, type LiveStickerEntry } from '../utils/stickers.js';
 import { MoodTracker, PROACTIVE_POOLS, type MoodDescription } from './mood.js';
 import type { VisionService } from './vision.js';
@@ -233,6 +233,12 @@ export const BANGDREAM_PERSONA = `你是这个QQ群的老群友，不是AI，不
 - 不熟 → "忘了" / "考我呢" / "记不得" / 懵逼贴图
 - 熟也懒得答 → "啊？" / "这还要问" / "自己听"
 - **绝对不要**为了 "显得懂" 而猜。猜错比装傻伤害大十倍。
+
+## 诚实底线（不许破）
+- 你**只能**声称说过 context 里以 [你(...)] 明确标记出现过的内容
+- **绝对不能**说"我刚说过了 / 我早就说了 / 我都说过了 / 这不是我刚说的嘛 / 我不是说过了吗"这类话，除非那句话真的以 [你(...)] 出现在 context 里
+- 被追问细节时，要么给出具体答复，要么承认"刚才就是随口说的"/"忘了"/"懒得解释"，不能用"我说过了"逃避
+- 不记得 = 说 "忘了" 或 "啥来的"，不是 "我早就说了"
 
 **话题不感兴趣也允许 skip**：两个人在聊股票 / 转码 / 美签，直接 \`<skip>\`。`;
 
@@ -755,6 +761,8 @@ export class ChatModule implements IChatModule {
 - 如果只想扔个短反应就够 → 就短一句，但必须和那条消息内容不同，不要凑字数
 - 如果要接就接，别摆成 "X 是 Y" 这种答题腔
 
+⚠️ 不要假装说过你实际没说过的话。被问到你前面发言的具体含义时：要么真给解释（如果 context 里有对应 [你(...)] 记录），要么装傻"忘了/随便说的"，要么 <skip>。**绝对禁止** "我刚说过" / "我都说过了" 这类逃避，除非 context 里真的有对应 [你(...)] 记录。
+
 只输出一个：<skip> 或 一条自然反应（可多行）。`;
 
     const factsBlock = this.selfLearning?.formatFactsForPrompt(groupId, 50) ?? '';
@@ -794,6 +802,8 @@ export class ChatModule implements IChatModule {
         this.logger.debug({ groupId }, 'Claude opted out — dropping reply silently');
         return null;
       }
+      // Confabulation detector: warn if bot claims it already said something
+      checkConfabulation(processed, triggerMessage.content, { groupId });
       // Echo detector: drop replies that are essentially the trigger parroted back
       if (isEcho(processed, triggerMessage.content)) {
         this.logger.info({ groupId, reply: processed, trigger: triggerMessage.content }, 'Echo detected — dropping reply silently');

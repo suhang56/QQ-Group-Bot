@@ -73,6 +73,18 @@ export function postProcess(text: string): string {
     .trim();
 }
 
+const CONFABULATION_RE = /我刚说过了|我早就说了|我都说过了|这不是我刚说的|我不是说过了吗|两个意思我都说过/;
+
+/**
+ * Detect and warn on confabulation patterns — bot claiming it explained something it didn't.
+ * Logs at warn level for tracking; does NOT drop (may be legit in rare cases).
+ */
+export function checkConfabulation(reply: string, trigger: string, context: Record<string, unknown>): void {
+  if (CONFABULATION_RE.test(reply)) {
+    logger.warn({ ...context, trigger, reply }, 'confabulation pattern detected');
+  }
+}
+
 /**
  * True when the bot reply is essentially an echo of the trigger with little new content.
  * Used to silently drop echo replies rather than regenerating.
