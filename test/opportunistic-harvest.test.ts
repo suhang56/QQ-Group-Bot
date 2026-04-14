@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { OpportunisticHarvest } from '../src/modules/opportunistic-harvest.js';
 import type { IClaudeClient } from '../src/ai/claude.js';
 import type { IMessageRepository, ILearnedFactsRepository, LearnedFact } from '../src/storage/db.js';
+import type { SelfLearningModule } from '../src/modules/self-learning.js';
 import type { Logger } from 'pino';
 
 const silentLogger = {
@@ -318,5 +319,120 @@ describe('OpportunisticHarvest', () => {
     expect(logCall![0].inserted).toBe(1);
     expect(logCall![0].dedupped).toBe(1);
     expect(logCall![0].totalActiveFacts).toBe(2);
+  });
+});
+
+// ── Unknown-term auto-research ────────────────────────────────────────────────
+
+describe('OpportunisticHarvest — unknown-term resolver', () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  function makeSelfLearning(researchResult = null as null | { factId: number; fact: string }): SelfLearningModule & { researchCalls: unknown[] } {
+    const researchCalls: unknown[] = [];
+    return {
+      researchCalls,
+      researchOnline: vi.fn().mockImplementation((params: unknown) => {
+        researchCalls.push(params);
+        return Promise.resolve(researchResult);
+      }),
+    } as unknown as SelfLearningModule & { researchCalls: unknown[] };
+  }
+
+  function makeClaudePair(termResponse: string, factResponse = '[]'): IClaudeClient {
+    let callCount = 0;
+    return {
+      complete: vi.fn().mockImplementation(() => {
+        callCount++;
+        const text = callCount === 1 ? factResponse : termResponse;
+        return Promise.resolve({ text, inputTokens: 10, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 });
+      }),
+    } as unknown as IClaudeClient;
+  }
+
+  it('calls researchOnline once per unknown term (3 terms → 3 calls)', async () => {
+    const msgs = makeRecentMsgs(15);
+    const msgRepo = makeMsgRepo(msgs);
+    const factRepo = makeFactRepo();
+    const selfLearning = makeSelfLearning();
+    const termsJson = JSON.stringify([
+      { term: 'jtty', contextSentence: 'jtty 好看', guessedDomain: 'fandom' },
+      { term: '渡瀬', contextSentence: '渡瀬真的不错', guessedDomain: 'fandom' },
+      { term: '智械危机', contextSentence: '智械危机这首歌', guessedDomain: 'fandom' },
+    ]);
+    const claude = makeClaudePair(termsJson);
+
+    const harvest = new OpportunisticHarvest({
+      messages: msgRepo, learnedFacts: factRepo, claude,
+      selfLearning, activeGroups: [GROUP], logger: silentLogger, enabled: true,
+    });
+
+    await harvest._run();
+
+    expect(selfLearning.researchCalls).toHaveLength(3);
+    expect((selfLearning.researchCalls[0] as { topic: string }).topic).toBe('jtty');
+  });
+
+  it('skips term already researched in last 24h (in-memory dedup)', async () => {
+    const msgs = makeRecentMsgs(15);
+    const msgRepo = makeMsgRepo(msgs);
+    const factRepo = makeFactRepo();
+    const selfLearning = makeSelfLearning();
+    const termsJson = JSON.stringify([
+      { term: 'jtty', contextSentence: 'jtty 塌房了', guessedDomain: 'fandom' },
+    ]);
+    const claude = makeClaudePair(termsJson);
+
+    const harvest = new OpportunisticHarvest({
+      messages: msgRepo, learnedFacts: factRepo, claude,
+      selfLearning, activeGroups: [GROUP], logger: silentLogger, enabled: true,
+    });
+
+    // First run: researches jtty
+    await harvest._run();
+    expect(selfLearning.researchCalls).toHaveLength(1);
+
+    // Second run: same term still in dedup map → skipped
+    await harvest._run();
+    expect(selfLearning.researchCalls).toHaveLength(1);
+  });
+
+  it('calls no researchOnline when Claude returns empty array', async () => {
+    const msgs = makeRecentMsgs(15);
+    const msgRepo = makeMsgRepo(msgs);
+    const factRepo = makeFactRepo();
+    const selfLearning = makeSelfLearning();
+    const claude = makeClaudePair('[]');
+
+    const harvest = new OpportunisticHarvest({
+      messages: msgRepo, learnedFacts: factRepo, claude,
+      selfLearning, activeGroups: [GROUP], logger: silentLogger, enabled: true,
+    });
+
+    await harvest._run();
+
+    expect(selfLearning.researchCalls).toHaveLength(0);
+  });
+
+  it('caps research at 3 terms per cycle even if Claude returns 4', async () => {
+    const msgs = makeRecentMsgs(15);
+    const msgRepo = makeMsgRepo(msgs);
+    const factRepo = makeFactRepo();
+    const selfLearning = makeSelfLearning();
+    const termsJson = JSON.stringify([
+      { term: 'term1', contextSentence: 'ctx1', guessedDomain: 'fandom' },
+      { term: 'term2', contextSentence: 'ctx2', guessedDomain: 'fandom' },
+      { term: 'term3', contextSentence: 'ctx3', guessedDomain: 'fandom' },
+      { term: 'term4', contextSentence: 'ctx4', guessedDomain: 'fandom' },
+    ]);
+    const claude = makeClaudePair(termsJson);
+
+    const harvest = new OpportunisticHarvest({
+      messages: msgRepo, learnedFacts: factRepo, claude,
+      selfLearning, activeGroups: [GROUP], logger: silentLogger, enabled: true,
+    });
+
+    await harvest._run();
+
+    expect(selfLearning.researchCalls).toHaveLength(3);
   });
 });

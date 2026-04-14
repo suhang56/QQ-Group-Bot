@@ -132,6 +132,7 @@ const harvest = new OpportunisticHarvest({
   learnedFacts: db.learnedFacts,
   claude,
   activeGroups: ACTIVE_GROUPS,
+  selfLearning,
   enabled: process.env['OPPORTUNISTIC_HARVEST_ENABLED'] !== '0',
 });
 

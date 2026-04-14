@@ -1,5 +1,6 @@
 import type { IClaudeClient } from '../ai/claude.js';
 import type { IMessageRepository, ILearnedFactsRepository } from '../storage/db.js';
+import type { SelfLearningModule } from './self-learning.js';
 import type { Logger } from 'pino';
 import { createLogger } from '../utils/logger.js';
 
@@ -8,6 +9,8 @@ const MAX_FACTS_PER_RUN = 12;
 const MAX_FACTS_DEEP = 30;
 const FACT_DEDUP_PREFIX_LEN = 20;
 const HARVEST_MODEL = 'claude-sonnet-4-6' as const;
+const MAX_TERM_RESEARCH_PER_CYCLE = 3;
+const TERM_DEDUP_TTL_MS = 24 * 60 * 60_000;
 
 interface HarvestItem {
   category?: string;
@@ -17,11 +20,18 @@ interface HarvestItem {
   confidence?: number;
 }
 
+interface UnknownTermItem {
+  term: string;
+  contextSentence: string;
+  guessedDomain?: string;
+}
+
 export interface OpportunisticHarvestOptions {
   messages: IMessageRepository;
   learnedFacts: ILearnedFactsRepository;
   claude: IClaudeClient;
   activeGroups: string[];
+  selfLearning?: SelfLearningModule;
   logger?: Logger;
   intervalMs?: number;
   deepIntervalMs?: number;
@@ -87,6 +97,7 @@ export class OpportunisticHarvest {
   private readonly learnedFacts: ILearnedFactsRepository;
   private readonly claude: IClaudeClient;
   private readonly activeGroups: string[];
+  private readonly selfLearning: SelfLearningModule | undefined;
   private readonly logger: Logger;
   private readonly intervalMs: number;
   private readonly deepIntervalMs: number;
@@ -101,12 +112,15 @@ export class OpportunisticHarvest {
   private deepFirstTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly lastRunTs = new Map<string, number>();
   private readonly lastDeepRunTs = new Map<string, number>();
+  // term → timestamp when it was last researched
+  private readonly recentlyResearched = new Map<string, number>();
 
   constructor(opts: OpportunisticHarvestOptions) {
     this.messages = opts.messages;
     this.learnedFacts = opts.learnedFacts;
     this.claude = opts.claude;
     this.activeGroups = opts.activeGroups;
+    this.selfLearning = opts.selfLearning;
     this.logger = opts.logger ?? createLogger('opportunistic-harvest');
     this.intervalMs = opts.intervalMs ?? 15 * 60_000;
     this.deepIntervalMs = opts.deepIntervalMs ?? 24 * 60 * 60_000;
@@ -153,6 +167,13 @@ export class OpportunisticHarvest {
         await this._runGroup(groupId, false);
       } catch (err) {
         this.logger.error({ err, groupId }, 'harvest group run failed');
+      }
+      if (this.selfLearning) {
+        try {
+          await this._resolveUnknownTerms(groupId);
+        } catch (err) {
+          this.logger.error({ err, groupId }, 'unknown-term resolver failed');
+        }
       }
     }
   }
@@ -263,5 +284,106 @@ export class OpportunisticHarvest {
       { groupId, inserted, dedupped, totalActiveFacts: totalAfter, deep },
       `${cycleLabel} cycle: ${inserted} facts inserted, ${dedupped} dedupped, ${totalAfter} total active`,
     );
+  }
+
+  async _resolveUnknownTerms(groupId: string): Promise<void> {
+    if (!this.selfLearning) return;
+
+    // Purge stale entries from the dedup cache
+    const cutoff = this.now() - TERM_DEDUP_TTL_MS;
+    for (const [term, ts] of this.recentlyResearched) {
+      if (ts < cutoff) this.recentlyResearched.delete(term);
+    }
+
+    const recent = this.messages.getRecent(groupId, this.windowMessages);
+    const chronoMsgs = [...recent].reverse();
+    const messagesList = chronoMsgs.map(m => `[${m.nickname}]: ${m.content}`).join('\n');
+
+    const existing = this.learnedFacts.listActive(groupId, 1000);
+    const knownCorpus = existing.map(f => f.fact).join('\n');
+
+    const prompt = `你在帮 QQ 群 bot 找出它**不认识**的名词然后让它学。下面是最近的群消息和 bot 已经知道的事实库。
+
+## 已知事实（bot 已经懂这些）
+${knownCorpus || '（暂无）'}
+
+## 最近群消息
+${messagesList}
+
+## 任务
+找出消息里出现的**专有名词 / 人名 / 作品名 / 角色名 / 曲目名 / 梗 / 黑话**，且**已知事实库里都没有解释**的。这些是 bot 不懂的盲点。
+
+排除：
+- 群友昵称（已经走 alias-miner）
+- 已经在事实库里的
+- 普通名词（吃饭 / 学校 / 电脑 等）
+- 政治 / 历史敏感词
+
+返回 JSON 数组，最多 5 条最有研究价值的：
+[
+  {
+    "term": "<不认识的名词>",
+    "contextSentence": "<在哪句话里出现，便于消歧>",
+    "guessedDomain": "fandom | game | meme | culture | other"
+  }
+]
+
+如果没有值得研究的盲点，返回空数组 []。`;
+
+    let responseText: string;
+    try {
+      const resp = await this.claude.complete({
+        model: HARVEST_MODEL,
+        maxTokens: 512,
+        system: [{ text: '你是一个群聊盲点发现助手，只输出 JSON。', cache: true }],
+        messages: [{ role: 'user', content: prompt }],
+      });
+      responseText = resp.text.trim();
+    } catch (err) {
+      this.logger.error({ err, groupId }, 'unknown-term Claude call failed');
+      return;
+    }
+
+    let terms: UnknownTermItem[];
+    try {
+      const jsonMatch = responseText.match(/\[[\s\S]*\]/);
+      terms = jsonMatch ? (JSON.parse(jsonMatch[0]) as UnknownTermItem[]) : [];
+      if (!Array.isArray(terms)) terms = [];
+    } catch {
+      this.logger.warn({ groupId, responseText }, 'unknown-term JSON parse failed');
+      return;
+    }
+
+    let researched = 0;
+    for (const item of terms) {
+      if (researched >= MAX_TERM_RESEARCH_PER_CYCLE) break;
+      if (typeof item.term !== 'string' || !item.term.trim()) continue;
+      const term = item.term.trim();
+
+      // Skip if researched in the last 24h
+      if (this.recentlyResearched.has(term)) {
+        this.logger.debug({ groupId, term }, 'unknown-term dedup: already researched recently');
+        continue;
+      }
+
+      const context = (item.contextSentence ?? term).trim() || term;
+      this.logger.info({ groupId, term, domain: item.guessedDomain }, 'unknown-term: researching');
+      try {
+        await this.selfLearning.researchOnline({
+          groupId,
+          evasiveBotReplyId: 0,
+          originalTrigger: context,
+          topic: term,
+        });
+        this.recentlyResearched.set(term, this.now());
+        researched++;
+      } catch (err) {
+        this.logger.warn({ err, groupId, term }, 'unknown-term researchOnline failed');
+      }
+    }
+
+    if (researched > 0) {
+      this.logger.info({ groupId, researched }, `unknown-term resolver: researched ${researched} terms`);
+    }
   }
 }
