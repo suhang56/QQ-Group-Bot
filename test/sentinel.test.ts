@@ -28,8 +28,12 @@ describe('hasForbiddenContent', () => {
     expect(hasForbiddenContent('我是一个AI助手，很高兴为您服务')).toBeTruthy();
   });
 
-  it('detects 模仿 substring', () => {
-    expect(hasForbiddenContent('我来模仿他的风格')).toBe('模仿');
+  it('detects 我来模仿 substring (not bare 模仿)', () => {
+    expect(hasForbiddenContent('我来模仿他的风格')).toBe('我来模仿');
+  });
+
+  it('does NOT flag bare 模仿 in natural usage', () => {
+    expect(hasForbiddenContent('没感觉出来模仿群友吗')).toBe(null);
   });
 
   it('detects 请问您', () => {

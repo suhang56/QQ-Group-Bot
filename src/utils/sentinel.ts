@@ -12,7 +12,7 @@ const SUBSTR_FORBIDDEN = [
   '克劳德', '机器人', '助手', 'a.i.',
   'ai模型', '语言模型', '大模型',
   '我是一个', '作为一个',
-  '模仿', '尝试模仿',
+  '尝试模仿',
   '根据您', '历史发言', '不当内容', '无法提供',
   '请问您', '您可以提供', '我来模仿', '风格生成', '您希望', '我可以', '需要我帮', '需要我',
   '我是ai', '我是bot', '一个ai', '一个bot',
@@ -82,7 +82,14 @@ export function postProcess(text: string): string {
     .replace(/\[CQ:mface,[^\]]*\]/g, '')   // strip [CQ:mface,...] — user banned QQ market stickers
     .split('\n')
     .filter(line => !SKIP_LINE_RE.test(line))
-    .map(l => l.trim())
+    .map(l => {
+      // Strip orphan trailing brackets that survived CQ stripping (e.g. from
+      // malformed [CQ:mface,summary=[笑]] where inner ] confuses the regex).
+      // Only strip if the line doesn't contain a balanced [CQ:...] code.
+      const trimmed = l.trim();
+      if (/\[CQ:/.test(trimmed)) return trimmed;
+      return trimmed.replace(/[\[\]]+\s*$/, '').trim();
+    })
     .filter(l => l.length > 0)
     .join('\n')
     .replace(/[\s。]*。[\s。]*$/, '')
