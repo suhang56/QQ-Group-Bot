@@ -84,8 +84,9 @@ export class ClaudeClient implements IClaudeClient {
           thinking: { type: 'disabled' },
           // Minimal effort = fastest path
           effort: 'low',
-          // One-shot: no agent loop
-          maxTurns: 1,
+          // Cap agent loop — chat calls should finish in 1-3 turns; 10 is a
+          // safety net against runaway tool-use loops, not a tight bound.
+          maxTurns: 10,
           ...(req.allowedTools ? { allowedTools: req.allowedTools } : {}),
         },
       });
