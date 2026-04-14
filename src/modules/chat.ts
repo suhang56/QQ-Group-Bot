@@ -1325,7 +1325,7 @@ export class ChatModule implements IChatModule {
     try {
       if (!existsSync(this.tuningPath)) return null;
       const content = readFileSync(this.tuningPath, 'utf8').trim();
-      return content ? `\n\n# 自我反思调优建议（上次反思结果，参考执行）\n${content}` : null;
+      return content || null;
     } catch {
       return null;
     }

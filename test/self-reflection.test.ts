@@ -71,7 +71,7 @@ function makeLearnedFactsRepo(facts: string[] = []): ILearnedFactsRepository {
   } as unknown as ILearnedFactsRepository;
 }
 
-function makeClaude(text = '# 反思\n好的地方...'): IClaudeClient {
+function makeClaude(text = '## 继续这样做\n- 保持简短\n\n## 不要再这样\n- 反思\n\n## 避开的句式\n- （无）\n\n## 补充记忆\n- （无）'): IClaudeClient {
   return {
     complete: vi.fn().mockResolvedValue({ text, inputTokens: 100, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0 }),
     describeImage: vi.fn(), visionWithPrompt: vi.fn(),
@@ -115,7 +115,7 @@ describe('SelfReflectionLoop', () => {
 
     expect(fs.existsSync(outputPath)).toBe(true);
     const content = fs.readFileSync(outputPath, 'utf8');
-    expect(content).toContain('自我反思调优');
+    expect(content).toContain('最近对话 tuning');
     expect(content).toContain('反思');
 
     fs.unlinkSync(outputPath);
@@ -260,7 +260,7 @@ describe('ChatModule tuning.md integration', () => {
   }
 
   it('includes tuning.md content in system prompt when file exists', async () => {
-    const tuningContent = '## 需要改进的\n- 别太啰嗦';
+    const tuningContent = '# 最近对话 tuning (auto-generated 2026-01-01 00:00)\n\n## 继续这样做\n- 保持简短\n\n## 不要再这样\n- 别太啰嗦';
     fs.writeFileSync(tuningPath, tuningContent, 'utf8');
 
     const completeMock = vi.fn().mockResolvedValue({ text: '<skip>', inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 });
@@ -279,7 +279,7 @@ describe('ChatModule tuning.md integration', () => {
     expect(completeMock).toHaveBeenCalled();
     const callArg = completeMock.mock.calls[0]![0];
     const systemTexts = (callArg.system as Array<{ text: string }>).map(s => s.text).join('\n');
-    expect(systemTexts).toContain('自我反思调优建议');
+    expect(systemTexts).toContain('最近对话 tuning');
     expect(systemTexts).toContain('别太啰嗦');
   });
 
@@ -295,7 +295,7 @@ describe('ChatModule tuning.md integration', () => {
     if (completeMock.mock.calls.length > 0) {
       const callArg = completeMock.mock.calls[0]![0];
       const systemTexts = (callArg.system as Array<{ text: string }>).map(s => s.text).join('\n');
-      expect(systemTexts).not.toContain('自我反思调优建议');
+      expect(systemTexts).not.toContain('最近对话 tuning');
     }
   });
 
@@ -314,7 +314,7 @@ describe('ChatModule tuning.md integration', () => {
     if (completeMock.mock.calls.length > 0) {
       const callArg = completeMock.mock.calls[0]![0];
       const systemTexts = (callArg.system as Array<{ text: string }>).map(s => s.text).join('\n');
-      expect(systemTexts).not.toContain('自我反思调优建议');
+      expect(systemTexts).not.toContain('最近对话 tuning');
     }
   });
 });

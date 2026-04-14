@@ -107,26 +107,37 @@ ${factsText}
 ## Recent moderation flags (last 24h)
 ${modText}`;
 
-    const systemPrompt = `You are a reviewer helping improve a QQ group bot persona'd as a 邦批 (BanG Dream fan). Read the recent outputs and identify quality issues. Be specific — name the offending replies and explain why they are problematic. Write in Chinese.`;
+    const systemPrompt = `You are a tuning agent for a QQ group bot persona'd as a 邦批 (BanG Dream fan). Analyze the recent bot outputs and produce ONLY a structured system-prompt snippet that the bot will read directly on its next turn. Do NOT write prose commentary or analysis paragraphs — output ONLY the four markdown sections below, in Chinese, with bullet points under each. Keep each bullet concise and actionable (≤20 chars preferred). If a section has nothing to add, write "（无）" as its only bullet.
+
+Output format (exact headers required):
+## 继续这样做
+- <rule>
+
+## 不要再这样
+- <anti-pattern>
+
+## 避开的句式
+- <phrase or sentence pattern to avoid>
+
+## 补充记忆
+- <fact about recent group context or corrections>`;
 
     let reflection: string;
     try {
       const resp = await this.opts.claude.complete({
         model: REFLECTION_MODEL,
-        maxTokens: 1200,
+        maxTokens: 800,
         system: [{ text: systemPrompt, cache: true }],
         messages: [{ role: 'user', content: userContent }],
       });
-      reflection = resp.text;
+      reflection = resp.text.trim();
     } catch (err) {
       logger.error({ err, groupId: this.opts.groupId }, 'self-reflection Claude call failed — skipping file write');
       throw err;
     }
 
     const now = new Date().toISOString().slice(0, 16).replace('T', ' ');
-    const md = `# 自我反思调优 / Self-Reflection Tuning
-Generated: ${now} | Group: ${this.opts.groupId}
-Reviewed: ${recent.length} replies | Rated: ${rated.length} | Avg: ${avgRating} | Negative: ${negPct}%
+    const md = `# 最近对话 tuning (auto-generated ${now})
 
 ${reflection}
 `;
