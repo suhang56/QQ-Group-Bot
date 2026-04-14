@@ -102,6 +102,8 @@ interface ScoreFactors {
   clarification: number;
   topicStick: number;
   metaIdentityProbe: number;
+  adminBoost: number;
+  stickerRequest: number;
 }
 
 // Signal A: bot alias keywords — always indicate a reference to the bot
@@ -1085,7 +1087,23 @@ export class ChatModule implements IChatModule {
       clarification: 0,
       topicStick: 0,
       metaIdentityProbe: 0,
+      adminBoost: 0,
+      stickerRequest: 0,
     };
+
+    // +0.5 for admin/owner — their messages are trusted commands and should
+    // reliably trigger a reply (subject to cooldown). Admin dev/management
+    // needs the bot to be reactive to them specifically.
+    if (msg.role === 'admin' || msg.role === 'owner') {
+      factors.adminBoost = 0.5;
+    }
+
+    // +0.6 when the message asks for a sticker (even if addressed to a third
+    // party, like "给ytmy发个表情" — it's still an implicit ask the bot
+    // should react to with a sticker).
+    if (/发(个|一个|几个|张|点)?[表贴]情|[表贴]情[包]?$|来点.*[表贴]情/.test(msg.content)) {
+      factors.stickerRequest = 0.6;
+    }
 
     // +1.0 @-mention of bot
     if (this._isMention(msg)) {
