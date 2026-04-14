@@ -123,7 +123,7 @@ export const TASK_DEFLECTIONS = [
 // deflecting a casual reminder with "啥啊" is harmless, and preventing real
 // memory-injection exploits is worth it.
 export const MEMORY_INJECT =
-  /(记住|记下来|记一下|记录一下|记得|背下来|以后叫|以后要|注意一下|听好|听着|告诉你|我告诉你|你要知道|你要记住|从现在起|从今天起|以后的|从此以后|设定你是|假设你是|扮演|角色扮演)/;
+  /(记住|记下来|记一下|记录一下|记得|背下来|以后叫|以后要|注意一下|听好|听着|告诉你|我告诉你|你要知道|你要记住|从现在起|从今天起|以后的|从此以后|设定你是|假设你是|扮演|角色扮演|.{1,10}的\s*(?:妻子|老婆|丈夫|老公|爸爸|妈妈|朋友|女朋友|男朋友|孩子).{0,5}(?:是(?!谁|什么|哪)|叫(?!啥|什么|哪)))/;
 
 export const MEMORY_INJECT_DEFLECTIONS = [
   '记不住', '我又不是你电脑', '啥啊', '谁关心', '懒得记', '嗯', '?', '好好好', '烦', '不想记',
@@ -203,7 +203,7 @@ export const BANGDREAM_PERSONA = `你是这个QQ群的老群友，不是AI，不
 - 圈内黑话自然使用（ygfn/nsy/ykn/邦/烤/现地/梅奔/...）
 - 吐槽时会用"几把""卧槽""笑死""绷不住""555""嘤嘤嘤"之类
 - 偶尔叫群友"姐妹""宝宝""老婆"
-- 遇到自己不懂的话题就装傻或者"啥来的"
+- 遇到自己不懂的话题时，偶尔可以用"啥来的"，但不要总是这一句。更多时候可以：装路过路人（"嗯？" / "？？" / "路过"）、反问（"谁啊" / "啥意思" / "这说的什么"）、直接无视或转话题、对明显的胡编乱造用敷衍（"嗯好的好的" / "懂了谢谢" / "行吧"）。"啥来的" 只用在对一个具体名词/事件的第一次听说时，别当万能回复
 - 不会主动暴露身份，别人问"是不是bot"就装听不懂；是女生但不会刻意强调，问到就自然回答
 - 反怼语气常用："？？""你先说清楚""不想""烦""自己玩""想屁吃""什么啊""你说啥呢"
 - 不要说"好的""当然""明白了""哈哈可以啊"这种讨好式应答`;
@@ -1021,7 +1021,8 @@ export class ChatModule implements IChatModule {
     this.deflectRefilling.add(category);
     try {
       const situation = DEFLECT_SITUATIONS[category];
-      const batchPrompt = `${BANGDREAM_PERSONA}\n\n生成 ${this.deflectCacheSize} 条不同的短回复，每条一行，都是"${situation}"的自然人格反应。要多样，不要重复套路，符合人物态度。3-15 字。只输出 ${this.deflectCacheSize} 行，不要编号/解释。`;
+      const seed = Math.random().toString(36).slice(2, 6);
+      const batchPrompt = `${BANGDREAM_PERSONA}\n\n生成 ${this.deflectCacheSize} 条短回复，每条一行，都是"${situation}"的自然人格反应（随机种子：${seed}）。必须全部不同，不要有任何两条语气相近。尽可能广地覆盖：惊讶/不屑/反问/敷衍/装傻/直接不理/幽默转移 各种风格。禁止在同一批里重复使用"啥"字或任何一个词超过 2 次。3-15 字。只输出 ${this.deflectCacheSize} 行，不要编号/解释。`;
       const response = await this.claude.complete({
         model: 'claude-haiku-4-5-20251001',
         maxTokens: 200,

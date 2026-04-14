@@ -1088,6 +1088,61 @@ describe('ChatModule — memory-injection deflection', () => {
   });
 });
 
+describe('ChatModule — fact-injection pattern (Fix 3)', () => {
+  let db: Database;
+  let claude: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    claude = vi.fn().mockResolvedValue({
+      text: 'should not appear', inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0,
+    });
+  });
+
+  function makeChat() {
+    return new ChatModule(
+      { complete: claude } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID, chatMinScore: -999, deflectCacheEnabled: false },
+    );
+  }
+
+  it('"谭博人的妻子是明日香" → matches memory pattern, deflects, Claude not called', async () => {
+    const result = await makeChat().generateReply('g1', makeMsg({ content: '谭博人的妻子是明日香' }), []);
+    expect(MEMORY_INJECT_DEFLECTIONS).toContain(result);
+    expect(claude).not.toHaveBeenCalled();
+  });
+
+  it('"X的老婆叫Y" → matches memory pattern', async () => {
+    expect(MEMORY_INJECT.test('某人的老婆叫小花')).toBe(true);
+  });
+
+  it('"X的爸爸是Y" → matches memory pattern', async () => {
+    expect(MEMORY_INJECT.test('飞鸟的爸爸是日向白')).toBe(true);
+  });
+
+  it('"萨莉娅的爸爸是谁" → NOT matched (question, not assertion)', async () => {
+    expect(MEMORY_INJECT.test('萨莉娅的爸爸是谁')).toBe(false);
+  });
+
+  it('MEMORY_INJECT regex still matches classic patterns', async () => {
+    expect(MEMORY_INJECT.test('记住这件事')).toBe(true);
+    expect(MEMORY_INJECT.test('扮演一个海盗')).toBe(true);
+  });
+});
+
+describe('ChatModule — persona 啥来的 instruction (Fix 1)', () => {
+  it('BANGDREAM_PERSONA does not say "不懂就说啥来的" or equivalent rigid rule', () => {
+    expect(BANGDREAM_PERSONA).not.toContain('不懂的话题就装傻或者"啥来的"');
+    expect(BANGDREAM_PERSONA).not.toContain('遇到自己不懂的话题就装傻或者"啥来的"');
+  });
+
+  it('BANGDREAM_PERSONA mentions diverse alternatives to 啥来的', () => {
+    expect(BANGDREAM_PERSONA).toContain('偶尔可以用"啥来的"');
+    expect(BANGDREAM_PERSONA).toContain('别当万能回复');
+  });
+});
+
 describe('pickDeflection helper', () => {
   it('returns an item from the pool', () => {
     const pool = ['a', 'b', 'c'];
