@@ -13,6 +13,7 @@ import { MoodTracker, PROACTIVE_POOLS, type MoodDescription } from './mood.js';
 import type { VisionService } from './vision.js';
 import type { IEmbeddingService } from '../storage/embeddings.js';
 import type { ILocalStickerRepository } from '../storage/db.js';
+import type { SelfLearningModule } from './self-learning.js';
 import { cosineSimilarity } from '../storage/embeddings.js';
 
 export interface IChatModule {
@@ -23,6 +24,7 @@ export interface IChatModule {
   tickStickerRefresh(groupId: string): void;
   getMoodTracker(): MoodTracker;
   noteAdminActivity(groupId: string, userId: string, nickname: string, content: string): void;
+  getEvasiveFlagForLastReply(groupId: string): boolean;
 }
 
 interface ChatOptions {
@@ -72,6 +74,7 @@ interface ChatOptions {
   chatAdminMirrorEnabled?: boolean;
   chatAdminMirrorMaxAdmins?: number;
   chatAdminMirrorSamplesPerAdmin?: number;
+  selfLearning?: SelfLearningModule;
 }
 
 interface ScoreFactors {
@@ -416,6 +419,9 @@ export class ChatModule implements IChatModule {
   private readonly chatAdminMirrorEnabled: boolean;
   private readonly chatAdminMirrorMaxAdmins: number;
   private readonly chatAdminMirrorSamplesPerAdmin: number;
+  private readonly selfLearning: SelfLearningModule | null;
+  // per-group: whether the last generateReply call returned an evasive reply
+  private readonly lastEvasiveReply = new Map<string, boolean>();
 
   private readonly loreDirPath: string;
   private readonly loreSizeCapBytes: number;
@@ -465,6 +471,7 @@ export class ChatModule implements IChatModule {
     this.chatAdminMirrorEnabled = options.chatAdminMirrorEnabled ?? true;
     this.chatAdminMirrorMaxAdmins = options.chatAdminMirrorMaxAdmins ?? 5;
     this.chatAdminMirrorSamplesPerAdmin = options.chatAdminMirrorSamplesPerAdmin ?? 5;
+    this.selfLearning = options.selfLearning ?? null;
 
     if (this.moodProactiveEnabled) {
       this.moodProactiveTimer = setInterval(
@@ -535,6 +542,19 @@ export class ChatModule implements IChatModule {
     arr = [...arr, reply];
     if (arr.length > 5) arr = arr.slice(-5);
     this.botRecentOutputs.set(groupId, arr);
+  }
+
+  /** Returns true if the reply is a known 装傻 (evasive) phrase. */
+  _isEvasiveReply(text: string): boolean {
+    return /^(忘了|考我呢|记不得|没听过|啥来的|？+|啊？|这还要问|自己听|不知道|我哪知道)/.test(text.trim());
+  }
+
+  /**
+   * Returns whether the last generateReply call for a group produced an evasive reply.
+   * Router reads this synchronously right after generateReply returns.
+   */
+  getEvasiveFlagForLastReply(groupId: string): boolean {
+    return this.lastEvasiveReply.get(groupId) ?? false;
   }
 
   /** Record a message from a group admin/owner for speech-style mirroring. */
@@ -728,6 +748,8 @@ export class ChatModule implements IChatModule {
 
 只输出一个：<skip> 或 一条自然反应（可多行）。`;
 
+    const factsBlock = this.selfLearning?.formatFactsForPrompt(groupId, 50) ?? '';
+
     const chatRequest = (hardened = false) => this.claude.complete({
       model: RUNTIME_CHAT_MODEL,
       maxTokens: 300,
@@ -738,6 +760,7 @@ export class ChatModule implements IChatModule {
             { text: systemPrompt, cache: true },
             ...(moodSection ? [{ text: moodSection, cache: true as const }] : []),
             ...(contextStickerSection ? [{ text: contextStickerSection, cache: true as const }] : []),
+            ...(factsBlock ? [{ text: factsBlock, cache: true as const }] : []),
           ],
       messages: [{ role: 'user', content: userContent }],
     });
@@ -773,6 +796,7 @@ export class ChatModule implements IChatModule {
         until: Date.now() + 90_000,
         msgCount: 0,
       });
+      this.lastEvasiveReply.set(groupId, this._isEvasiveReply(processed));
       return processed;
     } catch (err) {
       if (err instanceof ClaudeApiError || err instanceof ClaudeParseError) {
@@ -1151,7 +1175,7 @@ export class ChatModule implements IChatModule {
   /** Generate a single deflection phrase live via Claude (no caching). */
   private async _generateDeflectionLive(category: DeflectCategory, triggerMsg: GroupMessage): Promise<string | null> {
     const situation = DEFLECT_SITUATIONS[category];
-    const prompt = `${BANGDREAM_PERSONA}\n\n# 现在的情况\n${situation}\n\n触发消息: "${triggerMsg.content}"\n\n请以你的人格、态度自然回复一句极短（3-15字）的话。不要解释、不要道歉、不要说"作为AI"、不要合作、不要接话题。直接反应就行。只输出那句话本身。`;
+    const prompt = `${BANGDREAM_PERSONA}\n\n# 现在的情况\n${situation}\n\n触发消息: "${triggerMsg.content}"\n\n请以你的人格、态度自然回复一句极短（3-15字）的话。不要解释、不要道歉、不要说"作为AI"、不要合作、不要接话题。直接反应就行。只输出那句话本身。\n注意：现在不是水群，你**不能**输出 <skip>，必须给一句真实的话。`;
     const response = await this.claude.complete({
       model: RUNTIME_CHAT_MODEL,
       maxTokens: 50,
@@ -1166,6 +1190,7 @@ export class ChatModule implements IChatModule {
     const text = raw.trim();
     if (!text) return null;
     if (text.length > 30) return null;
+    if (/[<>]/.test(text)) return null;
     if (/[:：——]/.test(text)) return null;
     if (/作为ai|作为机器|我是ai|我是一个|无法|帮您|好的，|当然，/i.test(text)) return null;
     return text;
@@ -1178,7 +1203,7 @@ export class ChatModule implements IChatModule {
     try {
       const situation = DEFLECT_SITUATIONS[category];
       const seed = Math.random().toString(36).slice(2, 6);
-      const batchPrompt = `${BANGDREAM_PERSONA}\n\n生成 ${this.deflectCacheSize} 条短回复，每条一行，都是"${situation}"的自然人格反应（随机种子：${seed}）。必须全部不同，不要有任何两条语气相近。尽可能广地覆盖：惊讶/不屑/反问/敷衍/装傻/直接不理/幽默转移 各种风格。禁止在同一批里重复使用"啥"字或任何一个词超过 2 次。3-15 字。只输出 ${this.deflectCacheSize} 行，不要编号/解释。`;
+      const batchPrompt = `${BANGDREAM_PERSONA}\n\n生成 ${this.deflectCacheSize} 条短回复，每条一行，都是"${situation}"的自然人格反应（随机种子：${seed}）。必须全部不同，不要有任何两条语气相近。尽可能广地覆盖：惊讶/不屑/反问/敷衍/装傻/直接不理/幽默转移 各种风格。禁止在同一批里重复使用"啥"字或任何一个词超过 2 次。3-15 字。只输出 ${this.deflectCacheSize} 行，不要编号/解释。\n不能有任何一条是 <skip> 或带尖括号的内容。每条必须是真实的中文短语或emoji。`;
       const response = await this.claude.complete({
         model: RUNTIME_CHAT_MODEL,
         maxTokens: 200,

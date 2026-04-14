@@ -1682,6 +1682,32 @@ describe('ChatModule — deflection cache', () => {
     expect(chat['_validateDeflection']('这是一句超过三十个字符的超级超级超级超级超级超级超级超级长句子啊')).toBeNull();
     expect(chat['_validateDeflection']('短句')).toBe('短句');
   });
+
+  // angle-bracket rejection (prevents <skip> and similar leaks from deflection path)
+  it('_validateDeflection rejects <skip>', () => {
+    const chat = makeChat(vi.fn());
+    expect(chat['_validateDeflection']('<skip>')).toBeNull();
+  });
+
+  it('_validateDeflection rejects <SKIP>', () => {
+    const chat = makeChat(vi.fn());
+    expect(chat['_validateDeflection']('<SKIP>')).toBeNull();
+  });
+
+  it('_validateDeflection rejects "<skip> " (trims first, still has angle bracket)', () => {
+    const chat = makeChat(vi.fn());
+    expect(chat['_validateDeflection']('<skip> ')).toBeNull();
+  });
+
+  it('_validateDeflection passes "啥?" (short valid phrase)', () => {
+    const chat = makeChat(vi.fn());
+    expect(chat['_validateDeflection']('啥?')).toBe('啥?');
+  });
+
+  it('_validateDeflection passes "哈哈哈哈" (no regression)', () => {
+    const chat = makeChat(vi.fn());
+    expect(chat['_validateDeflection']('哈哈哈哈')).toBe('哈哈哈哈');
+  });
 });
 
 // ── Pure @-mention with no content ───────────────────────────────────────────
@@ -2384,5 +2410,144 @@ describe('ChatModule — topicStick engagement factor', () => {
     const result = await chat.generateReply('g1', msg, []);
     // topicStick=0, no question, no silence → score ≤ 0 → skip
     expect(result).toBeNull();
+  });
+});
+
+// ── Batch C: self-learning wiring in chat.ts ──────────────────────────────────
+
+import type { SelfLearningModule } from '../src/modules/self-learning.js';
+
+function makeMockSelfLearning(factsOutput = ''): SelfLearningModule {
+  return {
+    detectCorrection: vi.fn().mockResolvedValue(null),
+    harvestPassiveKnowledge: vi.fn().mockResolvedValue(null),
+    formatFactsForPrompt: vi.fn().mockReturnValue(factsOutput),
+    getModel: vi.fn().mockReturnValue('claude-sonnet-4-6'),
+  } as unknown as SelfLearningModule;
+}
+
+describe('ChatModule — _isEvasiveReply', () => {
+  let db: Database;
+
+  beforeEach(() => { db = new Database(':memory:'); });
+
+  function makeChat() {
+    return new ChatModule(makeMockClaude(), db, { botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999 });
+  }
+
+  it('"忘了" matches evasive pattern', () => expect(makeChat()['_isEvasiveReply']('忘了')).toBe(true));
+  it('"考我呢" matches evasive pattern', () => expect(makeChat()['_isEvasiveReply']('考我呢')).toBe(true));
+  it('"记不得" matches evasive pattern', () => expect(makeChat()['_isEvasiveReply']('记不得')).toBe(true));
+  it('"没听过" matches evasive pattern', () => expect(makeChat()['_isEvasiveReply']('没听过')).toBe(true));
+  it('"啥来的" matches evasive pattern', () => expect(makeChat()['_isEvasiveReply']('啥来的')).toBe(true));
+  it('"？？" matches evasive pattern (question marks)', () => expect(makeChat()['_isEvasiveReply']('？？')).toBe(true));
+  it('"啊？" matches evasive pattern', () => expect(makeChat()['_isEvasiveReply']('啊？')).toBe(true));
+  it('"不知道" matches evasive pattern', () => expect(makeChat()['_isEvasiveReply']('不知道')).toBe(true));
+  it('"我哪知道" matches evasive pattern', () => expect(makeChat()['_isEvasiveReply']('我哪知道')).toBe(true));
+  it('"是Roselia唱的" does NOT match evasive pattern', () => expect(makeChat()['_isEvasiveReply']('是Roselia唱的')).toBe(false));
+  it('"好啊" does NOT match evasive pattern', () => expect(makeChat()['_isEvasiveReply']('好啊')).toBe(false));
+});
+
+describe('ChatModule — getEvasiveFlagForLastReply', () => {
+  let db: Database;
+
+  beforeEach(() => { db = new Database(':memory:'); });
+
+  it('returns false before any reply', () => {
+    const chat = new ChatModule(makeMockClaude(), db, { botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999 });
+    expect(chat.getEvasiveFlagForLastReply('g1')).toBe(false);
+  });
+
+  it('returns true after an evasive reply', async () => {
+    const claude = vi.fn().mockResolvedValue({
+      text: '忘了', inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0,
+    } satisfies ClaudeResponse);
+    const chat = new ChatModule(
+      { complete: claude } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999, moodProactiveEnabled: false, deflectCacheEnabled: false },
+    );
+    await chat.generateReply('g1', makeMsg({ content: 'fire bird 是谁' }), []);
+    expect(chat.getEvasiveFlagForLastReply('g1')).toBe(true);
+  });
+
+  it('returns false after a non-evasive reply', async () => {
+    const chat = new ChatModule(makeMockClaude('好啊'), db, {
+      botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999, moodProactiveEnabled: false, deflectCacheEnabled: false,
+    });
+    await chat.generateReply('g1', makeMsg({ content: '今天天气' }), []);
+    expect(chat.getEvasiveFlagForLastReply('g1')).toBe(false);
+  });
+
+  it('flag is per-group isolated', async () => {
+    const claude = vi.fn()
+      .mockResolvedValueOnce({ text: '忘了', inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 } satisfies ClaudeResponse)
+      .mockResolvedValue({ text: '好啊', inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 } satisfies ClaudeResponse);
+    const chat = new ChatModule(
+      { complete: claude } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999, moodProactiveEnabled: false, deflectCacheEnabled: false },
+    );
+    await chat.generateReply('g1', makeMsg({ groupId: 'g1', content: 'fire bird' }), []);
+    await chat.generateReply('g2', makeMsg({ groupId: 'g2', content: 'hello' }), []);
+    expect(chat.getEvasiveFlagForLastReply('g1')).toBe(true);
+    expect(chat.getEvasiveFlagForLastReply('g2')).toBe(false);
+  });
+});
+
+describe('ChatModule — formatFactsForPrompt injection into system prompt', () => {
+  let db: Database;
+
+  beforeEach(() => { db = new Database(':memory:'); });
+
+  it('when selfLearning returns facts, they appear in system messages', async () => {
+    const factsText = '## 群里学到的事实\n- fire bird 是 Roselia 的曲子（被 群友A 纠正过）';
+    const sl = makeMockSelfLearning(factsText);
+    const claude = vi.fn().mockResolvedValue({
+      text: '好啊', inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0,
+    } satisfies ClaudeResponse);
+    const chat = new ChatModule(
+      { complete: claude } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999, moodProactiveEnabled: false, deflectCacheEnabled: false, selfLearning: sl },
+    );
+    const msg = makeMsg({ content: '有人吗', rawContent: `[CQ:at,qq=${BOT_ID}] 有人吗` });
+    await chat.generateReply('g1', msg, []);
+
+    const call = (claude as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { system: Array<{ text: string }> };
+    const allText = call.system.map(s => s.text).join('\n');
+    expect(allText).toContain('fire bird 是 Roselia 的曲子');
+    expect(sl.formatFactsForPrompt).toHaveBeenCalledWith('g1', 50);
+  });
+
+  it('when selfLearning returns empty string, system messages have no facts block', async () => {
+    const sl = makeMockSelfLearning('');
+    const claude = vi.fn().mockResolvedValue({
+      text: '好啊', inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0,
+    } satisfies ClaudeResponse);
+    const chat = new ChatModule(
+      { complete: claude } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999, moodProactiveEnabled: false, deflectCacheEnabled: false, selfLearning: sl },
+    );
+    const msg = makeMsg({ content: '有人吗', rawContent: `[CQ:at,qq=${BOT_ID}] 有人吗` });
+    await chat.generateReply('g1', msg, []);
+
+    const call = (claude as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { system: Array<{ text: string }> };
+    const allText = call.system.map(s => s.text).join('\n');
+    expect(allText).not.toContain('群里学到的事实');
+  });
+
+  it('when no selfLearning configured, system prompt still works normally', async () => {
+    const claude = vi.fn().mockResolvedValue({
+      text: '好啊', inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0,
+    } satisfies ClaudeResponse);
+    const chat = new ChatModule(
+      { complete: claude } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999, moodProactiveEnabled: false, deflectCacheEnabled: false },
+    );
+    const msg = makeMsg({ content: '有人吗', rawContent: `[CQ:at,qq=${BOT_ID}] 有人吗` });
+    await expect(chat.generateReply('g1', msg, [])).resolves.toBe('好啊');
   });
 });
