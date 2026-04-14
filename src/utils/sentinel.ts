@@ -28,7 +28,7 @@ const SUBSTR_FORBIDDEN = [
 
 // Soft-forbidden: reply STARTS with these → assistant meta-framing
 const SOFT_FORBIDDEN_STARTS = [
-  '好的，', '当然，', '我来', '让我', '这是', '以下是',
+  '好的，', '当然，', '我来', '让我', '这是一个', '这是为了', '这是因为', '以下是',
 ];
 
 const WORD_RE = new RegExp(
