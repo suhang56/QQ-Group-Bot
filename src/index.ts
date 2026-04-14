@@ -21,6 +21,7 @@ import { WelcomeModule } from './modules/welcome.js';
 import { IdCardGuard } from './modules/id-guard.js';
 import { SequenceGuard } from './modules/sequence-guard.js';
 import { SelfReflectionLoop } from './modules/self-reflection.js';
+import { OpportunisticHarvest } from './modules/opportunistic-harvest.js';
 import { RatingPortalServer } from './server/rating-portal.js';
 import { TuningGenerator } from './server/tuning-generator.js';
 
@@ -125,6 +126,14 @@ const sequenceGuard = new SequenceGuard({
 });
 router.setSequenceGuard(sequenceGuard);
 
+const harvest = new OpportunisticHarvest({
+  messages: db.messages,
+  learnedFacts: db.learnedFacts,
+  claude,
+  activeGroups: ACTIVE_GROUPS,
+  enabled: process.env['OPPORTUNISTIC_HARVEST_ENABLED'] !== '0',
+});
+
 const selfReflectionEnabled = process.env['SELF_REFLECTION_ENABLED'] !== '0';
 const selfReflection = ACTIVE_GROUPS[0]
   ? new SelfReflectionLoop({
@@ -168,6 +177,7 @@ try {
     logger.warn('no active groups configured, announcement sync disabled');
   }
   selfReflection?.start();
+  harvest.start();
 } catch (err) {
   logger.fatal({ err }, 'Failed to connect to NapCat — check NAPCAT_WS_URL and NapCat status');
   process.exit(1);
@@ -192,6 +202,7 @@ const shutdown = async () => {
   logger.info('Shutting down...');
   announcementSync.stop();
   selfReflection?.dispose();
+  harvest.dispose();
   router.dispose();
   ratingPortal?.stop();
   await adapter.disconnect();
