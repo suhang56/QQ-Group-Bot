@@ -696,9 +696,17 @@ export class ChatModule implements IChatModule {
     }
   }
 
-  /** Returns true if the reply is a known 装傻 (evasive) phrase. */
+  /** Returns true if the reply is a known 装傻 (evasive) phrase OR an asking-back pattern. */
   _isEvasiveReply(text: string): boolean {
-    return /^(忘了|考我呢|记不得|没听过|啥来的|？+|啊？|这还要问|自己听|不知道|我哪知道)/.test(text.trim());
+    const trimmed = text.trim();
+    if (/^(忘了|考我呢|记不得|没听过|啥来的|？+|啊？|这还要问|自己听|不知道|我哪知道)/.test(trimmed)) return true;
+    // Asking-back patterns — bot admitting it doesn't know a term by asking the group
+    // "mxd是啥" / "XX是什么" / "什么是XX" / "XX啥意思" / "XX是谁" / "XX咋" — 2-20 char subject
+    if (/^.{1,20}(是啥|是什么|啥意思|什么意思|是谁|咋回事|是干啥的)[\?？]?$/.test(trimmed)) return true;
+    if (/^(什么是|谁是|啥是).{1,20}[\?？]?$/.test(trimmed)) return true;
+    // Short asking-back without period — "你们都不知道mxd是啥" etc
+    if (/.{1,20}(是啥|是什么|啥意思)/.test(trimmed) && trimmed.length < 30) return true;
+    return false;
   }
 
   /**

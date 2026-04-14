@@ -2732,6 +2732,12 @@ describe('ChatModule — _isEvasiveReply', () => {
   it('"我哪知道" matches evasive pattern', () => expect(makeChat()['_isEvasiveReply']('我哪知道')).toBe(true));
   it('"是Roselia唱的" does NOT match evasive pattern', () => expect(makeChat()['_isEvasiveReply']('是Roselia唱的')).toBe(false));
   it('"好啊" does NOT match evasive pattern', () => expect(makeChat()['_isEvasiveReply']('好啊')).toBe(false));
+  it('"mxd是啥" matches (asking-back)', () => expect(makeChat()['_isEvasiveReply']('mxd是啥')).toBe(true));
+  it('"mxd是什么" matches (asking-back)', () => expect(makeChat()['_isEvasiveReply']('mxd是什么')).toBe(true));
+  it('"什么是ygfn" matches (asking-back)', () => expect(makeChat()['_isEvasiveReply']('什么是ygfn')).toBe(true));
+  it('"nsy啥意思" matches (asking-back)', () => expect(makeChat()['_isEvasiveReply']('nsy啥意思')).toBe(true));
+  it('"你们都不知道mxd是啥" matches (asking-back short sentence)', () => expect(makeChat()['_isEvasiveReply']('你们都不知道mxd是啥')).toBe(true));
+  it('"FIRE BIRD 是 Roselia 的曲" does NOT match (answer, not asking)', () => expect(makeChat()['_isEvasiveReply']('FIRE BIRD 是 Roselia 的曲')).toBe(false));
 });
 
 describe('ChatModule — getEvasiveFlagForLastReply', () => {
