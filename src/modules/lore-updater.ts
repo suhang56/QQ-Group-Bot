@@ -108,7 +108,7 @@ export class LoreUpdater {
       const prompt = `${loreSection}以下是该群最近 ${msgCount} 条聊天记录：\n${msgLines}\n\n---\n请基于新消息更新群志：\n1. 如果有新出现的群友（之前没在档案里的），添加到"常驻群友"\n2. 如果有新的梗/黑话/群内事件，添加到对应词典\n3. 如果已有条目需要补充新信息，扩展该条目\n4. 保留所有原有内容，不要删除已有记录\n5. 输出完整的新版群志 markdown，不要添加任何前缀或说明文字`;
 
       const resp = await this.claude.complete({
-        model: 'claude-sonnet-4-6',
+        model: 'claude-haiku-4-5-20251001',
         maxTokens: 8000,
         system: [{ text: '你是群组记录员，负责维护群志文档。直接输出 markdown 内容，不要任何前缀。', cache: true }],
         messages: [{ role: 'user', content: prompt }],

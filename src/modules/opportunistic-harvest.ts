@@ -9,7 +9,7 @@ const MIN_NEW_MESSAGES = 8;
 const MAX_FACTS_PER_RUN = 12;
 const MAX_FACTS_DEEP = 30;
 const FACT_DEDUP_PREFIX_LEN = 20;
-const HARVEST_MODEL = 'claude-sonnet-4-6' as const;
+const HARVEST_MODEL = 'claude-haiku-4-5-20251001' as const;
 const MAX_TERM_RESEARCH_PER_CYCLE = 3;
 const TERM_DEDUP_TTL_MS = 24 * 60 * 60_000;
 

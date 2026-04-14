@@ -5,7 +5,7 @@ import { createLogger } from '../utils/logger.js';
 import { extractJson } from '../utils/json-extract.js';
 
 const MIN_NEW_MESSAGES = 50;
-const ALIAS_MODEL = 'claude-sonnet-4-6' as const;
+const ALIAS_MODEL = 'claude-haiku-4-5-20251001' as const;
 const ALIAS_TOPIC_PREFIX = '群友别名 ';
 
 interface AliasEntry {

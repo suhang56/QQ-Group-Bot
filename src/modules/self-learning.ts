@@ -123,7 +123,7 @@ export class SelfLearningModule {
     this.correctionWindowMs = opts.correctionWindowMs ?? 600_000;
     this.harvestMaxPerMinute = opts.harvestMaxPerMinute ?? 2;
     this.harvestWindowMs = opts.harvestWindowMs ?? 60_000;
-    this.model = opts.model ?? 'claude-sonnet-4-6';
+    this.model = opts.model ?? 'claude-haiku-4-5-20251001';
     this.now = opts.now ?? (() => Date.now());
     this.researchMaxPer10MinPerGroup = opts.researchMaxPer10MinPerGroup ?? 3;
     this.researchMaxPerDayGlobal = opts.researchMaxPerDayGlobal ?? 30;

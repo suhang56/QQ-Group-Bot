@@ -8,7 +8,7 @@ import { createLogger } from '../utils/logger.js';
 
 const logger = createLogger('self-reflection');
 
-const REFLECTION_MODEL = 'claude-sonnet-4-6' as const;
+const REFLECTION_MODEL = 'claude-haiku-4-5-20251001' as const;
 const HOURLY_MS = 60 * 60 * 1000;
 const INITIAL_DELAY_MS = 30_000;
 const BOT_REPLIES_LIMIT = 200;
