@@ -19,6 +19,7 @@ import { VisionService } from './modules/vision.js';
 import { StickerCaptureService } from './modules/sticker-capture.js';
 import { WelcomeModule } from './modules/welcome.js';
 import { IdCardGuard } from './modules/id-guard.js';
+import { SequenceGuard } from './modules/sequence-guard.js';
 import { RatingPortalServer } from './server/rating-portal.js';
 import { TuningGenerator } from './server/tuning-generator.js';
 
@@ -110,6 +111,14 @@ const idGuard = new IdCardGuard({
   enabled: () => true,
 });
 router.setIdGuard(idGuard);
+
+const sequenceGuard = new SequenceGuard({
+  adapter,
+  pendingModeration: db.pendingModeration,
+  adminUserId: process.env['MOD_APPROVAL_ADMIN'] ?? '2331924739',
+  botUserId,
+});
+router.setSequenceGuard(sequenceGuard);
 
 // 5. Wire events
 adapter.on('error', (err) => {

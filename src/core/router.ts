@@ -9,6 +9,7 @@ import type { LoreUpdater } from '../modules/lore-updater.js';
 import type { StickerCaptureService } from '../modules/sticker-capture.js';
 import type { SelfLearningModule } from '../modules/self-learning.js';
 import type { IdCardGuard } from '../modules/id-guard.js';
+import type { SequenceGuard } from '../modules/sequence-guard.js';
 import { extractTokens } from '../modules/chat.js';
 import { BotErrorCode } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
@@ -83,6 +84,7 @@ export class Router implements IRouter {
   private stickerCapture: StickerCaptureService | null = null;
   private selfLearning: SelfLearningModule | null = null;
   private idGuard: IdCardGuard | null = null;
+  private sequenceGuard: SequenceGuard | null = null;
 
   // Repeater cooldown: key = `${groupId}:${content}`, value = last-triggered timestamp
   private readonly repeaterCooldown = new Map<string, number>();
@@ -147,10 +149,15 @@ export class Router implements IRouter {
     this.idGuard = guard;
   }
 
+  setSequenceGuard(guard: SequenceGuard): void {
+    this.sequenceGuard = guard;
+  }
+
   dispose(): void {
     for (const timer of this.harvestTimers.values()) clearTimeout(timer);
     this.harvestTimers.clear();
     if (this.expiryInterval) { clearInterval(this.expiryInterval); this.expiryInterval = null; }
+    this.sequenceGuard?.dispose();
   }
 
   async dispatch(msg: GroupMessage): Promise<void> {
@@ -166,6 +173,15 @@ export class Router implements IRouter {
           return false;
         });
         if (blocked) return;
+      }
+
+      // Sequence guard — cross-message 接龙 relay detection
+      if (this.sequenceGuard) {
+        const seqHit = await this.sequenceGuard.check(msg).catch(err => {
+          this.logger.error({ err, messageId: msg.messageId }, 'sequenceGuard check failed');
+          return false;
+        });
+        if (seqHit) return;
       }
 
       // Lore updater tick: increment per-group counter, fire async update if threshold hit
