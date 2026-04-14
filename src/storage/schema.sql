@@ -165,3 +165,24 @@ CREATE TABLE IF NOT EXISTS local_stickers (
 );
 
 CREATE INDEX IF NOT EXISTS idx_local_stickers_group ON local_stickers(group_id, count DESC);
+
+CREATE TABLE IF NOT EXISTS learned_facts (
+  id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id             TEXT    NOT NULL,
+  topic                TEXT,
+  fact                 TEXT    NOT NULL,
+  source_user_id       TEXT,
+  source_user_nickname TEXT,
+  source_msg_id        TEXT,
+  bot_reply_id         INTEGER,
+  confidence           REAL    NOT NULL DEFAULT 1.0,
+  status               TEXT    NOT NULL DEFAULT 'active',
+  created_at           INTEGER NOT NULL,
+  updated_at           INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_learned_facts_group_active
+  ON learned_facts(group_id, status, created_at DESC);
+
+-- bot_replies.was_evasive: 1 when bot emitted an evasive reply (e.g. "忘了" / "考我呢").
+-- Existing DBs are migrated via runtime ALTER TABLE in db.ts._runMigrations.
