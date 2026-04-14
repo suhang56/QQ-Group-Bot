@@ -152,7 +152,6 @@ export class ClaudeClient implements IClaudeClient {
         prompt: input(),
         options: {
           model,
-          maxTurns: 1,
           settingSources: [],
           persistSession: false,
           hooks: {},
