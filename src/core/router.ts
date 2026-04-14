@@ -22,6 +22,11 @@ const MAX_SPLIT_LINES = 3;
 const MOD_APPROVAL_ADMIN = process.env['MOD_APPROVAL_ADMIN'] ?? '2331924739';
 const MOD_DM_HOURLY_CAP = 20;
 const MOD_EXPIRY_SEC = 600; // 10 minutes
+// Users allowed to DM the bot for appeals. Admin is always allowed.
+const APPEAL_ALLOWED_USERS = new Set<string>(
+  (process.env['APPEAL_ALLOWED_USERS']?.split(',').filter(Boolean)) ?? ['1424791852']
+);
+const APPEAL_HOURLY_CAP_PER_USER = 3;
 const SPLIT_DELAY_MIN_MS = 30;
 const SPLIT_DELAY_MAX_MS = 80;
 
@@ -108,6 +113,16 @@ export class Router implements IRouter {
   private modDmHourStart = Math.floor(Date.now() / 3600000);
   // D5: expiry sweep interval
   private expiryInterval: ReturnType<typeof setInterval> | null = null;
+
+  // Appeals: in-memory pending appeal store. Short-lived — admin responds
+  // within minutes/hours typically, and bot restarts clear the queue.
+  private readonly pendingAppeals = new Map<number, {
+    userId: string; nickname: string; text: string; createdAt: number;
+  }>();
+  private nextAppealId = 1;
+  // Per-user appeal rate limit: userId → count in current hour
+  private readonly appealCounts = new Map<string, number>();
+  private appealCountHour = Math.floor(Date.now() / 3600000);
 
   constructor(
     private readonly db: Database,
@@ -848,9 +863,69 @@ export class Router implements IRouter {
     }
   }
 
+  private async _handleAppealFromUser(msg: PrivateMessage): Promise<void> {
+    const text = msg.content.trim();
+    if (text.length === 0) return;
+    if (text.length > 500) {
+      await this.adapter.sendPrivateMessage(msg.userId, '申诉内容过长，请精简到 500 字以内。').catch(() => { /* ignore */ });
+      return;
+    }
+
+    // Rate limit per user
+    const nowHour = Math.floor(Date.now() / 3600000);
+    if (nowHour !== this.appealCountHour) { this.appealCounts.clear(); this.appealCountHour = nowHour; }
+    const cnt = this.appealCounts.get(msg.userId) ?? 0;
+    if (cnt >= APPEAL_HOURLY_CAP_PER_USER) {
+      this.logger.info({ userId: msg.userId }, 'appeal rate limited — dropping');
+      await this.adapter.sendPrivateMessage(msg.userId, '申诉过于频繁，请一小时后再试。').catch(() => { /* ignore */ });
+      return;
+    }
+    this.appealCounts.set(msg.userId, cnt + 1);
+
+    const appealId = this.nextAppealId++;
+    this.pendingAppeals.set(appealId, {
+      userId: msg.userId, nickname: msg.nickname ?? msg.userId,
+      text, createdAt: Date.now(),
+    });
+
+    // Lookup user's most recent mute for context
+    const recent = (this.db as unknown as { _db: { prepare(s: string): { all(...a: unknown[]): unknown[] } } })._db
+      .prepare("SELECT group_id, action, reason, timestamp FROM moderation_log WHERE user_id = ? ORDER BY timestamp DESC LIMIT 1")
+      .all(msg.userId) as Array<{ group_id: string; action: string; reason: string; timestamp: number }>;
+    const ctxLine = recent.length > 0
+      ? `最近处罚：群 ${recent[0]!.group_id}，${recent[0]!.action}，原因：${recent[0]!.reason.slice(0, 80)}`
+      : '无最近处罚记录';
+
+    const dm = `[申诉 #${appealId}] 用户 ${msg.nickname}(${msg.userId}) 发来申诉：
+${text}
+
+${ctxLine}
+
+/appeal_approve ${appealId} 解除禁言
+/appeal_reject ${appealId} 驳回申诉`;
+
+    try {
+      await this.adapter.sendPrivateMessage(MOD_APPROVAL_ADMIN, dm);
+      await this.adapter.sendPrivateMessage(msg.userId, `申诉已提交（编号 #${appealId}），管理员会尽快处理。`).catch(() => { /* ignore */ });
+      this.logger.info({ appealId, userId: msg.userId }, 'appeal forwarded to admin');
+    } catch (err) {
+      this.logger.error({ err, appealId, userId: msg.userId }, 'failed to forward appeal to admin');
+      // Still keep the pending entry so admin can /appeals to see it later if DM recovers
+    }
+  }
+
   async dispatchPrivate(msg: PrivateMessage): Promise<void> {
-    if (msg.userId !== MOD_APPROVAL_ADMIN) {
-      this.logger.debug({ userId: msg.userId }, 'private message from non-admin — ignored');
+    const isAdmin = msg.userId === MOD_APPROVAL_ADMIN;
+    const isAppealAllowed = APPEAL_ALLOWED_USERS.has(msg.userId);
+
+    if (!isAdmin && !isAppealAllowed) {
+      this.logger.debug({ userId: msg.userId }, 'private message from unauthorized user — ignored');
+      return;
+    }
+
+    // Non-admin appeal flow: forward message to admin for decision
+    if (!isAdmin) {
+      await this._handleAppealFromUser(msg);
       return;
     }
 
@@ -860,6 +935,57 @@ export class Router implements IRouter {
     const reply = async (t: string) => {
       await this.adapter.sendPrivateMessage(MOD_APPROVAL_ADMIN, t);
     };
+
+    // Admin appeal commands
+    const appealApproveMatch = /^\/appeal_approve\s+(\d+)$/i.exec(text);
+    const appealRejectMatch = /^\/appeal_reject\s+(\d+)$/i.exec(text);
+    if (appealApproveMatch ?? appealRejectMatch) {
+      const id = parseInt((appealApproveMatch ?? appealRejectMatch)![1]!, 10);
+      const appeal = this.pendingAppeals.get(id);
+      if (!appeal) { await reply(`找不到申诉 #${id}。`); return; }
+      if (appealRejectMatch) {
+        this.pendingAppeals.delete(id);
+        await reply(`已拒绝申诉 #${id}（用户 ${appeal.nickname}）。`);
+        logger.info({ id, userId: appeal.userId }, 'appeal rejected by admin');
+        return;
+      }
+      // Approve: find user's most recent mute and unmute in that group
+      const recent = (this.db as unknown as { _db: { prepare(s: string): { all(...a: unknown[]): unknown[] } } })._db
+        .prepare("SELECT group_id, action, timestamp FROM moderation_log WHERE user_id = ? AND action LIKE 'mute%' ORDER BY timestamp DESC LIMIT 1")
+        .all(appeal.userId) as Array<{ group_id: string; action: string; timestamp: number }>;
+      if (recent.length === 0) {
+        await reply(`申诉 #${id} 已批准，但未找到该用户的禁言记录，请手动处理。`);
+        this.pendingAppeals.delete(id);
+        return;
+      }
+      const mutedGroupId = recent[0]!.group_id;
+      try {
+        await this.adapter.ban(mutedGroupId, appeal.userId, 0);
+        await reply(`已解除禁言：申诉 #${id} 用户 ${appeal.nickname} 群 ${mutedGroupId}。`);
+        logger.info({ id, userId: appeal.userId, groupId: mutedGroupId }, 'appeal approved — user unmuted');
+        // Notify the user that their appeal was approved
+        try {
+          await this.adapter.sendPrivateMessage(appeal.userId, '你的申诉已通过，禁言已解除。');
+        } catch { /* non-fatal */ }
+      } catch (err) {
+        logger.error({ err, id, userId: appeal.userId }, 'failed to unmute after appeal approve');
+        await reply(`申诉 #${id} 已批准但解除禁言失败：${String(err)}`);
+      }
+      this.pendingAppeals.delete(id);
+      return;
+    }
+
+    if (text === '/appeals') {
+      if (this.pendingAppeals.size === 0) {
+        await reply('无待处理申诉。');
+      } else {
+        const lines = [...this.pendingAppeals.entries()].map(([id, a]) =>
+          `#${id} ${a.nickname}(${a.userId}): ${a.text.slice(0, 50)}`
+        ).join('\n');
+        await reply(`待处理申诉：\n${lines}`);
+      }
+      return;
+    }
 
     if (text === '/pending') {
       const rows = this.db.pendingModeration.listPending(10);
@@ -875,7 +1001,7 @@ export class Router implements IRouter {
     }
 
     if (text === '/help') {
-      await reply('/approve <id> — 执行建议处理\n/reject <id> — 拒绝，不处理\n/pending — 查看待处理列表\n/mod_on — 开启所有群的自动审核\n/mod_off — 关闭所有群的自动审核（仅观察）\n/welcome_on <groupId> — 开启该群欢迎消息\n/welcome_off <groupId> — 关闭该群欢迎消息\n/idguard_on <groupId> — 开启该群身份证拦截\n/idguard_off <groupId> — 关闭该群身份证拦截\n/cache_clear_images — 清除图片审核缓存（规则更新后使用）');
+      await reply('/approve <id> — 执行建议处理\n/reject <id> — 拒绝，不处理\n/pending — 查看待处理列表\n/appeals — 查看待处理申诉\n/appeal_approve <id> — 批准申诉并解除禁言\n/appeal_reject <id> — 驳回申诉\n/mod_on — 开启所有群的自动审核\n/mod_off — 关闭所有群的自动审核（仅观察）\n/welcome_on <groupId> — 开启该群欢迎消息\n/welcome_off <groupId> — 关闭该群欢迎消息\n/idguard_on <groupId> — 开启该群身份证拦截\n/idguard_off <groupId> — 关闭该群身份证拦截\n/cache_clear_images — 清除图片审核缓存（规则更新后使用）');
       return;
     }
 
