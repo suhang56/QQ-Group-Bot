@@ -3,6 +3,7 @@ import type { IClaudeClient, ClaudeModel } from '../ai/claude.js';
 import type { Database } from '../storage/db.js';
 import { createLogger } from '../utils/logger.js';
 import { extractJson } from '../utils/json-extract.js';
+import { LEARN_MODEL, RESEARCH_MODEL } from '../config.js';
 
 /**
  * Configuration for {@link SelfLearningModule}.
@@ -24,8 +25,8 @@ export interface SelfLearningOptions {
   harvestMaxPerMinute?: number;
   /** Window for harvest rate-limiter, in ms. Default 60_000 (1 min). */
   harvestWindowMs?: number;
-  /** Claude model used for both distillation paths. Default `claude-sonnet-4-6`. */
-  model?: ClaudeModel;
+  /** Model used for distillation paths (corrections + passive harvest). Default `LEARN_MODEL`. */
+  model?: string;
   /** Override clock for tests. */
   now?: () => number;
   /** Max online research calls per group inside a 10-minute window. Default 3. */
@@ -103,7 +104,7 @@ export class SelfLearningModule {
   private readonly correctionWindowMs: number;
   private readonly harvestMaxPerMinute: number;
   private readonly harvestWindowMs: number;
-  private readonly model: ClaudeModel;
+  private readonly model: string;
   private readonly now: () => number;
   private readonly researchMaxPer10MinPerGroup: number;
   private readonly researchMaxPerDayGlobal: number;
@@ -123,7 +124,7 @@ export class SelfLearningModule {
     this.correctionWindowMs = opts.correctionWindowMs ?? 600_000;
     this.harvestMaxPerMinute = opts.harvestMaxPerMinute ?? 2;
     this.harvestWindowMs = opts.harvestWindowMs ?? 60_000;
-    this.model = opts.model ?? 'claude-haiku-4-5-20251001';
+    this.model = opts.model ?? LEARN_MODEL;
     this.now = opts.now ?? (() => Date.now());
     this.researchMaxPer10MinPerGroup = opts.researchMaxPer10MinPerGroup ?? 3;
     this.researchMaxPerDayGlobal = opts.researchMaxPerDayGlobal ?? 30;
@@ -329,8 +330,8 @@ export class SelfLearningModule {
     return { factId, fact: response.fact };
   }
 
-  /** Test/router hook — exposes the configured Claude model. */
-  getModel(): ClaudeModel {
+  /** Test/router hook — exposes the configured distillation model. */
+  getModel(): string {
     return this.model;
   }
 
@@ -461,7 +462,7 @@ export class SelfLearningModule {
     let res;
     try {
       res = await this.claude.complete({
-        model: this.model,
+        model: RESEARCH_MODEL as ClaudeModel,
         maxTokens: 1024,
         system: [{ text: 'You are a careful fact extractor with web search. Only output JSON, no prose.', cache: true }],
         messages: [{ role: 'user', content: prompt }],
@@ -491,7 +492,7 @@ export class SelfLearningModule {
   private async _safeComplete(prompt: string): Promise<string | null> {
     try {
       const res = await this.claude.complete({
-        model: this.model,
+        model: this.model as ClaudeModel,
         maxTokens: 256,
         system: [{ text: 'You are a careful fact extractor. Only output JSON, no prose.', cache: true }],
         messages: [{ role: 'user', content: prompt }],
