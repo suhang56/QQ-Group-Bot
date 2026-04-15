@@ -116,7 +116,10 @@ export function stripEcho(reply: string, lastUserMessage: string): string {
 /**
  * Post-process a generated reply: strip QQ built-in face codes and trailing 。.
  */
-const SKIP_LINE_RE = /^\s*<\s*skip\s*>\s*$/i;
+// Matches a line that is entirely <skip> optionally padded with filler punct
+// (dots/commas/ellipsis/etc). Catches both "<skip>" and "..<skip>" / "<skip>.."
+// produced when the model leaks the control token surrounded by hesitation.
+const SKIP_LINE_RE = /^[\s.。,，!！?？、;；:：~～\-_*#…]*<\s*skip\s*>[\s.。,，!！?？、;；:：~～\-_*#…]*$/i;
 
 // Matches leaked context-marker prefixes from the prompt's `[你(昵称)]:` /
 // `[昵称]:` format appearing at the start of a line. Model sometimes emits
@@ -138,8 +141,23 @@ export function postProcess(text: string): string {
   return text
     .replace(/\[CQ:face,[^\]]*\]/g, '')    // strip [CQ:face,id=N] — user banned QQ built-in faces
     .replace(/\[CQ:mface,[^\]]*\]/g, '')   // strip [CQ:mface,...] — user banned QQ market stickers
+    // Strip [CQ:image,...] that contains url=... — the model hallucinates
+    // image segments by copying from context (which has real url= params).
+    // Legit learned-sticker replies use file=file:/// local paths and never
+    // contain url=, so this filter is safe.
+    .replace(/\[CQ:image,[^\]]*url=[^\]]*\]/gi, '')
+    // Strip ANY angle-bracketed <CQ:...> — this is always hallucination; no
+    // legitimate path ever emits CQ codes in angle brackets. The sub_type=1
+    // url=https://... pattern the model invents when it "wants to send an
+    // image" hits this filter.
+    .replace(/<CQ:[^>\n]*>/gi, '')
     .split('\n')
+    // Drop whole-line <skip> first (including punct-padded "..<skip>" /
+    // "<skip>..") so we don't leave a ".." remnant after inline strip.
     .filter(line => !SKIP_LINE_RE.test(line))
+    // Then strip any remaining inline <skip> — e.g. "嗯 <skip> 走了" keeps
+    // the real content with the token removed.
+    .map(line => line.replace(/<\s*skip\s*>/gi, ''))
     // Degenerate angle-bracket wrap: unwrap or drop
     .map(l => {
       const m = ANGLE_WRAP_RE.exec(l);

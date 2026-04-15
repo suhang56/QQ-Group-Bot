@@ -169,6 +169,46 @@ describe('postProcess', () => {
   it('leaves normal reply unchanged', () => {
     expect(postProcess('正常回复')).toBe('正常回复');
   });
+
+  // ── Hallucinated CQ image segments (observed in prod 2026-04-15) ──────
+
+  it('strips hallucinated <CQ:image,...> angle-bracketed segment', () => {
+    const hallu = '<CQ:image,file=09949142F28E32E37CE17D35F180DAAC.jpg,sub_type=1,url=https://multimedia.nt.qq.com.cn/download?appid=1407&fileid=xxx>';
+    expect(postProcess(hallu)).toBe('');
+  });
+
+  it('strips mixed text + hallucinated <CQ:image,...>', () => {
+    expect(postProcess('笑死 <CQ:image,file=abc.jpg,url=https://x>')).toBe('笑死');
+  });
+
+  it('strips [CQ:image,...url=http...] hallucination but keeps local-file sticker', () => {
+    const hallu = '[CQ:image,file=abc.jpg,sub_type=1,url=https://multimedia.nt.qq.com.cn/x]';
+    expect(postProcess(hallu)).toBe('');
+    // Learned local sticker must still pass
+    const legit = '[CQ:image,file=file:///D:/stickers/abc.jpg]';
+    expect(postProcess(legit)).toBe(legit);
+  });
+
+  it('strips any <CQ:...> variant (hallucinated at/face/whatever)', () => {
+    expect(postProcess('<CQ:at,qq=123>')).toBe('');
+    expect(postProcess('<CQ:face,id=14>')).toBe('');
+    expect(postProcess('哈哈 <CQ:at,qq=123> 你看')).toBe('哈哈  你看');
+  });
+
+  // ── Leaked <skip> with leading/trailing junk (observed in prod 2026-04-15)
+
+  it('drops line that is "..<skip>" (skip with leading dots)', () => {
+    expect(postProcess('..<skip>')).toBe('');
+  });
+
+  it('drops line that is "<skip>.." (skip with trailing dots)', () => {
+    expect(postProcess('<skip>..')).toBe('');
+  });
+
+  it('unwraps line with inline <skip> leaving real content', () => {
+    // "嗯 <skip> 走了" — strip <skip>, keep the rest
+    expect(postProcess('嗯 <skip> 走了')).toBe('嗯  走了');
+  });
 });
 
 describe('isEcho', () => {
