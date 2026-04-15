@@ -109,13 +109,31 @@ describe('GeminiClient', () => {
     ).rejects.toThrow(ClaudeApiError);
   });
 
-  it('vision methods throw', async () => {
+  it('describeImage dispatches to chat.completions.create with inline image_url', async () => {
+    mockCreate.mockResolvedValueOnce({
+      choices: [{ message: { content: '【图里有什么】测试\n【发的人想表达】ok' } }],
+    });
+    const client = new GeminiClient({ apiKey: 'test-key' });
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const out = await client.describeImage(png, 'gemini-2.5-flash');
+    expect(out).toContain('测试');
+    expect(mockCreate).toHaveBeenCalledOnce();
+    const call = mockCreate.mock.calls[0]![0];
+    expect(call.model).toBe('gemini-2.5-flash');
+    expect(call.reasoning_effort).toBe('none');
+    const content = call.messages[0].content;
+    expect(content[1].type).toBe('image_url');
+    expect(content[1].image_url.url).toMatch(/^data:image\/png;base64,/);
+  });
+
+  it('vision methods wrap upstream errors as ClaudeApiError', async () => {
+    mockCreate.mockRejectedValue(new Error('upstream boom'));
     const client = new GeminiClient({ apiKey: 'test-key' });
     await expect(
-      client.describeImage(Buffer.from([]), 'claude-haiku-4-5-20251001'),
-    ).rejects.toThrow(/does not support describeImage/);
+      client.describeImage(Buffer.from([0xff, 0xd8, 0xff]), 'gemini-2.5-flash'),
+    ).rejects.toThrow(ClaudeApiError);
     await expect(
-      client.visionWithPrompt(Buffer.from([]), 'claude-haiku-4-5-20251001', 'p'),
-    ).rejects.toThrow(/does not support visionWithPrompt/);
+      client.visionWithPrompt(Buffer.from([0xff, 0xd8, 0xff]), 'gemini-2.5-flash', 'p'),
+    ).rejects.toThrow(ClaudeApiError);
   });
 });
