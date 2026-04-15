@@ -1202,20 +1202,27 @@ export class ChatModule implements IChatModule {
 这条消息的输出**绝不能是 <skip> 或 ... 或 空**。至少给一个最短的反应。`
       : '';
 
-    // "你"-addressed probe: trigger contains 你 and looks directed at bot
-    // (no @ to another user, bot posted recently or it's a question form).
-    // Softer than @-mention but still a strong hint that the user is
-    // addressing the bot, not a peer. Telling the LLM explicitly shortcuts
-    // the "is 你 referring to me" reasoning that cold personas tend to fail.
+    // "你"-addressed probe: trigger contains 你 and no @ to another user.
+    // We do NOT pre-decide whether "你" refers to bot vs a peer — that's a
+    // coreference task best done by the LLM with the full context window.
+    // We just flag the case and tell the LLM to actually do the reasoning.
     const triggerContent = triggerMessage.content.trim();
     const triggerRaw = triggerMessage.rawContent;
     const youSignal =
       !isAtTrigger
       && /你/.test(triggerContent)
-      && !/\[CQ:at,qq=\d+/.test(triggerRaw)
-      && (/[?？]$|[吗嘛呢吧]$/.test(triggerContent) || triggerContent.length <= 20);
+      && !/\[CQ:at,qq=\d+/.test(triggerRaw);
     const youAddressedDirective = youSignal
-      ? `\n\n⚠️ **这条消息用「你」直接问你。** 群里这会儿没有其他人被 @，「你」很可能就是指你（bot / 小号）。不要因为对方没 @ 就假装这话不是问你。被这样问到要回一句，哪怕最短的反应："嗯" / "还行" / "不讨厌" / "一般吧" / "别问我" / "不懂" / "?" 都行，不能 <skip>。\n\n例外：如果上下文里明显是两个群友在互相对话（前几条他们已经在 @/quote 对方）、你只是碰巧看到 —— 那可以 <skip>，但这种情况要谨慎判断。`
+      ? `\n\n⚠️ **这条消息里出现了「你」但没有 @ 谁，需要你先判断「你」指的是谁再决定怎么回。**
+
+判断步骤（按顺序）:
+1. **看上面 immediate / medium context 的最近几条消息**。
+2. 如果最近几条里明显是**两个特定群友在互相对话**（连续几条你来我往、话题连贯、互相 @/quote），那这条里的「你」大概率是他们之间的 → 你只是旁观 → **输出 <skip>**。
+3. 如果最近几条里你（[你(小号)]: ）刚发过话、而且没有其他两人正在活跃对话 → 这条的「你」大概率指你 → **必须回应**，哪怕一句 "嗯 / 还行 / 不讨厌 / 一般吧 / 别问我 / 不懂 / ?"都行，禁止 <skip>。
+4. 如果上下文不明朗（群刚刚开始聊、你没发过话也没两人在互动）→ 短中立反应 > 沉默，也别 <skip>。
+5. 如果这条消息明显是在说一个具体的第三人（例如前一条正在聊某个群友 X，这条说"你觉得 X 怎样"），那「你」指的是那个发言对象，而不是你本体 → 也可以 <skip>。
+
+**原则**: 宁可多接一句短反应，也不要在被问到时装死。上下文帮你判断，不要靠直觉瞎猜。`
       : '';
 
     const userContent = `${replyContextBlock}${keywordSection}${wideSection}${mediumSection}${immediateSection}${avoidSection}以下语境里出现 [你(昵称)] 的消息是你自己之前说过的，出现 [别人昵称] 的是群友说的。**不要把群友的话当成你自己说过的**。
