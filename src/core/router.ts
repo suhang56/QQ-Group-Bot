@@ -1644,5 +1644,62 @@ ${ctxLine}
       const count = this.db.learnedFacts.clearGroup(msg.groupId);
       await this.adapter.send(msg.groupId, `已清空本群知识库（共删除 ${count} 条）。`);
     });
+
+    // Feature B — human-in-the-loop queue inspection for harvest/alias rows.
+    // Admins and owners can see what's waiting; only the configured owner
+    // (MOD_APPROVAL_ADMIN) can promote a row to 'active'.
+    this.commands.set('facts_pending', async (msg, args, _config) => {
+      if (msg.role !== 'admin' && msg.role !== 'owner') {
+        await this.adapter.send(msg.groupId, '没有权限。只有管理员可以查看待审知识。');
+        return;
+      }
+      const PAGE_SIZE = 10;
+      const MAX_LINE_LEN = 120;
+      const MAX_MSG_LEN = 4000;
+      const pageRaw = parseInt(args[0] ?? '1', 10);
+      const page = Number.isFinite(pageRaw) && pageRaw > 0 ? pageRaw : 1;
+      const total = this.db.learnedFacts.countPending(msg.groupId);
+      if (total === 0) {
+        await this.adapter.send(msg.groupId, '待审队列为空。');
+        return;
+      }
+      const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+      const pageClamped = Math.min(page, totalPages);
+      const offset = (pageClamped - 1) * PAGE_SIZE;
+      const rows = this.db.learnedFacts.listPending(msg.groupId, PAGE_SIZE, offset);
+      const header = `待审知识 第 ${pageClamped}/${totalPages} 页（共 ${total} 条）：`;
+      const lines: string[] = [header];
+      let totalLen = header.length;
+      for (const f of rows) {
+        const confTag = `(${f.confidence.toFixed(2)})`;
+        let body = `[${f.id}] ${confTag} ${f.fact}`;
+        if (body.length > MAX_LINE_LEN) body = body.slice(0, MAX_LINE_LEN - 1) + '…';
+        if (totalLen + 1 + body.length > MAX_MSG_LEN) break;
+        lines.push(body);
+        totalLen += 1 + body.length;
+      }
+      if (totalPages > 1) {
+        const hint = `\n用法：/facts_pending [页码] ；通过：/fact_approve <ID>；拒绝：/fact_reject <ID>`;
+        if (totalLen + hint.length <= MAX_MSG_LEN) lines.push(hint);
+      } else {
+        const hint = `\n通过：/fact_approve <ID>；拒绝：/fact_reject <ID>`;
+        if (totalLen + hint.length <= MAX_MSG_LEN) lines.push(hint);
+      }
+      await this.adapter.send(msg.groupId, lines.join('\n'));
+    });
+
+    this.commands.set('fact_approve', async (msg, args, _config) => {
+      if (msg.userId !== MOD_APPROVAL_ADMIN) {
+        await this.adapter.send(msg.groupId, '没有权限。只有 bot 主人可以通过待审知识。');
+        return;
+      }
+      const id = parseInt(args[0] ?? '', 10);
+      if (isNaN(id)) {
+        await this.adapter.send(msg.groupId, '用法：/fact_approve <ID>');
+        return;
+      }
+      this.db.learnedFacts.markStatus(id, 'active');
+      await this.adapter.send(msg.groupId, `已通过知识条目 #${id}，纳入参考。`);
+    });
   }
 }

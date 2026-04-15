@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { ClaudeModel } from '../ai/claude.js';
 import type { IEmbeddingService } from './embeddings.js';
+import { cosineSimilarity } from './embeddings.js';
 
 // ---- Domain types ----
 
@@ -274,7 +275,7 @@ export interface LearnedFact {
   sourceMsgId: string | null;
   botReplyId: number | null;
   confidence: number;
-  status: 'active' | 'superseded' | 'rejected';
+  status: 'active' | 'pending' | 'superseded' | 'rejected';
   createdAt: number;
   updatedAt: number;
   embedding: number[] | null;
@@ -290,6 +291,7 @@ export interface ILearnedFactsRepository {
     sourceMsgId: string | null;
     botReplyId: number | null;
     confidence?: number;
+    status?: LearnedFact['status'];
   }): number;
   listActive(groupId: string, limit: number): LearnedFact[];
   listActiveWithEmbeddings(groupId: string): LearnedFact[];
@@ -300,6 +302,16 @@ export interface ILearnedFactsRepository {
   clearGroup(groupId: string): number;
   countActive(groupId: string): number;
   setEmbeddingService(svc: IEmbeddingService | null): void;
+  /**
+   * Return the active fact in this group whose embedding has the highest
+   * cosine similarity to `text`, if that similarity is ≥ `threshold`.
+   * Returns null if embeddings are unavailable, no candidates, or below threshold.
+   */
+  findSimilarActive(
+    groupId: string, text: string, threshold: number
+  ): Promise<{ fact: LearnedFact; cosine: number } | null>;
+  listPending(groupId: string, limit: number, offset: number): LearnedFact[];
+  countPending(groupId: string): number;
 }
 
 export type ProposedAction = 'warn' | 'delete' | 'mute_10m' | 'mute_1h' | 'kick';
@@ -1204,6 +1216,7 @@ class LearnedFactsRepository implements ILearnedFactsRepository {
     sourceMsgId: string | null;
     botReplyId: number | null;
     confidence?: number;
+    status?: LearnedFact['status'];
   }): number {
     const now = Math.floor(Date.now() / 1000);
     // insert() is sync; the embed call is async. Store NULL on the row and
@@ -1211,15 +1224,16 @@ class LearnedFactsRepository implements ILearnedFactsRepository {
     // safety net for any embedding that fails to land.
     const embBuf: Buffer | null = null;
     const svc = this._embeddingSvc;
+    const status: LearnedFact['status'] = row.status ?? 'active';
     const result = this.db.prepare(`
       INSERT INTO learned_facts
         (group_id, topic, fact, source_user_id, source_user_nickname,
          source_msg_id, bot_reply_id, confidence, status, created_at, updated_at, embedding_vec)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       row.groupId, row.topic, row.fact,
       row.sourceUserId, row.sourceUserNickname, row.sourceMsgId,
-      row.botReplyId, row.confidence ?? 1.0, now, now, embBuf,
+      row.botReplyId, row.confidence ?? 1.0, status, now, now, embBuf,
     );
     const id = Number(result.lastInsertRowid);
 
@@ -1296,6 +1310,53 @@ class LearnedFactsRepository implements ILearnedFactsRepository {
   countActive(groupId: string): number {
     const row = this.db.prepare(
       `SELECT COUNT(*) as count FROM learned_facts WHERE group_id = ? AND status = 'active'`
+    ).get(groupId) as unknown as CountRow;
+    return row.count;
+  }
+
+  async findSimilarActive(
+    groupId: string, text: string, threshold: number,
+  ): Promise<{ fact: LearnedFact; cosine: number } | null> {
+    const svc = this._embeddingSvc;
+    if (!svc || !svc.isReady) return null;
+
+    const candidates = this.listActiveWithEmbeddings(groupId);
+    if (candidates.length === 0) return null;
+
+    let queryVec: number[];
+    try {
+      queryVec = await svc.embed(text);
+    } catch (err) {
+      if (!this._embedFailureLogged) {
+        this._embedFailureLogged = true;
+        // eslint-disable-next-line no-console
+        console.warn('[learned-facts] embed failed for findSimilarActive', String(err));
+      }
+      return null;
+    }
+
+    let best: { fact: LearnedFact; cosine: number } | null = null;
+    for (const cand of candidates) {
+      if (!cand.embedding) continue;
+      const c = cosineSimilarity(queryVec, cand.embedding);
+      if (best === null || c > best.cosine) {
+        best = { fact: cand, cosine: c };
+      }
+    }
+    if (best === null || best.cosine < threshold) return null;
+    return best;
+  }
+
+  listPending(groupId: string, limit: number, offset: number): LearnedFact[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM learned_facts WHERE group_id = ? AND status = 'pending' ORDER BY id DESC LIMIT ? OFFSET ?`
+    ).all(groupId, limit, offset) as unknown as LearnedFactRow[];
+    return rows.map(learnedFactFromRow);
+  }
+
+  countPending(groupId: string): number {
+    const row = this.db.prepare(
+      `SELECT COUNT(*) as count FROM learned_facts WHERE group_id = ? AND status = 'pending'`
     ).get(groupId) as unknown as CountRow;
     return row.count;
   }
@@ -1620,6 +1681,9 @@ export class Database {
       )
     `);
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_learned_facts_group_active ON learned_facts(group_id, status, created_at DESC)`);
+    // Partial index for Feature B pending queue — most groups have 0 pending
+    // rows most of the time, so a partial index stays tiny.
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_learned_facts_group_pending ON learned_facts(group_id, status) WHERE status = 'pending'`);
 
     // learned_facts.embedding_vec — added for semantic retrieval. Idempotent
     // ALTER for existing DBs created before this column existed.

@@ -107,6 +107,10 @@ describe('extractJson — integration: opportunistic-harvest with fenced respons
     const factRepo = {
       inserted,
       listActive: vi.fn().mockReturnValue([]),
+      listActiveWithEmbeddings: vi.fn().mockReturnValue([]),
+      findSimilarActive: vi.fn().mockResolvedValue(null),
+      listPending: vi.fn().mockReturnValue([]),
+      countPending: vi.fn().mockReturnValue(0),
       insert: vi.fn().mockImplementation((row: unknown) => { inserted.push(row); return inserted.length; }),
       markStatus: vi.fn(), clearGroup: vi.fn(), countActive: vi.fn().mockReturnValue(0),
     } as unknown as ILearnedFactsRepository;

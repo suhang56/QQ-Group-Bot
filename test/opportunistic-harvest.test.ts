@@ -20,6 +20,10 @@ function makeFactRepo(existing: LearnedFact[] = []): ILearnedFactsRepository & {
   return {
     inserted,
     listActive: vi.fn().mockReturnValue(existing),
+    listActiveWithEmbeddings: vi.fn().mockReturnValue([]),
+    findSimilarActive: vi.fn().mockResolvedValue(null),
+    listPending: vi.fn().mockReturnValue([]),
+    countPending: vi.fn().mockReturnValue(0),
     insert: vi.fn().mockImplementation((row) => { inserted.push(row); return inserted.length; }),
     markStatus: vi.fn(),
     clearGroup: vi.fn(),

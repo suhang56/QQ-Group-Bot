@@ -12,6 +12,10 @@ const MAX_FACTS_DEEP = 30;
 const FACT_DEDUP_PREFIX_LEN = 20;
 const MAX_TERM_RESEARCH_PER_CYCLE = 3;
 const TERM_DEDUP_TTL_MS = 24 * 60 * 60_000;
+// Feature A — skip insertion when the new fact's embedding is near-duplicate
+// of an existing active fact (cosine ≥ threshold). Independent from alias-miner
+// so each can be tuned separately.
+const SEMANTIC_DEDUP_THRESHOLD = 0.88;
 
 interface HarvestItem {
   category?: string;
@@ -254,20 +258,32 @@ export class OpportunisticHarvest {
         continue;
       }
 
+      // Feature A — semantic dedup against all active facts. Returns null on
+      // empty candidate set / embedding-service unavailable / sub-threshold,
+      // so we fall through to insert in those cases.
+      const similar = await this.learnedFacts.findSimilarActive(
+        groupId, factText, SEMANTIC_DEDUP_THRESHOLD,
+      );
+      if (similar) {
+        this.logger.info(
+          { groupId, fact: factText, existingId: similar.fact.id, cosine: similar.cosine },
+          `${cycleLabel} semantic dedup skipped`,
+        );
+        dedupped++;
+        continue;
+      }
+
       const category = item.category?.trim() || '';
       const rawTopic = item.topic?.trim() || null;
       const topic = category && rawTopic ? `${category} ${rawTopic}` : (rawTopic ?? (category || null));
-      // Hard-cap harvest confidence below the formatFactsForPrompt injection
-      // floor (0.8). Harvest is pattern-matching on ambiguous group chat and
-      // routinely writes confidently-wrong causal claims ("X 是 Y 的 CV")
-      // with high self-reported confidence. We keep the rows as research
-      // hints but prevent them from polluting the chat prompt. Only
-      // researchOnline (web-verified) and detectCorrection (user-corrected)
-      // paths insert at confidence >= 0.8 and pass the injection gate.
-      const rawConfidence = typeof item.confidence === 'number'
+      // Feature B — harvest rows land as 'pending' and are isolated from
+      // formatFactsForPrompt (which filters status='active'). The previous
+      // Math.min(rawConfidence, 0.5) injection-floor cap is removed because
+      // pending status is now the isolation gate. LLM confidence flows through
+      // unchanged and is available to the human approval flow.
+      const confidence = typeof item.confidence === 'number'
         ? Math.min(1, Math.max(0, item.confidence))
         : 0.7;
-      const confidence = Math.min(rawConfidence, 0.5);
 
       this.learnedFacts.insert({
         groupId,
@@ -278,11 +294,12 @@ export class OpportunisticHarvest {
         sourceMsgId: null,
         botReplyId: null,
         confidence,
+        status: 'pending',
       });
       existing.push({
         id: 0, groupId, topic, fact: factText,
         sourceUserId: null, sourceUserNickname: null, sourceMsgId: null,
-        botReplyId: null, confidence, status: 'active',
+        botReplyId: null, confidence, status: 'pending',
         createdAt: 0, updatedAt: 0,
         embedding: null,
       });

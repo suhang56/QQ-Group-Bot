@@ -7,12 +7,19 @@ import { ALIAS_MODEL } from '../config.js';
 
 const MIN_NEW_MESSAGES = 50;
 const ALIAS_TOPIC_PREFIX = '群友别名 ';
+// Feature A — semantic dedup threshold (independent from harvest's for future tuning).
+const SEMANTIC_DEDUP_THRESHOLD = 0.88;
+// Default confidence when the LLM doesn't emit one. Alias mappings carry
+// explicit in-evidence ("X 就是 Y") more often than generic harvest, so we
+// default higher than harvest's 0.7.
+const DEFAULT_ALIAS_CONFIDENCE = 0.8;
 
 interface AliasEntry {
   alias: string;
   realUserNickname: string;
   realUserId: string;
   evidence: string;
+  confidence?: number;
 }
 
 export interface AliasMinerOptions {
@@ -189,6 +196,22 @@ ${messagesList}
         ? `${alias} = ${realUserNickname} (QQ ${realUserId})。${evidence}`
         : `${alias} = ${realUserNickname} (QQ ${realUserId})`;
 
+      // Feature A — semantic dedup across all active facts (not just alias rows).
+      const similar = await this.learnedFacts.findSimilarActive(
+        groupId, factText, SEMANTIC_DEDUP_THRESHOLD,
+      );
+      if (similar) {
+        this.logger.info(
+          { groupId, alias, existingId: similar.fact.id, cosine: similar.cosine },
+          'alias-miner semantic dedup skipped',
+        );
+        continue;
+      }
+
+      const confidence = typeof entry.confidence === 'number'
+        ? Math.min(1, Math.max(0, entry.confidence))
+        : DEFAULT_ALIAS_CONFIDENCE;
+
       this.learnedFacts.insert({
         groupId,
         topic: `${ALIAS_TOPIC_PREFIX}${alias}`,
@@ -197,7 +220,12 @@ ${messagesList}
         sourceUserNickname: '[alias-miner]',
         sourceMsgId: null,
         botReplyId: null,
-        confidence: 0.85,
+        // Feature B — alias rows land pending; the 0.5 injection-floor cap is
+        // removed because pending status is the isolation gate, not a low
+        // confidence number. Retrieval filters on status='active', so pending
+        // rows can't reach the chat prompt until /fact_approve promotes them.
+        confidence,
+        status: 'pending',
       });
 
       existing.push({
@@ -206,7 +234,7 @@ ${messagesList}
         fact: factText,
         sourceUserId: null, sourceUserNickname: '[alias-miner]',
         sourceMsgId: null, botReplyId: null,
-        confidence: 0.85, status: 'active',
+        confidence, status: 'pending',
         createdAt: 0, updatedAt: 0,
         embedding: null,
       });

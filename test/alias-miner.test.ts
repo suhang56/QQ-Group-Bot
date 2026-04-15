@@ -23,6 +23,10 @@ function makeFactRepo(existing: LearnedFact[] = []): ILearnedFactsRepository & {
   return {
     inserted,
     listActive: vi.fn().mockReturnValue(existing),
+    listActiveWithEmbeddings: vi.fn().mockReturnValue([]),
+    findSimilarActive: vi.fn().mockResolvedValue(null),
+    listPending: vi.fn().mockReturnValue([]),
+    countPending: vi.fn().mockReturnValue(0),
     insert: vi.fn().mockImplementation((row) => { inserted.push(row); return inserted.length; }),
     markStatus: vi.fn(),
     clearGroup: vi.fn(),
@@ -67,8 +71,9 @@ describe('AliasMiner', () => {
     expect(row.fact).toContain('拉神');
     expect(row.fact).toContain('User5');
     expect(row.fact).toContain('u5');
-    expect(row.confidence).toBe(0.85);
+    expect(row.confidence).toBe(0.8);
     expect(row.sourceUserNickname).toBe('[alias-miner]');
+    expect(row.status).toBe('pending');
   });
 
   it('skips entry when realUserId is not found in recent messages', async () => {
