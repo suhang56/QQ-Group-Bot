@@ -790,11 +790,32 @@ Ave Mujica 那场日程还没定，官网放出来了但日期空着，建议盯
 - `start_date IS NULL` 的事件**包含**在 `getUpcoming` 结果中（日程未定的活动仍值得告知）
 - scraper 失败时保留上次成功数据，不清空；bot 可能以最多 24h 旧数据回复，属于可接受范围
 
+#### 推荐注入窗口：未来 60 天内 + 进行中
+
+**推荐**：`getUpcoming` 在 Architect 实现时应增加上限过滤 `start_date <= today + 60 days`，只注入 60 天内开始的演出；日期未知（NULL）事件无上限限制，始终包含。
+
+**理由**：
+- BanG Dream! live 通常在开演前 1–3 个月开票，60 天窗口覆盖绝大多数粉丝关心的"近期"演出
+- 超过 60 天的活动信息对当前对话几乎无帮助，且官方票务细节尚未确定，注入后 LLM 可能产生误导性回复
+- 进行中活动（`start_date <= today <= end_date`）已被 `start_date >= today` 覆盖（当天仍展示），无需额外逻辑
+
+**cap 保持 3 条**：60 天窗口内超过 3 条时，仍只取最近 3 条（按 `start_date` 升序）。
+
 #### 已过期事件的 bot 行为
 
-`getUpcoming` 已从查询层过滤掉过去的事件，bot 不会主动提及已结束演出。
+`getUpcoming` 过滤掉 `start_date < today` 的事件，bot 在未来回复中不会主动提及已结束演出。
 
-若用户提到"上次 Roselia 的 live"等历史话题，bot 可以用粉丝口吻聊聊印象，但**不得**依赖注入块中不存在的信息捏造具体细节（日期/场馆等）。
+**若用户明确提到过去的演出**（"上次 Roselia 武道馆""去年那个 live"），关键词仍会触发注入，但注入块只包含近期事件。Architect 可选择额外查询最近 30 天内已结束的事件（`start_date >= today - 30 days AND start_date < today`）并附加"已完结"标记注入，格式如下：
+
+```
+【近期 BanG Dream! Live 信息】
+- Roselia 10th☆LIVE "Woven"｜2026-03-15 ~ 2026-03-16｜Roselia｜さいたまスーパーアリーナ・さいたま【已完结】
+- Roselia 11th☆LIVE｜2026-06-07｜Roselia｜日本武道館・東京
+```
+
+**v1 实现决策**：是否实现过去事件注入由 Architect 在 Iteration Contract 中决定。UX 要求如下：
+- 若注入：格式如上，末尾追加`【已完结】`标签，LLM 看到后可自然聊"那场我也想去但没去成"等口吻
+- 若不注入：bot 对历史话题只凭自身知识回应，不得捏造细节
 
 ```
 哦那场！我没去 orz 听说最后返场唱了 black shout，羡慕死了
