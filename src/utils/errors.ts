@@ -22,6 +22,10 @@ export enum BotErrorCode {
   CHAR_NOT_ACTIVE             = 'E024',
   CHAR_ALIAS_TOO_LONG         = 'E025',
   STICKER_THRESHOLD_INVALID   = 'E030',
+  BANDORI_NETWORK_ERROR       = 'E040',
+  BANDORI_HTTP_ERROR          = 'E041',
+  BANDORI_PARSE_ZERO          = 'E042',
+  BANDORI_DATE_PARSE          = 'E043',
 }
 
 export class BotError extends Error {
