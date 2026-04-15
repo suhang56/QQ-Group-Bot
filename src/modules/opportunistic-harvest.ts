@@ -257,9 +257,17 @@ export class OpportunisticHarvest {
       const category = item.category?.trim() || '';
       const rawTopic = item.topic?.trim() || null;
       const topic = category && rawTopic ? `${category} ${rawTopic}` : (rawTopic ?? (category || null));
-      const confidence = typeof item.confidence === 'number'
+      // Hard-cap harvest confidence below the formatFactsForPrompt injection
+      // floor (0.8). Harvest is pattern-matching on ambiguous group chat and
+      // routinely writes confidently-wrong causal claims ("X 是 Y 的 CV")
+      // with high self-reported confidence. We keep the rows as research
+      // hints but prevent them from polluting the chat prompt. Only
+      // researchOnline (web-verified) and detectCorrection (user-corrected)
+      // paths insert at confidence >= 0.8 and pass the injection gate.
+      const rawConfidence = typeof item.confidence === 'number'
         ? Math.min(1, Math.max(0, item.confidence))
         : 0.7;
+      const confidence = Math.min(rawConfidence, 0.5);
 
       this.learnedFacts.insert({
         groupId,

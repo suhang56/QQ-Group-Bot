@@ -402,7 +402,8 @@ export class SelfLearningModule {
       return `- ${f.fact}${src}`;
     });
     return {
-      text: `## 群里学到的事实（群友教过你的，别再错同一件）\n${lines.join('\n')}`,
+      text: `## 群里学到的事实 — 遇到下面提到的名字/梗，直接给出事实里的答案，不要装傻反问
+${lines.join('\n')}`,
       factIds: facts.map(f => f.id),
     };
   }
