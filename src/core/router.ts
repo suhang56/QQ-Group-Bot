@@ -235,11 +235,13 @@ export class Router implements IRouter {
         if (blocked) return;
       }
 
-      // Passive image describe — fire-and-forget so all images get cached regardless of chat reply
-      if (this.visionService && /\[CQ:image,/.test(msg.rawContent)) {
+      // Passive image describe — fire-and-forget so all images/mface stickers
+      // get cached regardless of chat reply. Both [CQ:image,...] and
+      // [CQ:mface,...] (QQ market stickers) are handled by the vision module.
+      if (this.visionService && /\[CQ:(image|mface),/.test(msg.rawContent)) {
         void this.visionService.describeFromMessage(
           msg.groupId, msg.rawContent, msg.userId, this.botUserId ?? '',
-        ).catch(err => this.logger.debug({ err, messageId: msg.messageId }, 'passive describe failed'));
+        ).catch(err => this.logger.warn({ err: String(err), messageId: msg.messageId }, 'passive describe failed'));
       }
 
       // Sequence guard — cross-message 接龙 relay detection
@@ -438,7 +440,11 @@ export class Router implements IRouter {
         if (repeated) return;
       }
 
-      // Name-image trigger: fires only when the entire message IS a known name (exact match after trim)
+      // Name-image trigger: fires only when the entire message IS a known name (exact match after trim).
+      // When a name-image trigger resolves (whether or not the image is actually sent due to cooldown/
+      // burst guard), we MUST short-circuit the rest of the pipeline so the chat module doesn't also
+      // generate a reply to what is effectively a user invoking the bot's picture-posting feature.
+      // Otherwise the chat module sees "just a name" and emits noise like "啊?" next to the picture.
       if (this.nameImagesModule && config.nameImagesEnabled) {
         const trimmedContent = msg.content.trim();
         const blocklist = (config.nameImagesBlocklist ?? []).map(b => b.toLowerCase());
@@ -459,6 +465,9 @@ export class Router implements IRouter {
                 }
               }
             }
+            // Whether we sent an image or skipped due to burst/cooldown, the user's intent was to
+            // invoke the picture-posting feature — chat should NOT also react to the same message.
+            return;
           }
         }
       }

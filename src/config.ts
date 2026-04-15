@@ -17,9 +17,14 @@ import type { GroupConfig } from './storage/db.js';
 export const RUNTIME_CHAT_MODEL = (process.env['CHAT_MODEL'] ?? 'claude-sonnet-4-6') as
   'claude-sonnet-4-6' | 'claude-haiku-4-5-20251001' | 'claude-opus-4-6';
 
-/** Image describe + image moderation — always a Claude vision model. */
-export const VISION_MODEL = (process.env['VISION_MODEL'] ?? 'claude-haiku-4-5-20251001') as
-  'claude-haiku-4-5-20251001' | 'claude-sonnet-4-6' | 'claude-opus-4-6';
+/**
+ * Image describe + image moderation. Default gemini-2.5-flash because it's
+ * ~3x faster than Claude Haiku vision (3-4s vs 10-12s per image) and cheap.
+ * ModelRouter dispatches `gemini*` to GeminiClient, others to Claude.
+ * Override via VISION_MODEL env var.
+ */
+export const VISION_MODEL = (process.env['VISION_MODEL'] ?? 'gemini-2.5-flash') as
+  'gemini-2.5-flash' | 'gemini-2.5-pro' | 'claude-haiku-4-5-20251001' | 'claude-sonnet-4-6' | 'claude-opus-4-6' | (string & {});
 
 /** Text moderator (HIGH-volume: every non-command group message). */
 export const MODERATOR_MODEL = process.env['MODERATOR_MODEL'] ?? 'qwen3:8b';

@@ -94,16 +94,70 @@ export class GeminiClient implements IClaudeClient {
     }
   }
 
-  async describeImage(_imageBytes: Buffer, _model: ClaudeModel): Promise<string> {
-    throw new Error('GeminiClient does not support describeImage — route via Claude');
+  async describeImage(imageBytes: Buffer, model: ClaudeModel): Promise<string> {
+    const prompt = '仔细看这张图，输出两段：\n\n【图里有什么】（30-80 字）：人物 / 物品 / 场景 / 可见文字 / 表情 / 动作 / 颜色 / 风格 / 整体氛围。如果是聊天截图请把可见的文字内容尽量完整地读出来（包括用户名、时间、消息内容）。如果是 emoji / 贴纸 / 梗图请说明梗的内容和情绪。如果是动画/游戏/二次元角色请尽量识别角色名或团体。\n\n【发的人想表达】（10-40 字）：基于图的内容和上下文（吐槽 / 炫耀 / 求安慰 / 共鸣 / 嘲讽 / 反讽 / 夸奖 / 抱怨 / 自嘲 / 求互动 等），猜测发图的人想用这张图说什么。直接说"想表达"什么，不要说"可能想表达"。\n\n只输出这两段，不要前缀。格式：\n【图里有什么】xxx\n【发的人想表达】yyy';
+    return this.visionWithPrompt(imageBytes, model, prompt, 400);
   }
 
   async visionWithPrompt(
-    _imageBytes: Buffer,
-    _model: ClaudeModel,
-    _prompt: string,
-    _maxTokens?: number,
+    imageBytes: Buffer,
+    model: ClaudeModel,
+    prompt: string,
+    maxTokens = 400,
   ): Promise<string> {
-    throw new Error('GeminiClient does not support visionWithPrompt — route via Claude');
+    const start = Date.now();
+    // Detect mime from magic bytes (best-effort); default to jpeg.
+    const mime = detectMime(imageBytes);
+    const dataUrl = `data:${mime};base64,${imageBytes.toString('base64')}`;
+
+    try {
+      const resp = await this.client.chat.completions.create({
+        model,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: prompt },
+              // OpenAI-compat multimodal image_url with inline data URL.
+              // Google AI Studio honors this for Gemini 1.5 / 2.5 models.
+              { type: 'image_url', image_url: { url: dataUrl } },
+            ],
+          },
+        ],
+        max_tokens: maxTokens,
+        // Same thinking-disable as text chat — keep vision response short and
+        // avoid reasoning-token budget exhaustion.
+        reasoning_effort: 'none',
+      });
+
+      const text = resp.choices[0]?.message?.content ?? '';
+      this.logger.debug(
+        { model, outputLen: text.length, durationMs: Date.now() - start },
+        'Gemini vision call completed',
+      );
+      if (!text) throw new Error('Gemini vision returned empty content');
+      return text;
+    } catch (err) {
+      const e = err as { status?: number; message?: string; code?: string; response?: { data?: unknown } };
+      this.logger.warn(
+        { status: e?.status, code: e?.code, message: e?.message, body: e?.response?.data },
+        'Gemini vision API call failed',
+      );
+      throw new ClaudeApiError(err);
+    }
   }
+}
+
+function detectMime(bytes: Buffer): string {
+  if (bytes.length >= 4) {
+    // JPEG: FF D8 FF
+    if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+    // PNG: 89 50 4E 47
+    if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return 'image/png';
+    // GIF: 47 49 46 38
+    if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38) return 'image/gif';
+    // WebP: 52 49 46 46 ... 57 45 42 50
+    if (bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 && bytes.length >= 12 && bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) return 'image/webp';
+  }
+  return 'image/jpeg';
 }

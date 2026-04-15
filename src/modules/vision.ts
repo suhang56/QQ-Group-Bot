@@ -9,6 +9,12 @@ const logger = createLogger('vision');
 
 // Matches [CQ:image,...] and extracts the file param
 const IMAGE_CQ_RE = /\[CQ:image,[^\]]*\bfile=([^,\]]+)/;
+// Matches [CQ:mface,...] (QQ market stickers) and extracts the URL or emoji_id.
+// mface tags have shape: [CQ:mface,emoji_id=NNN,emoji_package_id=NNN,url=https://...,summary=[xxx]]
+// We prefer the url attribute for fetch; emoji_id as cache key.
+const MFACE_CQ_RE = /\[CQ:mface,[^\]]*\]/;
+const MFACE_URL_RE = /\burl=([^,\]]+)/;
+const MFACE_EMOJI_ID_RE = /\bemoji_id=([^,\]]+)/;
 
 export interface VisionOptions {
   enabled?: boolean;
@@ -47,12 +53,26 @@ export class VisionService {
     // Skip bot's own images
     if (senderUserId === botUserId) return '';
 
-    const m = IMAGE_CQ_RE.exec(rawContent);
-    if (!m) return '';
-    const fileToken = m[1]!;
+    // Try [CQ:image,...] first, then [CQ:mface,...] for QQ market stickers
+    let fileKey: string;
+    let fetchUrl: string | null = null;
+    let fileToken: string | null = null;
 
-    // Cache key: sha256 of the file token (stable identifier from QQ)
-    const fileKey = createHash('sha256').update(fileToken).digest('hex');
+    const imgMatch = IMAGE_CQ_RE.exec(rawContent);
+    if (imgMatch) {
+      fileToken = imgMatch[1]!;
+      fileKey = createHash('sha256').update(fileToken).digest('hex');
+    } else {
+      const mfaceMatch = MFACE_CQ_RE.exec(rawContent);
+      if (!mfaceMatch) return '';
+      const mfaceSeg = mfaceMatch[0];
+      const urlMatch = MFACE_URL_RE.exec(mfaceSeg);
+      const emojiIdMatch = MFACE_EMOJI_ID_RE.exec(mfaceSeg);
+      if (!urlMatch || !emojiIdMatch) return '';
+      fetchUrl = decodeURIComponent(urlMatch[1]!.replace(/&amp;/g, '&'));
+      // Cache key by emoji_id — stable across messages for the same sticker
+      fileKey = createHash('sha256').update('mface:' + emojiIdMatch[1]!).digest('hex');
+    }
 
     // Check description cache first
     const cached = this.repo.get(fileKey);
@@ -70,27 +90,37 @@ export class VisionService {
     }
     this.lastCall.set(groupId, now);
 
-    // Fetch image bytes via adapter
+    // Fetch image bytes — mface uses its URL directly, image uses adapter.getImage
     let imageBytes: Buffer;
     try {
-      const imageInfo = await this.adapter.getImage(fileToken);
-      if (!imageInfo.base64 && !imageInfo.url) {
-        logger.warn({ groupId, fileToken }, 'getImage returned no base64 or url');
-        return '';
-      }
-      if (imageInfo.base64) {
-        imageBytes = Buffer.from(imageInfo.base64, 'base64');
-      } else {
-        // Fetch from URL
-        const resp = await fetch(imageInfo.url);
+      if (fetchUrl) {
+        const resp = await fetch(fetchUrl);
         if (!resp.ok) {
-          logger.warn({ groupId, url: imageInfo.url, status: resp.status }, 'image fetch failed');
+          logger.warn({ groupId, fetchUrl, status: resp.status }, 'mface fetch failed');
           return '';
         }
         imageBytes = Buffer.from(await resp.arrayBuffer());
+      } else if (fileToken) {
+        const imageInfo = await this.adapter.getImage(fileToken);
+        if (!imageInfo.base64 && !imageInfo.url) {
+          logger.warn({ groupId, fileToken }, 'getImage returned no base64 or url');
+          return '';
+        }
+        if (imageInfo.base64) {
+          imageBytes = Buffer.from(imageInfo.base64, 'base64');
+        } else {
+          const resp = await fetch(imageInfo.url);
+          if (!resp.ok) {
+            logger.warn({ groupId, url: imageInfo.url, status: resp.status }, 'image fetch failed');
+            return '';
+          }
+          imageBytes = Buffer.from(await resp.arrayBuffer());
+        }
+      } else {
+        return '';
       }
     } catch (err) {
-      logger.warn({ err, groupId, fileToken }, 'failed to fetch image — skipping description');
+      logger.warn({ err, groupId, fileToken, fetchUrl }, 'failed to fetch image — skipping description');
       return '';
     }
 

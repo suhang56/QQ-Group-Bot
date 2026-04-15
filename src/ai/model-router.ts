@@ -125,9 +125,13 @@ export class ModelRouter implements IClaudeClient {
     }
   }
 
-  // Vision always goes to claude. No fallback chain — if Claude vision
-  // fails, the caller handles it.
+  // Vision dispatch: gemini* → GeminiClient (multimodal OpenAI-compat),
+  // all other models → Claude. Falls back to Claude if Gemini is requested
+  // but not registered.
   async describeImage(imageBytes: Buffer, model: ClaudeModel): Promise<string> {
+    if (/^gemini/i.test(model) && this.gemini) {
+      return this.gemini.describeImage(imageBytes, model);
+    }
     return this.claude.describeImage(imageBytes, model);
   }
 
@@ -137,6 +141,9 @@ export class ModelRouter implements IClaudeClient {
     prompt: string,
     maxTokens?: number,
   ): Promise<string> {
+    if (/^gemini/i.test(model) && this.gemini) {
+      return this.gemini.visionWithPrompt(imageBytes, model, prompt, maxTokens);
+    }
     return this.claude.visionWithPrompt(imageBytes, model, prompt, maxTokens);
   }
 }
