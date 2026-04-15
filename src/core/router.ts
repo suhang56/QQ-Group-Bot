@@ -64,7 +64,14 @@ function randomDelay(): number {
 export function _extractImageUrl(rawContent: string): string | null {
   const m = rawContent.match(/\[CQ:image,[^\]]*url=([^,\]]+)/);
   if (!m || !m[1]) return null;
-  const url = decodeURIComponent(m[1]);
+  // OneBot encodes CQ code parameter values with HTML entities (& → &amp;,
+  // [ → &#91;, ] → &#93;, , → &#44;). Some upstream paths (forward-expand,
+  // nested quotes) re-escape on top of that, producing &amp;amp;. Decode
+  // both layers before returning the URL.
+  let url = m[1];
+  url = url.replace(/&amp;amp;/g, '&').replace(/&amp;/g, '&');
+  url = url.replace(/&#91;/g, '[').replace(/&#93;/g, ']').replace(/&#44;/g, ',');
+  try { url = decodeURIComponent(url); } catch { /* URI already plain */ }
   return url.startsWith('http') ? url : null;
 }
 
@@ -259,13 +266,23 @@ export class Router implements IRouter {
       }
 
       // Image moderator — runs after text check; id-guard already returned if it blocked the message.
+      // Skip when the sender is actively in name-image collection mode —
+      // those uploads are the admin curating their own library, not new
+      // content that needs moderation.
+      const inNameImageCollection =
+        this.nameImagesModule?.getCollectionTarget(msg.groupId, msg.userId) != null;
       const imageFileKey = _extractImageFile(msg.rawContent);
-      if (imageFileKey && this.moderatorModule && config.autoMod) {
+      if (imageFileKey && this.moderatorModule && config.autoMod && !inNameImageCollection) {
         void this._assessImageAsync(msg, imageFileKey);
       }
 
       // Nested images inside expanded forwards
-      if (msg.rawContent.includes('[CQ:forward,') && this.moderatorModule && config.autoMod) {
+      if (
+        msg.rawContent.includes('[CQ:forward,') &&
+        this.moderatorModule &&
+        config.autoMod &&
+        !inNameImageCollection
+      ) {
         const cachedExpanded = this.db.forwardCache.get(
           (msg.rawContent.match(/\[CQ:forward,id=([^\],]+)/)?.[1] ?? '').trim(),
         );
