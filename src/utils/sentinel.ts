@@ -35,6 +35,9 @@ const SUBSTR_FORBIDDEN = [
   '我刚刚已经说过',
   '刚说过相关内容',
   '但刚说过',
+  // bot's own internal error-message format leaking as chat output
+  '图片下载失败',
+  '请稍后再试',
 ];
 
 // Soft-forbidden: reply STARTS with these → assistant meta-framing
