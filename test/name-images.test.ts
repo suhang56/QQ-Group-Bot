@@ -164,9 +164,10 @@ describe('NameImagesModule — saveImage', () => {
     ).rejects.toThrow('Non-image content-type');
   });
 
-  // Image over 5 MB → throws
-  it('throws when image exceeds 5 MB size limit', async () => {
-    const oversized = Buffer.alloc(5 * 1024 * 1024 + 1, 0x00);
+  // Image over the configured size limit → throws. Limit is 20 MB to
+  // accommodate modern phone photos (raised from 5 MB).
+  it('throws when image exceeds 20 MB size limit', async () => {
+    const oversized = Buffer.alloc(20 * 1024 * 1024 + 1, 0x00);
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
       headers: { get: () => 'image/jpeg' },

@@ -278,3 +278,66 @@ describe('ChatModule._pickChatModel — routing rules', () => {
     });
   });
 });
+
+describe('ChatModule._isPicBotCommand — image-library whitelist', () => {
+  let db: Database;
+  let chat: ChatModule;
+
+  const call = (groupId: string, rawContent: string, isDirect = false): boolean =>
+    (chat as unknown as {
+      _isPicBotCommand: (g: string, r: string, d: boolean) => boolean;
+    })._isPicBotCommand(groupId, rawContent, isDirect);
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    chat = new ChatModule(makeMockClaude(), db, { botUserId: BOT_ID });
+  });
+
+  it('returns false when no provider is set (default)', () => {
+    expect(call(GROUP_ID, '友希那')).toBe(false);
+    expect(call(GROUP_ID, '真的假的')).toBe(false);
+  });
+
+  it('with provider: short reactions like "真的假的" pass through (not in library)', () => {
+    chat.setPicNameProvider({ getAllNames: () => ['友希那', '祥子', 'ykn'] });
+    expect(call(GROUP_ID, '真的假的')).toBe(false);
+    expect(call(GROUP_ID, '这怎么办')).toBe(false);
+    expect(call(GROUP_ID, '卧槽了')).toBe(false);
+    expect(call(GROUP_ID, '离谱')).toBe(false);
+  });
+
+  it('with provider: exact whitelist match skips', () => {
+    chat.setPicNameProvider({ getAllNames: () => ['友希那', '祥子', 'ykn'] });
+    expect(call(GROUP_ID, '友希那')).toBe(true);
+    expect(call(GROUP_ID, '祥子')).toBe(true);
+  });
+
+  it('with provider: case-insensitive match for ASCII aliases', () => {
+    chat.setPicNameProvider({ getAllNames: () => ['ykn'] });
+    expect(call(GROUP_ID, 'YKN')).toBe(true);
+    expect(call(GROUP_ID, 'Ykn')).toBe(true);
+  });
+
+  it('with provider: CQ codes and whitespace are stripped before matching', () => {
+    chat.setPicNameProvider({ getAllNames: () => ['友希那'] });
+    expect(call(GROUP_ID, '[CQ:at,qq=123] 友希那 ')).toBe(true);
+    expect(call(GROUP_ID, '  友希那  ')).toBe(true);
+  });
+
+  it('isDirect=true bypasses the skip (e.g. @-mention + name)', () => {
+    chat.setPicNameProvider({ getAllNames: () => ['友希那'] });
+    expect(call(GROUP_ID, '友希那', true)).toBe(false);
+  });
+
+  it('empty bare trigger returns false', () => {
+    chat.setPicNameProvider({ getAllNames: () => ['友希那'] });
+    expect(call(GROUP_ID, '')).toBe(false);
+    expect(call(GROUP_ID, '[CQ:image,file=abc]')).toBe(false);
+  });
+
+  it('partial match does NOT trigger skip (requires exact whole-message match)', () => {
+    chat.setPicNameProvider({ getAllNames: () => ['友希那'] });
+    expect(call(GROUP_ID, '友希那好可爱')).toBe(false);
+    expect(call(GROUP_ID, '我爱友希那')).toBe(false);
+  });
+});

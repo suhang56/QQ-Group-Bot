@@ -187,6 +187,7 @@ const announcementSync = new AnnouncementSyncModule(adapter, db.announcements, d
 const nameImagesDirPath = process.env['NAME_IMAGES_DIR'] ?? path.join(process.cwd(), 'data', 'name-images');
 const nameImages = new NameImagesModule(db.nameImages, nameImagesDirPath, adapter);
 router.setNameImages(nameImages);
+chat.setPicNameProvider(nameImages);
 
 const loreUpdater = new LoreUpdater(claude, db.messages, chat);
 router.setLoreUpdater(loreUpdater);

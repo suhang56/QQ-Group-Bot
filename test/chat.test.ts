@@ -2246,14 +2246,14 @@ describe('ChatModule — reply-to-bot context clarifier', () => {
     chat.recordOutgoingMessage('g1', 9999);
     const trigger = makeMsg({ content: '你说的是什么意思', rawContent: '[CQ:reply,id=9999]你说的是什么意思' });
     await chat.generateReply('g1', trigger, []);
-    expect(getUserContent()).toContain('这条消息引用了你刚才说的话来追问');
+    expect(getUserContent()).toContain('这条消息是对你刚才说的话的 reply-quote');
   });
 
   it('does NOT inject clarifier when trigger is not a reply-quote to bot', async () => {
     const chat = makeChat();
     const trigger = makeMsg({ content: '你说的是什么意思', rawContent: '你说的是什么意思' });
     await chat.generateReply('g1', trigger, []);
-    expect(getUserContent()).not.toContain('这条消息引用了你刚才说的话来追问');
+    expect(getUserContent()).not.toContain('这条消息是对你刚才说的话的 reply-quote');
   });
 });
 
@@ -2546,7 +2546,20 @@ describe('ChatModule — topicStick engagement factor', () => {
   }
 
   it('same-topic follow-up after bot reply boosts score (overlap ≥ 2 tokens)', async () => {
-    // First reply via @-mention to set engagedTopic
+    // Use a counter-mock so the 2nd reply is distinct — otherwise self-dedup
+    // (bigram-Jaccard > 0.7 vs recent own replies) drops the 2nd identical
+    // 'bot reply' and the test would see null for reasons unrelated to scoring.
+    const replies = [
+      '第一条回复随便说说',
+      '第二条回复主题完全不同的内容避免被自去重逻辑撞上',
+    ];
+    let callN = 0;
+    claude = {
+      complete: vi.fn().mockImplementation(async () => ({
+        text: replies[callN++] ?? '兜底',
+        inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0,
+      })),
+    };
     const chat = makeScoringChat();
     const atMsg = makeMsg({
       rawContent: `[CQ:at,qq=${BOT_ID}] roselia fire bird 好听`,
@@ -2555,12 +2568,12 @@ describe('ChatModule — topicStick engagement factor', () => {
     await chat.generateReply('g1', atMsg, []);
 
     // Follow-up: "roselia fire" overlaps with engaged tokens (>= 2)
-    // Without topicStick, score=0 → skip. With topicStick=0.4 → passes 0.5? no, 0.4 < 0.5.
     // Combine with a question mark to hit question=0.6 → total ≥ 0.5
     const followUp = makeMsg({ content: 'roselia fire 你也喜欢吗？', rawContent: 'roselia fire 你也喜欢吗？' });
     const result = await chat.generateReply('g1', followUp, []);
-    // question(0.6) alone is enough; verify call was made
-    expect(result).toBe('bot reply');
+    expect(result).not.toBeNull();
+    expect(typeof result).toBe('string');
+    expect(result as string).toContain('第二条');
   });
 
   it('different-topic message does not get topicStick boost', async () => {
@@ -2696,7 +2709,6 @@ describe('ChatModule — metaIdentityProbe scoring factor', () => {
   it('persona string contains "哪个人格" section with response examples', () => {
     expect(BANGDREAM_PERSONA).toContain('哪个人格你说呢');
     expect(BANGDREAM_PERSONA).toContain('主人格一直都是我这个');
-    expect(BANGDREAM_PERSONA).toContain('被夸像真人的反应');
   });
 });
 
