@@ -1132,3 +1132,385 @@ The sticker scoring query text is the **LLM's own output** (`processedText`), no
 | EC-19 | Interaction with `/char` persona | `/char` active, sticker-first ON | LLM generates char's intended text → sticker-first scores it → sticker returned if above threshold |
 | EC-20 | LLM returns `<skip>` | sticker-first ON | `generateReply` returns null before intercept; no sticker sent; zero output is correct |
 | EC-21 | Embedder not ready | `embedder.isReady=false`, sticker-first ON | Falls through to text; no error thrown; sticker not sent |
+
+---
+
+## 12. Bandori Live — Event Knowledge Scraper & Injection
+
+### 12.1 Overview
+
+The bandori-live feature gives the bot real-time awareness of BanG Dream! live events. The bot runs in QQ groups for BanG Dream! fans who frequently discuss concerts, livestreams, and tour announcements. Without this feature, the bot cannot distinguish "did you watch the Roselia live last weekend?" from general chat — it knows nothing about events it wasn't trained on.
+
+**Goal**: A scheduled scraper fetches upcoming and recent BanG Dream! live event data from the BanGDream! Girls Band Party! fan wiki and official Bushiroad event sources. Scraped data is distilled via Claude into a structured knowledge document (`data/lore/bandori-live.md`). This document is injected into the chat system prompt (via the existing lore injection path) so the bot can reference real event names, dates, setlists, and announcements during group chat.
+
+**Design principle**: Scraping is offline from the bot's reply path. Knowledge is injected as a static lore block. No runtime HTTP calls during message handling. Consistent with `feedback_distill_over_retrieve`.
+
+---
+
+### 12.2 Feature Scope
+
+**In scope (v1)**:
+- Scrape BanG Dream! live event listings from `bangdream.fandom.com` wiki pages and `bushiroad.com/en/event/` listings
+- Distill raw HTML/markdown into a structured `bandori-live.md` document via Claude
+- Inject `bandori-live.md` into the chat system prompt alongside the existing per-group lore block
+- Scheduled auto-refresh (configurable interval, default 24h)
+- `/bandori_live_refresh` command for on-demand refresh
+- `/bandori_live_status` command to show last-fetch metadata
+
+**Out of scope (v1)**:
+- Setlist scraping (only event names, dates, bands, and brief descriptions)
+- Venue seat maps or ticket pricing
+- Per-user event subscription/notification
+- Image or video thumbnail fetching
+- Non-BanG Dream! idol group events
+- Real-time push when a new event is announced (no polling <1h)
+
+---
+
+### 12.3 Data Sources
+
+The scraper targets two public sources in priority order:
+
+| Priority | Source | URL pattern | Content |
+|---|---|---|---|
+| 1 | Fandom wiki — Live events list | `https://bangdream.fandom.com/wiki/Lives` | Table of all announced lives: name, date, bands, venue, type (onsite/livestream) |
+| 2 | Bushiroad events page (EN) | `https://en.bushiroad.com/events/` | Upcoming events including non-BanG Dream!; filter for BanG Dream! entries only |
+
+**Fallback**: If source 1 returns HTTP error or is unscrapable, use source 2 only. If both fail, retain the last successful `bandori-live.md` and log a WARN.
+
+**robots.txt compliance**: Both sources are public fan/corporate sites. Scraper must set a descriptive `User-Agent` header and respect `Retry-After` response headers. No `robots.txt` violations — if a path is disallowed, skip it and fall through to the other source.
+
+---
+
+### 12.4 Scraped Data Schema
+
+After fetching and cleaning raw HTML, the scraper produces a JSON intermediate (in-memory, not persisted) conforming to:
+
+```typescript
+export interface BandoriLiveEvent {
+  name: string;              // e.g. "Roselia Live 2024「Ringing Bloom」"
+  dateText: string;          // raw date string as-found, e.g. "2024-09-21 ~ 2024-09-22"
+  startDate: string | null;  // ISO 8601 date "YYYY-MM-DD", or null if unparseable
+  endDate: string | null;    // ISO 8601 date "YYYY-MM-DD", or null if single-day
+  bands: string[];           // e.g. ["Roselia"], ["Poppin'Party", "Morfonica"]
+  venue: string | null;      // e.g. "Makuhari Messe", or null if TBD
+  type: 'onsite' | 'livestream' | 'hybrid' | 'unknown';
+  status: 'upcoming' | 'past' | 'ongoing' | 'unknown';
+  url: string | null;        // source URL for this event, if available
+  notes: string | null;      // brief extra note, ≤100 chars, or null
+}
+
+export interface BandoriLiveScrapeResult {
+  fetchedAt: string;         // ISO 8601 datetime
+  source: string;            // which source was used (URL)
+  eventCount: number;
+  events: BandoriLiveEvent[];
+}
+```
+
+**Date parsing rules**:
+- Attempt to parse `dateText` into `startDate`/`endDate` using standard ISO date parsing
+- Common formats to handle: `YYYY-MM-DD`, `YYYY/MM/DD`, `Month DD, YYYY` (English), `YYYY年MM月DD日` (Japanese)
+- If parsing fails, set both `startDate` and `endDate` to `null` (never throw on date parse failure)
+
+**Status inference** (computed at scrape time from today's date vs `startDate`/`endDate`):
+- `upcoming`: `startDate > today`
+- `past`: `endDate < today` (or `startDate < today` for single-day events)
+- `ongoing`: `startDate <= today <= endDate`
+- `unknown`: date fields are null
+
+**Event window**: Retain events where `startDate >= (today - 180 days)` OR `startDate IS NULL`. Events older than 180 days are excluded from the output document. No cap on upcoming events.
+
+---
+
+### 12.5 Distillation — `bandori-live.md`
+
+After scraping, the raw `BandoriLiveScrapeResult` is passed to Claude (Sonnet) which distills it into a human-readable, lore-style Markdown document suitable for injection into the chat system prompt.
+
+**Claude call** (single, non-streaming):
+
+```json
+{
+  "model": "claude-sonnet-4-6",
+  "max_tokens": 1200,
+  "system": [
+    {
+      "type": "text",
+      "text": "You are a BanG Dream! fan wiki editor. Given raw event data as JSON, write a compact lore block in Chinese that a QQ group bot can use during fan chat. Cover: upcoming events (emphasise most, within 60 days), recent past events (within 30 days), ongoing events. Use concise bullet format. Include event name, date, bands, type (现场/线上), and venue if known. Omit nulls. Max 900 Chinese characters total. Do not include commentary about the JSON itself.",
+      "cache_control": {"type": "ephemeral"}
+    }
+  ],
+  "messages": [
+    {
+      "role": "user",
+      "content": "Today is {today_iso}.\n\nRaw event data:\n{json_string}"
+    }
+  ]
+}
+```
+
+**Output** (`data/lore/bandori-live.md`):
+
+```markdown
+# BanG Dream! 近期演唱会 & Live 信息
+（更新于 {fetchedAt}）
+
+{Claude's distilled bullet list}
+```
+
+**File location**: `data/lore/bandori-live.md` — alongside the per-group lore files. Created on first successful distillation. Overwritten on each subsequent refresh (no version history in v1).
+
+**Idempotency**: If Claude returns an error or empty output, the existing file is NOT overwritten. Log ERROR and retain previous content.
+
+---
+
+### 12.6 System Prompt Injection
+
+The `bandori-live.md` content is injected into the chat system prompt as an additional cached block, using the existing lore-injection infrastructure in `ChatModule._buildGroupIdentityPrompt`.
+
+**Injection point**: After the per-group lore block and before the tuning/fact blocks.
+
+**Structure** (appended to `systemBlocks` in `ChatModule`):
+
+```typescript
+// Immediately after perGroupLoreBlock, if bandoriLiveBlock is loaded:
+{
+  text: `【BanG Dream! Live 信息】\n${bandoriLiveContent}`,
+  cache: true,  // ephemeral prompt caching
+}
+```
+
+**Loading**: `ChatModule` reads `data/lore/bandori-live.md` at startup (or on first reply if not yet loaded). It caches the content in memory. `BandoriLiveModule` calls `chatModule.invalidateBandoriLive()` after each successful refresh so the next reply reloads from disk.
+
+**File missing**: If `bandori-live.md` does not exist (first run, scraper not yet executed), the block is silently omitted. No error, no crash. Bot replies normally without live knowledge.
+
+**Size cap**: If `bandori-live.md` exceeds 1200 characters, truncate at the last complete bullet point before the cap. Log WARN.
+
+---
+
+### 12.7 Commands
+
+All commands are admin/owner only at the router gate, consistent with all other slash commands.
+
+#### `/bandori_live_refresh`
+- **Syntax**: `/bandori_live_refresh`
+- **Permission**: admins and owner only
+- **Action**: Immediately triggers a full scrape + distillation cycle for all groups that have bandori-live enabled (or globally, since the lore file is shared). Runs asynchronously; reply is sent when scrape starts (not when it completes).
+- **Response on trigger**: `正在抓取 BanG Dream! Live 信息，稍候...`
+- **Response on completion** (sent as follow-up group message): `BanG Dream! Live 信息已更新（共 {N} 场活动）。`
+- **Response on failure**: `抓取失败，保留上次数据。详情见日志。`
+- **Edge cases**:
+  1. Scrape already in-flight → reply `BanG Dream! Live 信息正在更新中，请稍候。` and do not start a second concurrent scrape
+  2. No events found after scrape → reply `未找到活动信息，保留上次数据。` and retain existing file
+  3. Claude distillation fails (API error) → retain existing file, reply failure message
+  4. Non-admin sends command → silently ignored at router gate
+
+#### `/bandori_live_status`
+- **Syntax**: `/bandori_live_status`
+- **Permission**: admins and owner only
+- **Response**:
+  ```
+  【BanG Dream! Live 状态】
+  上次更新：{fetchedAt or 从未更新}
+  数据来源：{source URL or 无}
+  活动数量：{N 场}
+  下次自动更新：{next scheduled time}
+  注入状态：{已注入 / 未注入（文件不存在）}
+  ```
+- **Edge cases**:
+  1. `bandori-live.md` not yet created → `从未更新` / `未注入（文件不存在）`
+  2. Metadata file missing but lore file exists (rare) → show `未知` for times/counts, `已注入` for injection status
+
+---
+
+### 12.8 Scheduled Refresh
+
+The scraper runs on a configurable schedule managed by an internal interval (not a system cron). Default: every **24 hours**. Configurable via env var `BANDORI_LIVE_REFRESH_INTERVAL_MS` (integer milliseconds).
+
+**Startup behavior**: On bot start, if `bandori-live.md` does not exist OR is older than `BANDORI_LIVE_REFRESH_INTERVAL_MS`, run an immediate refresh. Otherwise, defer to the next scheduled interval.
+
+**Schedule drift**: The interval is reset (not accumulated) after each successful refresh, so the next refresh is always `refreshIntervalMs` after the last successful one. A failed refresh does not reset the interval.
+
+---
+
+### 12.9 Scraper Implementation
+
+**Module**: `src/modules/bandori-live.ts` — `BandoriLiveModule`
+
+**HTTP**: Use Node.js built-in `fetch` (Node 18+, already used elsewhere in the project). No new HTTP dependency.
+
+**HTML parsing**: Use `node-html-parser` (already in `package.json` if present; add if absent — lightweight, no native deps). Extract text from table/list elements. Strip all script/style/nav/footer HTML before passing to Claude.
+
+**Rate limiting**: One request per source. Total ≤ 2 HTTP requests per refresh cycle. No parallel fetching.
+
+**Timeout**: 15 seconds per HTTP request. On timeout: treat as fetch failure, fall through to next source or retain existing file.
+
+**Scrape flow**:
+```
+1. Fetch source 1 HTML (15s timeout)
+2. If HTTP error or timeout → log WARN, try source 2
+3. Parse HTML → extract BandoriLiveEvent[]
+4. If source 2 needed: fetch + parse, merge events (dedup by name+date)
+5. Compute status fields (upcoming/past/ongoing/unknown)
+6. Filter: exclude events where startDate < (today - 180 days) AND startDate != null
+7. Sort: upcoming first (soonest first), then ongoing, then past (most recent first), then unknown
+8. Call Claude distillation → markdown string
+9. Prepend header + write to data/lore/bandori-live.md
+10. Write metadata to data/lore/bandori-live-meta.json
+11. Call chatModule.invalidateBandoriLive() to flush cache
+12. Return eventCount
+```
+
+**Metadata file** (`data/lore/bandori-live-meta.json`):
+```json
+{
+  "fetchedAt": "2026-04-15T10:00:00Z",
+  "source": "https://bangdream.fandom.com/wiki/Lives",
+  "eventCount": 12
+}
+```
+
+---
+
+### 12.10 `ICharModule` / `IChatModule` Integration Points
+
+Two new methods added to `IChatModule` (interface change — requires Architect approval per §8):
+
+```typescript
+/** Reload bandori-live lore from disk on next reply (called after each successful refresh). */
+invalidateBandoriLive(): void;
+
+/** For status display: return whether bandori-live block is currently loaded in memory. */
+isBandoriLiveLoaded(): boolean;
+```
+
+`BandoriLiveModule` constructor receives `IChatModule` (nullable, for invalidation) and `IClaudeClient`. It does NOT receive `INapCatAdapter` directly — it sends group messages via a callback provided by `Router`.
+
+---
+
+### 12.11 Error Codes (additions to §3)
+
+| Code | Name | Cause | Bot response |
+|---|---|---|---|
+| E031 | BANDORI_LIVE_SCRAPE_FAILED | Both HTTP sources failed | `抓取失败，保留上次数据。详情见日志。` |
+| E032 | BANDORI_LIVE_IN_FLIGHT | `/bandori_live_refresh` while already running | `BanG Dream! Live 信息正在更新中，请稍候。` |
+| E033 | BANDORI_LIVE_EMPTY | Scrape succeeded but 0 events found | `未找到活动信息，保留上次数据。` |
+| E034 | BANDORI_LIVE_DISTILL_FAILED | Claude call returned error or empty text | Retain old file; log ERROR; reply failure msg |
+
+---
+
+### 12.12 DB Schema Changes
+
+No new database tables. All persistent state is in the filesystem (`data/lore/bandori-live.md` and `data/lore/bandori-live-meta.json`).
+
+No new `group_config` columns. The feature is globally enabled (one shared lore file for all groups). A per-group toggle is a v2 consideration.
+
+**`applyMigrations()` change**: None required for v1.
+
+---
+
+### 12.13 Config & Environment
+
+| Variable | Type | Default | Description |
+|---|---|---|---|
+| `BANDORI_LIVE_REFRESH_INTERVAL_MS` | integer | `86400000` (24h) | Auto-refresh interval in ms |
+| `BANDORI_LIVE_ENABLED` | `'true'/'false'` | `'true'` | Master toggle — set `false` to disable entirely |
+| `BANDORI_LIVE_LORE_DIR` | string | `'data/lore'` | Directory where lore files are written |
+
+All read from `process.env` in `BandoriLiveModule` constructor options. Not stored in `group_config`.
+
+---
+
+### 12.14 Bootstrap Order Change
+
+Added to `src/index.ts` after step 6b (CharModule instantiation):
+
+```typescript
+// 6c. Instantiate BandoriLiveModule (after ChatModule)
+const bandoriLiveModule = new BandoriLiveModule(claude, chatModule, {
+  loreDir: config.bandoriLiveLoreDir,
+  refreshIntervalMs: config.bandoriLiveRefreshIntervalMs,
+  enabled: config.bandoriLiveEnabled,
+});
+await bandoriLiveModule.start();  // triggers initial fetch if stale/absent, starts interval
+```
+
+`BandoriLiveModule.start()` is async but must resolve within 60 seconds. If the initial fetch exceeds 60 seconds, it is aborted and the module marks itself as `pending_first_refresh`. The bot is NOT blocked from coming online.
+
+---
+
+### 12.15 File Layout
+
+```
+data/
+  lore/
+    bandori-live.md            ← distilled markdown, injected into chat system prompt
+    bandori-live-meta.json     ← scrape metadata for /bandori_live_status
+src/
+  modules/
+    bandori-live.ts            ← BandoriLiveModule (new)
+  core/
+    router.ts                  ← register /bandori_live_refresh, /bandori_live_status
+  modules/
+    chat.ts                    ← add invalidateBandoriLive(), isBandoriLiveLoaded(); inject bandori-live block
+  utils/
+    errors.ts                  ← add E031–E034
+test/
+  bandori-live.test.ts         ← unit + integration tests
+```
+
+---
+
+### 12.16 Edge Test Cases (mandatory — SOUL RULE, 22 cases)
+
+| ID | Scenario | Precondition | Expected result |
+|---|---|---|---|
+| EC-1 | Source 1 returns HTTP 404 | Source 1 unavailable | Falls back to source 2; WARN logged |
+| EC-2 | Both sources return HTTP 500 | Both unavailable | E031; existing `bandori-live.md` retained; error reply sent |
+| EC-3 | Source 1 returns valid HTML with 0 events | Scrape yields empty list | E033; existing file retained; `未找到活动信息` reply |
+| EC-4 | Source 1 returns events, some > 180 days old | 3 events: 1 old, 2 recent | Old event excluded; `eventCount = 2` in metadata |
+| EC-5 | Date string unparseable (e.g. "TBD") | `dateText = "TBD"` | `startDate = null`, `endDate = null`; `status = 'unknown'`; no throw |
+| EC-6 | Claude returns empty string | API succeeds but text is `""` | E034; existing file retained; error reply sent |
+| EC-7 | Claude returns API error (5xx) | Claude unavailable | E034; existing file retained; error reply sent |
+| EC-8 | `bandori-live.md` does not exist on startup | Fresh install | Module starts without error; `isBandoriLiveLoaded()` = false; chat replies without live block |
+| EC-9 | `bandori-live.md` is stale (>24h old) on startup | File exists but old | Immediate refresh triggered at startup |
+| EC-10 | `bandori-live.md` is fresh (<24h old) on startup | File exists and recent | No immediate refresh; next refresh at scheduled time |
+| EC-11 | `/bandori_live_refresh` while scrape in-flight | Previous refresh running | E032; no second scrape started |
+| EC-12 | `/bandori_live_refresh` by non-admin | `msg.role = 'member'` | Silently ignored at router gate |
+| EC-13 | Successful refresh: `invalidateBandoriLive()` called | Normal success path | `ChatModule` reloads file on next reply |
+| EC-14 | `bandori-live.md` exceeds 1200 chars | Distill output very long | Truncated at last complete bullet before cap; WARN logged |
+| EC-15 | `/bandori_live_status` when file never created | No metadata or lore file | Status shows `从未更新`, `未注入（文件不存在）` |
+| EC-16 | `/bandori_live_status` after successful refresh | Normal state | All fields populated accurately |
+| EC-17 | Dedup: same event in source 1 and source 2 | Identical name+date | Only one event in output list |
+| EC-18 | HTTP request timeout (>15s) | Source hangs | Timeout fires; log WARN; fall through to other source |
+| EC-19 | `BANDORI_LIVE_ENABLED = 'false'` | Feature disabled | `BandoriLiveModule.start()` is no-op; commands reply `功能未启用`; no injection |
+| EC-20 | Chat reply with char mode active + bandori-live loaded | Both feature flags on | Both char persona AND bandori-live block present in system prompt |
+| EC-21 | Prompt injection in scraped event name | Event name contains `</system>` or similar | Content is passed as `user`-role message content to Claude distill only; never interpolated into `system` block |
+| EC-22 | `BANDORI_LIVE_REFRESH_INTERVAL_MS` set to invalid (non-integer) env var | Bad env | Module falls back to default 24h; logs WARN |
+
+---
+
+### 12.17 Test Plan Summary
+
+- **Unit tests** (`test/bandori-live.test.ts`):
+  - `BandoriLiveEvent` parsing: date formats, status inference, 180-day filter, unknown dates
+  - `BandoriLiveModule.start()`: no-op when disabled, immediate refresh on stale file, defer when fresh
+  - `pickSticker` and distillation: mock Claude returning valid text, empty text, API error
+  - EC-1 through EC-22 (all mandatory)
+- **Integration tests** (same file, tagged `@integration`):
+  - Real HTTP fetch skipped in CI — use `vi.mock('node-fetch')` or `vi.spyOn(globalThis, 'fetch')`
+  - Filesystem write/read round-trip using `tmp` directory
+  - `invalidateBandoriLive()` propagates correctly to `ChatModule`
+- **Coverage target**: ≥80% line coverage for `src/modules/bandori-live.ts`
+- All 22 edge cases are mandatory — failing any one blocks Reviewer sign-off (SOUL RULE)
+
+---
+
+### 12.18 Permissions Summary
+
+| Command | Permission |
+|---|---|
+| `/bandori_live_refresh` | Admin and owner only (router gate) |
+| `/bandori_live_status` | Admin and owner only (router gate) |
+| Scheduled auto-refresh | Internal — no user permission required |
+| Lore injection into chat | Automatic — all groups that use chat module receive it |
