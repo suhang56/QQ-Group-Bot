@@ -213,9 +213,10 @@ export class OpportunisticHarvest {
     try {
       const resp = await this.claude.complete({
         model: HARVEST_MODEL as ClaudeModel,
-        // Deep cycles return up to MAX_FACTS_DEEP (30) entries, each ~150
-        // tokens with Qwen's slightly more verbose style. Headroom at 6k.
-        maxTokens: deep ? 6144 : 1536,
+        // Qwen3 is more verbose per fact (~180 tok) than Haiku. Budget:
+        // deep (30 facts) ≈ 6k; regular (12 facts) ≈ 3k. Previous 1536 was
+        // still truncating mid-array on regular cycles.
+        maxTokens: deep ? 6144 : 3072,
         system: [{ text: '你是一个群聊知识抽取助手，只输出 JSON。', cache: true }],
         messages: [{ role: 'user', content: prompt }],
       });
