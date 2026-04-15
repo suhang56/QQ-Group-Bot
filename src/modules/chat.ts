@@ -1202,6 +1202,22 @@ export class ChatModule implements IChatModule {
 这条消息的输出**绝不能是 <skip> 或 ... 或 空**。至少给一个最短的反应。`
       : '';
 
+    // "你"-addressed probe: trigger contains 你 and looks directed at bot
+    // (no @ to another user, bot posted recently or it's a question form).
+    // Softer than @-mention but still a strong hint that the user is
+    // addressing the bot, not a peer. Telling the LLM explicitly shortcuts
+    // the "is 你 referring to me" reasoning that cold personas tend to fail.
+    const triggerContent = triggerMessage.content.trim();
+    const triggerRaw = triggerMessage.rawContent;
+    const youSignal =
+      !isAtTrigger
+      && /你/.test(triggerContent)
+      && !/\[CQ:at,qq=\d+/.test(triggerRaw)
+      && (/[?？]$|[吗嘛呢吧]$/.test(triggerContent) || triggerContent.length <= 20);
+    const youAddressedDirective = youSignal
+      ? `\n\n⚠️ **这条消息用「你」直接问你。** 群里这会儿没有其他人被 @，「你」很可能就是指你（bot / 小号）。不要因为对方没 @ 就假装这话不是问你。被这样问到要回一句，哪怕最短的反应："嗯" / "还行" / "不讨厌" / "一般吧" / "别问我" / "不懂" / "?" 都行，不能 <skip>。\n\n例外：如果上下文里明显是两个群友在互相对话（前几条他们已经在 @/quote 对方）、你只是碰巧看到 —— 那可以 <skip>，但这种情况要谨慎判断。`
+      : '';
+
     const userContent = `${replyContextBlock}${keywordSection}${wideSection}${mediumSection}${immediateSection}${avoidSection}以下语境里出现 [你(昵称)] 的消息是你自己之前说过的，出现 [别人昵称] 的是群友说的。**不要把群友的话当成你自己说过的**。
 
 参考以上语境，判断：标了 ← 的那条消息值不值得你开口。**绝对不要把那条消息原样重复出来**——不管多短。
@@ -1211,7 +1227,7 @@ export class ChatModule implements IChatModule {
 - 如果只想扔个短反应就够 → 就短一句，但必须和那条消息内容不同，不要凑字数
 - 如果要接就接，别摆成 "X 是 Y" 这种答题腔
 
-⚠️ 不要假装说过你实际没说过的话。被问到你前面发言的具体含义时：要么真给解释（如果 context 里有对应 [你(...)] 记录），要么装傻"忘了/随便说的"，要么 <skip>。**绝对禁止** "我刚说过" / "我都说过了" 这类逃避，除非 context 里真的有对应 [你(...)] 记录。${atMentionDirective}
+⚠️ 不要假装说过你实际没说过的话。被问到你前面发言的具体含义时：要么真给解释（如果 context 里有对应 [你(...)] 记录），要么装傻"忘了/随便说的"，要么 <skip>。**绝对禁止** "我刚说过" / "我都说过了" 这类逃避，除非 context 里真的有对应 [你(...)] 记录。${atMentionDirective}${youAddressedDirective}
 
 只输出一个：${isAtTrigger ? '一条自然反应（不能是 <skip>）' : '<skip> 或 一条自然反应（可多行）'}。
 
@@ -1453,8 +1469,9 @@ export class ChatModule implements IChatModule {
     }
 
     // +0.8 implicit bot reference: alias keyword OR (pronoun/reaction + recent bot post)
+    // OR "你"-addressed question when bot was recently active with no other @-mention.
     const lastProactiveMs = this.lastProactiveReply.get(groupId) ?? 0;
-    if (this._isImplicitBotRef(content, nowMs, lastProactiveMs)) {
+    if (this._isImplicitBotRef(content, nowMs, lastProactiveMs, msg.rawContent)) {
       factors.implicitBotRef = 0.8;
       this.logger.debug({ groupId, content }, 'implicit bot reference detected');
     }
@@ -1594,7 +1611,7 @@ export class ChatModule implements IChatModule {
     return next >= this.teaseCurseThreshold;
   }
 
-  private _isImplicitBotRef(content: string, nowMs: number, lastBotPostMs: number): boolean {
+  private _isImplicitBotRef(content: string, nowMs: number, lastBotPostMs: number, rawContent = ''): boolean {
     // Signal A: explicit bot alias keyword — always counts regardless of timing
     if (BOT_ALIAS_RE.test(content)) return true;
     // Signal B: pronoun OR reaction phrase + bot posted recently
@@ -1605,6 +1622,20 @@ export class ChatModule implements IChatModule {
       content.length <= IMPLICIT_BOT_REF_REACTION_MAX_CHARS &&
       msSinceBot < IMPLICIT_BOT_REF_REACTION_WINDOW_MS
     ) return true;
+    // Signal D: "你"-addressed question with no other @-mention, AND bot was
+    // recently active. Catches "你喜欢lisa吗" / "你觉得呢" / "你看到了吗"
+    // where the sender clearly addresses someone individually and bot is the
+    // most recent speaker. Guarded so we don't false-positive on peer-to-peer
+    // chat: (a) must contain 你, (b) must NOT contain @ to another user,
+    // (c) must end with question marker OR be ≤15 chars (short direct quip),
+    // (d) bot must have posted within IMPLICIT_BOT_REF_ALIAS_WINDOW_MS.
+    if (msSinceBot < IMPLICIT_BOT_REF_ALIAS_WINDOW_MS && /你/.test(content)) {
+      const hasAtOtherUser = /\[CQ:at,qq=\d+/.test(rawContent);
+      if (!hasAtOtherUser) {
+        const isQuestion = /[?？]$|[吗嘛呢吧]$/.test(content.trim());
+        if (isQuestion || content.length <= 15) return true;
+      }
+    }
     return false;
   }
 
