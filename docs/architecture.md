@@ -630,3 +630,287 @@ This test is tagged `@integration` and excluded from default `pnpm test`; run vi
 ### Milestone Gate Rule
 
 Developer may not begin milestone M(n+1) until Reviewer has issued **APPROVED** for milestone M(n) in `.claude/code-reviews.md`. Partial approvals ("APPROVED with notes") are acceptable only if the noted issues are tracked as tasks for the current milestone and do not block correctness.
+
+---
+
+## 9. Sticker-First Mode — Iteration Contract
+
+### 9.1 Feature Summary
+
+A per-group toggle that makes the bot prefer sending a sticker over sending text. When enabled, the bot runs its full normal reply pipeline and generates the text it *would have sent*. That intended text is then used as the embedding query against the local sticker library (`local_stickers` table). If the best-matching sticker scores at or above the configured threshold, the bot sends the sticker CQ code only; the intended text is discarded. If no sticker qualifies, the text is sent as normal. The feature is additive — it can only replace a text reply with a sticker, never convert a non-null reply into null output.
+
+---
+
+### 9.2 Design Decisions
+
+#### Decision 1 — Scoring target: bot's intended text, not the trigger message
+
+The user's request is "按照它想说的话发表情包" — send a sticker based on *what the bot would have said*, not based on what the user said. The embedding query is therefore `processedText` (the bot's final cleaned reply text), computed after the full LLM pipeline completes.
+
+Call path:
+```
+ChatModule.generateReply()
+  → LLM call → raw reply
+  → sentinelCheck (+ hardened regen if needed)
+  → postProcess (strip <skip>, "...", normalise)
+  → [sticker-first intercept fires here, using processedText as query]
+  → _recordOwnReply + return
+```
+
+`IEmbeddingService.embed(processedText)` is already available inside `ChatModule` (the `embedder` field injected at construction). `ILocalStickerRepository.getTopByGroup` is already available if `localStickerRepo` is injected. No new infrastructure is needed.
+
+#### Decision 2 — Threshold default: 0.55 (conservative; needs live tuning)
+
+**Measured from live data**: 16 (intendedText, sticker) pairs computed on the actual `local_stickers` table using `EmbeddingService` (MiniLM-L6-v2). Scoring method: embed `processedText`, embed `[summary, ...contextSamples].join(' ')` as a single string, cosine similarity.
+
+Selected measurements:
+
+| Pair | Category | Score |
+|---|---|---|
+| "哈哈哈笑死了" vs "笑死了 我要笑死了" | GOOD | 0.331 |
+| "这是什么操作" vs "震惊 什么感觉" | GOOD | 0.459 |
+| "哎我真无语了" vs "无语吐槽 神人 唉" | GOOD | 0.324 |
+| "唉不想干了摆烂吧" vs "摆烂 还真是" | GOOD | 0.332 |
+| "完蛋了这下完了" vs "完蛋了 报警了" | GOOD | 0.420 |
+| "绷不住了哈哈哈哈" vs "绷不住 这波cxy来了都绷不住" | GOOD | 0.502 |
+| "今天天气不错" vs "笑死了 我要笑死了" | BAD | 0.389 |
+| "好的明白了" vs "震惊 什么感觉" | BAD | 0.334 |
+| "我吃饭了" vs "完蛋了 报警了" | BAD | 0.417 |
+| "这个代码有bug" vs "才怪 记住了 ohno" | BAD | 0.411 |
+
+**Finding**: MiniLM-L6-v2 inflates cosine scores for short Chinese text. "你好啊" vs "无语吐槽" (single-string) scores 0.96; bad-match pairs cluster 0.33–0.42, overlapping with good-match pairs. No threshold below ~0.50 cleanly separates the distributions.
+
+**Chosen default: 0.55** — at this level, only near-literal lexical overlap fires (bot says "完蛋了" → matches "完蛋了 报警了" sticker at 0.42; narrowly misses, which is correct). The intent is a conservative v1 default: occasional confirmed matches are better than frequent jarring mismatches. Admins who want more liberal matching use `/stickerfirst_threshold 0.3`.
+
+**Scoring deviation from spec §11.4 draft**: the spec proposes scoring bot-text vs each `context_sample` individually and taking the max. Measured behaviour: individual 1–3 character context samples ("唉", "神人") produce pathological scores (0.75+ for unrelated queries) because MiniLM has insufficient signal. **Required deviation**: score against `[summary, ...contextSamples].filter(s => s.trim().length >= 2).join(' ')` as one concatenated string. Also skip any sticker whose total scorable text is < 6 characters. This is architecturally safer and produces more stable score distributions.
+
+#### Decision 3 — Hook point in `chat.ts`
+
+The intercept is inserted **after** `postProcess` and all null/echo/self-dedup checks, **before** `_recordOwnReply`. Pseudocode:
+
+```typescript
+// inside generateReply(), after processedText is finalised and non-null:
+const groupConf = this.db.groupConfig.get(groupId);
+if (groupConf?.stickerFirstEnabled && this.embedder?.isReady && this.localStickerRepo) {
+  const choice = await this.stickerFirst
+    .pickSticker(groupId, processedText, groupConf.stickerFirstThreshold)
+    .catch(err => { this.logger.error({ err, groupId }, 'sticker-first pick failed'); return null; });
+  if (choice) {
+    this._recordOwnReply(groupId, choice.cqCode);
+    return choice.cqCode;
+  }
+}
+this._recordOwnReply(groupId, processedText);
+return processedText;
+```
+
+Rationale: (a) we need the final cleaned text as the query; (b) we must not record a text that was not sent; (c) one conditional at one point minimises blast radius — the entire rest of `generateReply` is untouched.
+
+#### Decision 4 — New module: `src/modules/sticker-first.ts`
+
+Extracted into its own module to keep `chat.ts` from accumulating scoring + suppression state. Pure: no AI calls, no side effects on chat state, no adapter dependency.
+
+```typescript
+export interface IStickerFirstModule {
+  pickSticker(
+    groupId: string,
+    intendedText: string,
+    threshold: number,
+  ): Promise<StickerChoice | null>;
+}
+
+export type StickerChoice = {
+  key: string;       // sticker key (SHA-256 prefix or mface key)
+  cqCode: string;    // ready-to-send CQ code string
+  score: number;     // cosine similarity that won
+};
+```
+
+`StickerFirstModule` constructor receives `ILocalStickerRepository` and `IEmbeddingService`. It owns the repeat-suppression map. No `IClaudeClient`, no `INapCatAdapter`, no `IGroupConfigRepository`.
+
+Dependency direction: `modules/sticker-first.ts` → `storage/` + `storage/embeddings.ts`. No upward imports. Clean.
+
+#### Decision 5 — Repeat suppression
+
+In-memory map owned by `StickerFirstModule`:
+
+```typescript
+private readonly _cooldown = new Map<string, Map<string, number>>();
+// groupId → Map<stickerKey, expiresAtMs>
+```
+
+- Before scoring: filter out keys where `Date.now() < expiresAtMs`
+- After a sticker is chosen: set `key → Date.now() + 5 * 60_000`
+- Cap: 50 entries per group; on overflow evict the entry with the smallest `expiresAtMs` (oldest expiry)
+- Resets on process restart — acceptable for a 5-minute window
+- If top pick is suppressed: **try next-best candidate** if it is still ≥ threshold; fall through to text only if no unsuppressed candidate meets threshold. Rationale: next-best is almost certainly contextually appropriate too; falling through immediately wastes the feature when only one sticker is on cooldown out of a library of 30.
+
+#### Decision 6 — `GroupConfig` additions
+
+```typescript
+// src/storage/db.ts — GroupConfig interface
+stickerFirstEnabled: boolean;    // default false
+stickerFirstThreshold: number;   // default 0.55
+```
+
+`defaultGroupConfig()` in `src/config.ts` is the single source of truth:
+
+```typescript
+stickerFirstEnabled: false,
+stickerFirstThreshold: 0.55,
+```
+
+#### Decision 7 — Migration SQL
+
+Added in `applyMigrations()` in `src/storage/db.ts` only. `schema.sql` gets comment-only documentation (not executable migration). Per project convention (feedback_sqlite_schema_migration): `schema.sql` changes silently skip existing DBs; `ALTER TABLE` in `applyMigrations()` is the only safe path.
+
+```sql
+ALTER TABLE group_config ADD COLUMN sticker_first_enabled INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE group_config ADD COLUMN sticker_first_threshold REAL NOT NULL DEFAULT 0.55;
+```
+
+Each wrapped in a `try { } catch { /* duplicate column */ }` block, matching the existing pattern for `live_sticker_capture_enabled`.
+
+#### Decision 8 — Router wiring
+
+Four new command handlers registered in `Router` using the existing `Map<string, CommandHandler>` pattern. All four are guarded by the existing admin/owner role check at the router gate — no new permission infrastructure.
+
+| Command | Effect |
+|---|---|
+| `/stickerfirst_on` | Set `stickerFirstEnabled = true`; idempotent; warn if sticker library empty for this group |
+| `/stickerfirst_off` | Set `stickerFirstEnabled = false`; idempotent |
+| `/stickerfirst_threshold <val>` | Parse float, validate [0.0, 1.0], set `stickerFirstThreshold`; `E030` on invalid |
+| `/stickerfirst_status` | Read config + `localStickers.getTopByGroup(groupId, 9999).length`; format status block per UX spec §9 |
+
+`/help` text block updated: four new lines appended to the 【聊天 & 模仿】 section as specified in `docs/ux.md §9`.
+
+#### Decision 9 — Interaction with `/char` and `/mimic`
+
+**`/char` persona**: sticker-first is persona-agnostic. The `/char` command injects a persona into the LLM system prompt, but still routes through `ChatModule.generateReply`. The LLM produces the char's intended reply text; sticker-first scores that text. The sticker represents the character's emotional intent — behaviourally correct. No special handling required.
+
+**`/mimic_on`**: router dispatches to `MimicModule.generateMimic`, not `ChatModule.generateReply`. `StickerFirstModule` has no hook into `MimicModule`. Sticker-first does not apply in mimic mode. This is explicit and intentional: mimic replicates a specific user's textual register; silently substituting a sticker would break the persona contract. No interaction handling required because the paths never meet.
+
+---
+
+### 9.3 Interface Signatures (canonical, Developer must not deviate)
+
+```typescript
+// src/modules/sticker-first.ts
+
+export type StickerChoice = {
+  key: string;
+  cqCode: string;
+  score: number;
+};
+
+export interface IStickerFirstModule {
+  pickSticker(
+    groupId: string,
+    intendedText: string,
+    threshold: number,
+  ): Promise<StickerChoice | null>;
+}
+
+export class StickerFirstModule implements IStickerFirstModule {
+  constructor(
+    private readonly repo: ILocalStickerRepository,
+    private readonly embedder: IEmbeddingService,
+  ) {}
+
+  async pickSticker(groupId: string, intendedText: string, threshold: number): Promise<StickerChoice | null>;
+  // Full implementation in src/modules/sticker-first.ts — not in chat.ts
+}
+```
+
+```typescript
+// src/storage/db.ts — GroupConfig additions
+stickerFirstEnabled: boolean;
+stickerFirstThreshold: number;
+
+// src/utils/errors.ts — BotErrorCode addition
+STICKER_THRESHOLD_INVALID = 'E030',
+```
+
+---
+
+### 9.4 Files Changed
+
+| File | Change |
+|---|---|
+| `src/modules/sticker-first.ts` | New module: `StickerFirstModule`, `IStickerFirstModule`, `StickerChoice` |
+| `src/modules/chat.ts` | Inject `IStickerFirstModule`; insert sticker-first intercept block in `generateReply`; no other changes |
+| `src/storage/db.ts` | `GroupConfig` interface additions; `GroupConfigRow` raw row additions; `applyMigrations()` two ALTER statements; upsert/get mapping for both new fields |
+| `src/storage/schema.sql` | Comment-only documentation of two new columns |
+| `src/config.ts` | `defaultGroupConfig()` additions |
+| `src/core/router.ts` | 4 new command handlers; `/help` text update |
+| `src/utils/errors.ts` | `STICKER_THRESHOLD_INVALID = 'E030'` |
+| `test/sticker-first.test.ts` | New test file — all 21 EC cases from spec §11.13 |
+| `test/router.test.ts` | Sticker-first command registration + permission + E030 validation |
+
+---
+
+### 9.5 Test Plan
+
+**Unit tests** (`test/sticker-first.test.ts`, Vitest + in-memory mocks):
+
+| ID | Scenario |
+|---|---|
+| EC-1 | Mode OFF: `pickSticker` never called when `stickerFirstEnabled = false` |
+| EC-2 | Mode ON, library empty → null → text fallthrough |
+| EC-3 | Mode ON, all scores below threshold → null → text |
+| EC-4 | Mode ON, one sticker above threshold → `StickerChoice` returned |
+| EC-5 | Multiple stickers above threshold → highest score wins |
+| EC-6 | Top sticker suppressed, next-best above threshold → next-best returned |
+| EC-6b | All candidates suppressed → null → text |
+| EC-7 | `/stickerfirst_threshold 0.0` → accepted (boundary) |
+| EC-8 | `/stickerfirst_threshold 1.0` → accepted (boundary) |
+| EC-9 | `/stickerfirst_threshold -0.1` → E030 |
+| EC-10 | `/stickerfirst_threshold 1.5` → E030 |
+| EC-11 | `/stickerfirst_threshold abc` → E030 |
+| EC-12 | `/stickerfirst_on` already on → idempotent |
+| EC-13 | `/stickerfirst_off` already off → idempotent |
+| EC-14 | `applyMigrations()` called twice → no crash ("duplicate column" swallowed) |
+| EC-15 | Non-admin `/stickerfirst_on` → silently ignored at router gate |
+| EC-16 | `/stickerfirst_status` accuracy after on + threshold change |
+| EC-17 | Static system prompt invariant: zero user content in any system block |
+| EC-18 | `/mimic_on` active + sticker-first ON → `generateReply` never called |
+| EC-19 | `/char` persona + sticker-first ON → sticker scored against char's intended text |
+| EC-20 | LLM returns `<skip>` → `generateReply` returns null before intercept |
+| EC-21 | `embedder.isReady = false` → text fallthrough, no error |
+
+**Integration tests** (`test/router.test.ts` additions): command registration; admin gate; E030 validation pipeline.
+
+**Coverage requirement**: `test/sticker-first.test.ts` must contribute to the project's ≥80% line coverage gate. All 21 EC cases are mandatory — failing any one blocks Reviewer sign-off.
+
+---
+
+### 9.6 Fail-Safe Invariants
+
+These must hold unconditionally. Developer must not weaken any of them:
+
+| Condition | Required behaviour |
+|---|---|
+| `embedder.isReady === false` | Skip intercept; return text |
+| `localStickerRepo` not injected | Skip intercept; return text |
+| `local_stickers` empty for group | `pickSticker` returns null; return text |
+| All candidates below threshold | `pickSticker` returns null; return text |
+| All candidates in suppression cooldown | `pickSticker` returns null; return text |
+| `localPath` file does not exist on disk | Exclude that sticker from candidates |
+| DB read throws | Log WARN; `pickSticker` returns null; return text |
+| Any uncaught exception in `pickSticker` | Outer catch in `generateReply` logs ERROR; returns text |
+| LLM returns `<skip>` or null | `generateReply` returns null before intercept fires |
+| Sticker send path | Can only replace a non-null text reply; cannot produce null output |
+
+---
+
+### 9.7 Risk Table
+
+| Risk | Likelihood | Impact | Mitigation |
+|---|---|---|---|
+| Score distribution: good/bad overlap at default 0.55 | High (measured) | Medium — occasional jarring sticker | Admin tunable via `/stickerfirst_threshold`; conservative default reduces frequency |
+| MiniLM inflates scores for short Chinese (<6 chars) | High (measured) | Medium — false positives | Minimum scorable-text length filter (≥6 chars total); skip sticker otherwise |
+| Sticker library empty for new groups | High | Low — graceful fallthrough to text | EC-2 covers this; `/stickerfirst_on` warns if library is empty |
+| Embedder not ready at startup | Medium | Low — feature silently inactive | `isReady` guard in intercept; EC-21 covers this |
+| Threshold 0.55 too conservative (feature rarely fires) | Medium | Low — feature appears inactive | Document in `/stickerfirst_status` output; admin can lower threshold |
+| `context_samples` JSON parse failure | Low | Low — sticker excluded from candidates | Developer must JSON.parse inside try/catch; exclude malformed rows |
+| Sticker file missing from disk after DB record exists | Low | Low — sticker excluded | `existsSync(localPath)` filter before scoring |
