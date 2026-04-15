@@ -6,7 +6,7 @@ import { createLogger } from '../utils/logger.js';
 
 const logger = createLogger('name-images');
 
-const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // 5 MB
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024; // 20 MB — modern phone photos easily exceed 5 MB
 
 /** Minimal adapter surface needed for image download. */
 export interface IImageAdapter {

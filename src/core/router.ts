@@ -404,7 +404,11 @@ export class Router implements IRouter {
                 const count = this.nameImagesModule.countByName(msg.groupId, target);
                 await this.adapter.send(msg.groupId, `已保存到 ${target}（${count}张）`);
               }
-            } catch {
+            } catch (err) {
+              this.logger.warn(
+                { err: String(err), groupId: msg.groupId, target },
+                'image-capture: saveImage failed',
+              );
               await this.adapter.send(msg.groupId, '图片下载失败，请稍后再试。');
             }
             return; // Skip chat/mimic pipeline for this message
