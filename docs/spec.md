@@ -400,3 +400,434 @@ Admin denies via /appeal_deny {msg_id}:  [future command, phase 2]
 - `messages.deleted=1` marks soft-deleted messages (moderated)
 - `moderation_log` never deletes rows — append-only audit trail
 - `rules.type`: `'positive'` = this IS a violation example; `'negative'` = false positive, NOT a violation
+
+---
+
+## 10. /char — BanG Dream Character Role-Play Feature
+
+### 10.1 Overview
+
+The `/char` feature enables the bot to reply in the voice of a specific BanG Dream! character instead of its default 邦批 (BanG Dream fan persona). Character mode is per-group, persisted in `group_config`, and mutually exclusive with `/mimic` user-imitation mode.
+
+The default character is **ykn** (凑友希那, Minato Yukina), Roselia's vocalist and leader. Character persona is built from an offline-distilled static profile, not runtime RAG, per `feedback_distill_over_retrieve` memory.
+
+---
+
+### 10.2 Commands
+
+#### `/char`
+- **Syntax**: `/char`
+- **Permission**: admins and owner only (router gate)
+- **Action**: Activates character mode with the group's last-set character, defaulting to `ykn` (凑友希那) if no character has ever been set for the group.
+- **Response**: `已切换至角色模式：凑友希那 (ykn)。使用 /char_off 关闭。`
+- **Mutual exclusion**: If `/mimic` session is currently active → reject: `当前正在运行 /mimic_on 模式，请先使用 /mimic_off 关闭。` (E020)
+- **Edge cases**:
+  1. `/char` called while char mode already active with same character → reply `角色模式已开启（凑友希那）。无需重复激活。`
+  2. `/char` called while char mode active with different character → switch to default ykn, reply with new character name
+  3. Lore file for character missing → E022 (see below)
+
+---
+
+#### `/char_on`
+- **Syntax**: `/char_on`
+- **Permission**: admins and owner only
+- **Action**: Alias of `/char`. Activates char mode with default or last-used character.
+- **Response**: Same as `/char`
+- **Mutual exclusion**: Same as `/char` — E020 if `/mimic` is active
+
+---
+
+#### `/char_off`
+- **Syntax**: `/char_off`
+- **Permission**: admins and owner only
+- **Response**: `角色模式已关闭，恢复邦批人格。`
+- **Edge cases**:
+  1. No char mode active → `角色模式当前未开启。`
+  2. Called by different admin than who started → allowed (no ownership enforcement)
+  3. Called mid-generation → finish current reply in character voice, then disable for next reply
+
+---
+
+#### `/char set <alias|name>`
+- **Syntax**: `/char set <alias>` — e.g. `/char set ykn` or `/char set 凑友希那`
+- **Permission**: admins and owner only
+- **Action**: Resolve alias to canonical character name, look up lore file, set as active character. Activates char mode immediately (no need for a separate `/char_on`).
+- **Response**: `已切换至角色：凑友希那 (ykn)。`
+- **Alias resolution**: See section 10.5
+- **Edge cases**:
+  1. Unknown alias → E021: `未知角色：<input>。支持的角色请参考 /char status 或群管理员。`
+  2. Known alias but lore file missing (`data/characters/<name>.json` absent) → E022: `该角色暂无角色数据，请先运行 distill-character 脚本。`
+  3. `/mimic` session active → E020, reject before any state change
+  4. Alias collision: if two entries map to the same canonical name, last entry in aliases.json wins (documented; avoid collisions at authoring time)
+  5. Input >50 chars → E025: `输入过长，请使用角色缩写或完整中文名。`
+
+---
+
+#### `/char status`
+- **Syntax**: `/char status`
+- **Permission**: admins and owner only
+- **Response**:
+  ```
+  角色模式：[开启 / 关闭]
+  当前角色：凑友希那 (ykn) / 无
+  激活者：@Admin
+  Mimic 模式：[无 / @User]
+  支持角色列表：ykn, sayo, risa, rinko, ako, tomoe, ran, ... (all aliases with lore files present)
+  ```
+- **Edge cases**:
+  1. No character ever set → `当前角色：无（默认将使用 ykn）`
+  2. Lore file was deleted after activation → still show character name, flag `⚠️ 角色数据文件缺失`
+
+---
+
+### 10.3 State Machine
+
+```
+IDLE (char mode off, mimic mode off)
+  │
+  ├─ /char | /char_on | /char set <x>
+  │         → CHAR_ACTIVE (activeCharacterId = <x or ykn>)
+  │
+  ├─ /mimic_on @user
+  │         → MIMIC_ACTIVE
+  │
+CHAR_ACTIVE
+  │
+  ├─ /char_off
+  │         → IDLE
+  │
+  ├─ /char set <y>     (switch character)
+  │         → CHAR_ACTIVE (activeCharacterId = <y>)
+  │
+  ├─ /mimic_on @user
+  │         → REJECT (E020) — CHAR_ACTIVE unchanged
+  │
+  ├─ Bot decides to reply (chat module scores trigger)
+  │         → generate reply in CHARACTER VOICE
+  │
+MIMIC_ACTIVE
+  │
+  ├─ /mimic_off
+  │         → IDLE
+  │
+  ├─ /char | /char_on | /char set <x>
+  │         → REJECT (E020) — MIMIC_ACTIVE unchanged
+  │
+  ├─ Bot decides to reply
+  │         → generate reply in MIMIC VOICE (existing behaviour)
+```
+
+**Persistence**: `group_config.active_character_id` (TEXT, nullable). `NULL` = char mode off. Value is the canonical character name string (e.g. `"凑友希那"`). `group_config.char_started_by` (TEXT, nullable) stores QQ ID of activating admin for status display.
+
+**Mutual exclusion invariant**: `mimic_active_user_id IS NOT NULL` and `active_character_id IS NOT NULL` must never both be true simultaneously. The command handlers enforce this; the DB does not have a constraint.
+
+---
+
+### 10.4 Persona Composition
+
+When char mode is active and the chat module decides to reply, the system prompt is replaced (not appended) with the character persona prompt. The standard 邦批 persona is suppressed.
+
+**Persona system prompt structure** (≤2000 chars total target, assembled at reply time):
+
+```
+[A] Character Profile (≤800 chars)
+    — Static distilled block from data/characters/<name>.json
+    — Field: profile
+    — Written in third-person description of the character's voice/style/quirks
+    — Example: "你是凑友希那，Roselia的主唱兼队长。性格内敛冷静，话少而精，对音乐要求极高..."
+
+[B] Canonical Facts Block
+    — Static block from data/characters/<name>.json
+    — Field: canonicalFacts
+    — Format: key-value pairs: band, position, cv, imageColor, age, catchphrases[]
+    — Used to prevent confabulation of wrong band/position/CV
+
+[C] 圈内底线 Block (MUST be present in every persona prompt)
+    — Hardcoded constant, NOT from distill file
+    — Content: "【圈内底线】即使在角色扮演中，绝对不攻击或贬低其他乐队、角色、声优，不散布声优相关谣言，不涉及恶意黑料。角色可以有个性和执念，但不得越过此线。"
+
+[D] 诚实底线 Block (MUST be present in every persona prompt)
+    — Hardcoded constant
+    — Content: "【诚实底线】不捏造角色不可能知道的事实，不对现实声优或圈内八卦作出断言。"
+
+[E] Anti-QA Menu / Behaviour Shape Block
+    — Reused from feedback_humanize_llm_bot pattern
+    — Content: "【回复风格】绝对不要输出问答菜单式的列举；可以只发贴图反应（用<sticker>标记）；回复长度3-15字，重要时可多行；不要解释自己为什么回复。如果不想回复，输出 <skip>。"
+
+[F] Context Injection (dynamic, per-reply)
+    — Recent chat history (same as normal chat path, last N messages)
+    — Sticker legend if stickers enabled
+```
+
+**Template**:
+```
+你是{characterName}（{band}）。{profile}
+
+【角色设定】乐队：{band} / 职位：{position} / 代表色：{color}
+口头禅/标志：{catchphrases}
+
+{圈内底线}
+
+{诚实底线}
+
+{回复风格}
+```
+
+---
+
+### 10.5 Alias Resolution
+
+**Alias map file**: `data/characters/aliases.json`
+
+Format:
+```json
+{
+  "ykn": "凑友希那",
+  "yukina": "凑友希那",
+  "友希那": "凑友希那",
+  "sayo": "冰川纱夜",
+  "纱夜": "冰川纱夜",
+  "risa": "今井莉莎",
+  "莉莎": "今井莉莎",
+  "rinko": "白金燐子",
+  "燐子": "白金燐子",
+  "ako": "宇田川亚子",
+  "亚子": "宇田川亚子",
+  "tomoe": "宇田川巴",
+  "巴": "宇田川巴",
+  "ran": "美竹兰",
+  "兰": "美竹兰",
+  "moca": "青叶摩卡",
+  "摩卡": "青叶摩卡",
+  "himari": "上原绯玛丽",
+  "绯玛丽": "上原绯玛丽",
+  "tsugu": "山吹沙绫",
+  "沙绫": "山吹沙绫",
+  "kasumi": "户山香澄",
+  "香澄": "户山香澄",
+  "tae": "花园多惠",
+  "多惠": "花园多惠",
+  "rimi": "牛込里美",
+  "里美": "牛込里美",
+  "saaya": "山田沙綾",
+  "arisa": "市谷有咲",
+  "有咲": "市谷有咲",
+  "kokoro": "弦卷心",
+  "心": "弦卷心",
+  "hagumi": "北泽育美",
+  "misaki": "奥泽美咲",
+  "美咲": "奥泽美咲",
+  "kaoru": "濑田薰",
+  "薰": "濑田薰",
+  "chisato": "白鹭千圣",
+  "千圣": "白鹭千圣",
+  "eve": "弦卷伊芙",
+  "maya": "丸山彩",
+  "彩": "丸山彩",
+  "aya": "丸山彩",
+  "hina": "冰川日菜",
+  "日菜": "冰川日菜",
+  "sayo": "冰川纱夜",
+  "灯": "高松灯",
+  "tomori": "高松灯",
+  "anon": "千早爱音",
+  "爱音": "千早爱音",
+  "soyo": "长崎爽世",
+  "爽世": "长崎爽世",
+  "taki": "三角初华",
+  "初华": "三角初华",
+  "mutsumi": "若叶睦",
+  "睦": "若叶睦",
+  "sakiko": "丰川祥子",
+  "saki": "丰川祥子",
+  "祥子": "丰川祥子",
+  "mortis": "八幡海铃",
+  "uika": "八幡海铃",
+  "海铃": "八幡海铃",
+  "nyamu": "要乐奈",
+  "乐奈": "要乐奈",
+  "crychic-mutsumi": "若叶睦",
+  "ave-sakiko": "丰川祥子"
+}
+```
+
+**Lore file guard**: After resolving an alias to a canonical name, the system checks for `data/characters/<canonicalName>.json`. If absent → E022. This prevents activating a character whose distill file hasn't been generated yet.
+
+**Resolution order**: Input is lowercased and trimmed. Exact match in aliases.json → canonical name. No match → E021.
+
+**Loaded at startup**: `CharModule` loads `aliases.json` once at init, not per-command. Changes to the file require bot restart.
+
+---
+
+### 10.6 Mutual Exclusion with /mimic
+
+- `/char_on` (or `/char`, `/char set`) while `mimic_active_user_id IS NOT NULL` → **reject** with E020. Do NOT modify state.
+- `/mimic_on` while `active_character_id IS NOT NULL` → **reject** with E020. Do NOT modify state.
+- This is enforced in the command router before any module method is called.
+- **If both are somehow set simultaneously** (should never happen; treat as bug): char mode takes precedence for reply generation. Log an error. `/mimic_off` clears mimic; `/char_off` clears char.
+- **Document surface**: `/char status` shows both states so admins can diagnose.
+
+---
+
+### 10.7 Chat Integration
+
+When the chat module decides to reply (lurker/score/keyword trigger):
+
+```
+if group_config.mimic_active_user_id != null:
+  → use existing mimic path (UNCHANGED)
+else if group_config.active_character_id != null:
+  → compose character persona prompt (section 10.4)
+  → call Claude with character prompt replacing normal system prompt
+  → apply sentinelCheck (same as normal chat path)
+  → apply postProcess (same as normal chat path)
+  → apply output splitting + typing delay (same as normal chat path)
+else:
+  → normal 邦批 chat path (UNCHANGED)
+```
+
+**Priority**: mimic > char > default. Mimic takes precedence even if char is somehow also set.
+
+**Stickers**: Character mode may emit `<sticker>` tokens identical to normal chat. The sticker resolver runs as normal.
+
+**`<skip>`**: If character persona returns `<skip>`, suppress reply (same as normal chat `<skip>` handling).
+
+---
+
+### 10.8 Offline Distill Script: `scripts/distill-character.ts`
+
+**Purpose**: Pre-generate the static character profile JSON used at reply time.
+
+**Usage**:
+```
+npx ts-node scripts/distill-character.ts --char "凑友希那"
+npx ts-node scripts/distill-character.ts --char ykn   # alias lookup
+```
+
+**Input**: `data/lore/moegirl/<characterName>.md`
+
+**Output**: `data/characters/<characterName>.json`
+
+**Output schema**:
+```json
+{
+  "characterName": "凑友希那",
+  "alias": "ykn",
+  "band": "Roselia",
+  "position": "主唱/作词作曲",
+  "cv": "相羽あいな",
+  "imageColor": "#881188",
+  "age": "17（高中3年级→大学1年级）",
+  "catchphrases": ["就这样决定了。", "音乐不容妥协。"],
+  "profile": "（≤800字 角色声音/性格/口吻/习惯 distilled静态块）",
+  "toneNotes": "（≤200字 写给LLM的语气提示：不该用的词、语气特征、常见错误）",
+  "distilledAt": "2026-04-15T00:00:00Z",
+  "sourceFile": "data/lore/moegirl/凑友希那.md"
+}
+```
+
+**Idempotent**: Re-running overwrites the JSON. The script checks that the source `.md` file exists and is non-empty before calling Claude.
+
+**Claude call**: Single API call, Sonnet model, `max_tokens: 1000`. System prompt instructs extraction of the above fields from the lore Markdown. No streaming.
+
+**Pre-shipped file**: `data/characters/凑友希那.json` is committed as part of this feature so the bot can activate ykn mode without running the script first.
+
+---
+
+### 10.9 DB Schema Changes
+
+**New column on `group_config`** (TEXT, nullable, default NULL):
+
+| Column | Type | Default | Description |
+|---|---|---|---|
+| `active_character_id` | TEXT | `NULL` | Canonical character name if char mode active, else NULL |
+| `char_started_by` | TEXT | `NULL` | QQ ID of admin who activated char mode |
+
+**Migration** (both paths required per `feedback_sqlite_schema_migration`):
+
+1. `src/storage/schema.sql` — add columns to `group_config` CREATE TABLE statement
+2. `src/storage/db.ts` `applyMigrations()` — add ALTER TABLE lines:
+   ```ts
+   try { this._db.exec(`ALTER TABLE group_config ADD COLUMN active_character_id TEXT`); } catch { /* already exists */ }
+   try { this._db.exec(`ALTER TABLE group_config ADD COLUMN char_started_by TEXT`); } catch { /* already exists */ }
+   ```
+
+**`GroupConfig` TypeScript type**: Add `activeCharacterId: string | null` and `charStartedBy: string | null`.
+
+---
+
+### 10.10 Error Codes (additions to section 3)
+
+| Code | Name | Cause | Bot response |
+|---|---|---|---|
+| E020 | CHAR_MIMIC_CONFLICT | `/char_on` while mimic active, or `/mimic_on` while char active | `当前正在运行 /mimic_on 模式，请先使用 /mimic_off 关闭。` (or vice versa) |
+| E021 | UNKNOWN_CHARACTER | Alias not found in aliases.json | `未知角色：<input>。` |
+| E022 | MISSING_LORE_FILE | `data/characters/<name>.json` absent | `该角色暂无角色数据，请先运行 distill-character 脚本。` |
+| E023 | CHAR_ALREADY_ACTIVE | `/char_on` while same char already active | `角色模式已开启（<name>）。无需重复激活。` |
+| E024 | CHAR_NOT_ACTIVE | `/char_off` when nothing active | `角色模式当前未开启。` |
+| E025 | CHAR_INPUT_TOO_LONG | `/char set <input>` >50 chars | `输入过长，请使用角色缩写或完整中文名。` |
+
+---
+
+### 10.11 Permissions
+
+**Decision**: All `/char*` commands are **admin and owner only**, consistent with the existing router gate that governs all slash commands. Regular members cannot activate, change, or disable character mode.
+
+**Rationale**: Character role-play is a group-wide mode change that affects every subsequent reply. Limiting it to admins prevents abuse and ensures the group vibe is intentional.
+
+**No special sub-permission**: Any admin can activate/deactivate any character, and any admin can override another admin's character choice. No ownership enforcement.
+
+---
+
+### 10.12 Edge Cases (TDD Mandatory)
+
+| # | Edge Case | Expected Behaviour |
+|---|---|---|
+| EC-1 | `/char set unknown_alias` | E021, no state change |
+| EC-2 | `/char_on` while `/mimic_on` active | E020, mimic session unchanged |
+| EC-3 | `/mimic_on @user` while char mode active | E020, char mode unchanged |
+| EC-4 | `/char_off` when char mode not active | E024 |
+| EC-5 | `/char_off` when mimic mode (not char) active | E024 (char mode never was on) |
+| EC-6 | `/char set ykn` when ykn lore file `data/characters/凑友希那.json` deleted | E022 |
+| EC-7 | `/char set ykn` when `data/lore/moegirl/凑友希那.md` is empty | `distill-character.ts` returns error; E022 at runtime |
+| EC-8 | Missing migration: `active_character_id` column absent | `applyMigrations()` ADD COLUMN succeeds silently; if column already exists, catch swallows the error |
+| EC-9 | Alias collision in aliases.json (two keys → same value) | Last key wins; no runtime error |
+| EC-10 | `/char set <50-char input>` | E025 |
+| EC-11 | Non-admin member sends `/char_on` | Silently ignored by router gate (no reply) |
+| EC-12 | Both `active_character_id` and `mimic_active_user_id` non-null (bug state) | Log error; char mode suppressed, mimic takes precedence; `/char_off` resolves |
+| EC-13 | Character persona returns `<skip>` | Reply suppressed, no message sent |
+| EC-14 | sentinelCheck fails on character output | postProcess drops output; no reply sent; log sentinel failure |
+| EC-15 | `/char status` when lore file deleted after activation | Show character name + `⚠️ 角色数据文件缺失` warning |
+| EC-16 | `distill-character.ts` run on character with empty `.md` file | Script exits with non-zero, prints error, does NOT write JSON |
+| EC-17 | `distill-character.ts` run twice (idempotent) | Second run overwrites first; no error |
+| EC-18 | `/char` with no prior character set → defaults to ykn | Active character set to `凑友希那`, reply confirms ykn |
+| EC-19 | `/char set 凑友希那` (full name, no alias) | Resolved by reverse-lookup in aliases map; activates ykn |
+
+---
+
+### 10.13 File Layout
+
+```
+data/
+  characters/
+    aliases.json               ← alias map, loaded at startup
+    凑友希那.json               ← pre-distilled, committed with feature
+scripts/
+  distill-character.ts         ← CLI distill script
+src/
+  modules/
+    char.ts                    ← CharModule (new)
+  storage/
+    schema.sql                 ← add active_character_id, char_started_by columns
+    db.ts                      ← GroupConfig type + applyMigrations() ALTER TABLE
+```
+
+---
+
+### 10.14 Test Plan Summary
+
+- Unit tests: `CharModule` — alias resolution, state transitions, persona composition
+- Unit tests: `distill-character.ts` — empty file guard, idempotency, JSON schema validation
+- Integration tests: `/char set`, `/char_on`, `/char_off`, `/char status` command handlers
+- Edge tests: all 19 cases in section 10.12 (SOUL RULE — mandatory)
+- Coverage target: ≥80% for `char.ts` and distill script

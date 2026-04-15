@@ -12,6 +12,7 @@ import { parseFaces } from '../utils/qqface.js';
 import { sentinelCheck, postProcess, isEcho, checkConfabulation, hasForbiddenContent, HARDENED_SYSTEM } from '../utils/sentinel.js';
 import { buildStickerSection, getStickerPool, type LiveStickerEntry } from '../utils/stickers.js';
 import { MoodTracker, PROACTIVE_POOLS, type MoodDescription } from './mood.js';
+import type { ICharModule } from './char.js';
 import type { VisionService } from './vision.js';
 import type { IEmbeddingService } from '../storage/embeddings.js';
 import type { ILocalStickerRepository, IImageDescriptionRepository, IForwardCacheRepository } from '../storage/db.js';
@@ -687,6 +688,7 @@ export class ChatModule implements IChatModule {
   private readonly selfLearning: SelfLearningModule | null;
   private readonly imageDescriptions: IImageDescriptionRepository | null;
   private readonly forwardCache: IForwardCacheRepository | null;
+  private charModule: ICharModule | null = null;
   // per-group: whether the last generateReply call returned an evasive reply
   private readonly lastEvasiveReply = new Map<string, boolean>();
   // per-group: fact ids injected into the system prompt of the last generateReply.
@@ -916,6 +918,10 @@ export class ChatModule implements IChatModule {
       groupAdmins.delete(oldest);
       this.adminStyleCache.delete(groupId);
     }
+  }
+
+  setCharModule(charModule: ICharModule): void {
+    this.charModule = charModule;
   }
 
   /** Evict lore + identity caches for a group so next message re-reads the updated file. */
@@ -1214,7 +1220,10 @@ export class ChatModule implements IChatModule {
       ?? { text: '', factIds: [] };
     this.lastInjectedFactIds.set(groupId, injectedFactIds);
 
-    const tuningBlock = this._loadTuning();
+    // Suppress tuning.md when char mode is active — tuning is calibrated to the
+    // 邦批 persona and creates prompt conflict with character personas.
+    const charModeActive = !!(this.db.groupConfig.get(groupId)?.activeCharacterId && this.charModule);
+    const tuningBlock = charModeActive ? null : this._loadTuning();
 
     const pickedModel = this._pickChatModel(groupId, triggerMessage, factors);
     this.logger.debug(
@@ -2139,9 +2148,20 @@ export class ChatModule implements IChatModule {
 
     const outputRules = `\n\n输出规则（必须严格遵守）：\n- **直接就是一条群聊发言**。不要任何前缀、后缀、解释、元评论、分析、推理\n- **绝对禁止**第三人称分析当前对话（"西瓜在问..."/"X 刚说的是..."/"这是在纠正..."/"这个梗我懂..."/"这个话题我熟..."/"我刚刚已经说过..."/"接话会显得复读..."）——那些是你脑子里的想法，**不是**发出去的消息\n- **绝对禁止**解释你为什么回复或为什么不回复——看到要说就说，不说就直接 <skip>\n- 禁止出现任何自我指涉词（包括但不限于：AI、机器人、助手、模仿、尝试、风格、根据、历史、无法）\n- 禁止"好的，"、"当然，"、"我来"、"让我"等助手式开场\n- 如果想说多个意思，用换行分开，每行就是一条消息（最多 3 行）\n- **例外**：群友问到需要**列举 / 计数 / 时间线 / 多人信息**的问题（比如 "XX 乐队一共几个人"、"XX 角色都有谁"、"XX 历代声优"、"XX 年份"），并且上面事实段落有对应信息时，允许 2-4 行展开回答，把具体数字/列表说清楚，不要敷衍成一两个字。**注意**：这个例外只适用于需要整合多条事实的场景，普通寒暄/情绪/闲聊依然保持 1-3 行短回复。\n- 如果想发表情，让表情独占一行（上一行是文字，下一行 [CQ:image,file=...]）。不要把文字和表情挤在一行\n- 表情只能用上面"【当前语境下推荐使用的群表情】"段落里给出的 [CQ:image,...] 清单里的，**绝对禁止 [CQ:mface,...]、[CQ:face,...] 以及任何 QQ 市场/商城表情**\n- 如果实在不知道说什么，输出"..."，禁止解释\n\n标点习惯：\n- 不要用句号。中文群聊几乎不打句号\n- 少用逗号，句子短就不用\n- 感叹号和问号可以用，但不要叠\n- 括号（）少用，用就是吐槽\n\n参与原则：\n- 你有自己的喜好和情绪。如果当前消息你没兴趣、看不懂、或者不想接话，就输出单个 "..." 或者空字符串\n- 不是每条消息都要回，真群友大多数时候只围观不说话\n- 只回复你真的有话想说的那条\n\n**想象你在 QQ 输入框里，只能打字发出去。** 脑子里的想法（分析/判断/纠结要不要回）都不能打出来。输出的就是发给群里那条消息本身，仅此而已。`;
 
-    // Persona: custom override from DB, else hardcoded 邦批 identity
+    // Persona: char mode > custom chatPersonaText > default 邦批 identity.
+    // tuning.md is suppressed when char mode is active to avoid persona conflict.
     const config = this.db.groupConfig.get(groupId);
-    const personaBase = config?.chatPersonaText ?? BANGDREAM_PERSONA;
+    let personaBase: string;
+    if (config?.activeCharacterId && this.charModule) {
+      try {
+        personaBase = this.charModule.composePersonaPrompt(config.activeCharacterId);
+      } catch {
+        // Profile missing: fall back to default rather than crashing the chat path
+        personaBase = config.chatPersonaText ?? BANGDREAM_PERSONA;
+      }
+    } else {
+      personaBase = config?.chatPersonaText ?? BANGDREAM_PERSONA;
+    }
 
     const loreSection = lore
       ? `\n\n# 关于这个群\n${lore}`
