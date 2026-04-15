@@ -2739,6 +2739,10 @@ describe('ChatModule — _isEvasiveReply', () => {
   it('"nsy啥意思" matches (asking-back)', () => expect(makeChat()['_isEvasiveReply']('nsy啥意思')).toBe(true));
   it('"你们都不知道mxd是啥" matches (asking-back short sentence)', () => expect(makeChat()['_isEvasiveReply']('你们都不知道mxd是啥')).toBe(true));
   it('"FIRE BIRD 是 Roselia 的曲" does NOT match (answer, not asking)', () => expect(makeChat()['_isEvasiveReply']('FIRE BIRD 是 Roselia 的曲')).toBe(false));
+  it('"kzn四连? 啥梗来的" matches (meme-ignorance asking-back)', () => expect(makeChat()['_isEvasiveReply']('kzn四连? 啥梗来的')).toBe(true));
+  it('"什么梗啊" matches (meme-ignorance)', () => expect(makeChat()['_isEvasiveReply']('这是什么梗啊')).toBe(true));
+  it('"没听过这个" matches (ignorance statement)', () => expect(makeChat()['_isEvasiveReply']('没听过这个')).toBe(true));
+  it('"不熟呢" matches (ignorance statement)', () => expect(makeChat()['_isEvasiveReply']('不熟呢')).toBe(true));
 });
 
 describe('ChatModule — getEvasiveFlagForLastReply', () => {

@@ -807,13 +807,19 @@ export class ChatModule implements IChatModule {
   /** Returns true if the reply is a known 装傻 (evasive) phrase OR an asking-back pattern. */
   _isEvasiveReply(text: string): boolean {
     const trimmed = text.trim();
-    if (/^(忘了|考我呢|记不得|没听过|啥来的|？+|啊？|这还要问|自己听|不知道|我哪知道)/.test(trimmed)) return true;
+    if (/^(忘了|考我呢|记不得|没听过|没印象|啥来的|？+|啊？|这还要问|自己听|不知道|我哪知道)/.test(trimmed)) return true;
     // Asking-back patterns — bot admitting it doesn't know a term by asking the group
     // "mxd是啥" / "XX是什么" / "什么是XX" / "XX啥意思" / "XX是谁" / "XX咋" — 2-20 char subject
     if (/^.{1,20}(是啥|是什么|啥意思|什么意思|是谁|咋回事|是干啥的)[\?？]?$/.test(trimmed)) return true;
     if (/^(什么是|谁是|啥是).{1,20}[\?？]?$/.test(trimmed)) return true;
     // Short asking-back without period — "你们都不知道mxd是啥" etc
     if (/.{1,20}(是啥|是什么|啥意思)/.test(trimmed) && trimmed.length < 30) return true;
+    // "啥梗" / "什么梗" / "啥梗来的" / "什么梗来的" / "啥来头" / "什么来头" — admitting
+    // ignorance of a meme/term the group is using. These SHOULD trigger the
+    // online research path just like "是啥" does.
+    if (/(啥梗|什么梗|哪里的梗|啥来头|什么来头|啥典故|什么典故)/.test(trimmed) && trimmed.length < 40) return true;
+    // "没听过 X" / "没印象 X" / "不熟 X" — longer-form ignorance statements
+    if (/^(没听过|没印象|不熟|没听说过|我不懂|听不懂)/.test(trimmed)) return true;
     return false;
   }
 
