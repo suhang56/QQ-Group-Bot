@@ -1,11 +1,11 @@
-import type { IClaudeClient } from '../ai/claude.js';
+import type { IClaudeClient, ClaudeModel } from '../ai/claude.js';
 import type { IMessageRepository, ILearnedFactsRepository } from '../storage/db.js';
 import type { Logger } from 'pino';
 import { createLogger } from '../utils/logger.js';
 import { extractJson } from '../utils/json-extract.js';
+import { ALIAS_MODEL } from '../config.js';
 
 const MIN_NEW_MESSAGES = 50;
-const ALIAS_MODEL = 'claude-haiku-4-5-20251001' as const;
 const ALIAS_TOPIC_PREFIX = '群友别名 ';
 
 interface AliasEntry {
@@ -129,7 +129,7 @@ ${messagesList}
     let responseText: string;
     try {
       const resp = await this.claude.complete({
-        model: ALIAS_MODEL,
+        model: ALIAS_MODEL as ClaudeModel,
         maxTokens: 1024,
         system: [{ text: '你是一个群聊别名抽取助手，只输出 JSON。', cache: true }],
         messages: [{ role: 'user', content: prompt }],
