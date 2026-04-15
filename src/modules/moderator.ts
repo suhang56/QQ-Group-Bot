@@ -2,7 +2,8 @@ import type { IClaudeClient } from '../ai/claude.js';
 import type { INapCatAdapter, GroupMessage } from '../adapter/napcat.js';
 import type {
   IMessageRepository, IModerationRepository, IGroupConfigRepository,
-  IRuleRepository, IImageModCacheRepository, GroupConfig, PendingModeration,
+  IRuleRepository, IImageModCacheRepository, IModRejectionRepository,
+  GroupConfig, PendingModeration,
 } from '../storage/db.js';
 import type { ILearnerModule } from './learner.js';
 import { BotErrorCode, ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
@@ -100,6 +101,7 @@ export class ModeratorModule implements IModeratorModule {
     private readonly rules: IRuleRepository,
     private readonly learner: ILearnerModule | null = null,
     private readonly imageModCache: IImageModCacheRepository | null = null,
+    private readonly modRejections: IModRejectionRepository | null = null,
   ) {}
 
   async assess(msg: GroupMessage, config: GroupConfig): Promise<ModerationVerdict> {
@@ -158,6 +160,26 @@ export class ModeratorModule implements IModeratorModule {
       ? `\n相关违规示例（供参考，置于同等重视度）：\n${ragExamples.join('\n')}`
       : '';
 
+    // Self-learning: recent false positives that the admin /rejected. These
+    // are content patterns the moderator previously flagged which the human
+    // decided were NOT violations. Include them as strong negative examples
+    // so the model stops making the same mistake.
+    let rejectionSection = '';
+    if (this.modRejections) {
+      try {
+        const recent = this.modRejections.getRecent(msg.groupId, 30);
+        if (recent.length > 0) {
+          const lines = recent
+            .slice(0, 30)
+            .map((r, i) => `${i + 1}. 内容: 「${r.content.slice(0, 80)}」\n   当时误判理由: ${r.reason.slice(0, 100)}`)
+            .join('\n');
+          rejectionSection = `\n\n【管理员已驳回的误判样本 — 以下内容不是违规，遇到类似内容请判定 violation:false】\n${lines}\n\n注意：这些样本是**管理员亲自确认不算违规**的。如果当前消息在语义、用词、话题上与上面任何一条类似，应倾向于不判违规。`;
+        }
+      } catch {
+        this.logger.warn({ groupId: msg.groupId }, 'modRejections.getRecent failed — proceeding without self-learning');
+      }
+    }
+
     // Build prompt — user content ONLY in user-role message (never system)
     const systemText = `你是一个群管理AI。请根据群规判断最后一条消息是否违规。
 
@@ -191,7 +213,7 @@ ${contextLines}
 需要判定的消息：${msg.nickname}（${msg.userId}）说：${msg.content}
 
 该用户近期违规记录：
-${offenseHistory}${ragSection}`;
+${offenseHistory}${ragSection}${rejectionSection}`;
 
     let parsed: ReturnType<typeof parseSonnetResponse>;
 

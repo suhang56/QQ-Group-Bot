@@ -1157,8 +1157,22 @@ ${ctxLine}
 
       if (rejectMatch) {
         this.db.pendingModeration.markStatus(id, 'rejected', MOD_APPROVAL_ADMIN);
-        await reply(`已拒绝审核 #${id}。`);
-        logger.info({ id, groupId: row.groupId, userId: row.userId }, 'moderation rejected by admin');
+        // Self-learning: record the (content, reason) as a false positive
+        // example. Moderator will inject recent rejections into its prompt
+        // so Qwen stops making the same wrong call.
+        try {
+          this.db.modRejections.insert({
+            groupId: row.groupId,
+            content: row.content,
+            reason: row.reason,
+            userNickname: row.userNickname,
+            createdAt: Math.floor(Date.now() / 1000),
+          });
+        } catch (err) {
+          logger.warn({ err, id }, 'failed to insert mod rejection for self-learning');
+        }
+        await reply(`已拒绝审核 #${id}（已存入误判样本，以后不会再犯类似错）。`);
+        logger.info({ id, groupId: row.groupId, userId: row.userId }, 'moderation rejected by admin + recorded as false positive');
         return;
       }
 

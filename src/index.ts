@@ -147,7 +147,7 @@ router.setVisionService(vision);
 
 const learner = new LearnerModule(embedder, db.rules, db.moderation);
 const mimic = new MimicModule(claude, db.messages, db.groupConfig, botUserId);
-const moderator = new ModeratorModule(claude, adapter, db.messages, db.moderation, db.groupConfig, db.rules, learner, db.imageModCache);
+const moderator = new ModeratorModule(claude, adapter, db.messages, db.moderation, db.groupConfig, db.rules, learner, db.imageModCache, db.modRejections);
 router.setMimic(mimic);
 router.setModerator(moderator);
 

@@ -162,6 +162,20 @@ export interface IRuleRepository {
   deleteBySource(groupId: string, source: Rule['source']): number;
 }
 
+export interface ModRejection {
+  id: number;
+  groupId: string;
+  content: string;
+  reason: string;
+  userNickname: string | null;
+  createdAt: number;
+}
+
+export interface IModRejectionRepository {
+  insert(row: Omit<ModRejection, 'id'>): ModRejection;
+  getRecent(groupId: string, limit: number): ModRejection[];
+}
+
 export interface IAnnouncementRepository {
   upsert(ann: Omit<GroupAnnouncement, 'id'>): GroupAnnouncement;
   getByNoticeId(groupId: string, noticeId: string): GroupAnnouncement | null;
@@ -788,6 +802,30 @@ class GroupConfigRepository implements IGroupConfigRepository {
   }
 }
 
+class ModRejectionRepository implements IModRejectionRepository {
+  constructor(private readonly db: DatabaseSync) {}
+
+  insert(row: Omit<ModRejection, 'id'>): ModRejection {
+    const result = this.db.prepare(
+      'INSERT INTO mod_rejections (group_id, content, reason, user_nickname, created_at) VALUES (?, ?, ?, ?, ?)'
+    ).run(row.groupId, row.content, row.reason, row.userNickname, row.createdAt);
+    return { ...row, id: Number(result.lastInsertRowid) };
+  }
+
+  getRecent(groupId: string, limit: number): ModRejection[] {
+    const rows = this.db.prepare(
+      'SELECT id, group_id, content, reason, user_nickname, created_at FROM mod_rejections WHERE group_id = ? ORDER BY created_at DESC LIMIT ?'
+    ).all(groupId, limit) as unknown as Array<{
+      id: number; group_id: string; content: string; reason: string;
+      user_nickname: string | null; created_at: number;
+    }>;
+    return rows.map(r => ({
+      id: r.id, groupId: r.group_id, content: r.content, reason: r.reason,
+      userNickname: r.user_nickname, createdAt: r.created_at,
+    }));
+  }
+}
+
 class RuleRepository implements IRuleRepository {
   constructor(private readonly db: DatabaseSync) {}
 
@@ -1365,6 +1403,7 @@ export class Database {
   readonly learnedFacts: ILearnedFactsRepository;
   readonly pendingModeration: IPendingModerationRepository;
   readonly welcomeLog: IWelcomeLogRepository;
+  readonly modRejections: IModRejectionRepository;
 
   private readonly _db: DatabaseSync;
 
@@ -1390,6 +1429,7 @@ export class Database {
     this.learnedFacts = new LearnedFactsRepository(this._db);
     this.pendingModeration = new PendingModerationRepository(this._db);
     this.welcomeLog = new WelcomeLogRepository(this._db);
+    this.modRejections = new ModRejectionRepository(this._db);
   }
 
   /** Execute arbitrary SQL — intended for bulk-import scripts and migrations only. */
@@ -1559,5 +1599,21 @@ export class Database {
       )
     `);
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_forward_cache_fetched ON forward_cache(fetched_at)`);
+
+    // mod_rejections — moderator self-learning: when admin /reject's a
+    // flagged message, record the (content, reason) pair as a false positive
+    // example that the moderator prompt includes in future judgments so it
+    // stops making the same wrong call.
+    this._db.exec(`
+      CREATE TABLE IF NOT EXISTS mod_rejections (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id      TEXT    NOT NULL,
+        content       TEXT    NOT NULL,
+        reason        TEXT    NOT NULL,
+        user_nickname TEXT,
+        created_at    INTEGER NOT NULL
+      )
+    `);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_mod_rejections_group_ts ON mod_rejections(group_id, created_at DESC)`);
   }
 }
