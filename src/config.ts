@@ -49,6 +49,9 @@ export const RESEARCH_MODEL = process.env['RESEARCH_MODEL'] ?? 'claude-haiku-4-5
  */
 export const CHAT_QWEN_MODEL = process.env['CHAT_QWEN_MODEL'] ?? 'qwen3:8b';
 
+/** DeepSeek V3.2 — primary chat model (cost-optimized replacement for Sonnet on engaged paths). */
+export const CHAT_DEEPSEEK_MODEL = process.env['CHAT_DEEPSEEK_MODEL'] ?? 'deepseek-chat';
+
 /**
  * Kill switch. Set to '1' to force ALL chat calls through RUNTIME_CHAT_MODEL
  * bypassing the layered router. Emergency rollback — no code change required.
@@ -64,6 +67,8 @@ export const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta
 /** Enable flags. Flip to 0 on machines that lack the provider. */
 export const OLLAMA_ENABLED = process.env['OLLAMA_ENABLED'] !== '0';
 export const GEMINI_ENABLED = !!process.env['GEMINI_API_KEY'];
+/** Lazy: read at call time so tests can toggle DEEPSEEK_API_KEY per-case. */
+export const DEEPSEEK_ENABLED = (): boolean => !!process.env['DEEPSEEK_API_KEY'];
 
 export const lurkerDefaults = {
   lurkerReplyChance: 0.12,

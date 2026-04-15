@@ -7,7 +7,7 @@ import type { Database } from '../storage/db.js';
 import type { SelfLearningModule } from './self-learning.js';
 import { ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
-import { lurkerDefaults, chatHistoryDefaults, RUNTIME_CHAT_MODEL, CHAT_QWEN_MODEL, CHAT_QWEN_DISABLED } from '../config.js';
+import { lurkerDefaults, chatHistoryDefaults, RUNTIME_CHAT_MODEL, CHAT_QWEN_MODEL, CHAT_QWEN_DISABLED, CHAT_DEEPSEEK_MODEL, DEEPSEEK_ENABLED } from '../config.js';
 import { parseFaces } from '../utils/qqface.js';
 import { sentinelCheck, postProcess, isEcho, checkConfabulation, hasForbiddenContent, HARDENED_SYSTEM } from '../utils/sentinel.js';
 import { buildStickerSection, getStickerPool, type LiveStickerEntry } from '../utils/stickers.js';
@@ -1378,43 +1378,46 @@ export class ChatModule implements IChatModule {
    * internals (`_isEvasiveReply`, `_resolveForwardText`, etc.).
    */
   _pickChatModel(groupId: string, triggerMessage: GroupMessage, factors: ScoreFactors): string {
-    // 1. Emergency kill switch — one env var flip forces everything Sonnet.
-    if (CHAT_QWEN_DISABLED) return RUNTIME_CHAT_MODEL;
+    // Primary engaged-path model: DeepSeek when enabled, else Sonnet.
+    const primary = DEEPSEEK_ENABLED() ? CHAT_DEEPSEEK_MODEL : RUNTIME_CHAT_MODEL;
+
+    // 1. Emergency kill switch — bypass router escalation, use primary model.
+    if (CHAT_QWEN_DISABLED) return primary;
 
     const content = triggerMessage.content;
 
     // 2-3. Direct engagement (@-mention or reply-to-bot): quality-critical.
-    if (factors.mention > 0) return RUNTIME_CHAT_MODEL;
-    if (factors.replyToBot > 0) return RUNTIME_CHAT_MODEL;
+    if (factors.mention > 0) return primary;
+    if (factors.replyToBot > 0) return primary;
 
-    // 4. Admin/owner messages are trusted management channel — always Sonnet.
+    // 4. Admin/owner messages are trusted management channel — always primary.
     if (triggerMessage.role === 'admin' || triggerMessage.role === 'owner') {
-      return RUNTIME_CHAT_MODEL;
+      return primary;
     }
 
     // 5-7. Sensitive / meta-tech / political tripwires.
-    if (CHAT_SENSITIVE_RE.test(content)) return RUNTIME_CHAT_MODEL;
-    if (CHAT_META_TECH_RE.test(content)) return RUNTIME_CHAT_MODEL;
-    if (CHAT_POLITICAL_RE.test(content)) return RUNTIME_CHAT_MODEL;
+    if (CHAT_SENSITIVE_RE.test(content)) return primary;
+    if (CHAT_META_TECH_RE.test(content)) return primary;
+    if (CHAT_POLITICAL_RE.test(content)) return primary;
 
     // 8-10. Existing adversarial exploit regexes (identity probe, task request,
     // memory injection). These already have deflection shortcuts upstream of
-    // this call, but if they reach here (e.g. no shortcut fired), still Sonnet.
-    if (IDENTITY_PROBE.test(content)) return RUNTIME_CHAT_MODEL;
-    if (TASK_REQUEST.test(content)) return RUNTIME_CHAT_MODEL;
-    if (MEMORY_INJECT.test(content)) return RUNTIME_CHAT_MODEL;
+    // this call, but if they reach here (e.g. no shortcut fired), still primary.
+    if (IDENTITY_PROBE.test(content)) return primary;
+    if (TASK_REQUEST.test(content)) return primary;
+    if (MEMORY_INJECT.test(content)) return primary;
 
     // 11-12. Meta-identity probes ("哪个人格" etc.) — both the raw regex and
     // the gated factor. Raw regex catches probes even when bot wasn't recent.
-    if (META_IDENTITY_RE.test(content)) return RUNTIME_CHAT_MODEL;
-    if (factors.metaIdentityProbe > 0) return RUNTIME_CHAT_MODEL;
+    if (META_IDENTITY_RE.test(content)) return primary;
+    if (factors.metaIdentityProbe > 0) return primary;
 
     // 13. Active tease counter: this user is already winding the bot up in
     // the current window. Bot is in defensive mode — persona quality matters.
     const key = `${groupId}:${triggerMessage.userId}`;
     const entry = this.teaseCounter.get(key);
     const teaseActive = !!entry && entry.count > 0 && (Date.now() - entry.lastHit) < this.teaseCounterWindowMs;
-    if (teaseActive) return RUNTIME_CHAT_MODEL;
+    if (teaseActive) return primary;
 
     // 14. Default: lurker-mode casual banter → fast path.
     return CHAT_QWEN_MODEL;

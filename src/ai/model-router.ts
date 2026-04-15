@@ -13,6 +13,8 @@ export interface ModelRouterProviders {
   ollama?: IClaudeClient;
   /** Optional — handles `gemini*` models. */
   gemini?: IClaudeClient;
+  /** Optional — handles `deepseek*` models. */
+  deepseek?: IClaudeClient;
   /** Optional — handles `gpt*`, `o1*`, `o3*` models (future). */
   openai?: IClaudeClient;
   /**
@@ -43,6 +45,7 @@ export class ModelRouter implements IClaudeClient {
   private readonly claude: IClaudeClient;
   private readonly ollama: IClaudeClient | null;
   private readonly gemini: IClaudeClient | null;
+  private readonly deepseek: IClaudeClient | null;
   private readonly openai: IClaudeClient | null;
   private readonly fallbackClient: IClaudeClient;
   private readonly fallbackModel: ClaudeModel;
@@ -51,6 +54,7 @@ export class ModelRouter implements IClaudeClient {
     this.claude = providers.claude;
     this.ollama = providers.ollama ?? null;
     this.gemini = providers.gemini ?? null;
+    this.deepseek = providers.deepseek ?? null;
     this.openai = providers.openai ?? null;
     this.fallbackClient = providers.fallbackClient ?? providers.claude;
     this.fallbackModel = providers.fallbackModel ?? 'claude-haiku-4-5-20251001';
@@ -61,6 +65,7 @@ export class ModelRouter implements IClaudeClient {
     const list = ['claude'];
     if (this.ollama) list.push('ollama');
     if (this.gemini) list.push('gemini');
+    if (this.deepseek) list.push('deepseek');
     if (this.openai) list.push('openai');
     return list;
   }
@@ -81,6 +86,12 @@ export class ModelRouter implements IClaudeClient {
     if (/^gemini/.test(m)) {
       if (this.gemini) return { provider: this.gemini, name: 'gemini' };
       this.logger.warn({ model }, 'gemini model requested but gemini provider not registered — falling back to claude');
+      return { provider: this.claude, name: 'claude-fallback' };
+    }
+
+    if (/^deepseek/.test(m)) {
+      if (this.deepseek) return { provider: this.deepseek, name: 'deepseek' };
+      this.logger.warn({ model }, 'deepseek model requested but deepseek provider not registered — falling back to claude');
       return { provider: this.claude, name: 'claude-fallback' };
     }
 

@@ -8,8 +8,9 @@ import { EmbeddingService } from './storage/embeddings.js';
 import { ClaudeClient, type IClaudeClient } from './ai/claude.js';
 import { OllamaClient } from './ai/providers/ollama-llm.js';
 import { GeminiClient } from './ai/providers/gemini-llm.js';
+import { DeepSeekClient } from './ai/providers/deepseek-llm.js';
 import { ModelRouter } from './ai/model-router.js';
-import { OLLAMA_ENABLED, OLLAMA_BASE_URL, GEMINI_ENABLED } from './config.js';
+import { OLLAMA_ENABLED, OLLAMA_BASE_URL, GEMINI_ENABLED, DEEPSEEK_ENABLED } from './config.js';
 import { RateLimiter } from './core/rateLimiter.js';
 import { Router } from './core/router.js';
 import { ChatModule } from './modules/chat.js';
@@ -87,7 +88,7 @@ const adapter = new NapCatAdapter(NAPCAT_WS_URL, process.env['NAPCAT_ACCESS_TOKE
 // on env. ModelRouter implements IClaudeClient and dispatches by model-name
 // prefix so all downstream modules continue to receive a single client.
 const claudeRaw = new ClaudeClient();
-const providerMap: { claude: ClaudeClient; ollama?: OllamaClient; gemini?: GeminiClient } = {
+const providerMap: { claude: ClaudeClient; ollama?: OllamaClient; gemini?: GeminiClient; deepseek?: DeepSeekClient } = {
   claude: claudeRaw,
 };
 if (OLLAMA_ENABLED) {
@@ -112,10 +113,19 @@ if (GEMINI_ENABLED) {
     logger.warn({ err: String(err) }, 'Gemini init failed');
   }
 }
+if (DEEPSEEK_ENABLED()) {
+  try {
+    providerMap.deepseek = new DeepSeekClient();
+    logger.info('DeepSeek registered — deepseek* models routed to api.deepseek.com');
+  } catch (err) {
+    logger.warn({ err: String(err) }, 'DeepSeek init failed');
+  }
+}
 const claude: IClaudeClient = new ModelRouter({
   claude: claudeRaw,
   ollama: providerMap.ollama,
   gemini: providerMap.gemini,
+  deepseek: providerMap.deepseek,
 });
 logger.info({ providers: (claude as ModelRouter).getRegisteredProviders() }, 'model router ready');
 

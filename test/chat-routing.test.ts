@@ -12,6 +12,7 @@ const GROUP_ID = 'g1';
 
 const SONNET = 'claude-sonnet-4-6';
 const QWEN = 'qwen3:8b';
+const DEEPSEEK = 'deepseek-chat';
 
 function makeMsg(overrides: Partial<GroupMessage> = {}): GroupMessage {
   return {
@@ -80,10 +81,12 @@ describe('ChatModule._pickChatModel — routing rules', () => {
     db = new Database(':memory:');
     chat = new ChatModule(makeMockClaude(), db, { botUserId: BOT_ID });
     delete process.env['CHAT_QWEN_DISABLED'];
+    delete process.env['DEEPSEEK_API_KEY'];
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
+    delete process.env['DEEPSEEK_API_KEY'];
   });
 
   // ── Always-Sonnet factor rules ──────────────────────────────────────────
@@ -201,5 +204,77 @@ describe('ChatModule._pickChatModel — routing rules', () => {
   ])('does NOT route innocuous content "%s" to Sonnet', (content) => {
     const msg = makeMsg({ content });
     expect(pick(chat, GROUP_ID, msg, makeFactors())).toBe(QWEN);
+  });
+
+  // ── DeepSeek primary substitution (DEEPSEEK_ENABLED) ───────────────────────
+
+  describe('with DEEPSEEK_ENABLED=true', () => {
+    beforeEach(() => {
+      process.env['DEEPSEEK_API_KEY'] = 'test-key';
+    });
+
+    it('routes @-mention to deepseek-chat', () => {
+      const msg = makeMsg({ content: '哈哈' });
+      expect(pick(chat, GROUP_ID, msg, makeFactors({ mention: 1 }))).toBe(DEEPSEEK);
+    });
+
+    it('routes reply-to-bot to deepseek-chat', () => {
+      const msg = makeMsg({ content: '哈哈' });
+      expect(pick(chat, GROUP_ID, msg, makeFactors({ replyToBot: 1 }))).toBe(DEEPSEEK);
+    });
+
+    it('routes admin to deepseek-chat', () => {
+      const msg = makeMsg({ content: '哈哈', role: 'admin' });
+      expect(pick(chat, GROUP_ID, msg, makeFactors())).toBe(DEEPSEEK);
+    });
+
+    it('routes owner to deepseek-chat', () => {
+      const msg = makeMsg({ content: '哈哈', role: 'owner' });
+      expect(pick(chat, GROUP_ID, msg, makeFactors())).toBe(DEEPSEEK);
+    });
+
+    it('routes sensitive regex to deepseek-chat', () => {
+      const msg = makeMsg({ content: '上你' });
+      expect(pick(chat, GROUP_ID, msg, makeFactors())).toBe(DEEPSEEK);
+    });
+
+    it('routes tease-active user to deepseek-chat', () => {
+      const internal = chat as unknown as {
+        _teaseIncrement: (g: string, u: string, now: number) => boolean;
+      };
+      internal._teaseIncrement(GROUP_ID, 'u1', Date.now());
+      const msg = makeMsg({ content: '哈哈', userId: 'u1' });
+      expect(pick(chat, GROUP_ID, msg, makeFactors())).toBe(DEEPSEEK);
+    });
+
+    it('lurker fast-path still returns CHAT_QWEN_MODEL regardless of DEEPSEEK_ENABLED', () => {
+      const msg = makeMsg({ content: '哈哈笑死' });
+      expect(pick(chat, GROUP_ID, msg, makeFactors())).toBe(QWEN);
+    });
+
+    it('CHAT_QWEN_DISABLED=1 returns deepseek-chat (primary)', async () => {
+      process.env['CHAT_QWEN_DISABLED'] = '1';
+      vi.resetModules();
+      const { ChatModule: FreshChatModule } = await import('../src/modules/chat.js');
+      const freshChat = new FreshChatModule(makeMockClaude(), db, { botUserId: BOT_ID });
+      const msg = makeMsg({ content: '哈哈笑死' });
+      const picked = (freshChat as unknown as {
+        _pickChatModel: (g: string, m: GroupMessage, f: ScoreFactors) => string;
+      })._pickChatModel(GROUP_ID, msg, makeFactors());
+      expect(picked).toBe(DEEPSEEK);
+      delete process.env['CHAT_QWEN_DISABLED'];
+    });
+  });
+
+  describe('with DEEPSEEK_ENABLED=false (regression guard)', () => {
+    it('routes @-mention to RUNTIME_CHAT_MODEL (Sonnet)', () => {
+      const msg = makeMsg({ content: '哈哈' });
+      expect(pick(chat, GROUP_ID, msg, makeFactors({ mention: 1 }))).toBe(SONNET);
+    });
+
+    it('routes admin to Sonnet', () => {
+      const msg = makeMsg({ content: '哈哈', role: 'admin' });
+      expect(pick(chat, GROUP_ID, msg, makeFactors())).toBe(SONNET);
+    });
   });
 });

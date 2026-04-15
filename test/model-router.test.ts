@@ -36,11 +36,13 @@ describe('ModelRouter', () => {
   let claude: ReturnType<typeof makeStubClient>;
   let ollama: ReturnType<typeof makeStubClient>;
   let gemini: ReturnType<typeof makeStubClient>;
+  let deepseek: ReturnType<typeof makeStubClient>;
 
   beforeEach(() => {
     claude = makeStubClient('claude');
     ollama = makeStubClient('ollama');
     gemini = makeStubClient('gemini');
+    deepseek = makeStubClient('deepseek');
   });
 
   describe('routing by model-name prefix', () => {
@@ -69,6 +71,19 @@ describe('ModelRouter', () => {
       await router.complete(makeRequest('gemini-2.0-flash-exp'));
       expect(gemini.completeSpy).toHaveBeenCalledOnce();
       expect(claude.completeSpy).not.toHaveBeenCalled();
+    });
+
+    it('routes deepseek-chat → deepseek when registered', async () => {
+      const router = new ModelRouter({ claude, deepseek });
+      await router.complete(makeRequest('deepseek-chat'));
+      expect(deepseek.completeSpy).toHaveBeenCalledOnce();
+      expect(claude.completeSpy).not.toHaveBeenCalled();
+    });
+
+    it('routes deepseek-chat → claude-fallback when deepseek not registered', async () => {
+      const router = new ModelRouter({ claude });
+      await router.complete(makeRequest('deepseek-chat'));
+      expect(claude.completeSpy).toHaveBeenCalledOnce();
     });
 
     it('routes claude-sonnet-4-6 → claude', async () => {
@@ -173,6 +188,11 @@ describe('ModelRouter', () => {
     it('returns all registered providers in order', () => {
       const router = new ModelRouter({ claude, ollama, gemini });
       expect(router.getRegisteredProviders()).toEqual(['claude', 'ollama', 'gemini']);
+    });
+
+    it('includes deepseek when registered', () => {
+      const router = new ModelRouter({ claude, ollama, gemini, deepseek });
+      expect(router.getRegisteredProviders()).toEqual(['claude', 'ollama', 'gemini', 'deepseek']);
     });
   });
 });
