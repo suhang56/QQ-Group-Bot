@@ -38,6 +38,15 @@ const SUBSTR_FORBIDDEN = [
   // bot's own internal error-message format leaking as chat output
   '图片下载失败',
   '请稍后再试',
+  // raw model padding / special tokens leaking due to safety intervention
+  // or agent-SDK content filter. Seen on PII-adjacent triggers where Claude
+  // emits e.g. '[PAD151903' mid-generation instead of a normal refusal.
+  '[pad',
+  '[unk',
+  '[mask',
+  '<|endoftext|>',
+  '<|im_start|>',
+  '<|im_end|>',
 ];
 
 // Soft-forbidden: reply STARTS with these → assistant meta-framing
