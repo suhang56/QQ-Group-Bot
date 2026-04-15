@@ -51,6 +51,7 @@ describe('OllamaClient', () => {
       expect(body.think).toBe(false);
       expect(body.stream).toBe(false);
       expect(body.options.num_predict).toBe(40);
+      expect(body.options.num_ctx).toBe(32768);
       expect(body.messages).toEqual([
         { role: 'system', content: 'be short' },
         { role: 'user', content: 'hi' },

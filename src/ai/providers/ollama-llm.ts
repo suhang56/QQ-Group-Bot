@@ -71,6 +71,11 @@ export class OllamaClient implements IClaudeClient {
           think: false,
           options: {
             num_predict: req.maxTokens,
+            // Context window. Ollama's default is 4096, which silently
+            // truncates our ~8-10k-token persona + lore + context prompts.
+            // 32768 fits the full prompt for all current chat paths and
+            // still runs comfortably on a 16 GB VRAM Qwen3:8b.
+            num_ctx: 32768,
             // Leave temperature/top_p at Ollama defaults — Qwen's defaults
             // are tuned reasonably for instruct tasks.
           },
