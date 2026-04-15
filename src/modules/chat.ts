@@ -660,6 +660,8 @@ export class ChatModule implements IChatModule {
   private readonly deflectRefilling = new Set<DeflectCategory>();
   private readonly deflectCacheEnabled: boolean;
   private readonly visionService: VisionService | null;
+  /** Minimal shape of the name-images module — only what chat needs for pic-bot skip whitelist. */
+  private picNameProvider: { getAllNames(groupId: string): string[] } | null = null;
   private readonly chatContinuityWindowMs: number;
   private readonly chatContinuityBoost: number;
   // groupId:userId → timestamp of bot's last reply to this user
@@ -1061,20 +1063,7 @@ export class ChatModule implements IChatModule {
       && (triggerMessage.role === 'admin' || triggerMessage.role === 'owner')
       && /(?:她|小号|bot|Bot|BOT)(?:.{0,20})?(?:又|第一次|这次|现在|总是|还是|会|不会|不懂|学会|还没|还是不|终于|又开始|又来|装傻|胡说|乱说|正常|不正常|好像|应该|不应该)/.test(rawTrigger);
 
-    // Picture-bot command skip: short messages that are just a proper noun
-    // without any punctuation/particles are typically commands to a SEPARATE
-    // picture-posting bot (群友输入声优/角色名叫发图 bot 返图). Our bot should
-    // not chat-react to these. Pattern: ≤ 8 chars, CJK letters only, no
-    // question/exclamation/particles, not @mention/reply-to-bot.
-    const bareTrigger = rawTrigger
-      .replace(/\[CQ:[^\]]*\]/g, '')
-      .replace(/\s+/g, '')
-      .trim();
-    const isPicBotCommand = !isDirect
-      && bareTrigger.length > 0
-      && bareTrigger.length <= 8
-      && /^[\u4e00-\u9fa5A-Za-z]+$/.test(bareTrigger)
-      && !/[?？！!啊嘛呢吧呀哎哦]/.test(bareTrigger);
+    const isPicBotCommand = this._isPicBotCommand(groupId, rawTrigger, isDirect);
 
     const decision = (!isShortAck && !isMetaCommentary && !isPicBotCommand && (isDirect || score >= this.chatMinScore)) ? 'respond' : 'skip';
     this.logger.debug({ groupId, score: +score.toFixed(3), factors, chatMinScore: this.chatMinScore, decision }, 'participation score');
@@ -1796,6 +1785,27 @@ export class ChatModule implements IChatModule {
   /** Called by router to enable proactive mood messages. */
   setProactiveAdapter(fn: (groupId: string, text: string) => Promise<number | null>): void {
     this._proactiveAdapter = fn;
+  }
+
+  /** Inject a provider of known image-library names. Used as the pic-bot skip whitelist. */
+  setPicNameProvider(provider: { getAllNames(groupId: string): string[] }): void {
+    this.picNameProvider = provider;
+  }
+
+  /**
+   * A bare trigger that exactly matches a name in our image library
+   * (声优/角色名) is assumed to be a pic-bot invocation (ours via router
+   * short-circuit OR a sibling pic bot sharing the name set). Only exact
+   * whitelist match skips — prevents false positives on normal short
+   * reactions like "真的假的" / "这怎么办" / "卧槽了".
+   */
+  _isPicBotCommand(groupId: string, rawContent: string, isDirect: boolean): boolean {
+    if (isDirect || !this.picNameProvider) return false;
+    const bare = rawContent.replace(/\[CQ:[^\]]*\]/g, '').replace(/\s+/g, '').trim();
+    if (!bare) return false;
+    const names = this.picNameProvider.getAllNames(groupId);
+    const lower = bare.toLowerCase();
+    return names.some(n => n.toLowerCase() === lower);
   }
 
   /** Pop one deflection from cache (refill async if low), fall back to static pool on empty. */
