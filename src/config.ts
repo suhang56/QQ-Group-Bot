@@ -70,6 +70,11 @@ export const GEMINI_ENABLED = !!process.env['GEMINI_API_KEY'];
 /** Lazy: read at call time so tests can toggle DEEPSEEK_API_KEY per-case. */
 export const DEEPSEEK_ENABLED = (): boolean => !!process.env['DEEPSEEK_API_KEY'];
 
+/** Kill switch for fact semantic retrieval. Set FACTS_RAG_DISABLED=1 to fall
+ * back to the recency-based learned-fact injection path. Lazy-evaluated
+ * (matches DEEPSEEK_ENABLED pattern) so tests can toggle per-case. */
+export const FACTS_RAG_DISABLED = (): boolean => process.env['FACTS_RAG_DISABLED'] === '1';
+
 export const lurkerDefaults = {
   lurkerReplyChance: 0.12,
   lurkerCooldownMs: 120_000,

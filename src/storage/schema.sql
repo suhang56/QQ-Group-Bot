@@ -179,7 +179,8 @@ CREATE TABLE IF NOT EXISTS learned_facts (
   confidence           REAL    NOT NULL DEFAULT 1.0,
   status               TEXT    NOT NULL DEFAULT 'active',
   created_at           INTEGER NOT NULL,
-  updated_at           INTEGER NOT NULL
+  updated_at           INTEGER NOT NULL,
+  embedding_vec        BLOB
 );
 
 CREATE INDEX IF NOT EXISTS idx_learned_facts_group_active

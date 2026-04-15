@@ -1,9 +1,16 @@
 import type { Logger } from 'pino';
 import type { IClaudeClient, ClaudeModel } from '../ai/claude.js';
-import type { Database } from '../storage/db.js';
+import type { Database, LearnedFact } from '../storage/db.js';
+import type { IEmbeddingService } from '../storage/embeddings.js';
+import { cosineSimilarity } from '../storage/embeddings.js';
 import { createLogger } from '../utils/logger.js';
 import { extractJson } from '../utils/json-extract.js';
-import { LEARN_MODEL, RESEARCH_MODEL } from '../config.js';
+import { LEARN_MODEL, RESEARCH_MODEL, FACTS_RAG_DISABLED } from '../config.js';
+
+/** Cosine similarity floor — facts below this are dropped unless pinned.
+ * MiniLM-L6-v2 is noisier on Chinese text so we set a slightly higher
+ * threshold than English RAG defaults. Tune here without touching logic. */
+export const FACT_SIMILARITY_FLOOR = 0.30;
 
 /**
  * Configuration for {@link SelfLearningModule}.
@@ -35,6 +42,8 @@ export interface SelfLearningOptions {
   researchMaxPerDayGlobal?: number;
   /** Kill-switch for {@link SelfLearningModule.researchOnline}. Default true. */
   researchEnabled?: boolean;
+  /** Optional embedding service used for semantic fact retrieval. */
+  embeddingService?: IEmbeddingService | null;
 }
 
 /**
@@ -113,6 +122,8 @@ export class SelfLearningModule {
     '不确定','暗示','疑似','大概是','或许是','不明',
   ];
   private static readonly NEG_PATTERN = /(不是|不对|错了|搞错|没说对|胡说|瞎说|说啥呢)/;
+  /** Top K newest facts that are pinned regardless of similarity score. */
+  private static readonly PINNED_NEWEST_K = 5;
 
   private static isHedged(fact: string): boolean {
     return SelfLearningModule.HEDGE_MARKERS.some(m => fact.includes(m));
@@ -131,6 +142,7 @@ export class SelfLearningModule {
   private readonly researchMaxPer10MinPerGroup: number;
   private readonly researchMaxPerDayGlobal: number;
   private readonly researchEnabled: boolean;
+  private readonly _embeddingService: IEmbeddingService | null;
 
   private readonly correctionStamps: Map<string, number[]> = new Map();
   private readonly harvestStamps: Map<string, number[]> = new Map();
@@ -155,6 +167,7 @@ export class SelfLearningModule {
     this.researchMaxPer10MinPerGroup = opts.researchMaxPer10MinPerGroup ?? 3;
     this.researchMaxPerDayGlobal = opts.researchMaxPerDayGlobal ?? 30;
     this.researchEnabled = opts.researchEnabled ?? true;
+    this._embeddingService = opts.embeddingService ?? null;
   }
 
   /**
@@ -265,8 +278,99 @@ export class SelfLearningModule {
    * Format the active learned facts for a group as a markdown block to be
    * appended to the chat module's system prompt. Returns the empty string when
    * the group has no active facts (so callers can append unconditionally).
+   *
+   * `triggerText` is the user message that prompted this chat call. When an
+   * embedding service is available, facts are ranked by cosine similarity to
+   * the trigger and the top-K most relevant are injected (with the newest K
+   * pinned regardless of score). Falls back to recency when the embedding
+   * service is unavailable, the kill switch is set, or fewer facts have
+   * embeddings than the requested limit.
    */
-  formatFactsForPrompt(groupId: string, limit: number): FormattedFacts {
+  async formatFactsForPrompt(
+    groupId: string,
+    limit: number,
+    triggerText: string = '',
+  ): Promise<FormattedFacts> {
+    const svc = this._embeddingService;
+    const semanticEnabled = !FACTS_RAG_DISABLED() && svc !== null && svc.isReady && triggerText.length > 0;
+
+    if (!semanticEnabled) {
+      const reason = FACTS_RAG_DISABLED() ? 'killSwitch' : (svc === null || !svc.isReady ? 'noService' : 'noTrigger');
+      return this._formatFactsRecency(groupId, limit, reason);
+    }
+
+    // Order: listActiveWithEmbeddings → Feature B (hedge+confidence) →
+    // score → 0.30 cutoff → sort desc → take top (limit-pinned) → union with
+    // pinned-newest → dedupe → format. Filter BEFORE scoring (cheaper +
+    // semantically correct: junk facts cannot leak in regardless of similarity).
+    const embedded = this.db.learnedFacts.listActiveWithEmbeddings(groupId);
+    const filteredEmbedded = this._applyHedgeAndConfidenceFilter(embedded);
+
+    let triggerEmbedding: number[];
+    try {
+      triggerEmbedding = await svc!.embed(triggerText);
+    } catch (err) {
+      this.logger.warn({ err, groupId }, 'formatFactsForPrompt: trigger embed failed — recency fallback');
+      return this._formatFactsRecency(groupId, limit, 'embedError');
+    }
+
+    // listActiveWithEmbeddings returns created_at DESC, so filteredEmbedded
+    // is already newest-first. Take the first K as the pinned set.
+    const pinnedFacts = filteredEmbedded.slice(0, SelfLearningModule.PINNED_NEWEST_K);
+    const pinnedIds = new Set(pinnedFacts.map(f => f.id));
+
+    const scored: Array<{ fact: LearnedFact; sim: number }> = filteredEmbedded.map(f => ({
+      fact: f,
+      sim: f.embedding ? cosineSimilarity(triggerEmbedding, f.embedding) : 0,
+    }));
+    scored.sort((a, b) => b.sim - a.sim);
+
+    // Drop below-floor facts (unless pinned). No padding from recency —
+    // padding reintroduces the dilution bug we are trying to fix.
+    let droppedLowSim = 0;
+    const survivors = scored.filter(s => {
+      if (pinnedIds.has(s.fact.id)) return true;
+      if (s.sim < FACT_SIMILARITY_FLOOR) {
+        droppedLowSim++;
+        return false;
+      }
+      return true;
+    });
+
+    // Build final list: pinned first, then top-by-similarity to fill `limit`.
+    const finalFacts: LearnedFact[] = [];
+    const seen = new Set<number>();
+    for (const f of pinnedFacts) {
+      if (finalFacts.length >= limit) break;
+      if (seen.has(f.id)) continue;
+      finalFacts.push(f);
+      seen.add(f.id);
+    }
+    for (const s of survivors) {
+      if (finalFacts.length >= limit) break;
+      if (seen.has(s.fact.id)) continue;
+      finalFacts.push(s.fact);
+      seen.add(s.fact.id);
+    }
+
+    const topSimilarity = scored[0]?.sim ?? 0;
+    this.logger.debug(
+      {
+        groupId,
+        embeddedTotal: embedded.length,
+        kept: finalFacts.length,
+        droppedLowSim,
+        topSimilarity,
+        pinnedCount: pinnedFacts.length,
+      },
+      'facts filtered for prompt (semantic)',
+    );
+
+    if (finalFacts.length === 0) return { text: '', factIds: [] };
+    return this._renderFacts(finalFacts);
+  }
+
+  private _formatFactsRecency(groupId: string, limit: number, reason: string): FormattedFacts {
     const overFetch = Math.min(limit * 3, 150);
     const raw = this.db.learnedFacts.listActive(groupId, overFetch);
     let droppedLowConf = 0;
@@ -277,17 +381,29 @@ export class SelfLearningModule {
       return true;
     }).slice(0, limit);
     this.logger.debug(
-      { groupId, total: raw.length, kept: kept.length, droppedLowConf, droppedHedge },
-      'facts filtered for prompt',
+      { groupId, total: raw.length, kept: kept.length, droppedLowConf, droppedHedge, reason },
+      'facts filtered for prompt (recency)',
     );
     if (kept.length === 0) return { text: '', factIds: [] };
-    const lines = kept.map(f => {
+    return this._renderFacts(kept);
+  }
+
+  private _applyHedgeAndConfidenceFilter(facts: LearnedFact[]): LearnedFact[] {
+    return facts.filter(f => {
+      if (f.confidence < SelfLearningModule.MIN_INJECT_CONFIDENCE) return false;
+      if (SelfLearningModule.isHedged(f.fact)) return false;
+      return true;
+    });
+  }
+
+  private _renderFacts(facts: LearnedFact[]): FormattedFacts {
+    const lines = facts.map(f => {
       const src = f.sourceUserNickname ? `（被 ${f.sourceUserNickname} 纠正过）` : '';
       return `- ${f.fact}${src}`;
     });
     return {
       text: `## 群里学到的事实（群友教过你的，别再错同一件）\n${lines.join('\n')}`,
-      factIds: kept.map(f => f.id),
+      factIds: facts.map(f => f.id),
     };
   }
 

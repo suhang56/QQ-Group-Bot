@@ -2711,7 +2711,7 @@ function makeMockSelfLearning(factsOutput: string | { text: string; factIds: num
   return {
     detectCorrection: vi.fn().mockResolvedValue(null),
     harvestPassiveKnowledge: vi.fn().mockResolvedValue(null),
-    formatFactsForPrompt: vi.fn().mockReturnValue(normalized),
+    formatFactsForPrompt: vi.fn().mockResolvedValue(normalized),
     rememberInjection: vi.fn(),
     handleTopLevelCorrection: vi.fn(),
     getModel: vi.fn().mockReturnValue('claude-sonnet-4-6'),
@@ -2823,7 +2823,7 @@ describe('ChatModule — formatFactsForPrompt injection into system prompt', () 
     const call = (claude as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { system: Array<{ text: string }> };
     const allText = call.system.map(s => s.text).join('\n');
     expect(allText).toContain('fire bird 是 Roselia 的曲子');
-    expect(sl.formatFactsForPrompt).toHaveBeenCalledWith('g1', 50);
+    expect(sl.formatFactsForPrompt).toHaveBeenCalledWith('g1', 50, expect.any(String));
   });
 
   it('when selfLearning returns empty string, system messages have no facts block', async () => {

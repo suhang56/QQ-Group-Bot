@@ -1130,7 +1130,8 @@ export class ChatModule implements IChatModule {
 **注意**: 如果触发消息是 @-mention 你（含 [CQ:at,qq=你的id]）并且消息里有 sb/傻逼/你妈/操/废物/智障/滚/煞笔 等脏话，那是有人直接骂你。**绝对不要回"自言自语吗"/"在骂谁"** — 那是装糊涂的 bot tell。要么硬怼回去（"你才sb"/"操你妈"/"滚"），要么直接 <skip> 不理。`;
 
     const { text: factsBlock, factIds: injectedFactIds } =
-      this.selfLearning?.formatFactsForPrompt(groupId, 50) ?? { text: '', factIds: [] };
+      (await this.selfLearning?.formatFactsForPrompt(groupId, 50, triggerMessage.content))
+      ?? { text: '', factIds: [] };
     this.lastInjectedFactIds.set(groupId, injectedFactIds);
 
     const tuningBlock = this._loadTuning();

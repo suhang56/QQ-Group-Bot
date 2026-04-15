@@ -21,6 +21,7 @@ import { AnnouncementSyncModule } from './modules/announcement-sync.js';
 import { NameImagesModule } from './modules/name-images.js';
 import { LoreUpdater } from './modules/lore-updater.js';
 import { SelfLearningModule } from './modules/self-learning.js';
+import { runFactEmbeddingBackfill, BACKFILL_INTERVAL_MS } from './modules/fact-embedding-backfill.js';
 import { VisionService } from './modules/vision.js';
 import { StickerCaptureService } from './modules/sticker-capture.js';
 import { WelcomeModule } from './modules/welcome.js';
@@ -133,13 +134,33 @@ const rateLimiter = new RateLimiter();
 const router = new Router(db, adapter, rateLimiter, botUserId);
 // Embedding service: fire-and-forget init — bot must not block on model load
 const embedder = new EmbeddingService();
-void embedder.waitReady().then(() => {
-  if (embedder.isReady) logger.info('Embedding model ready');
-});
 
 const selfLearning = new SelfLearningModule({
   db, claude, botUserId,
   researchEnabled: process.env['SELF_LEARN_ONLINE'] !== '0',
+  embeddingService: embedder,
+});
+
+let factBackfillTimer: NodeJS.Timeout | null = null;
+void embedder.waitReady().then(() => {
+  if (embedder.isReady) {
+    logger.info('Embedding model ready');
+    // LearnedFactsRepo gets the service via setter — repos are built at
+    // Database init, before EmbeddingService waitReady resolves. Different
+    // lifecycle from SelfLearningModule (which takes it via constructor).
+    db.learnedFacts.setEmbeddingService(embedder);
+    void runFactEmbeddingBackfill(db, embedder, logger).catch(err => {
+      logger.warn({ err }, 'fact embedding backfill failed');
+    });
+    // Periodic re-run: defense in depth against insert-time races where
+    // embed() failed and the row was left NULL.
+    factBackfillTimer = setInterval(() => {
+      void runFactEmbeddingBackfill(db, embedder, logger).catch(err => {
+        logger.warn({ err }, 'periodic fact embedding backfill failed');
+      });
+    }, BACKFILL_INTERVAL_MS);
+    factBackfillTimer.unref?.();
+  }
 });
 router.setSelfLearning(selfLearning);
 
@@ -284,6 +305,7 @@ const shutdown = async () => {
   harvest.dispose();
   aliasMiner.dispose();
   chat.destroy();
+  if (factBackfillTimer) clearInterval(factBackfillTimer);
   stickerCapture.stopBackfillLoop();
   router.dispose();
   ratingPortal?.stop();

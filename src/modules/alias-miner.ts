@@ -208,6 +208,7 @@ ${messagesList}
         sourceMsgId: null, botReplyId: null,
         confidence: 0.85, status: 'active',
         createdAt: 0, updatedAt: 0,
+        embedding: null,
       });
 
       inserted++;

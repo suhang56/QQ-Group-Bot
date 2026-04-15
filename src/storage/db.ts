@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { ClaudeModel } from '../ai/claude.js';
+import type { IEmbeddingService } from './embeddings.js';
 
 // ---- Domain types ----
 
@@ -276,6 +277,7 @@ export interface LearnedFact {
   status: 'active' | 'superseded' | 'rejected';
   createdAt: number;
   updatedAt: number;
+  embedding: number[] | null;
 }
 
 export interface ILearnedFactsRepository {
@@ -290,9 +292,14 @@ export interface ILearnedFactsRepository {
     confidence?: number;
   }): number;
   listActive(groupId: string, limit: number): LearnedFact[];
+  listActiveWithEmbeddings(groupId: string): LearnedFact[];
+  listNullEmbeddingActive(groupId: string, limit: number): LearnedFact[];
+  listAllNullEmbeddingActive(limit: number): LearnedFact[];
+  updateEmbedding(id: number, embedding: number[]): void;
   markStatus(id: number, status: LearnedFact['status']): void;
   clearGroup(groupId: string): number;
   countActive(groupId: string): number;
+  setEmbeddingService(svc: IEmbeddingService | null): void;
 }
 
 export type ProposedAction = 'warn' | 'delete' | 'mute_10m' | 'mute_1h' | 'kick';
@@ -1149,9 +1156,19 @@ interface LearnedFactRow {
   source_msg_id: string | null; bot_reply_id: number | null;
   confidence: number; status: string;
   created_at: number; updated_at: number;
+  embedding_vec: Buffer | null;
 }
 
 function learnedFactFromRow(r: LearnedFactRow): LearnedFact {
+  let embedding: number[] | null = null;
+  if (r.embedding_vec) {
+    const view = new Float32Array(
+      r.embedding_vec.buffer,
+      r.embedding_vec.byteOffset,
+      r.embedding_vec.byteLength / 4,
+    );
+    embedding = Array.from(view);
+  }
   return {
     id: r.id, groupId: r.group_id, topic: r.topic, fact: r.fact,
     sourceUserId: r.source_user_id, sourceUserNickname: r.source_user_nickname,
@@ -1159,11 +1176,24 @@ function learnedFactFromRow(r: LearnedFactRow): LearnedFact {
     confidence: r.confidence,
     status: (r.status as LearnedFact['status']) ?? 'active',
     createdAt: r.created_at, updatedAt: r.updated_at,
+    embedding,
   };
 }
 
+function embeddingToBuffer(embedding: number[]): Buffer {
+  const f = new Float32Array(embedding);
+  return Buffer.from(new Uint8Array(f.buffer, f.byteOffset, f.byteLength));
+}
+
 class LearnedFactsRepository implements ILearnedFactsRepository {
+  private _embeddingSvc: IEmbeddingService | null = null;
+  private _embedFailureLogged = false;
+
   constructor(private readonly db: DatabaseSync) {}
+
+  setEmbeddingService(svc: IEmbeddingService | null): void {
+    this._embeddingSvc = svc;
+  }
 
   insert(row: {
     groupId: string;
@@ -1176,17 +1206,42 @@ class LearnedFactsRepository implements ILearnedFactsRepository {
     confidence?: number;
   }): number {
     const now = Math.floor(Date.now() / 1000);
+    // insert() is sync; the embed call is async. Store NULL on the row and
+    // schedule a fire-and-forget update below — the backfill loop is the
+    // safety net for any embedding that fails to land.
+    const embBuf: Buffer | null = null;
+    const svc = this._embeddingSvc;
     const result = this.db.prepare(`
       INSERT INTO learned_facts
         (group_id, topic, fact, source_user_id, source_user_nickname,
-         source_msg_id, bot_reply_id, confidence, status, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+         source_msg_id, bot_reply_id, confidence, status, created_at, updated_at, embedding_vec)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
     `).run(
       row.groupId, row.topic, row.fact,
       row.sourceUserId, row.sourceUserNickname, row.sourceMsgId,
-      row.botReplyId, row.confidence ?? 1.0, now, now,
+      row.botReplyId, row.confidence ?? 1.0, now, now, embBuf,
     );
-    return Number(result.lastInsertRowid);
+    const id = Number(result.lastInsertRowid);
+
+    // Fire-and-forget embedding compute for the just-inserted row. If the
+    // service is not ready or throws, the row stays NULL and the startup
+    // backfill loop will fill it in later.
+    if (svc && svc.isReady) {
+      const factText = row.fact;
+      void svc.embed(factText).then(
+        (vec) => {
+          try { this.updateEmbedding(id, vec); } catch { /* row may have been deleted */ }
+        },
+        (err) => {
+          if (!this._embedFailureLogged) {
+            this._embedFailureLogged = true;
+            // eslint-disable-next-line no-console
+            console.warn('[learned-facts] embed failed for fact', id, String(err));
+          }
+        },
+      );
+    }
+    return id;
   }
 
   listActive(groupId: string, limit: number): LearnedFact[] {
@@ -1194,6 +1249,34 @@ class LearnedFactsRepository implements ILearnedFactsRepository {
       `SELECT * FROM learned_facts WHERE group_id = ? AND status = 'active' ORDER BY created_at DESC, id DESC LIMIT ?`
     ).all(groupId, limit) as unknown as LearnedFactRow[];
     return rows.map(learnedFactFromRow);
+  }
+
+  listActiveWithEmbeddings(groupId: string): LearnedFact[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM learned_facts WHERE group_id = ? AND status = 'active' AND embedding_vec IS NOT NULL ORDER BY created_at DESC, id DESC`
+    ).all(groupId) as unknown as LearnedFactRow[];
+    return rows.map(learnedFactFromRow);
+  }
+
+  listNullEmbeddingActive(groupId: string, limit: number): LearnedFact[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM learned_facts WHERE group_id = ? AND status = 'active' AND embedding_vec IS NULL ORDER BY id LIMIT ?`
+    ).all(groupId, limit) as unknown as LearnedFactRow[];
+    return rows.map(learnedFactFromRow);
+  }
+
+  listAllNullEmbeddingActive(limit: number): LearnedFact[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM learned_facts WHERE status = 'active' AND embedding_vec IS NULL ORDER BY id LIMIT ?`
+    ).all(limit) as unknown as LearnedFactRow[];
+    return rows.map(learnedFactFromRow);
+  }
+
+  updateEmbedding(id: number, embedding: number[]): void {
+    const buf = embeddingToBuffer(embedding);
+    this.db.prepare(
+      'UPDATE learned_facts SET embedding_vec = ? WHERE id = ?'
+    ).run(buf, id);
   }
 
   markStatus(id: number, status: LearnedFact['status']): void {
@@ -1532,10 +1615,15 @@ export class Database {
         confidence           REAL    NOT NULL DEFAULT 1.0,
         status               TEXT    NOT NULL DEFAULT 'active',
         created_at           INTEGER NOT NULL,
-        updated_at           INTEGER NOT NULL
+        updated_at           INTEGER NOT NULL,
+        embedding_vec        BLOB
       )
     `);
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_learned_facts_group_active ON learned_facts(group_id, status, created_at DESC)`);
+
+    // learned_facts.embedding_vec — added for semantic retrieval. Idempotent
+    // ALTER for existing DBs created before this column existed.
+    try { this._db.exec(`ALTER TABLE learned_facts ADD COLUMN embedding_vec BLOB`); } catch { /* already exists */ }
 
     // pending_moderation table — Batch D human-in-loop approval flow.
     this._db.exec(`

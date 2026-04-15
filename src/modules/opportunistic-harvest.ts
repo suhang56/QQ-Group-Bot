@@ -276,6 +276,7 @@ export class OpportunisticHarvest {
         sourceUserId: null, sourceUserNickname: null, sourceMsgId: null,
         botReplyId: null, confidence, status: 'active',
         createdAt: 0, updatedAt: 0,
+        embedding: null,
       });
       inserted++;
     }
