@@ -82,6 +82,8 @@ export interface GroupConfig {
   charStartedBy: string | null;
   welcomeEnabled: boolean;
   idGuardEnabled: boolean;
+  stickerFirstEnabled: boolean;
+  stickerFirstThreshold: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -424,6 +426,8 @@ interface GroupConfigRow {
   char_started_by: string | null;
   welcome_enabled: number;
   id_guard_enabled: number;
+  sticker_first_enabled: number;
+  sticker_first_threshold: number;
   created_at: string; updated_at: string;
 }
 
@@ -517,6 +521,8 @@ function configFromRow(row: GroupConfigRow): GroupConfig {
     charStartedBy: row.char_started_by ?? null,
     welcomeEnabled: (row.welcome_enabled ?? 1) !== 0,
     idGuardEnabled: (row.id_guard_enabled ?? 1) !== 0,
+    stickerFirstEnabled: (row.sticker_first_enabled ?? 0) !== 0,
+    stickerFirstThreshold: row.sticker_first_threshold ?? 0.55,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -746,9 +752,11 @@ class GroupConfigRepository implements IGroupConfigRepository {
         name_images_blocklist,
         lore_update_enabled, lore_update_threshold, lore_update_cooldown_ms,
         live_sticker_capture_enabled, sticker_legend_refresh_every_msgs,
-        chat_persona_text, active_character_id, char_started_by, welcome_enabled, id_guard_enabled,
+        chat_persona_text, active_character_id, char_started_by,
+        welcome_enabled, id_guard_enabled,
+        sticker_first_enabled, sticker_first_threshold,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(group_id) DO UPDATE SET
         enabled_modules = excluded.enabled_modules,
         auto_mod = excluded.auto_mod,
@@ -780,6 +788,8 @@ class GroupConfigRepository implements IGroupConfigRepository {
         char_started_by = excluded.char_started_by,
         welcome_enabled = excluded.welcome_enabled,
         id_guard_enabled = excluded.id_guard_enabled,
+        sticker_first_enabled = excluded.sticker_first_enabled,
+        sticker_first_threshold = excluded.sticker_first_threshold,
         updated_at = excluded.updated_at
     `).run(
       config.groupId,
@@ -813,6 +823,8 @@ class GroupConfigRepository implements IGroupConfigRepository {
       config.charStartedBy ?? null,
       (config.welcomeEnabled ?? true) ? 1 : 0,
       (config.idGuardEnabled ?? true) ? 1 : 0,
+      (config.stickerFirstEnabled ?? false) ? 1 : 0,
+      config.stickerFirstThreshold ?? 0.55,
       config.createdAt,
       config.updatedAt,
     );
@@ -1735,6 +1747,10 @@ export class Database {
 
     // id_guard_enabled column on group_config — default ON (strict zero-tolerance).
     try { this._db.exec(`ALTER TABLE group_config ADD COLUMN id_guard_enabled INTEGER NOT NULL DEFAULT 1`); } catch { /* already exists */ }
+
+    // sticker-first mode columns — feat/sticker-first.
+    try { this._db.exec(`ALTER TABLE group_config ADD COLUMN sticker_first_enabled INTEGER NOT NULL DEFAULT 0`); } catch { /* already exists */ }
+    try { this._db.exec(`ALTER TABLE group_config ADD COLUMN sticker_first_threshold REAL NOT NULL DEFAULT 0.55`); } catch { /* already exists */ }
 
     // image_mod_cache — verdicts from assessImage, keyed by sha256 file_key, TTL 7 days.
     this._db.exec(`

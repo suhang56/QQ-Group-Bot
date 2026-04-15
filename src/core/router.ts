@@ -1837,5 +1837,59 @@ ${ctxLine}
       this.db.learnedFacts.markStatus(id, 'active');
       await this.adapter.send(msg.groupId, `已通过知识条目 #${id}，纳入参考。`);
     });
+
+    this.commands.set('stickerfirst_on', async (msg, _args, config) => {
+      if (msg.role !== 'admin' && msg.role !== 'owner') return;
+      if (config.stickerFirstEnabled) {
+        await this.adapter.send(msg.groupId, '表情包优先模式本来就是开着的。');
+        return;
+      }
+      const stickerCount = this.db.localStickers.getTopByGroup(msg.groupId, 1).length;
+      const updated = { ...config, stickerFirstEnabled: true, updatedAt: new Date().toISOString() };
+      this.db.groupConfig.upsert(updated);
+      if (stickerCount === 0) {
+        await this.adapter.send(msg.groupId, '已开启，但本群暂无本地表情包记录，暂时只能发文字。');
+      } else {
+        await this.adapter.send(msg.groupId, '表情包优先模式已开启。当我有话说时，会优先找合适的表情包代替文字发送。');
+      }
+    });
+
+    this.commands.set('stickerfirst_off', async (msg, _args, config) => {
+      if (msg.role !== 'admin' && msg.role !== 'owner') return;
+      if (!config.stickerFirstEnabled) {
+        await this.adapter.send(msg.groupId, '表情包优先模式本来就是关着的。');
+        return;
+      }
+      const updated = { ...config, stickerFirstEnabled: false, updatedAt: new Date().toISOString() };
+      this.db.groupConfig.upsert(updated);
+      await this.adapter.send(msg.groupId, '表情包优先模式已关闭，恢复正常文字回复。');
+    });
+
+    this.commands.set('stickerfirst_threshold', async (msg, args, config) => {
+      if (msg.role !== 'admin' && msg.role !== 'owner') return;
+      const raw = args[0];
+      if (!raw) {
+        await this.adapter.send(msg.groupId, '用法：/stickerfirst_threshold <0到1之间的数字>（如 /stickerfirst_threshold 0.3）');
+        return;
+      }
+      const val = parseFloat(raw);
+      if (!Number.isFinite(val) || val < 0.0 || val > 1.0) {
+        await this.adapter.send(msg.groupId, '无效的阈值格式，必须是 0 到 1 之间的数字（如 /stickerfirst_threshold 0.3）。');
+        return;
+      }
+      const updated = { ...config, stickerFirstThreshold: val, updatedAt: new Date().toISOString() };
+      this.db.groupConfig.upsert(updated);
+      await this.adapter.send(msg.groupId, `表情包匹配阈值已设为 ${val}。`);
+    });
+
+    this.commands.set('stickerfirst_status', async (msg, _args, config) => {
+      if (msg.role !== 'admin' && msg.role !== 'owner') return;
+      const stickers = this.db.localStickers.getTopByGroup(msg.groupId, 9999);
+      const count = stickers.length;
+      const onOff = config.stickerFirstEnabled ? 'ON' : 'OFF';
+      // Last sticker sent time: not tracked at router level, report 暂无
+      await this.adapter.send(msg.groupId,
+        `【表情包优先模式状态】\n开关: ${onOff}\n匹配阈值: ${config.stickerFirstThreshold}\n本群本地表情包库大小: ${count} 张\n最近发送表情包时间: 暂无`);
+    });
   }
 }

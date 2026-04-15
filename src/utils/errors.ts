@@ -14,13 +14,14 @@ export enum BotErrorCode {
   RULE_TOO_LONG         = 'E014',
   RULE_DUPLICATE        = 'E015',
   WHITELIST_MEMBER      = 'E016',
-  SELF_MIMIC            = 'E017',
-  CHAR_MIMIC_CONFLICT   = 'E020',
-  CHAR_UNKNOWN_ALIAS    = 'E021',
-  CHAR_PROFILE_MISSING  = 'E022',
-  CHAR_ALREADY_ACTIVE   = 'E023',
-  CHAR_NOT_ACTIVE       = 'E024',
-  CHAR_ALIAS_TOO_LONG   = 'E025',
+  SELF_MIMIC                  = 'E017',
+  CHAR_MIMIC_CONFLICT         = 'E020',
+  CHAR_UNKNOWN_ALIAS          = 'E021',
+  CHAR_PROFILE_MISSING        = 'E022',
+  CHAR_ALREADY_ACTIVE         = 'E023',
+  CHAR_NOT_ACTIVE             = 'E024',
+  CHAR_ALIAS_TOO_LONG         = 'E025',
+  STICKER_THRESHOLD_INVALID   = 'E030',
 }
 
 export class BotError extends Error {

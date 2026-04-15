@@ -146,6 +146,8 @@ export function defaultGroupConfig(groupId: string): GroupConfig {
     charStartedBy: null,
     welcomeEnabled: true,
     idGuardEnabled: true,
+    stickerFirstEnabled: false,
+    stickerFirstThreshold: 0.55,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
