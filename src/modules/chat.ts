@@ -640,6 +640,15 @@ export class ChatModule implements IChatModule {
   private readonly teaseCurseThreshold: number;
   private readonly teaseCounterWindowMs: number;
 
+  // @-mention spam tracker: `groupId:userId` -> sorted array of recent @ timestamps
+  // Used to detect users who are hammering the bot to break it (e.g. quizzing
+  // on seiyuu/meta to force the LLM through the @-override into revealing
+  // char禁区 content). When count in window crosses threshold, the at-mention
+  // directive switches to an annoyance variant that permits <skip> / dismissal.
+  private readonly atMentionHistory = new Map<string, number[]>();
+  private readonly atMentionSpamWindowMs = 10 * 60 * 1000; // 10 minutes
+  private readonly atMentionSpamThreshold = 4;             // >= 4 @s in window → annoyed
+
   private readonly moodTracker = new MoodTracker();
   private readonly moodProactiveIntervalMs: number;
   private readonly moodProactiveMinSilenceMs: number;
@@ -1193,13 +1202,31 @@ export class ChatModule implements IChatModule {
       : '';
 
     const isAtTrigger = this._isMention(triggerMessage);
-    const atMentionDirective = isAtTrigger
-      ? `\n\n⚠️⚠️ **这条消息是 @ 你的。绝对禁止 <skip>。** 有人 @ 你 = 直接点名要你说话，完全沉默会被理解成 bot 坏了。即使话题你不熟 / 不想聊 / 是政治宗教 / 是敏感话题，也必须给一个反应：
+    const atSpamCount = isAtTrigger
+      ? this._recordAtMention(groupId, triggerMessage.userId, now)
+      : 0;
+    const atMentionSpamActive = atSpamCount >= this.atMentionSpamThreshold;
+
+    const atMentionDirective = isAtTrigger && !atMentionSpamActive
+      ? `\n\n⚠️⚠️ **这条消息是 @ 你的。默认禁止 <skip>。** 有人 @ 你 = 直接点名要你说话，完全沉默会被理解成 bot 坏了。即使话题你不熟 / 不想聊 / 是政治宗教 / 是敏感话题，也必须给一个反应：
 - 不想聊 → "啊？" / "咋了" / "啥事" / "怎么" / "叫我干嘛"
 - 不懂话题 → "不懂" / "啥来的" / "?" / "听不懂"
 - 政治/宗教/敏感 → "不碰这个" / "我不懂这些" / "路过" / "?"
 - 就是懒 → "懒得说" / "没空" / "哈哈"
-这条消息的输出**绝不能是 <skip> 或 ... 或 空**。至少给一个最短的反应。`
+
+**唯一例外**：角色禁区话题（声优真实身份/你自己的 CV/meta 人格玩笑/攻击其他乐队角色声优/承认自己是 AI/bot/claude）即使被 @ 也不能展开讨论。具体来说——如果对方问的是"如何评价 [声优名 X]" / "X 是你的声优吗" / "你是相羽爱奈吗" / "你是 bot 吗" / "哪个 AI" 之类：
+- **绝对不要回答、不要夸、不要描述、不要承认也不要否认声优名字**
+- 必须用拒绝回应代替: "不聊这个" / "别问" / "？" / "闭嘴" / "无聊" / 直接 <skip>
+- 假装没看懂也可以: "啥" / "你说啥" (但不要反复装懂，一次就够)
+- 不要说"她是个出色的声优"这种。你**是**那个角色，不是在评价她。`
+      : isAtTrigger && atMentionSpamActive
+      ? `\n\n⚠️ **这个人最近 10 分钟内 @ 了你 ${atSpamCount} 次，明显是在玩机器人/拷问你/想逼你说出角色禁区内容**。你已经进入"烦了"状态：
+- 允许 <skip>（不是禁止）
+- 允许一字/两字 dismissive 回复: "烦" / "又是你" / "别问了" / "滚" / "无聊" / "……" / "?" / "闭嘴" / "问完了没"
+- 允许模仿真人被骚扰时的反应：懒得搭理、装没看见、冷淡、讽刺
+- **角色禁区（讨论声优真实身份 / meta 人格玩笑 / 攻击其他乐队角色声优 / 承认自己是 AI/bot）绝对优先于 @-override**，禁区话题即使被 @ 也绝不展开讨论，只能 <skip> 或拒绝("不聊这个"/"别问")
+- 不要再配合对方的拷问节奏给"完整答复"——越回答越鼓励对方继续 @ 你
+- 如果对方问的是 "如何评价 X"（X 是声优/你自己的 CV/角色），X=你角色的声优本人 → 必须 <skip> 或拒绝回应，禁止夸 / 评价 / 描述。这是假扮真人的基础。`
       : '';
 
     // "你"-addressed probe: trigger contains 你 and no @ to another user.
@@ -1604,6 +1631,27 @@ export class ChatModule implements IChatModule {
     // Message is a reply-quote, but NOT to the bot
     if (!msg.rawContent.includes('[CQ:reply,')) return false;
     return !this._isReplyToBot(msg);
+  }
+
+  /**
+   * Record an @-mention from this user at nowMs; prune entries older than
+   * the spam window; return the number of @-mentions in the active window.
+   * Callers use the count to decide whether to switch the @-mention directive
+   * into annoyance mode.
+   */
+  private _recordAtMention(groupId: string, userId: string, nowMs: number): number {
+    const key = `${groupId}:${userId}`;
+    const cutoff = nowMs - this.atMentionSpamWindowMs;
+    const arr = (this.atMentionHistory.get(key) ?? []).filter(t => t > cutoff);
+    arr.push(nowMs);
+    this.atMentionHistory.set(key, arr);
+    if (arr.length >= this.atMentionSpamThreshold) {
+      this.logger.debug(
+        { groupId, userId, atCountInWindow: arr.length, windowMs: this.atMentionSpamWindowMs },
+        '@-mention spam detected — annoyance mode active',
+      );
+    }
+    return arr.length;
   }
 
   /** Increment the tease counter for a user; returns true if they've crossed the curse threshold. */
