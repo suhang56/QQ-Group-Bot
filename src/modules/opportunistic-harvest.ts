@@ -213,7 +213,9 @@ export class OpportunisticHarvest {
     try {
       const resp = await this.claude.complete({
         model: HARVEST_MODEL as ClaudeModel,
-        maxTokens: deep ? 2048 : 1024,
+        // Deep cycles return up to MAX_FACTS_DEEP (30) entries, each ~150
+        // tokens with Qwen's slightly more verbose style. Headroom at 6k.
+        maxTokens: deep ? 6144 : 1536,
         system: [{ text: '你是一个群聊知识抽取助手，只输出 JSON。', cache: true }],
         messages: [{ role: 'user', content: prompt }],
       });
