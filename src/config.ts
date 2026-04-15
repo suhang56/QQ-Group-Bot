@@ -1,7 +1,56 @@
 import type { GroupConfig } from './storage/db.js';
 
-export const RUNTIME_CHAT_MODEL = 'claude-sonnet-4-6' as const;
-export const VISION_MODEL = 'claude-haiku-4-5-20251001' as const;
+// ============================================================================
+// LLM routing — per-module model names
+// ----------------------------------------------------------------------------
+// All values below are env-overridable. The ModelRouter dispatches by prefix:
+//   qwen* / ollama:* / local:* → OllamaClient (local)
+//   gemini*                    → GeminiClient (Google AI Studio)
+//   gpt* / o1* / o3*           → OpenAIClient (future)
+//   claude* and default        → ClaudeClient (via @anthropic-ai/claude-agent-sdk)
+//
+// To try a different model for any pipeline on a particular machine, set the
+// matching env var in .env and restart. No code changes required.
+// ============================================================================
+
+/** Main group chat reply + deflections + mimic + welcome + announcements. */
+export const RUNTIME_CHAT_MODEL = (process.env['CHAT_MODEL'] ?? 'claude-sonnet-4-6') as
+  'claude-sonnet-4-6' | 'claude-haiku-4-5-20251001' | 'claude-opus-4-6';
+
+/** Image describe + image moderation — always a Claude vision model. */
+export const VISION_MODEL = (process.env['VISION_MODEL'] ?? 'claude-haiku-4-5-20251001') as
+  'claude-haiku-4-5-20251001' | 'claude-sonnet-4-6' | 'claude-opus-4-6';
+
+/** Text moderator (HIGH-volume: every non-command group message). */
+export const MODERATOR_MODEL = process.env['MODERATOR_MODEL'] ?? 'qwen3:8b';
+
+/** Self-reflection loop (hourly tuning.md generator). */
+export const REFLECTION_MODEL = process.env['REFLECTION_MODEL'] ?? 'qwen3:8b';
+
+/** Opportunistic harvest + unknown-term resolver (every 15min + daily deep). */
+export const HARVEST_MODEL = process.env['HARVEST_MODEL'] ?? 'qwen3:8b';
+
+/** Alias miner (every 2h — group member nickname discovery). */
+export const ALIAS_MODEL = process.env['ALIAS_MODEL'] ?? 'qwen3:8b';
+
+/** Lore updater (threshold-triggered, outputs full markdown doc). */
+export const LORE_MODEL = process.env['LORE_MODEL'] ?? 'qwen3:8b';
+
+/** Self-learning correction + harvest distillation. */
+export const LEARN_MODEL = process.env['LEARN_MODEL'] ?? 'qwen3:8b';
+
+/** Online research path — needs WebSearch tool, stays on Claude. */
+export const RESEARCH_MODEL = process.env['RESEARCH_MODEL'] ?? 'claude-haiku-4-5-20251001';
+
+/** Ollama server endpoint. */
+export const OLLAMA_BASE_URL = process.env['OLLAMA_BASE_URL'] ?? 'http://localhost:11434';
+
+/** Gemini OpenAI-compat endpoint (do not change unless Google moves it). */
+export const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/openai/';
+
+/** Enable flags. Flip to 0 on machines that lack the provider. */
+export const OLLAMA_ENABLED = process.env['OLLAMA_ENABLED'] !== '0';
+export const GEMINI_ENABLED = !!process.env['GEMINI_API_KEY'];
 
 export const lurkerDefaults = {
   lurkerReplyChance: 0.12,
