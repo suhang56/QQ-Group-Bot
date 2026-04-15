@@ -11,6 +11,7 @@ import type { SelfLearningModule } from '../modules/self-learning.js';
 import type { IdCardGuard } from '../modules/id-guard.js';
 import type { SequenceGuard } from '../modules/sequence-guard.js';
 import type { VisionService } from '../modules/vision.js';
+import type { ICharModule } from '../modules/char.js';
 import { extractTokens } from '../modules/chat.js';
 import { BotErrorCode } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
@@ -108,6 +109,7 @@ export class Router implements IRouter {
   private idGuard: IdCardGuard | null = null;
   private sequenceGuard: SequenceGuard | null = null;
   private visionService: VisionService | null = null;
+  private charModule: ICharModule | null = null;
   private forwardPurgeInterval: ReturnType<typeof setInterval> | null = null;
 
   // Repeater cooldown: key = `${groupId}:${content}`, value = last-triggered timestamp
@@ -195,6 +197,10 @@ export class Router implements IRouter {
 
   setVisionService(vision: VisionService): void {
     this.visionService = vision;
+  }
+
+  setChar(charModule: ICharModule): void {
+    this.charModule = charModule;
   }
 
   dispose(): void {
@@ -1377,9 +1383,15 @@ ${ctxLine}
       await this.adapter.send(msg.groupId, reply);
     });
 
-    this.commands.set('mimic_on', async (msg, args, _config) => {
+    this.commands.set('mimic_on', async (msg, args, config) => {
       if (!this.mimicModule) {
         await this.adapter.send(msg.groupId, '此功能即将推出，敬请期待。');
+        return;
+      }
+
+      // EC-3: mutual exclusion — cannot start mimic while char is active
+      if (this.charModule && !this.charModule.mimicCanActivate(config)) {
+        await this.adapter.send(msg.groupId, `当前已开启角色模式（${config.activeCharacterId}），请先发送 /char_off 关闭后再试。`);
         return;
       }
 
@@ -1420,6 +1432,121 @@ ${ctxLine}
         await this.adapter.send(msg.groupId, '模仿模式已关闭，恢复正常聊天模式。');
       } else {
         await this.adapter.send(msg.groupId, '当前没有开启模仿模式，无需关闭。');
+      }
+    });
+
+    // /char — activate default character (ykn = 凑友希那)
+    this.commands.set('char', async (msg, _args, config) => {
+      if (!this.charModule) {
+        await this.adapter.send(msg.groupId, '此功能即将推出，敬请期待。');
+        return;
+      }
+      if (!this.charModule.charCanActivate(config)) {
+        await this.adapter.send(msg.groupId, `当前已在模仿 @${config.mimicActiveUserId}，请先发送 /mimic_off 关闭后再试。`);
+        return;
+      }
+      const canonical = this.charModule.defaultCharacter();
+      if (this.charModule.charIsAlreadyActive(config, canonical)) {
+        await this.adapter.send(msg.groupId, `角色模式已经是 ${canonical}，无需重新开启。`);
+        return;
+      }
+      if (!this.charModule.loadProfile(canonical)) {
+        await this.adapter.send(msg.groupId, `找不到角色 ${canonical} 的档案，无法开启角色模式。`);
+        return;
+      }
+      this.db.groupConfig.upsert({ ...config, activeCharacterId: canonical, charStartedBy: msg.userId, updatedAt: new Date().toISOString() });
+      this.chatModule?.invalidateLore(msg.groupId);
+      await this.adapter.send(msg.groupId, `角色模式已开启：${canonical}（${msg.groupId === msg.groupId ? 'Roselia' : ''}）。使用 /char_off 可随时关闭。`);
+    });
+
+    // /char_on — same as /char, alias
+    this.commands.set('char_on', async (msg, _args, config) => {
+      if (!this.charModule) {
+        await this.adapter.send(msg.groupId, '此功能即将推出，敬请期待。');
+        return;
+      }
+      if (!this.charModule.charCanActivate(config)) {
+        await this.adapter.send(msg.groupId, `当前已在模仿 @${config.mimicActiveUserId}，请先发送 /mimic_off 关闭后再试。`);
+        return;
+      }
+      const canonical = this.charModule.defaultCharacter();
+      if (this.charModule.charIsAlreadyActive(config, canonical)) {
+        await this.adapter.send(msg.groupId, `角色模式已经是 ${canonical}，无需重新开启。`);
+        return;
+      }
+      if (!this.charModule.loadProfile(canonical)) {
+        await this.adapter.send(msg.groupId, `找不到角色 ${canonical} 的档案，无法开启角色模式。`);
+        return;
+      }
+      this.db.groupConfig.upsert({ ...config, activeCharacterId: canonical, charStartedBy: msg.userId, updatedAt: new Date().toISOString() });
+      this.chatModule?.invalidateLore(msg.groupId);
+      await this.adapter.send(msg.groupId, `角色模式已开启：${canonical}。使用 /char_off 可随时关闭。`);
+    });
+
+    // /char_off — deactivate character mode
+    this.commands.set('char_off', async (msg, _args, config) => {
+      if (!this.charModule) {
+        await this.adapter.send(msg.groupId, '此功能即将推出，敬请期待。');
+        return;
+      }
+      if (!this.charModule.charIsActive(config)) {
+        await this.adapter.send(msg.groupId, '当前没有开启角色模式，无需关闭。');
+        return;
+      }
+      this.db.groupConfig.upsert({ ...config, activeCharacterId: null, charStartedBy: null, updatedAt: new Date().toISOString() });
+      this.chatModule?.invalidateLore(msg.groupId);
+      await this.adapter.send(msg.groupId, '角色模式已关闭，恢复正常聊天模式。');
+    });
+
+    // /char_set <alias> — switch to a specific character
+    this.commands.set('char_set', async (msg, args, config) => {
+      if (!this.charModule) {
+        await this.adapter.send(msg.groupId, '此功能即将推出，敬请期待。');
+        return;
+      }
+      const input = args.join(' ').trim();
+      if (!input) {
+        await this.adapter.send(msg.groupId, '用法：/char_set <角色名或别名>，例如 /char_set ykn');
+        return;
+      }
+      if (input.length > 50) {
+        await this.adapter.send(msg.groupId, '别名太长（最多50字），请确认后重试。');
+        return;
+      }
+      if (!this.charModule.charCanActivate(config)) {
+        await this.adapter.send(msg.groupId, `当前已在模仿 @${config.mimicActiveUserId}，请先发送 /mimic_off 关闭后再试。`);
+        return;
+      }
+      const canonical = this.charModule.resolveAlias(input);
+      if (!canonical) {
+        await this.adapter.send(msg.groupId, `未知角色别名"${input}"。可用别名：${this.charModule.listAvailableAliases().join('、')}`);
+        return;
+      }
+      if (this.charModule.charIsAlreadyActive(config, canonical)) {
+        await this.adapter.send(msg.groupId, `角色模式已经是 ${canonical}，无需重新设置。`);
+        return;
+      }
+      if (!this.charModule.loadProfile(canonical)) {
+        await this.adapter.send(msg.groupId, `找不到角色 ${canonical} 的档案，无法开启角色模式。`);
+        return;
+      }
+      this.db.groupConfig.upsert({ ...config, activeCharacterId: canonical, charStartedBy: msg.userId, updatedAt: new Date().toISOString() });
+      this.chatModule?.invalidateLore(msg.groupId);
+      await this.adapter.send(msg.groupId, `角色模式已切换为：${canonical}。使用 /char_off 可随时关闭。`);
+    });
+
+    // /char_status — show current char mode status
+    this.commands.set('char_status', async (msg, _args, config) => {
+      if (!this.charModule) {
+        await this.adapter.send(msg.groupId, '此功能即将推出，敬请期待。');
+        return;
+      }
+      if (config.activeCharacterId) {
+        const available = this.charModule.listAvailableAliases().join('、');
+        await this.adapter.send(msg.groupId, `当前角色模式：${config.activeCharacterId}。可用角色别名：${available}`);
+      } else {
+        const available = this.charModule.listAvailableAliases().join('、');
+        await this.adapter.send(msg.groupId, `当前未开启角色模式。可用角色别名：${available}`);
       }
     });
 
