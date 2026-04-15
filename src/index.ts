@@ -14,6 +14,8 @@ import { OLLAMA_ENABLED, OLLAMA_BASE_URL, GEMINI_ENABLED, DEEPSEEK_ENABLED } fro
 import { RateLimiter } from './core/rateLimiter.js';
 import { Router } from './core/router.js';
 import { ChatModule } from './modules/chat.js';
+import { CharModule } from './modules/char.js';
+import { StickerFirstModule } from './modules/sticker-first.js';
 import { MimicModule } from './modules/mimic.js';
 import { ModeratorModule } from './modules/moderator.js';
 import { LearnerModule } from './modules/learner.js';
@@ -167,14 +169,21 @@ router.setSelfLearning(selfLearning);
 const tuningPath = path.join(process.cwd(), 'data', 'tuning.md');
 
 const vision = new VisionService(claude, adapter, db.imageDescriptions);
+const stickerFirst = new StickerFirstModule(db.localStickers, embedder);
 const chat = new ChatModule(claude, db, {
   botUserId, deflectCacheEnabled: true, visionService: vision,
   localStickerRepo: db.localStickers, embedder, selfLearning,
   tuningPath, imageDescriptions: db.imageDescriptions,
   forwardCache: db.forwardCache,
+  stickerFirst,
 });
 router.setChat(chat);
 router.setVisionService(vision);
+
+const charDataDir = path.join(process.cwd(), 'data', 'characters');
+const charModule = new CharModule(charDataDir);
+chat.setCharModule(charModule);
+router.setChar(charModule);
 
 const learner = new LearnerModule(embedder, db.rules, db.moderation);
 const mimic = new MimicModule(claude, db.messages, db.groupConfig, botUserId);
