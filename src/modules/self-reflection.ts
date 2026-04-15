@@ -1,14 +1,14 @@
 import { writeFileSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
-import type { IClaudeClient } from '../ai/claude.js';
+import type { IClaudeClient, ClaudeModel } from '../ai/claude.js';
 import type {
   IBotReplyRepository, IModerationRepository, ILearnedFactsRepository,
 } from '../storage/db.js';
 import { createLogger } from '../utils/logger.js';
+import { REFLECTION_MODEL } from '../config.js';
 
 const logger = createLogger('self-reflection');
 
-const REFLECTION_MODEL = 'claude-haiku-4-5-20251001' as const;
 const HOURLY_MS = 60 * 60 * 1000;
 const INITIAL_DELAY_MS = 30_000;
 const BOT_REPLIES_LIMIT = 200;
@@ -125,7 +125,7 @@ Output format (exact headers required):
     let reflection: string;
     try {
       const resp = await this.opts.claude.complete({
-        model: REFLECTION_MODEL,
+        model: REFLECTION_MODEL as ClaudeModel,
         maxTokens: 800,
         system: [{ text: systemPrompt, cache: true }],
         messages: [{ role: 'user', content: userContent }],

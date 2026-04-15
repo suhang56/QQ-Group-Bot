@@ -1,15 +1,15 @@
-import type { IClaudeClient } from '../ai/claude.js';
+import type { IClaudeClient, ClaudeModel } from '../ai/claude.js';
 import type { IMessageRepository, ILearnedFactsRepository } from '../storage/db.js';
 import type { SelfLearningModule } from './self-learning.js';
 import type { Logger } from 'pino';
 import { createLogger } from '../utils/logger.js';
 import { extractJson } from '../utils/json-extract.js';
+import { HARVEST_MODEL } from '../config.js';
 
 const MIN_NEW_MESSAGES = 8;
 const MAX_FACTS_PER_RUN = 12;
 const MAX_FACTS_DEEP = 30;
 const FACT_DEDUP_PREFIX_LEN = 20;
-const HARVEST_MODEL = 'claude-haiku-4-5-20251001' as const;
 const MAX_TERM_RESEARCH_PER_CYCLE = 3;
 const TERM_DEDUP_TTL_MS = 24 * 60 * 60_000;
 
@@ -212,7 +212,7 @@ export class OpportunisticHarvest {
     let responseText: string;
     try {
       const resp = await this.claude.complete({
-        model: HARVEST_MODEL,
+        model: HARVEST_MODEL as ClaudeModel,
         maxTokens: deep ? 2048 : 1024,
         system: [{ text: '你是一个群聊知识抽取助手，只输出 JSON。', cache: true }],
         messages: [{ role: 'user', content: prompt }],
@@ -331,7 +331,7 @@ ${messagesList}
     let responseText: string;
     try {
       const resp = await this.claude.complete({
-        model: HARVEST_MODEL,
+        model: HARVEST_MODEL as ClaudeModel,
         maxTokens: 512,
         system: [{ text: '你是一个群聊盲点发现助手，只输出 JSON。', cache: true }],
         messages: [{ role: 'user', content: prompt }],
