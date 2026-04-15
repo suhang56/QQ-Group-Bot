@@ -15,9 +15,10 @@ import { MoodTracker, PROACTIVE_POOLS, type MoodDescription } from './mood.js';
 import type { ICharModule } from './char.js';
 import type { VisionService } from './vision.js';
 import type { IEmbeddingService } from '../storage/embeddings.js';
-import type { ILocalStickerRepository, IImageDescriptionRepository, IForwardCacheRepository } from '../storage/db.js';
+import type { ILocalStickerRepository, IImageDescriptionRepository, IForwardCacheRepository, IBandoriLiveRepository } from '../storage/db.js';
 import { cosineSimilarity } from '../storage/embeddings.js';
 import type { IStickerFirstModule } from './sticker-first.js';
+import { _hasBandoriLiveKeyword, _formatLiveBlock } from './bandori-live-scraper.js';
 
 export interface IChatModule {
   generateReply(groupId: string, triggerMessage: GroupMessage, _recentMessages: GroupMessage[]): Promise<string | null>;
@@ -89,6 +90,7 @@ interface ChatOptions {
   imageDescriptions?: IImageDescriptionRepository;
   forwardCache?: IForwardCacheRepository;
   stickerFirst?: IStickerFirstModule;
+  bandoriLiveRepo?: IBandoriLiveRepository;
 }
 
 export interface ScoreFactors {
@@ -692,6 +694,7 @@ export class ChatModule implements IChatModule {
   private readonly forwardCache: IForwardCacheRepository | null;
   private charModule: ICharModule | null = null;
   private readonly stickerFirst: IStickerFirstModule | null;
+  private readonly bandoriLiveRepo: IBandoriLiveRepository | null;
   // per-group: whether the last generateReply call returned an evasive reply
   private readonly lastEvasiveReply = new Map<string, boolean>();
   // per-group: fact ids injected into the system prompt of the last generateReply.
@@ -752,6 +755,7 @@ export class ChatModule implements IChatModule {
     this.imageDescriptions = options.imageDescriptions ?? null;
     this.forwardCache = options.forwardCache ?? null;
     this.stickerFirst = options.stickerFirst ?? null;
+    this.bandoriLiveRepo = options.bandoriLiveRepo ?? null;
 
     if (this.moodProactiveEnabled) {
       this.moodProactiveTimer = setInterval(
@@ -1202,7 +1206,18 @@ export class ChatModule implements IChatModule {
 这条消息的输出**绝不能是 <skip> 或 ... 或 空**。至少给一个最短的反应。`
       : '';
 
-    const userContent = `${replyContextBlock}${keywordSection}${wideSection}${mediumSection}${immediateSection}${avoidSection}以下语境里出现 [你(昵称)] 的消息是你自己之前说过的，出现 [别人昵称] 的是群友说的。**不要把群友的话当成你自己说过的**。
+    // Bandori live knowledge injection — user-role context prefix, not system prompt.
+    // Fires only when trigger message contains a live-related keyword (flat match).
+    let liveBlock = '';
+    if (this.bandoriLiveRepo && _hasBandoriLiveKeyword(triggerMessage.content)) {
+      const today = new Date().toISOString().slice(0, 10);
+      const upcoming = this.bandoriLiveRepo.getUpcoming(today, 3);
+      if (upcoming.length > 0) {
+        liveBlock = _formatLiveBlock(upcoming) + '\n\n';
+      }
+    }
+
+    const userContent = `${liveBlock}${replyContextBlock}${keywordSection}${wideSection}${mediumSection}${immediateSection}${avoidSection}以下语境里出现 [你(昵称)] 的消息是你自己之前说过的，出现 [别人昵称] 的是群友说的。**不要把群友的话当成你自己说过的**。
 
 参考以上语境，判断：标了 ← 的那条消息值不值得你开口。**绝对不要把那条消息原样重复出来**——不管多短。
 
