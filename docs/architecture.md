@@ -682,6 +682,8 @@ Selected measurements:
 
 **Chosen default: 0.55** — at this level, only near-literal lexical overlap fires (bot says "完蛋了" → matches "完蛋了 报警了" sticker at 0.42; narrowly misses, which is correct). The intent is a conservative v1 default: occasional confirmed matches are better than frequent jarring mismatches. Admins who want more liberal matching use `/stickerfirst_threshold 0.3`.
 
+**Architecture supersedes spec §11.9 placeholder**: `docs/spec.md §11.9` lists `0.20` as a placeholder pending architect investigation. That number is superseded by this measured decision. The authoritative implementation default is **0.55**, reflected in both the `ALTER TABLE` migration `DEFAULT 0.55` and `defaultGroupConfig()` in `src/config.ts`. Developer implements 0.55; the spec's 0.20 is a stale placeholder. No spec re-open needed — the architecture document is the binding contract.
+
 **Scoring deviation from spec §11.4 draft**: the spec proposes scoring bot-text vs each `context_sample` individually and taking the max. Measured behaviour: individual 1–3 character context samples ("唉", "神人") produce pathological scores (0.75+ for unrelated queries) because MiniLM has insufficient signal. **Required deviation**: score against `[summary, ...contextSamples].filter(s => s.trim().length >= 2).join(' ')` as one concatenated string. Also skip any sticker whose total scorable text is < 6 characters. This is architecturally safer and produces more stable score distributions.
 
 #### Decision 3 — Hook point in `chat.ts`
