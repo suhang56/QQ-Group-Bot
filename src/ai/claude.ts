@@ -3,7 +3,21 @@ import sharp from 'sharp';
 import { ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
 
-export type ClaudeModel = 'claude-haiku-4-5-20251001' | 'claude-sonnet-4-6' | 'claude-opus-4-6';
+/**
+ * LLM model identifier. Known Claude literals get IDE autocomplete, but any
+ * string is accepted so that ModelRouter can dispatch non-Claude providers
+ * (e.g. `qwen3:8b`, `gemini-2.0-flash-exp`) by prefix. The `(string & {})`
+ * trick is a standard TypeScript pattern to preserve literal autocomplete on
+ * an otherwise-widened union.
+ *
+ * Kept exported as `ClaudeModel` to avoid a rename churn — consumers just
+ * treat it as "any chat model identifier string".
+ */
+export type ClaudeModel =
+  | 'claude-haiku-4-5-20251001'
+  | 'claude-sonnet-4-6'
+  | 'claude-opus-4-6'
+  | (string & {});
 
 export interface CachedSystemBlock {
   text: string;
