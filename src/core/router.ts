@@ -583,18 +583,26 @@ export class Router implements IRouter {
           nickname: m.nickname, role: 'member' as const,
           content: m.content, rawContent: m.content, timestamp: m.timestamp,
         }));
-        const reply = await this.chatModule.generateReply(groupId, item.msg, recentMsgs);
-        if (reply) {
-          await this._sendReply(groupId, reply, item.sourceMsgId, {
-            module: 'chat',
-            triggerMsgId: item.msg.messageId,
-            triggerUserId: item.msg.userId,
-            triggerUserNickname: item.msg.nickname,
-            triggerContent: item.msg.content,
-          });
-          timestamps.push(Date.now());
-          this.atReplyTimestamps.set(groupId, timestamps);
+        let reply = await this.chatModule.generateReply(groupId, item.msg, recentMsgs);
+
+        // Safety net: @-mention must never result in total silence. If chat
+        // returned null (Claude skip / opt-out / echo), send a minimal
+        // deflection so the user who @-ed sees an ack instead of nothing.
+        if (!reply) {
+          const AT_FALLBACK = ['啊?', '咋了', '啥事', '?', '怎么了', '叫我干嘛', '什么'];
+          reply = AT_FALLBACK[Math.floor(Math.random() * AT_FALLBACK.length)]!;
+          this.logger.info({ groupId, userId: item.msg.userId }, '@-mention fallback deflection — chat returned null');
         }
+
+        await this._sendReply(groupId, reply, item.sourceMsgId, {
+          module: 'chat',
+          triggerMsgId: item.msg.messageId,
+          triggerUserId: item.msg.userId,
+          triggerUserNickname: item.msg.nickname,
+          triggerContent: item.msg.content,
+        });
+        timestamps.push(Date.now());
+        this.atReplyTimestamps.set(groupId, timestamps);
       }
     } finally {
       this.atInFlight.delete(groupId);

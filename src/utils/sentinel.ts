@@ -24,6 +24,17 @@ const SUBSTR_FORBIDDEN = [
   '图没描述',
   '描述呢',
   '描述不出来',
+  // meta-reasoning / chain-of-thought leaks — bot narrating its decision
+  // process instead of just replying. All of these are third-person analysis.
+  '这是在纠正',
+  '这是在确认',
+  '这个梗我懂',
+  '这个话题我熟',
+  '接话会显得',
+  '不能重复类似',
+  '我刚刚已经说过',
+  '刚说过相关内容',
+  '但刚说过',
 ];
 
 // Soft-forbidden: reply STARTS with these → assistant meta-framing
