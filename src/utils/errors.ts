@@ -14,7 +14,8 @@ export enum BotErrorCode {
   RULE_TOO_LONG         = 'E014',
   RULE_DUPLICATE        = 'E015',
   WHITELIST_MEMBER      = 'E016',
-  SELF_MIMIC            = 'E017',
+  SELF_MIMIC                  = 'E017',
+  STICKER_THRESHOLD_INVALID   = 'E030',
 }
 
 export class BotError extends Error {

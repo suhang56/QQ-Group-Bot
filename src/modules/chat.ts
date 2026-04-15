@@ -16,6 +16,7 @@ import type { VisionService } from './vision.js';
 import type { IEmbeddingService } from '../storage/embeddings.js';
 import type { ILocalStickerRepository, IImageDescriptionRepository, IForwardCacheRepository } from '../storage/db.js';
 import { cosineSimilarity } from '../storage/embeddings.js';
+import type { IStickerFirstModule } from './sticker-first.js';
 
 export interface IChatModule {
   generateReply(groupId: string, triggerMessage: GroupMessage, _recentMessages: GroupMessage[]): Promise<string | null>;
@@ -86,6 +87,7 @@ interface ChatOptions {
   tuningPath?: string;
   imageDescriptions?: IImageDescriptionRepository;
   forwardCache?: IForwardCacheRepository;
+  stickerFirst?: IStickerFirstModule;
 }
 
 export interface ScoreFactors {
@@ -687,6 +689,7 @@ export class ChatModule implements IChatModule {
   private readonly selfLearning: SelfLearningModule | null;
   private readonly imageDescriptions: IImageDescriptionRepository | null;
   private readonly forwardCache: IForwardCacheRepository | null;
+  private readonly stickerFirst: IStickerFirstModule | null;
   // per-group: whether the last generateReply call returned an evasive reply
   private readonly lastEvasiveReply = new Map<string, boolean>();
   // per-group: fact ids injected into the system prompt of the last generateReply.
@@ -746,6 +749,7 @@ export class ChatModule implements IChatModule {
     this.selfLearning = options.selfLearning ?? null;
     this.imageDescriptions = options.imageDescriptions ?? null;
     this.forwardCache = options.forwardCache ?? null;
+    this.stickerFirst = options.stickerFirst ?? null;
 
     if (this.moodProactiveEnabled) {
       this.moodProactiveTimer = setInterval(
@@ -1282,6 +1286,28 @@ export class ChatModule implements IChatModule {
         this.logger.info({ groupId, reply: processed, duplicateOf: nearDup }, 'Near-duplicate of recent own reply — dropping');
         return null;
       }
+
+      // ── STICKER-FIRST INTERCEPT ──────────────────────────────────────────
+      if (this.stickerFirst) {
+        const sfConfig = this.db.groupConfig.get(groupId);
+        if (sfConfig?.stickerFirstEnabled) {
+          try {
+            const choice = await this.stickerFirst.pickSticker(
+              groupId, processed, sfConfig.stickerFirstThreshold, true,
+            );
+            if (choice) {
+              this.stickerFirst.suppressSticker(groupId, choice.key);
+              this._recordOwnReply(groupId, choice.cqCode);
+              this.logger.info({ groupId, key: choice.key, score: choice.score }, 'sticker-first: sending sticker instead of text');
+              return choice.cqCode;
+            }
+          } catch (err) {
+            this.logger.error({ err, groupId }, 'sticker-first: unhandled error — falling through to text');
+          }
+        }
+      }
+      // ────────────────────────────────────────────────────────────────────
+
       this._recordOwnReply(groupId, processed);
       this.engagedTopic.set(groupId, {
         tokens: extractTokens(triggerMessage.content),
