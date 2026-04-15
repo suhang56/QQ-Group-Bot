@@ -52,10 +52,16 @@ export class GeminiClient implements IClaudeClient {
     }
 
     try {
+      // Disable Gemini 2.5 Flash's default thinking — thinking tokens
+      // count against max_tokens, so with max_tokens=300 the reasoning
+      // budget leaves almost nothing for actual content. Chat path wants
+      // short direct replies, not reasoning. `reasoning_effort: "none"`
+      // is the OpenAI-compat parameter Google honors for this.
       const resp = await this.client.chat.completions.create({
         model: req.model,
         messages,
         max_tokens: req.maxTokens,
+        reasoning_effort: 'none',
       });
 
       const text = resp.choices[0]?.message?.content ?? '';
@@ -79,6 +85,11 @@ export class GeminiClient implements IClaudeClient {
         cacheWriteTokens: 0,
       };
     } catch (err) {
+      const e = err as { status?: number; message?: string; code?: string; response?: { data?: unknown } };
+      this.logger.warn(
+        { status: e?.status, code: e?.code, message: e?.message, body: e?.response?.data },
+        'Gemini API call failed',
+      );
       throw new ClaudeApiError(err);
     }
   }

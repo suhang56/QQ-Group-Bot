@@ -84,6 +84,11 @@ export class DeepSeekClient implements IClaudeClient {
         cacheWriteTokens: 0,
       };
     } catch (err) {
+      const e = err as { status?: number; message?: string; code?: string; response?: { data?: unknown } };
+      this.logger.warn(
+        { status: e?.status, code: e?.code, message: e?.message, body: e?.response?.data },
+        'DeepSeek API call failed',
+      );
       throw new ClaudeApiError(err);
     }
   }
