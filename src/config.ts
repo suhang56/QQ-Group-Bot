@@ -42,6 +42,19 @@ export const LEARN_MODEL = process.env['LEARN_MODEL'] ?? 'qwen3:8b';
 /** Online research path — needs WebSearch tool, stays on Claude. */
 export const RESEARCH_MODEL = process.env['RESEARCH_MODEL'] ?? 'claude-haiku-4-5-20251001';
 
+/**
+ * Layered chat routing: the "fast path" (lurker-mode) model used when a
+ * trigger doesn't match any Sonnet-required rule. See ChatModule._pickChatModel
+ * for the routing rules. Default qwen3:8b.
+ */
+export const CHAT_QWEN_MODEL = process.env['CHAT_QWEN_MODEL'] ?? 'qwen3:8b';
+
+/**
+ * Kill switch. Set to '1' to force ALL chat calls through RUNTIME_CHAT_MODEL
+ * bypassing the layered router. Emergency rollback — no code change required.
+ */
+export const CHAT_QWEN_DISABLED = process.env['CHAT_QWEN_DISABLED'] === '1';
+
 /** Ollama server endpoint. */
 export const OLLAMA_BASE_URL = process.env['OLLAMA_BASE_URL'] ?? 'http://localhost:11434';
 

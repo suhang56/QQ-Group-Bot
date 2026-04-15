@@ -7,7 +7,7 @@ import type { Database } from '../storage/db.js';
 import type { SelfLearningModule } from './self-learning.js';
 import { ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
-import { lurkerDefaults, chatHistoryDefaults, RUNTIME_CHAT_MODEL } from '../config.js';
+import { lurkerDefaults, chatHistoryDefaults, RUNTIME_CHAT_MODEL, CHAT_QWEN_MODEL, CHAT_QWEN_DISABLED } from '../config.js';
 import { parseFaces } from '../utils/qqface.js';
 import { sentinelCheck, postProcess, isEcho, checkConfabulation, hasForbiddenContent, HARDENED_SYSTEM } from '../utils/sentinel.js';
 import { buildStickerSection, getStickerPool, type LiveStickerEntry } from '../utils/stickers.js';
@@ -87,7 +87,7 @@ interface ChatOptions {
   forwardCache?: IForwardCacheRepository;
 }
 
-interface ScoreFactors {
+export interface ScoreFactors {
   mention: number;
   replyToBot: number;
   question: number;
@@ -133,6 +133,26 @@ function _reservoirSample<T>(arr: T[], k: number): T[] {
 // Deliberately excludes third-person observational mentions: "这AI为啥..."/"机器人真快"/"AI 真聪明".
 export const IDENTITY_PROBE =
   /(你\s*是\s*(不是\s*)?(一个?\s*)?(bot|ai|机器人|真人)|你\s*是\s*人\s*吗|是\s*(不是\s*)?(bot|ai|机器人)\s*吧|(bot|ai)\s*吧|真人吗|这\s*不\s*是\s*(bot|ai|机器人)|are\s+you\s+(an?\s+)?(bot|ai|human))/i;
+
+// Layered chat routing: sensitive triggers that MUST go to Sonnet.
+// Bias: high recall > high precision — a false positive costs a Sonnet call
+// (cheap), a false negative costs a viral-bad Qwen reply on a hot pattern.
+
+// Sexual propositions (2nd-person pronoun target): 上/干/日/睡/搞/艹/操 你/她/他.
+export const CHAT_SENSITIVE_RE =
+  /上\s*[你她他]|干\s*[你她他]|日\s*[你她他]|睡\s*[你她他]|搞\s*[你她他]|艹\s*[你她他]|操\s*[你她他]/i;
+
+// Dev / API / infra chatter the bot should not riff on with a local model.
+// Recall-first: "claude", "api", "vpn", model names, proxy jargon — Sonnet handles
+// these with persona intact; Qwen tends to break character or leak meta-knowledge.
+export const CHAT_META_TECH_RE =
+  /usage|quota|token|claude|gpt\b|模型|prompt|vpn|加速器|穿梭|节点|dns|翻墙|api\b|subscription/i;
+
+// Political / religious tripwires. Recall-first with narrow negative lookahead on
+// 毛 (to exclude idioms 毛茸/毛毯/毛线). All matches escalate to Sonnet so the
+// persona can deflect cleanly instead of a Qwen freewheel.
+export const CHAT_POLITICAL_RE =
+  /习\s*近平|毛(?![茸毯线])泽东|共产党|安拉|反动|法轮|文革|台独|藏独|六四|tiananmen/i;
 
 export const IDENTITY_DEFLECTIONS = ['啊？', '什么', '？？', '?', '我不明白', '啧'];
 
@@ -1091,8 +1111,16 @@ export class ChatModule implements IChatModule {
 
     const tuningBlock = this._loadTuning();
 
+    const pickedModel = this._pickChatModel(groupId, triggerMessage, factors);
+    this.logger.debug(
+      { groupId, pickedModel, trigger: triggerMessage.content.slice(0, 50) },
+      'chat routing decision',
+    );
+
     const chatRequest = (hardened = false) => this.claude.complete({
-      model: RUNTIME_CHAT_MODEL,
+      // Hardened-regen path always escalates to Sonnet for safety, regardless
+      // of the normal routing decision.
+      model: hardened ? RUNTIME_CHAT_MODEL : pickedModel,
       maxTokens: 300,
       // identity prompt is cached; mood section appended (cache:true required by type, API ignores dups)
       system: hardened
@@ -1113,7 +1141,7 @@ export class ChatModule implements IChatModule {
       const tc0 = Date.now();
       const response = await chatRequest();
       const tc1 = Date.now();
-      this.logger.info({ groupId, ms_claude: tc1 - tc0, tokens_in: response.inputTokens, tokens_out: response.outputTokens, cache_read: response.cacheReadTokens }, 'chat timing (claude)');
+      this.logger.info({ groupId, model: pickedModel, ms_claude: tc1 - tc0, tokens_in: response.inputTokens, tokens_out: response.outputTokens, cache_read: response.cacheReadTokens }, 'chat timing (claude)');
       const text = await sentinelCheck(
         response.text,
         triggerMessage.content,
@@ -1309,6 +1337,63 @@ export class ChatModule implements IChatModule {
 
     const score = Object.values(factors).reduce((s, f) => s + f, 0);
     return { score: Math.max(0, score), factors, isDirect: false };
+  }
+
+  /**
+   * Layered chat routing. Returns the model name to use for this trigger.
+   *
+   * Bias: **fail closed to Sonnet**. Any rule we're unsure about routes to
+   * Sonnet. A false positive costs one Sonnet call (cheap); a false negative
+   * costs a viral-bad Qwen reply on a hot-path pattern (expensive — reputational).
+   *
+   * Priority order (first match wins). `factors` is the score breakdown
+   * already computed by `_computeWeightedScore`; callers MUST pass it rather
+   * than having us recompute mention / replyToBot / metaIdentityProbe.
+   *
+   * No `private` keyword — matches this module's convention for test-visible
+   * internals (`_isEvasiveReply`, `_resolveForwardText`, etc.).
+   */
+  _pickChatModel(groupId: string, triggerMessage: GroupMessage, factors: ScoreFactors): string {
+    // 1. Emergency kill switch — one env var flip forces everything Sonnet.
+    if (CHAT_QWEN_DISABLED) return RUNTIME_CHAT_MODEL;
+
+    const content = triggerMessage.content;
+
+    // 2-3. Direct engagement (@-mention or reply-to-bot): quality-critical.
+    if (factors.mention > 0) return RUNTIME_CHAT_MODEL;
+    if (factors.replyToBot > 0) return RUNTIME_CHAT_MODEL;
+
+    // 4. Admin/owner messages are trusted management channel — always Sonnet.
+    if (triggerMessage.role === 'admin' || triggerMessage.role === 'owner') {
+      return RUNTIME_CHAT_MODEL;
+    }
+
+    // 5-7. Sensitive / meta-tech / political tripwires.
+    if (CHAT_SENSITIVE_RE.test(content)) return RUNTIME_CHAT_MODEL;
+    if (CHAT_META_TECH_RE.test(content)) return RUNTIME_CHAT_MODEL;
+    if (CHAT_POLITICAL_RE.test(content)) return RUNTIME_CHAT_MODEL;
+
+    // 8-10. Existing adversarial exploit regexes (identity probe, task request,
+    // memory injection). These already have deflection shortcuts upstream of
+    // this call, but if they reach here (e.g. no shortcut fired), still Sonnet.
+    if (IDENTITY_PROBE.test(content)) return RUNTIME_CHAT_MODEL;
+    if (TASK_REQUEST.test(content)) return RUNTIME_CHAT_MODEL;
+    if (MEMORY_INJECT.test(content)) return RUNTIME_CHAT_MODEL;
+
+    // 11-12. Meta-identity probes ("哪个人格" etc.) — both the raw regex and
+    // the gated factor. Raw regex catches probes even when bot wasn't recent.
+    if (META_IDENTITY_RE.test(content)) return RUNTIME_CHAT_MODEL;
+    if (factors.metaIdentityProbe > 0) return RUNTIME_CHAT_MODEL;
+
+    // 13. Active tease counter: this user is already winding the bot up in
+    // the current window. Bot is in defensive mode — persona quality matters.
+    const key = `${groupId}:${triggerMessage.userId}`;
+    const entry = this.teaseCounter.get(key);
+    const teaseActive = !!entry && entry.count > 0 && (Date.now() - entry.lastHit) < this.teaseCounterWindowMs;
+    if (teaseActive) return RUNTIME_CHAT_MODEL;
+
+    // 14. Default: lurker-mode casual banter → fast path.
+    return CHAT_QWEN_MODEL;
   }
 
   private _isMention(msg: GroupMessage): boolean {
@@ -1630,8 +1715,9 @@ export class ChatModule implements IChatModule {
       const situation = DEFLECT_SITUATIONS[category];
       const seed = Math.random().toString(36).slice(2, 6);
       const batchPrompt = `${BANGDREAM_PERSONA}\n\n生成 ${this.deflectCacheSize} 条短回复，每条一行，都是"${situation}"的自然人格反应（随机种子：${seed}）。必须全部不同，不要有任何两条语气相近。尽可能广地覆盖：惊讶/不屑/反问/敷衍/装傻/直接不理/幽默转移 各种风格。禁止在同一批里重复使用"啥"字或任何一个词超过 2 次。3-15 字。只输出 ${this.deflectCacheSize} 行，不要编号/解释。\n不能有任何一条是 <skip> 或带尖括号的内容。每条必须是真实的中文短语或emoji。`;
+      const refillModel = CHAT_QWEN_DISABLED ? RUNTIME_CHAT_MODEL : CHAT_QWEN_MODEL;
       const response = await this.claude.complete({
-        model: RUNTIME_CHAT_MODEL,
+        model: refillModel,
         maxTokens: 200,
         system: [{ text: batchPrompt, cache: true }],
         messages: [{ role: 'user', content: '(生成)' }],
@@ -1641,7 +1727,7 @@ export class ChatModule implements IChatModule {
       if (valid.length > 0) {
         const existing = this.deflectCache.get(category) ?? [];
         this.deflectCache.set(category, [...existing, ...valid]);
-        this.logger.debug({ category, count: valid.length }, 'deflect cache refilled');
+        this.logger.debug({ category, model: refillModel, count: valid.length }, 'deflect cache refilled');
       }
     } catch (err) {
       this.logger.warn({ err, category }, 'deflect cache refill failed — will use fallback');
