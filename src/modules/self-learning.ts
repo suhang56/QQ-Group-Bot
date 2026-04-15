@@ -82,6 +82,16 @@ const CORRECTION_PATTERNS: ReadonlyArray<RegExp> = [
 const MIN_CORRECTION_LENGTH = 3;
 
 /**
+ * Result of formatting learned facts for the system prompt. `factIds` lists
+ * the rows actually injected so the caller can remember them against the
+ * resulting bot reply (Feature C — top-level correction path).
+ */
+export interface FormattedFacts {
+  text: string;
+  factIds: number[];
+}
+
+/**
  * Captures factual corrections from group members and turns them into
  * `learned_facts` rows. Two paths:
  *
@@ -96,6 +106,18 @@ const MIN_CORRECTION_LENGTH = 3;
  * the system prompt so the bot does not repeat the same mistake.
  */
 export class SelfLearningModule {
+  private static readonly MIN_INJECT_CONFIDENCE = 0.8;
+  private static readonly HEDGE_MARKERS: ReadonlyArray<string> = [
+    '可能是','可能与','可能代表','可能是某','似乎是','似乎与',
+    '具体信息不明确','具体含义不明','具体含义需','不太清楚',
+    '不确定','暗示','疑似','大概是','或许是','不明',
+  ];
+  private static readonly NEG_PATTERN = /(不是|不对|错了|搞错|没说对|胡说|瞎说|说啥呢)/;
+
+  private static isHedged(fact: string): boolean {
+    return SelfLearningModule.HEDGE_MARKERS.some(m => fact.includes(m));
+  }
+
   private readonly db: Database;
   private readonly claude: IClaudeClient;
   private readonly logger: Logger;
@@ -114,6 +136,10 @@ export class SelfLearningModule {
   private readonly harvestStamps: Map<string, number[]> = new Map();
   private readonly researchStamps: Map<string, number[]> = new Map();
   private researchGlobalStamps: number[] = [];
+
+  // Feature C: most recent bot reply per group paired with the fact ids that
+  // were injected into its prompt. Bounded LRU (insertion-order Map).
+  private readonly injectionMemory = new Map<string, { botReplyId: number; factIds: number[] }>();
 
   constructor(opts: SelfLearningOptions) {
     this.db = opts.db;
@@ -240,16 +266,85 @@ export class SelfLearningModule {
    * appended to the chat module's system prompt. Returns the empty string when
    * the group has no active facts (so callers can append unconditionally).
    */
-  formatFactsForPrompt(groupId: string, limit: number): string {
-    const facts = this.db.learnedFacts.listActive(groupId, limit);
-    if (facts.length === 0) {
-      return '';
-    }
-    const lines = facts.map(f => {
+  formatFactsForPrompt(groupId: string, limit: number): FormattedFacts {
+    const overFetch = Math.min(limit * 3, 150);
+    const raw = this.db.learnedFacts.listActive(groupId, overFetch);
+    let droppedLowConf = 0;
+    let droppedHedge = 0;
+    const kept = raw.filter(f => {
+      if (f.confidence < SelfLearningModule.MIN_INJECT_CONFIDENCE) { droppedLowConf++; return false; }
+      if (SelfLearningModule.isHedged(f.fact)) { droppedHedge++; return false; }
+      return true;
+    }).slice(0, limit);
+    this.logger.debug(
+      { groupId, total: raw.length, kept: kept.length, droppedLowConf, droppedHedge },
+      'facts filtered for prompt',
+    );
+    if (kept.length === 0) return { text: '', factIds: [] };
+    const lines = kept.map(f => {
       const src = f.sourceUserNickname ? `（被 ${f.sourceUserNickname} 纠正过）` : '';
       return `- ${f.fact}${src}`;
     });
-    return `## 群里学到的事实（群友教过你的，别再错同一件）\n${lines.join('\n')}`;
+    return {
+      text: `## 群里学到的事实（群友教过你的，别再错同一件）\n${lines.join('\n')}`,
+      factIds: kept.map(f => f.id),
+    };
+  }
+
+  /**
+   * Record the fact ids injected into the system prompt for the bot reply
+   * identified by `botReplyId`. Consumed by {@link handleTopLevelCorrection}
+   * when a group member pushes back on that reply without reply-quoting it.
+   */
+  rememberInjection(groupId: string, botReplyId: number, factIds: number[]): void {
+    // Refresh insertion order so recently-touched entries survive eviction.
+    this.injectionMemory.delete(groupId);
+    this.injectionMemory.set(groupId, { botReplyId, factIds });
+    if (this.injectionMemory.size > 200) {
+      const firstKey = this.injectionMemory.keys().next().value;
+      if (firstKey !== undefined) this.injectionMemory.delete(firstKey);
+    }
+  }
+
+  /**
+   * Handle a plain (non-reply-quote) negation that arrives right after a bot
+   * reply. If the negation has a token overlap with the prior bot reply we
+   * treat it as a correction: reject any facts we injected into that reply's
+   * prompt and fire an online research call to find the right answer.
+   *
+   * Silently no-ops on missing prior reply, missing negation marker, or
+   * missing referent. Errors from {@link researchOnline} are swallowed by
+   * that method — callers should still use `void`.
+   */
+  handleTopLevelCorrection(params: {
+    groupId: string;
+    content: string;
+    priorBotReply: { id: number; content: string; trigger: string } | null;
+  }): void {
+    const { groupId, content, priorBotReply } = params;
+    if (!priorBotReply) return;
+    if (!SelfLearningModule.NEG_PATTERN.test(content)) return;
+    const tokens = priorBotReply.content.match(/[\u4e00-\u9fa5A-Za-z0-9]{2,}/g) ?? [];
+    const hasReferent = tokens.some(t => content.includes(t));
+    if (!hasReferent) return;
+
+    const injected = this.injectionMemory.get(groupId);
+    if (injected && injected.botReplyId === priorBotReply.id) {
+      for (const factId of injected.factIds) {
+        this.db.learnedFacts.markStatus(factId, 'rejected');
+      }
+      this.logger.info(
+        { groupId, botReplyId: priorBotReply.id, rejected: injected.factIds.length },
+        'top-level correction: facts rejected',
+      );
+      this.injectionMemory.delete(groupId);
+    }
+
+    void this.researchOnline({
+      groupId,
+      evasiveBotReplyId: priorBotReply.id,
+      originalTrigger: priorBotReply.trigger,
+    });
   }
 
   /**

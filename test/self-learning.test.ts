@@ -258,32 +258,40 @@ describe('SelfLearningModule.formatFactsForPrompt', () => {
     db = makeDb();
   });
 
-  function insertFact(groupId: string, fact: string, nickname: string | null): number {
+  function insertFact(
+    groupId: string,
+    fact: string,
+    nickname: string | null,
+    confidence = 1.0,
+  ): number {
     return db.learnedFacts.insert({
       groupId, topic: null, fact,
       sourceUserId: null, sourceUserNickname: nickname,
       sourceMsgId: null, botReplyId: null,
+      confidence,
     });
   }
 
   it('returns a formatted markdown block with 3 active facts', () => {
-    insertFact('g1', 'fact A', 'sino');
-    insertFact('g1', 'fact B', 'ykn');
-    insertFact('g1', 'fact C', null);
+    const a = insertFact('g1', 'fact A', 'sino');
+    const b = insertFact('g1', 'fact B', 'ykn');
+    const c = insertFact('g1', 'fact C', null);
     const learner = new SelfLearningModule({ db, claude: stubClaude([]) });
 
     const out = learner.formatFactsForPrompt('g1', 50);
-    expect(out).toContain('群里学到的事实');
-    expect(out).toContain('fact A');
-    expect(out).toContain('fact B');
-    expect(out).toContain('fact C');
-    expect(out).toContain('被 sino 纠正过');
-    expect(out).toContain('被 ykn 纠正过');
+    expect(out.text).toContain('群里学到的事实');
+    expect(out.text).toContain('fact A');
+    expect(out.text).toContain('fact B');
+    expect(out.text).toContain('fact C');
+    expect(out.text).toContain('被 sino 纠正过');
+    expect(out.text).toContain('被 ykn 纠正过');
+    expect(out.factIds).toEqual(expect.arrayContaining([a, b, c]));
+    expect(out.factIds).toHaveLength(3);
   });
 
-  it('returns empty string when group has no active facts', () => {
+  it('returns empty text and empty factIds when group has no active facts', () => {
     const learner = new SelfLearningModule({ db, claude: stubClaude([]) });
-    expect(learner.formatFactsForPrompt('empty-group', 50)).toBe('');
+    expect(learner.formatFactsForPrompt('empty-group', 50)).toEqual({ text: '', factIds: [] });
   });
 
   it('excludes rejected facts and lists only active ones', () => {
@@ -294,9 +302,67 @@ describe('SelfLearningModule.formatFactsForPrompt', () => {
 
     const learner = new SelfLearningModule({ db, claude: stubClaude([]) });
     const out = learner.formatFactsForPrompt('g1', 50);
-    expect(out).not.toContain('fact A');
-    expect(out).toContain('fact B');
-    expect(out).toContain('fact C');
+    expect(out.text).not.toContain('fact A');
+    expect(out.text).toContain('fact B');
+    expect(out.text).toContain('fact C');
+    expect(out.factIds).toHaveLength(2);
+  });
+
+  it('filters facts with confidence below 0.8 (low-conf boundary)', () => {
+    insertFact('g1', 'low conf fact', 'sino', 0.5);
+    insertFact('g1', 'boundary fact', 'ykn', 0.79);
+    const ok = insertFact('g1', 'strong fact', 'tk', 0.8);
+    const learner = new SelfLearningModule({ db, claude: stubClaude([]) });
+
+    const out = learner.formatFactsForPrompt('g1', 50);
+    expect(out.text).not.toContain('low conf fact');
+    expect(out.text).not.toContain('boundary fact');
+    expect(out.text).toContain('strong fact');
+    expect(out.factIds).toEqual([ok]);
+  });
+
+  it('filters hedge-marker facts even at confidence 1.0', () => {
+    insertFact('g1', '这可能是某种 meme', 'sino', 1.0);
+    insertFact('g1', '具体含义不明确', 'ykn', 1.0);
+    insertFact('g1', '不太清楚是啥', 'tk', 1.0);
+    const clean = insertFact('g1', 'fire bird 是 Roselia 的曲', 'sino', 1.0);
+    const learner = new SelfLearningModule({ db, claude: stubClaude([]) });
+
+    const out = learner.formatFactsForPrompt('g1', 50);
+    expect(out.text).not.toContain('可能是某');
+    expect(out.text).not.toContain('具体含义不明确');
+    expect(out.text).not.toContain('不太清楚');
+    expect(out.text).toContain('fire bird');
+    expect(out.factIds).toEqual([clean]);
+  });
+
+  it('mixed: 3 clean facts + 2 junk → only 3 returned', () => {
+    insertFact('g1', '可能是 某个 meme', 'a', 1.0); // hedge
+    insertFact('g1', '模糊的东西', 'b', 0.5); // low conf
+    const k1 = insertFact('g1', 'fact K1', 'c', 1.0);
+    const k2 = insertFact('g1', 'fact K2', 'd', 0.9);
+    const k3 = insertFact('g1', 'fact K3', 'e', 1.0);
+    const learner = new SelfLearningModule({ db, claude: stubClaude([]) });
+
+    const out = learner.formatFactsForPrompt('g1', 50);
+    expect(out.factIds).toHaveLength(3);
+    expect(out.factIds).toEqual(expect.arrayContaining([k1, k2, k3]));
+  });
+
+  it('over-fetch saturation: limit 10 with 30 clean facts returns exactly 10', () => {
+    for (let i = 0; i < 30; i++) {
+      insertFact('g1', `fact ${i}`, 'src', 1.0);
+    }
+    const learner = new SelfLearningModule({ db, claude: stubClaude([]) });
+
+    const out = learner.formatFactsForPrompt('g1', 10);
+    expect(out.factIds).toHaveLength(10);
+    expect(out.text.split('\n').filter(l => l.startsWith('- '))).toHaveLength(10);
+  });
+
+  it('empty active facts returns {text: "", factIds: []}', () => {
+    const learner = new SelfLearningModule({ db, claude: stubClaude([]) });
+    expect(learner.formatFactsForPrompt('nobody', 50)).toEqual({ text: '', factIds: [] });
   });
 });
 

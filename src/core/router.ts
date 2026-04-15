@@ -353,6 +353,22 @@ export class Router implements IRouter {
               this.logger.warn({ err, groupId: msg.groupId }, 'detectCorrection failed — ignored');
             });
           }
+        } else if (msg.userId !== (this.botUserId ?? '')) {
+          // Top-level correction: no reply-quote, but the user may still be pushing back
+          // on the most recent bot reply in this group. Feature C in fact-quality batch.
+          try {
+            const recent = this.db.botReplies.getRecent(msg.groupId, 1);
+            const last = recent[0];
+            if (last && last.module === 'chat' && (Math.floor(Date.now() / 1000) - last.sentAt) <= 60) {
+              this.selfLearning.handleTopLevelCorrection({
+                groupId: msg.groupId,
+                content: msg.content,
+                priorBotReply: { id: last.id, content: last.botReply, trigger: last.triggerContent },
+              });
+            }
+          } catch (err) {
+            this.logger.warn({ err, groupId: msg.groupId }, 'handleTopLevelCorrection failed — ignored');
+          }
         }
       }
 
@@ -487,6 +503,7 @@ export class Router implements IRouter {
           const reply = await this.chatModule.generateReply(msg.groupId, msg, recentMsgs);
           if (reply) {
             const wasEvasive = this.chatModule.getEvasiveFlagForLastReply(msg.groupId);
+            const injectedFactIds = this.chatModule.getInjectedFactIdsForLastReply(msg.groupId);
             const botReplyId = await this._sendReply(msg.groupId, reply, undefined, {
               module: 'chat',
               triggerMsgId: msg.messageId,
@@ -494,6 +511,9 @@ export class Router implements IRouter {
               triggerUserNickname: msg.nickname,
               triggerContent: msg.content,
             });
+            if (botReplyId !== null && this.selfLearning && injectedFactIds.length > 0) {
+              this.selfLearning.rememberInjection(msg.groupId, botReplyId, injectedFactIds);
+            }
             if (wasEvasive && botReplyId !== null && this.selfLearning) {
               if (botReplyId !== null) {
                 try { this.db.botReplies.markEvasive(botReplyId); } catch { /* non-fatal */ }

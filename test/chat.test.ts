@@ -2704,11 +2704,16 @@ describe('ChatModule — metaIdentityProbe scoring factor', () => {
 
 import type { SelfLearningModule } from '../src/modules/self-learning.js';
 
-function makeMockSelfLearning(factsOutput = ''): SelfLearningModule {
+function makeMockSelfLearning(factsOutput: string | { text: string; factIds: number[] } = ''): SelfLearningModule {
+  const normalized = typeof factsOutput === 'string'
+    ? { text: factsOutput, factIds: [] }
+    : factsOutput;
   return {
     detectCorrection: vi.fn().mockResolvedValue(null),
     harvestPassiveKnowledge: vi.fn().mockResolvedValue(null),
-    formatFactsForPrompt: vi.fn().mockReturnValue(factsOutput),
+    formatFactsForPrompt: vi.fn().mockReturnValue(normalized),
+    rememberInjection: vi.fn(),
+    handleTopLevelCorrection: vi.fn(),
     getModel: vi.fn().mockReturnValue('claude-sonnet-4-6'),
   } as unknown as SelfLearningModule;
 }

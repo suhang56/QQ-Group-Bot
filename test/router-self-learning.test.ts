@@ -43,7 +43,9 @@ function makeMockSelfLearning(): SelfLearningModule {
   return {
     detectCorrection: vi.fn().mockResolvedValue(null),
     harvestPassiveKnowledge: vi.fn().mockResolvedValue(null),
-    formatFactsForPrompt: vi.fn().mockReturnValue(''),
+    formatFactsForPrompt: vi.fn().mockReturnValue({ text: '', factIds: [] }),
+    rememberInjection: vi.fn(),
+    handleTopLevelCorrection: vi.fn(),
     getModel: vi.fn().mockReturnValue('claude-sonnet-4-6'),
   } as unknown as SelfLearningModule;
 }

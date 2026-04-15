@@ -32,6 +32,7 @@ export interface IChatModule {
   getMoodTracker(): MoodTracker;
   noteAdminActivity(groupId: string, userId: string, nickname: string, content: string): void;
   getEvasiveFlagForLastReply(groupId: string): boolean;
+  getInjectedFactIdsForLastReply(groupId: string): number[];
 }
 
 interface ChatOptions {
@@ -670,6 +671,9 @@ export class ChatModule implements IChatModule {
   private readonly forwardCache: IForwardCacheRepository | null;
   // per-group: whether the last generateReply call returned an evasive reply
   private readonly lastEvasiveReply = new Map<string, boolean>();
+  // per-group: fact ids injected into the system prompt of the last generateReply.
+  // Router reads this right after generateReply returns to wire into self-learning.rememberInjection.
+  private readonly lastInjectedFactIds = new Map<string, number[]>();
 
   private readonly loreDirPath: string;
   private readonly loreSizeCapBytes: number;
@@ -832,6 +836,15 @@ export class ChatModule implements IChatModule {
    */
   getEvasiveFlagForLastReply(groupId: string): boolean {
     return this.lastEvasiveReply.get(groupId) ?? false;
+  }
+
+  /**
+   * Returns the fact ids that were injected into the most recent generateReply
+   * system prompt for this group. Router pairs this with the bot_replies row id
+   * to let self-learning remember what facts shaped a given reply.
+   */
+  getInjectedFactIdsForLastReply(groupId: string): number[] {
+    return this.lastInjectedFactIds.get(groupId) ?? [];
   }
 
   /** Record a message from a group admin/owner for speech-style mirroring. */
@@ -1116,7 +1129,9 @@ export class ChatModule implements IChatModule {
 
 **注意**: 如果触发消息是 @-mention 你（含 [CQ:at,qq=你的id]）并且消息里有 sb/傻逼/你妈/操/废物/智障/滚/煞笔 等脏话，那是有人直接骂你。**绝对不要回"自言自语吗"/"在骂谁"** — 那是装糊涂的 bot tell。要么硬怼回去（"你才sb"/"操你妈"/"滚"），要么直接 <skip> 不理。`;
 
-    const factsBlock = this.selfLearning?.formatFactsForPrompt(groupId, 50) ?? '';
+    const { text: factsBlock, factIds: injectedFactIds } =
+      this.selfLearning?.formatFactsForPrompt(groupId, 50) ?? { text: '', factIds: [] };
+    this.lastInjectedFactIds.set(groupId, injectedFactIds);
 
     const tuningBlock = this._loadTuning();
 
