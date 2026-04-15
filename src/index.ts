@@ -30,6 +30,7 @@ import { WelcomeModule } from './modules/welcome.js';
 import { IdCardGuard } from './modules/id-guard.js';
 import { SequenceGuard } from './modules/sequence-guard.js';
 import { SelfReflectionLoop } from './modules/self-reflection.js';
+import { BandoriLiveScraper } from './modules/bandori-live-scraper.js';
 import { OpportunisticHarvest } from './modules/opportunistic-harvest.js';
 import { AliasMiner } from './modules/alias-miner.js';
 import { RatingPortalServer } from './server/rating-portal.js';
@@ -170,12 +171,21 @@ const tuningPath = path.join(process.cwd(), 'data', 'tuning.md');
 
 const vision = new VisionService(claude, adapter, db.imageDescriptions);
 const stickerFirst = new StickerFirstModule(db.localStickers, embedder);
+
+const bandoriEnabled = process.env['BANDORI_SCRAPE_ENABLED'] !== 'false';
+const bandoriScraper = new BandoriLiveScraper(db.bandoriLives, {
+  enabled: bandoriEnabled,
+  intervalMs: parseInt(process.env['BANDORI_SCRAPE_INTERVAL_MS'] ?? '86400000', 10),
+});
+bandoriScraper.start();
+
 const chat = new ChatModule(claude, db, {
   botUserId, deflectCacheEnabled: true, visionService: vision,
   localStickerRepo: db.localStickers, embedder, selfLearning,
   tuningPath, imageDescriptions: db.imageDescriptions,
   forwardCache: db.forwardCache,
   stickerFirst,
+  bandoriLiveRepo: bandoriEnabled ? db.bandoriLives : undefined,
 });
 router.setChat(chat);
 router.setVisionService(vision);
