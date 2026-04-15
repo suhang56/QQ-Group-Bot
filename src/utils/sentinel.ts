@@ -47,6 +47,12 @@ const SUBSTR_FORBIDDEN = [
   '<|endoftext|>',
   '<|im_start|>',
   '<|im_end|>',
+  // leaked context-marker prefix — model dumping its own context window
+  // verbatim. postProcess strips lone prefixes but if "[你]:" appears in
+  // the MIDDLE of a reply it means the model is emitting multiple
+  // [nickname]: blocks which is always wrong.
+  '[你]:',
+  '[你(',
 ];
 
 // Soft-forbidden: reply STARTS with these → assistant meta-framing
@@ -99,12 +105,21 @@ export function stripEcho(reply: string, lastUserMessage: string): string {
  */
 const SKIP_LINE_RE = /^\s*<\s*skip\s*>\s*$/i;
 
+// Matches leaked context-marker prefixes from the prompt's `[你(昵称)]:` /
+// `[昵称]:` format appearing at the start of a line. Model sometimes emits
+// these verbatim when it's dumping its context window as output. Capture the
+// whole prefix (the bracketed name + colon + any following whitespace) so we
+// can strip it and keep the actual content that followed.
+const LEAKED_CONTEXT_PREFIX_RE = /^\s*\[[^\]\n]{1,40}\]\s*[:：]\s*/;
+
 export function postProcess(text: string): string {
   return text
     .replace(/\[CQ:face,[^\]]*\]/g, '')    // strip [CQ:face,id=N] — user banned QQ built-in faces
     .replace(/\[CQ:mface,[^\]]*\]/g, '')   // strip [CQ:mface,...] — user banned QQ market stickers
     .split('\n')
     .filter(line => !SKIP_LINE_RE.test(line))
+    // Strip leaked context-marker prefixes like "[你]: " / "[你(小号)]: " / "[Alice]:"
+    .map(l => l.replace(LEAKED_CONTEXT_PREFIX_RE, ''))
     .map(l => {
       // Strip orphan trailing brackets that survived CQ stripping (e.g. from
       // malformed [CQ:mface,summary=[笑]] where inner ] confuses the regex).
