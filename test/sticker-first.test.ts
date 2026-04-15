@@ -494,3 +494,34 @@ describe('StickerChoice shape', () => {
     fs.unlinkSync(localPath);
   });
 });
+
+// ─── Embed failure paths ─────────────────────────────────────────────────────
+
+describe('Embed query failure falls through to null', () => {
+  it('returns null and does not throw when embed(intendedText) rejects', async () => {
+    const sticker = makeSticker({ contextSamples: ['哈哈哈哈哈'] });
+    const repo = makeRepo([sticker]);
+    const embedder = makeEmbedder(true, () => { throw new Error('embed network error'); });
+    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder);
+    const result = await mod.pickSticker('g1', '测试', 0.0, true);
+    expect(result).toBeNull();
+  });
+});
+
+describe('Embed sticker failure skips that sticker', () => {
+  it('skips sticker whose embed rejects, returns null if no others qualify', async () => {
+    const localPath = fs.mkdtempSync(path.join(os.tmpdir(), 'sf-embfail-')) + '/s.jpg';
+    fs.writeFileSync(localPath, 'x');
+    const sticker = makeSticker({ localPath, summary: '开心', contextSamples: ['哈哈哈哈哈'] });
+    const repo = makeRepo([sticker]);
+    let callIdx = 0;
+    const embedder = makeEmbedder(true, () => {
+      if (callIdx++ === 0) return [1, 0, 0, 0]; // query succeeds
+      throw new Error('sticker embed failure');  // sticker embed fails
+    });
+    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder);
+    const result = await mod.pickSticker('g1', '测试', 0.0, true);
+    expect(result).toBeNull(); // sticker skipped, no candidates left
+    fs.unlinkSync(localPath);
+  });
+});
