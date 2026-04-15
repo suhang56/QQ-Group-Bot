@@ -403,40 +403,42 @@ Admin denies via /appeal_deny {msg_id}:  [future command, phase 2]
 
 ---
 
-## 10. Sticker-First Mode
+## 11. Sticker-First Mode
 
-### 10.1 Overview
+### 11.1 Overview
 
 **User request (verbatim):** "给 bot 加一个表情包权重的功能 就是按照它想说的话发表情包 如果有合适的表情包就发 不发文字 如果没有就发文字"
 
-**Interpretation:** A per-group toggle that changes *how* the bot replies. When enabled, the bot first generates the text it would normally send, then searches the local sticker library for a sticker whose emotional/contextual meaning matches that intended text. If the best match scores at or above a configurable threshold, the bot sends the sticker instead of the text. If no sticker qualifies, the bot sends the text as normal. The feature is additive and never causes a silent drop — if sticker search is unavailable or yields no match, text always wins.
+**Interpretation:** A per-group toggle that changes *how* the bot delivers replies. When enabled, the bot runs its full normal reply pipeline and produces the text it **would have sent**. That intended text is then used as the embedding query against the local sticker library. If the best-matching sticker scores at or above the configured threshold, the bot sends the sticker only (the text is discarded). If no sticker qualifies, the text is sent as normal. The feature is additive and never causes a silent drop — if sticker search fails or yields no match, text always wins.
 
 ---
 
-### 10.2 User Stories
+### 11.2 User Stories
 
 | # | As a… | I want to… | So that… |
 |---|---|---|---|
 | US-1 | group admin | turn sticker-first mode ON for my group | the bot replies with stickers when context matches, feeling more like a real member |
 | US-2 | group admin | turn sticker-first mode OFF | the bot reverts to text-only replies immediately |
-| US-3 | group admin | set a custom match threshold | I can tune how picky the bot is about sticker matching |
+| US-3 | group admin | set a custom match threshold | I can tune how picky the bot is (different groups have different sticker libraries) |
 | US-4 | group admin | see the current mode status | I can confirm the mode without guessing |
 | US-5 | group member | receive a contextually appropriate sticker reply | the bot feels natural, not mechanical |
 | US-6 | group member | receive a text reply when no sticker fits | the bot never goes silent unexpectedly |
 
 ---
 
-### 10.3 Commands
+### 11.3 Commands
+
+All four commands are restricted to group admins and owner via the existing router-level gate. Non-admin invocations are silently ignored (fall through to chat pipeline) — consistent with all other slash commands.
 
 #### `/stickerfirst_on`
 - **Syntax**: `/stickerfirst_on`
-- **Permission**: admins and owner only (router gate — `E001` if member)
+- **Permission**: admins and owner only (`E001` if member)
 - **Effect**: Sets `group_config.sticker_first_enabled = 1` for this group
 - **Response**: `表情包优先模式已开启。当我有话说时，会优先找合适的表情包代替文字发送。`
 - **Edge cases**:
   1. Mode already ON → idempotent, respond: `表情包优先模式本来就是开着的。`
   2. Local sticker library empty for this group → enable anyway, warn: `已开启，但本群暂无本地表情包记录，暂时只能发文字。`
-  3. Non-admin sends command → `E001` (silently ignored at router gate)
+  3. Non-admin sends command → silently ignored at router gate
 
 #### `/stickerfirst_off`
 - **Syntax**: `/stickerfirst_off`
@@ -449,15 +451,15 @@ Admin denies via /appeal_deny {msg_id}:  [future command, phase 2]
 #### `/stickerfirst_threshold <value>`
 - **Syntax**: `/stickerfirst_threshold <float>`
 - **Permission**: admins and owner only
-- **Effect**: Sets `group_config.sticker_first_threshold` to `<value>` (must be in `[0.0, 1.0]`)
+- **Effect**: Sets `group_config.sticker_first_threshold` to `<value>`
 - **Response**: `表情包匹配阈值已设为 <value>。`
-- **Error cases**:
-  1. Value is not a valid float → `E030`: `无效的阈值格式，必须是 0 到 1 之间的数字（如 /stickerfirst_threshold 0.3）。`
-  2. Value < 0.0 → `E030`: same message
-  3. Value > 1.0 → `E030`: same message
-  4. No argument given → `E030`: usage hint
 - **Validation**: `parseFloat()` must succeed AND result must satisfy `0.0 <= value <= 1.0`. Non-numeric strings, empty string, `NaN`, `Infinity` all trigger E030.
-- **Note**: The Architect selects the recommended default value based on observed score distributions in the live `local_stickers` table. This spec allocates the column with a placeholder of `0.20` pending that calibration. The default is documented here for completeness; the Architect MUST override this based on real data and document the chosen default in the Iteration Contract.
+- **Error cases** (all → `E030`):
+  1. Value not a valid float → `无效的阈值格式，必须是 0 到 1 之间的数字（如 /stickerfirst_threshold 0.3）。`
+  2. Value < 0.0 → same message
+  3. Value > 1.0 → same message
+  4. No argument given → `用法：/stickerfirst_threshold <0到1之间的数字>（如 /stickerfirst_threshold 0.3）`
+- **Rationale**: The default threshold will almost certainly need per-group tuning because sticker library quality, size, and style varies significantly across groups. Without a runtime command, every tuning attempt requires a code change and redeploy. The default value is TBD by the Architect (see §11.9).
 
 #### `/stickerfirst_status`
 - **Syntax**: `/stickerfirst_status`
@@ -477,176 +479,228 @@ Admin denies via /appeal_deny {msg_id}:  [future command, phase 2]
 
 ---
 
-### 10.4 Scoring Pipeline
+### 11.4 Scoring Pipeline
 
-#### Background: how the existing sticker library works
+#### Background: the local sticker library
 
-The local sticker library (`local_stickers` table) stores image stickers captured from the group. Each row has:
+The `local_stickers` table stores image stickers captured passively from the group. Each row has:
 - `key`: SHA-256 hash of the image (first 16 hex chars)
-- `summary`: a 2–6 character Chinese description generated by vision model (e.g. "笑哭", "摆烂", "震惊")
-- `context_samples`: JSON array of up to 3 text strings from messages that appeared near this sticker
+- `summary`: a 2–6 character Chinese description generated by the vision model (e.g. "笑哭", "摆烂", "震惊")
+- `context_samples`: JSON array of up to 3 text strings from messages that appeared near this sticker when it was observed in the wild
 - `count`: how many times observed in the group
-- `usage_positive` / `usage_negative`: feedback signal from `recordUsage()`
-- `cq_code`: the `[CQ:image,file=file:///...]` code to send
+- `usage_positive` / `usage_negative`: explicit feedback signal
+- `cq_code`: `[CQ:image,file=file:///...]` code to send
 
-The current `_getContextStickers()` in `chat.ts` ranks stickers by embedding-based cosine similarity between the query text and `context_samples`, subject to a `stickerMinScoreFloor` cutoff on `(usagePositive - usageNegative)`.
+#### The key design decision: score against the bot's intended reply, not the trigger
 
-#### Sticker-first scoring: what changes
+The user's request is "**按照它想说的话**发表情包" — send a sticker *based on what the bot would have said*. This means the embedding query must be the **bot's intended reply text**, generated by the LLM. Scoring against the trigger message or context is the wrong direction.
 
-In sticker-first mode, the scoring query text changes from the **trigger message** to the **intended reply text** that the LLM just generated. This is the key design insight: we are asking "which sticker best represents what I was about to say?" rather than "which sticker fits the incoming message?"
+The sticker-first intercept is a **post-LLM, post-processing filter** inserted in the reply-assembly path — right before `_recordOwnReply`. It cannot fire before the LLM runs because the intended text does not exist yet.
 
-**Pipeline (when sticker-first mode is ON)**:
+#### Full pipeline (when sticker-first mode is ON)
 
 ```
-1. generateReply() runs LLM call as normal → produces intendedText
-2. If intendedText is null / <skip> / "..." → return null (no change)
-3. Call _pickStickerForReply(groupId, intendedText) →
-     a. Query local_stickers: top-20 by count with non-null summary and
-        usagePositive - usageNegative >= stickerMinScoreFloor
-     b. If embedder ready: embed intendedText and each sticker's context_samples;
-        compute max cosine similarity per sticker vs intendedText
-     c. If embedder NOT ready: rank by count (usage-weighted fallback)
-     d. Apply repeat-suppression filter (see §10.5)
-     e. Return top-1 sticker IF score >= stickerFirstThreshold; else return null
-4. If sticker returned → send sticker.cqCode ONLY (discard intendedText)
-5. If sticker null → send intendedText as normal (existing path)
+generateReply() runs as normal:
+  1. LLM call → raw reply text
+  2. sentinelCheck (+ hardened regen if needed)
+  3. postProcess (strip <skip>, "...", etc.)
+  4. Echo-drop, self-dedup checks
+     → if any of the above yields null / <skip> / empty: return null immediately
+        (sticker-first intercept never fires on a null reply)
+
+  ── STICKER-FIRST INTERCEPT (new, inserted here) ──
+  5. config = db.groupConfig.get(groupId)
+     if !config.stickerFirstEnabled → skip to step 9 (text path)
+  6. sticker = await _pickStickerForReply(groupId, processedText)
+     a. Query local_stickers.getTopByGroup(groupId, 20)
+        Filter: summary != null, usagePositive - usageNegative >= stickerMinScoreFloor
+     b. If embedder.isReady:
+          embed processedText → queryVec
+          for each candidate: embed each context_sample → compute cosine(queryVec, sampleVec)
+          score[sticker] = max cosine across its context_samples
+        Else:
+          fall through to text (step 9) — no scoring without embedder
+     c. Apply repeat-suppression filter: remove keys in per-group cooldown map
+     d. Sort by score descending; take top-1
+     e. If top-1 score >= config.stickerFirstThreshold AND localPath file exists:
+          return that sticker
+        Else:
+          return null
+  7. If sticker != null:
+       _recordOwnReply(groupId, sticker.cqCode)   // track for rotation cooldown
+       _recordStickerSent(groupId, sticker.key)    // update repeat-suppression map
+       return sticker.cqCode                        // text is discarded
+  ──────────────────────────────────────────────────
+
+  8. (sticker null) fall through:
+  9. _recordOwnReply(groupId, processedText)
+     return processedText
 ```
 
-**Cosine similarity score**: ranges [-1, 1] in theory but in practice cluster around [0.0, 0.6] for meaningful semantic matches with the MiniLM-L6 embedder used in this project. Scores above 0.20 typically indicate contextual relevance. The Architect must verify this against real `local_stickers` data before finalising the default threshold.
+#### Cosine similarity in practice
 
-**Score fallback (embedder not ready)**: when the embedder is unavailable (`embedder.isReady === false`), sticker-first mode falls through to text. Sending a random sticker without semantic validation would be worse than no sticker at all. This is intentional — sticker-first requires the embedding layer.
+With the MiniLM-L6 embedder used in this project, cosine scores against short Chinese text cluster roughly:
+- `< 0.10`: essentially unrelated
+- `0.10 – 0.25`: loosely related (same domain, not the same emotion)
+- `0.25 – 0.45`: contextually relevant match
+- `> 0.45`: strong semantic overlap
+
+The default threshold is **TBD by the Architect** based on actual score distribution against live `local_stickers` data. The Architect must sample at least 10–20 (intendedText, sticker) pairs from the live DB, compute real cosine scores, and pick a value that hits the right sensitivity/precision trade-off. Document the chosen value and justification in the Iteration Contract (task #3).
+
+#### When embedder is not ready
+
+If `embedder.isReady === false`, sticker-first falls through to text. A random or count-ranked sticker sent without semantic validation would be worse (jarring, off-context) than sending the text. Sticker-first is semantically gated.
 
 ---
 
-### 10.5 Repeat Suppression
+### 11.5 Repeat Suppression
 
-The bot must not send the same sticker twice within a short window, as this feels broken/looping.
+The bot must not send the same sticker twice within a short window, as repeated identical stickers feel broken.
 
-**Requirement**: After sending a sticker in sticker-first mode, that sticker's `key` is excluded from consideration for the next **5 minutes** in the same group.
+**Requirement**: After a sticker is sent via sticker-first mode, that sticker's `key` is excluded from consideration for the next **5 minutes** in the same group.
 
-**Mechanism** (implementation detail for Architect/Developer):
-- An in-memory `Map<groupId, Map<stickerKey, expiresAtMs>>` in `ChatModule`
-- Before returning a candidate sticker, filter out keys that are still in the cooldown window
-- On sticker send, insert `key → now + 5min` into the map
-- Cap the map per group at 50 entries (evict oldest on overflow)
-- After suppression filter: if the top-1 sticker is suppressed, try the next-best candidate. If all candidates are suppressed or the next-best falls below threshold, fall through to text reply.
-- Map is in-memory only (resets on restart) — acceptable, cooldown is short
+**Mechanism** (implementation detail left to Developer, direction for Architect):
+- An in-memory `Map<groupId, Map<stickerKey, expiresAtMs>>` owned by `ChatModule`
+- Before scoring: filter out candidates whose key is in the cooldown map (not yet expired)
+- After sticker send: insert `key → Date.now() + 5 * 60_000`
+- Cap per group at 50 entries — evict oldest on overflow
+- If top-1 is suppressed: try next-best candidate above threshold
+- If all candidates are suppressed OR next-best is below threshold: fall through to text
+- Map is in-memory only (resets on restart) — acceptable for a 5-minute window
 
 ---
 
-### 10.6 Mode Interaction Matrix
+### 11.6 Mode Interaction Matrix
 
-| Active mode | sticker-first ON | Behaviour |
+| Concurrent mode | sticker-first ON | Behaviour |
 |---|---|---|
-| Normal chat | Yes | Sticker-first intercept fires after LLM generates intended text |
-| `/mimic_on` active | Yes | Mimic path runs first (router §475). `ChatModule.generateReply` is NOT called. Sticker-first does **not** apply to mimic replies. Rationale: mimic output replicates a specific user's textual style; inserting a sticker breaks the persona contract. |
-| `/char` active (if implemented) | Yes | `/char` mode operates inside `ChatModule.generateReply` via persona injection into the system prompt. Sticker-first fires on the LLM output from the char persona. The sticker that replaces the text will represent the char's intended reply — behaviorally correct. |
-| Proactive mood messages (silence breaker / `_moodProactiveTick`) | Yes — **MODE DOES NOT APPLY** | Proactive messages bypass `generateReply` entirely. Sticker-first is only wired into the `generateReply` path. V1 explicitly excludes proactive messages. |
-| Deflections (identity probe, task request, etc.) | Yes — **MODE DOES NOT APPLY** | Deflection shortcuts return before the LLM call. Sticker-first intercept fires after the LLM generates the intended text; since deflections never reach that point, they are unaffected. |
+| Normal reactive chat | Yes | Intercept fires in `generateReply` after LLM produces intended text |
+| `/mimic_on` active | Yes — **does NOT apply** | Router dispatches to `MimicModule.generateMimic` first; `ChatModule.generateReply` is not called. Sticker-first has no hook into the mimic path. Rationale: mimic replicates a specific user's textual register; injecting a sticker silently breaks that persona contract. |
+| `/char` persona active | Yes — **applies** | `/char` injects a persona into the system prompt but still runs through `ChatModule.generateReply`. The LLM generates the char's intended reply; sticker-first scores that text. The sticker represents the char's emotional intent — behaviorally correct. |
+| Proactive mood messages (`_moodProactiveTick`, silence breakers) | Yes — **does NOT apply** | Proactive messages are sent directly by the mood subsystem, bypassing `generateReply`. No hook point exists in v1. Non-goal: see §11.12. |
+| Deflections (identity probe, task, memory-inject shortcuts) | Yes — **does NOT apply** | Deflections short-circuit before the LLM call (`return this._generateDeflection(...)`). The intercept hook is after the LLM; deflections never reach it. |
 
-**Summary rule**: sticker-first is a post-LLM filter within `generateReply`. Anything that bypasses or short-circuits `generateReply` is unaffected by the mode.
+**Invariant**: sticker-first is a post-LLM filter inside `generateReply`. It does not and cannot affect any code path that bypasses `generateReply`.
 
 ---
 
-### 10.7 Fail-Safe Guarantees
+### 11.7 Fail-Safe Guarantees
 
-| Condition | Result |
+sticker-first mode MUST satisfy these invariants at all times:
+
+| Condition | Required result |
 |---|---|
-| Local sticker library empty for group | Fall through to text (never silent drop) |
+| Local sticker library empty for group | Fall through to text — never silent drop |
 | Embedder not ready (`isReady === false`) | Fall through to text |
 | All candidate stickers below threshold | Fall through to text |
-| All candidate stickers suppressed by repeat-suppression | Fall through to text |
-| CQ code malformed or missing local file | Fall through to text (sticker selection validates `localPath` existence before returning) |
-| LLM returns `<skip>` or null | sticker-first check never reached; `generateReply` returns null as normal |
-| DB read error during sticker query | Log warning, fall through to text |
+| All candidate stickers in repeat-suppression cooldown | Fall through to text |
+| `localPath` file does not exist on disk | Exclude that sticker from candidates; fall through if no valid sticker remains |
+| LLM returns `<skip>` or null or empty | Intercept never fires; `generateReply` returns null as normal |
+| DB read error during sticker query | Log warning at WARN level; fall through to text |
+| Any unhandled exception in `_pickStickerForReply` | Catch, log at ERROR; fall through to text |
 
-**Invariant**: sticker-first mode can only replace a text reply with a sticker. It can never cause a non-null reply to become null, and it can never produce a zero-output when the LLM was going to reply.
+**Non-negotiable**: sticker-first can only **replace** a text reply with a sticker. It must never convert a non-null reply into null, and must never produce zero output when the LLM intended to reply.
 
 ---
 
-### 10.8 Error Codes (additions)
+### 11.8 Error Codes (new)
+
+Appended to §3 Error Code Table:
 
 | Code | Name | Cause | Bot response |
 |---|---|---|---|
-| E030 | STICKER_THRESHOLD_INVALID | `/stickerfirst_threshold` value is not a float in [0,1] | `无效的阈值格式，必须是 0 到 1 之间的数字（如 /stickerfirst_threshold 0.3）。` |
+| E030 | STICKER_THRESHOLD_INVALID | `/stickerfirst_threshold` value is not a float in [0.0, 1.0] | `无效的阈值格式，必须是 0 到 1 之间的数字（如 /stickerfirst_threshold 0.3）。` |
 
 ---
 
-### 10.9 Schema Changes
+### 11.9 Schema Changes
 
-**`group_config` new columns** (added via `ALTER TABLE` migration in `applyMigrations()`, NOT in CREATE TABLE — see project SQLite migration convention):
+**`group_config` new columns** — added via `ALTER TABLE` in `applyMigrations()` only. Do NOT add to `CREATE TABLE` in `schema.sql` (existing DBs skip schema.sql re-runs; ALTER is the only safe migration path per project convention).
 
 | Column | Type | Default | Description |
 |---|---|---|---|
 | `sticker_first_enabled` | INTEGER | `0` | 1 = sticker-first mode ON for this group |
-| `sticker_first_threshold` | REAL | `0.20` | Min cosine similarity for a sticker match (Architect must calibrate from real data) |
+| `sticker_first_threshold` | REAL | TBD by Architect | Min cosine similarity for a sticker match to win over text |
 
-**`GroupConfig` TypeScript interface** additions:
+**Default threshold note**: `0.20` is a placeholder here. The Architect (task #3) must measure real cosine score distributions from the live `local_stickers` table before selecting a default. Document the chosen number and justification in the Iteration Contract.
+
+**`GroupConfig` TypeScript interface** (additions to `db.ts`):
 ```typescript
 stickerFirstEnabled: boolean;
 stickerFirstThreshold: number;
 ```
 
-**`defaultGroupConfig()` additions**:
+**`defaultGroupConfig()` additions** (`config.ts`):
 ```typescript
 stickerFirstEnabled: false,
-stickerFirstThreshold: 0.20,  // Architect to calibrate
+stickerFirstThreshold: <architect-chosen value>,
 ```
 
-**Migration** (in `applyMigrations()`):
+**`applyMigrations()` additions** (`db.ts`):
 ```sql
 ALTER TABLE group_config ADD COLUMN sticker_first_enabled INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE group_config ADD COLUMN sticker_first_threshold REAL NOT NULL DEFAULT 0.20;
+ALTER TABLE group_config ADD COLUMN sticker_first_threshold REAL NOT NULL DEFAULT <architect-chosen value>;
 ```
 
----
-
-### 10.10 Permission Model
-
-All four `/stickerfirst_*` commands are restricted to group admins and owner via the existing router-level gate. No member can invoke them. Non-admin invocations are silently ignored (fall through to chat pipeline) — consistent with all other slash commands.
+The migration must be wrapped in a try/catch that silently ignores `"duplicate column"` errors (SQLite's error on re-running `ALTER TABLE` on a column that already exists).
 
 ---
 
-### 10.11 Static System Prompt Invariant
+### 11.10 Static System Prompt Invariant
 
-Group message content MUST NOT be interpolated into the system prompt in any sticker-first code path. The sticker scoring query text is the **LLM's own output** (intendedText), not user input. This satisfies the existing prompt-injection defence policy.
-
----
-
-### 10.12 V1 Non-Goals (future extension points)
-
-- Sticker-first for proactive mood messages / silence breakers (excluded: no `generateReply` path)
-- Sticker-first for mimic mode (excluded: breaks persona contract)
-- Sticker-first for private chat path
-- Market-face (mface) sticker support in sticker-first scoring (excluded: mface stickers have summaries but no `localPath` and no vision embeddings; they can be added to the candidate pool in v2 if the embedder learns to score them)
-- Admin-configurable suppress window (currently hardcoded to 5 min)
-- Combo reply (sticker + text together) — intentionally binary: sticker OR text, never both
+The sticker scoring query text is the **LLM's own output** (`processedText`), not user-supplied group message content. No user message content is interpolated into any system prompt in this feature. This satisfies the existing prompt-injection defence policy documented in §9.
 
 ---
 
-### 10.13 Edge Test Cases (mandatory, SOUL RULE)
+### 11.11 Files Changed
+
+| File | Change |
+|---|---|
+| `src/storage/schema.sql` | Document the two new columns in a comment (for reference); actual migration is via ALTER only |
+| `src/storage/db.ts` | `GroupConfig` interface additions; `applyMigrations()` ALTER statements; upsert/get mapping for both new fields |
+| `src/config.ts` | `defaultGroupConfig()` additions |
+| `src/modules/chat.ts` | `_pickStickerForReply()` private method; sticker-first intercept block in `generateReply`; repeat-suppression map |
+| `src/core/router.ts` | Register `stickerfirst_on`, `stickerfirst_off`, `stickerfirst_threshold`, `stickerfirst_status` commands |
+| `src/utils/errors.ts` | Add `STICKER_THRESHOLD_INVALID = 'E030'` to `BotErrorCode` enum |
+| `test/sticker-first.test.ts` | Unit tests covering all EC-1 through EC-21 cases |
+| `test/router.test.ts` | Command registration + permission + E030 validation tests |
+
+---
+
+### 11.12 V1 Non-Goals
+
+- Sticker-first for proactive mood messages / silence breakers (no `generateReply` hook point)
+- Sticker-first for mimic mode (breaks persona contract)
+- Sticker-first for private chat (`generatePrivateReply` path)
+- Market-face (mface) sticker support in scoring (no `localPath`/vision embeddings in v1)
+- Admin-configurable suppress window (hardcoded 5 min)
+- Combo reply (sticker + text simultaneously) — intentional binary: sticker OR text, never both
+
+---
+
+### 11.13 Edge Test Cases (mandatory — SOUL RULE, 21 cases)
 
 | ID | Scenario | Precondition | Expected result |
 |---|---|---|---|
-| EC-1 | Mode OFF: sticker-first never fires | `stickerFirstEnabled=false`, library non-empty, embedder ready | `generateReply` returns text; `_pickStickerForReply` is never called |
-| EC-2 | Mode ON, library empty | `stickerFirstEnabled=true`, no rows in `local_stickers` for group | Returns text reply (fall-through) |
-| EC-3 | Mode ON, library non-empty, all scores below threshold | `stickerFirstEnabled=true`, top sticker cosine=0.05, threshold=0.20 | Returns text reply |
-| EC-4 | Mode ON, one sticker above threshold | cosine=0.35, threshold=0.20 | Returns sticker CQ code only; intendedText is discarded |
-| EC-5 | Mode ON, multiple above threshold | stickers at cosine 0.4, 0.3, 0.25, threshold=0.20 | Returns the sticker with cosine=0.4 (highest score) |
-| EC-6 | Mode ON, top sticker suppressed | Top sticker key in cooldown map; second-best cosine=0.28, threshold=0.20 | Returns second-best sticker's CQ code |
-| EC-6b | Mode ON, all candidates suppressed | All stickers in cooldown map | Falls through to text reply |
-| EC-7 | Threshold command: valid 0.0 | `/stickerfirst_threshold 0.0` | Accepted; `stickerFirstThreshold=0.0`; success response |
-| EC-8 | Threshold command: valid 1.0 | `/stickerfirst_threshold 1.0` | Accepted; `stickerFirstThreshold=1.0`; success response |
-| EC-9 | Threshold command: -0.1 | `/stickerfirst_threshold -0.1` | E030 error message |
-| EC-10 | Threshold command: 1.5 | `/stickerfirst_threshold 1.5` | E030 error message |
-| EC-11 | Threshold command: non-numeric | `/stickerfirst_threshold abc` | E030 error message |
-| EC-12 | `/stickerfirst_on` when already on | `stickerFirstEnabled=true` | Idempotent: success message, no DB write if value unchanged |
-| EC-13 | `/stickerfirst_off` when already off | `stickerFirstEnabled=false` | Idempotent: `已关着` message |
-| EC-14 | Migration idempotency | Run `applyMigrations()` twice on live DB that already has both columns | No error; second run is a no-op (SQLite returns "duplicate column" which is caught and ignored) |
-| EC-15 | Permission: non-admin `/stickerfirst_on` | `msg.role='member'` | E001: silently ignored at router gate (falls to chat pipeline) |
-| EC-16 | `/stickerfirst_status` reflects current state | After `/stickerfirst_on` + `/stickerfirst_threshold 0.3` | Status shows ON, threshold 0.3, correct library size |
-| EC-17 | Static system prompt invariant | sticker-first scoring path active | No user-supplied message content appears in any `system` block of any LLM call |
-| EC-18 | Interaction with `/mimic_on` | mimic active + sticker-first ON | Mimic path runs; `generateReply` never called; no sticker-first intercept |
-| EC-19 | Interaction with `/char` persona | char mode active + sticker-first ON | LLM generates char persona text → sticker-first scores it → sticker returned if above threshold |
-| EC-20 | LLM returns `<skip>` | sticker-first ON, LLM explicitly skips | `generateReply` returns null; sticker-first never fires; zero output (correct) |
-| EC-21 | Embedder not ready | `embedder.isReady=false`, sticker-first ON | Falls through to text; no error log; sticker not sent |
+| EC-1 | Mode OFF: intercept never fires | `stickerFirstEnabled=false`, library non-empty, embedder ready | `generateReply` returns text; `_pickStickerForReply` never called |
+| EC-2 | Mode ON, library empty | `stickerFirstEnabled=true`, no `local_stickers` rows for group | Returns text reply (fall-through) |
+| EC-3 | Mode ON, all scores below threshold | Top sticker cosine=0.05, threshold=0.25 | Returns text reply |
+| EC-4 | Mode ON, one sticker above threshold | cosine=0.35, threshold=0.25 | Returns sticker CQ code only; `processedText` is discarded |
+| EC-5 | Mode ON, multiple above threshold | Stickers at cosine 0.4, 0.3, 0.25; threshold=0.20 | Returns sticker with cosine=0.4 (highest score wins) |
+| EC-6 | Top sticker suppressed, next-best above threshold | Top key in cooldown; second-best cosine=0.28, threshold=0.20 | Returns second-best sticker's CQ code |
+| EC-6b | All candidates suppressed | All sticker keys in cooldown map | Falls through to text reply |
+| EC-7 | `/stickerfirst_threshold 0.0` | Valid boundary | Accepted; `stickerFirstThreshold=0.0`; success response |
+| EC-8 | `/stickerfirst_threshold 1.0` | Valid boundary | Accepted; `stickerFirstThreshold=1.0`; success response |
+| EC-9 | `/stickerfirst_threshold -0.1` | Below range | E030 error response |
+| EC-10 | `/stickerfirst_threshold 1.5` | Above range | E030 error response |
+| EC-11 | `/stickerfirst_threshold abc` | Non-numeric | E030 error response |
+| EC-12 | `/stickerfirst_on` already on | `stickerFirstEnabled=true` | Idempotent: already-on response; DB not dirtied unnecessarily |
+| EC-13 | `/stickerfirst_off` already off | `stickerFirstEnabled=false` | Idempotent: already-off response |
+| EC-14 | Migration idempotency | `applyMigrations()` called twice on DB that already has both columns | Second call is no-op; no crash; "duplicate column" error swallowed |
+| EC-15 | Non-admin `/stickerfirst_on` | `msg.role='member'` | Silently ignored at router gate; message falls to chat pipeline |
+| EC-16 | `/stickerfirst_status` accuracy | After `/stickerfirst_on` + `/stickerfirst_threshold 0.3` | Status shows ON, threshold 0.3, correct library count |
+| EC-17 | Static system prompt invariant | Sticker-first scoring active | Zero user-supplied content in any `system` block of any LLM call in this path |
+| EC-18 | Interaction with `/mimic_on` | `mimicActiveUserId` set, sticker-first ON | Router calls `MimicModule`; `generateReply` never invoked; no sticker-first intercept |
+| EC-19 | Interaction with `/char` persona | `/char` active, sticker-first ON | LLM generates char's intended text → sticker-first scores it → sticker returned if above threshold |
+| EC-20 | LLM returns `<skip>` | sticker-first ON | `generateReply` returns null before intercept; no sticker sent; zero output is correct |
+| EC-21 | Embedder not ready | `embedder.isReady=false`, sticker-first ON | Falls through to text; no error thrown; sticker not sent |
