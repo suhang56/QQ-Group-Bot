@@ -820,6 +820,9 @@ export class ChatModule implements IChatModule {
     if (/(啥梗|什么梗|哪里的梗|啥来头|什么来头|啥典故|什么典故)/.test(trimmed) && trimmed.length < 40) return true;
     // "没听过 X" / "没印象 X" / "不熟 X" — longer-form ignorance statements
     if (/^(没听过|没印象|不熟|没听说过|我不懂|听不懂)/.test(trimmed)) return true;
+    // "谁啊" / "谁呢" / "这谁" / "谁啊这个" — asking-back on a person the bot doesn't know
+    if (/^(谁啊|谁呢|谁是|谁[？?]|这谁|哪位|是谁[啊呢？?]?|谁啊这个|啥人)/.test(trimmed)) return true;
+    if (/^.{1,15}(是谁啊|谁啊|谁呢|哪位)[\?？]?$/.test(trimmed)) return true;
     return false;
   }
 

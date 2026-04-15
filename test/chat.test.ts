@@ -2743,6 +2743,10 @@ describe('ChatModule — _isEvasiveReply', () => {
   it('"什么梗啊" matches (meme-ignorance)', () => expect(makeChat()['_isEvasiveReply']('这是什么梗啊')).toBe(true));
   it('"没听过这个" matches (ignorance statement)', () => expect(makeChat()['_isEvasiveReply']('没听过这个')).toBe(true));
   it('"不熟呢" matches (ignorance statement)', () => expect(makeChat()['_isEvasiveReply']('不熟呢')).toBe(true));
+  it('"谁啊这个" matches (asking-who)', () => expect(makeChat()['_isEvasiveReply']('谁啊这个')).toBe(true));
+  it('"谁啊" matches (asking-who)', () => expect(makeChat()['_isEvasiveReply']('谁啊')).toBe(true));
+  it('"哪位" matches (asking-who polite)', () => expect(makeChat()['_isEvasiveReply']('哪位')).toBe(true));
+  it('"有利息是谁啊" matches (asking-who with subject)', () => expect(makeChat()['_isEvasiveReply']('有利息是谁啊')).toBe(true));
 });
 
 describe('ChatModule — getEvasiveFlagForLastReply', () => {
