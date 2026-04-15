@@ -1252,8 +1252,11 @@ ${ctxLine}
     this.commands.set('rules', async (msg, args, _config) => {
       const pageArg = args[0] === 'page' ? parseInt(args[1] ?? '1', 10) : 1;
       const page = isNaN(pageArg) ? 1 : Math.max(1, pageArg);
-      const limit = 20;
+      // Tight page size + per-rule truncation so a single NapCat send never
+      // exceeds QQ's per-message limit (observed timeouts on ~4k char sends).
+      const limit = 10;
       const offset = (page - 1) * limit;
+      const perRuleCharCap = 100;
 
       const { rules, total } = this.db.rules.getPage(msg.groupId, offset, limit);
 
@@ -1265,7 +1268,9 @@ ${ctxLine}
       const start = offset + 1;
       const end = Math.min(offset + rules.length, total);
       const ruleLines = rules.map((r, i) => {
-        const text = r.content.length > 200 ? r.content.slice(0, 200) + '...' : r.content;
+        const text = r.content.length > perRuleCharCap
+          ? r.content.slice(0, perRuleCharCap) + '…'
+          : r.content;
         return `${offset + i + 1}. ${text}`;
       }).join('\n');
 
