@@ -92,6 +92,8 @@ CREATE TABLE IF NOT EXISTS group_config (
   live_sticker_capture_enabled          INTEGER NOT NULL DEFAULT 1,
   sticker_legend_refresh_every_msgs     INTEGER NOT NULL DEFAULT 50,
   chat_persona_text                     TEXT,
+  active_character_id                   TEXT,
+  char_started_by                       TEXT,
   created_at                            TEXT    NOT NULL DEFAULT '',
   updated_at                            TEXT    NOT NULL DEFAULT ''
 );

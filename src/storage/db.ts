@@ -78,6 +78,8 @@ export interface GroupConfig {
   liveStickerCaptureEnabled: boolean;
   stickerLegendRefreshEveryMsgs: number;
   chatPersonaText: string | null;
+  activeCharacterId: string | null;
+  charStartedBy: string | null;
   welcomeEnabled: boolean;
   idGuardEnabled: boolean;
   createdAt: string;
@@ -418,6 +420,8 @@ interface GroupConfigRow {
   live_sticker_capture_enabled: number;
   sticker_legend_refresh_every_msgs: number;
   chat_persona_text: string | null;
+  active_character_id: string | null;
+  char_started_by: string | null;
   welcome_enabled: number;
   id_guard_enabled: number;
   created_at: string; updated_at: string;
@@ -509,6 +513,8 @@ function configFromRow(row: GroupConfigRow): GroupConfig {
     liveStickerCaptureEnabled: (row.live_sticker_capture_enabled ?? 1) !== 0,
     stickerLegendRefreshEveryMsgs: row.sticker_legend_refresh_every_msgs ?? 50,
     chatPersonaText: row.chat_persona_text ?? null,
+    activeCharacterId: row.active_character_id ?? null,
+    charStartedBy: row.char_started_by ?? null,
     welcomeEnabled: (row.welcome_enabled ?? 1) !== 0,
     idGuardEnabled: (row.id_guard_enabled ?? 1) !== 0,
     createdAt: row.created_at,
@@ -740,9 +746,9 @@ class GroupConfigRepository implements IGroupConfigRepository {
         name_images_blocklist,
         lore_update_enabled, lore_update_threshold, lore_update_cooldown_ms,
         live_sticker_capture_enabled, sticker_legend_refresh_every_msgs,
-        chat_persona_text, welcome_enabled, id_guard_enabled,
+        chat_persona_text, active_character_id, char_started_by, welcome_enabled, id_guard_enabled,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(group_id) DO UPDATE SET
         enabled_modules = excluded.enabled_modules,
         auto_mod = excluded.auto_mod,
@@ -770,6 +776,8 @@ class GroupConfigRepository implements IGroupConfigRepository {
         live_sticker_capture_enabled = excluded.live_sticker_capture_enabled,
         sticker_legend_refresh_every_msgs = excluded.sticker_legend_refresh_every_msgs,
         chat_persona_text = excluded.chat_persona_text,
+        active_character_id = excluded.active_character_id,
+        char_started_by = excluded.char_started_by,
         welcome_enabled = excluded.welcome_enabled,
         id_guard_enabled = excluded.id_guard_enabled,
         updated_at = excluded.updated_at
@@ -801,6 +809,8 @@ class GroupConfigRepository implements IGroupConfigRepository {
       (config.liveStickerCaptureEnabled ?? true) ? 1 : 0,
       config.stickerLegendRefreshEveryMsgs ?? 50,
       config.chatPersonaText ?? null,
+      config.activeCharacterId ?? null,
+      config.charStartedBy ?? null,
       (config.welcomeEnabled ?? true) ? 1 : 0,
       (config.idGuardEnabled ?? true) ? 1 : 0,
       config.createdAt,
@@ -1740,6 +1750,10 @@ export class Database {
 
     // messages.raw_content — stores original CQ-code content for image context resolution.
     try { this._db.exec(`ALTER TABLE messages ADD COLUMN raw_content TEXT`); } catch { /* already exists */ }
+
+    // /char feature columns on group_config — added for BanG Dream character role-play.
+    try { this._db.exec(`ALTER TABLE group_config ADD COLUMN active_character_id TEXT`); } catch { /* already exists */ }
+    try { this._db.exec(`ALTER TABLE group_config ADD COLUMN char_started_by TEXT`); } catch { /* already exists */ }
 
     // forward_cache — pre-expanded 合并转发 content, keyed by forward_id, TTL 24h.
     this._db.exec(`

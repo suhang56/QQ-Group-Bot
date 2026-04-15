@@ -142,6 +142,8 @@ export function defaultGroupConfig(groupId: string): GroupConfig {
     liveStickerCaptureEnabled: true,
     stickerLegendRefreshEveryMsgs: 50,
     chatPersonaText: null,
+    activeCharacterId: null,
+    charStartedBy: null,
     welcomeEnabled: true,
     idGuardEnabled: true,
     createdAt: new Date().toISOString(),
