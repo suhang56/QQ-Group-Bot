@@ -105,6 +105,7 @@ export interface ScoreFactors {
   metaIdentityProbe: number;
   adminBoost: number;
   stickerRequest: number;
+  hasImage: number;
 }
 
 // Signal A: bot alias keywords — always indicate a reference to the bot
@@ -256,6 +257,7 @@ export const BANGDREAM_PERSONA = `# 元层次（你的身份）
 - 嘴碎但有脾气，不是嘴软的那种
 - 别人发无聊的接龙、让你背乱七八糟的东西、教你说话的时候，直接「？？」或者「烦 你自己玩」或者「这什么东西」
 - 群友之间互怼是正常的，你也参与，但不过界（不 doxxing、不人身攻击）
+- **但群友真实生理/情绪不适时要关心，不要理性化 dismiss**。看到"中暑/40度/发烧/头痛/胃疼/累死/没睡好/emo/心情差/被骂了/难受/崩溃"这类真实状态，**不能**回"是有点高啊"/"还好吧"/"没事"/"你夸张了"/"就这?"这种冷冰冰的 downplay。正确反应是简短关心："多喝水"/"别中暑了"/"开空调吧"/"早点睡"/"吃点药"/"别硬扛"/"抱抱"/"心疼你" 之类，一句就够，不要假惺惺但也不要装没看见。这是真朋友的基本礼貌，跟"嘴毒"不矛盾 — 朋友之间嘴毒是玩笑背景，真难受时会认真一句。
 
 # 你的说话方式
 - 中文，短句，很少用句号
@@ -420,6 +422,7 @@ export const BANGDREAM_PERSONA = `# 元层次（你的身份）
 ## 诚实底线（不许破）
 - 你**只能**声称说过 context 里以 [你(...)] 明确标记出现过的内容
 - **绝对不能**说"我刚说过了 / 我早就说了 / 我都说过了 / 这不是我刚说的嘛 / 我不是说过了吗"这类话，除非那句话真的以 [你(...)] 出现在 context 里
+- **被追问你自己前面说的话时，不能反问对方**。你前面说过的话（[你(...)] 标记的）就是你说的，对方追问细节就是让你解释，不是对方听不懂。**禁止**的回复："这说的啥" / "嗯?" / "啥意思" / "你说啥呢" / "我说了什么" / "什么时候说的"。正确回复：(a) 能解释就真给一个具体原因/细节（哪怕补编一个也行，要有信息量）；(b) 不能解释就直接承认 "就随口一说" / "忘了当时想说啥" / "瞎讲的别当真" / "顺嘴" / "随便说的"。承认瞎说 >> 反问对方。
 - 被追问细节时，要么给出具体答复，要么承认"刚才就是随口说的"/"忘了"/"懒得解释"，不能用"我说过了"逃避
 - 不记得 = 说 "忘了" 或 "啥来的"，不是 "我早就说了"
 - **说过的话要认账，不能自相矛盾**。如果 context 里有 [你(...)] 的 recent 发言，你现在的回复必须和那些话保持一致——不能前一句说"我也抽"，后一句说"不抽"；不能先夸再骂；不能先承认再否认。哪怕前面是敷衍乱说的也要认，被追问就装傻"随便说的你还当真" / "忘了当时为啥这么说" 之类，不能直接翻脸否认。
@@ -821,6 +824,30 @@ export class ChatModule implements IChatModule {
     }
   }
 
+  /**
+   * Character-bigram Jaccard similarity — quick near-duplicate check between
+   * two short Chinese strings. Returns 0-1 where 1 = identical set of char
+   * bigrams. Used to catch Gemini re-emitting the same reply to a repeated
+   * trigger despite the prompt's "don't repeat yourself" rule.
+   */
+  _bigramSim(a: string, b: string): number {
+    if (!a || !b) return 0;
+    if (a === b) return 1;
+    const bigrams = (s: string): Set<string> => {
+      const out = new Set<string>();
+      const trimmed = s.trim();
+      if (trimmed.length < 2) { if (trimmed) out.add(trimmed); return out; }
+      for (let i = 0; i < trimmed.length - 1; i++) out.add(trimmed.slice(i, i + 2));
+      return out;
+    };
+    const A = bigrams(a);
+    const B = bigrams(b);
+    if (A.size === 0 || B.size === 0) return 0;
+    let inter = 0;
+    for (const x of A) if (B.has(x)) inter++;
+    return inter / (A.size + B.size - inter);
+  }
+
   /** Returns true if the reply is a known 装傻 (evasive) phrase OR an asking-back pattern. */
   _isEvasiveReply(text: string): boolean {
     const trimmed = text.trim();
@@ -962,35 +989,53 @@ export class ChatModule implements IChatModule {
       }
     }
 
-    // Vision: sync-await vision for reply-quoted image OR single most-recent context image.
-    // Max 1 wait — correctness > speed, but cap latency to one vision call.
+    // Vision: sync-await vision for ALL images in the immediate context window.
+    // Ensures bot doesn't reply to an image-containing thread before it can
+    // "see" those images. Reply-quoted image gets priority (awaited first);
+    // remaining context images are awaited in parallel with a total deadline
+    // of 15 seconds to cap worst-case latency.
     if (this.visionService) {
-      let rcToWait: string | null = null;
+      const vs = this.visionService;
+      const rcsToWait: string[] = [];
 
-      // Priority 1: reply-quote target references an image
+      // Priority 1: reply-quote target references an image (always first)
       const replyMatch = triggerMessage.rawContent.match(/\[CQ:reply,id=(\d+)/);
       if (replyMatch) {
         const quotedMsg = this.db.messages.findBySourceId(replyMatch[1]!);
-        if (quotedMsg && quotedMsg.userId !== this.botUserId && /\[CQ:image,/.test(quotedMsg.rawContent)) {
-          rcToWait = quotedMsg.rawContent;
+        if (quotedMsg && quotedMsg.userId !== this.botUserId && /\[CQ:(image|mface),/.test(quotedMsg.rawContent)) {
+          rcsToWait.push(quotedMsg.rawContent);
         }
       }
 
-      // Priority 2 (fallback): most recent context message (not from bot, not the trigger) has an image
-      if (!rcToWait) {
-        const recentRaw = this.db.messages.getRecent(groupId, this.chatContextImmediate);
-        for (const m of recentRaw) {
-          if (m.userId !== this.botUserId && m.rawContent !== triggerMessage.rawContent && /\[CQ:image,/.test(m.rawContent)) {
-            rcToWait = m.rawContent;
-            break;
-          }
-        }
+      // Priority 2: all recent context messages with images (not bot, not trigger).
+      // Scan newest-first, cap at 4 images to bound parallel vision calls.
+      const recentRaw = this.db.messages.getRecent(groupId, this.chatContextImmediate);
+      let addedCtx = 0;
+      for (const m of recentRaw) {
+        if (addedCtx >= 4) break;
+        if (m.userId === this.botUserId) continue;
+        if (m.rawContent === triggerMessage.rawContent) continue;
+        if (!/\[CQ:(image|mface),/.test(m.rawContent)) continue;
+        if (rcsToWait.includes(m.rawContent)) continue;
+        rcsToWait.push(m.rawContent);
+        addedCtx++;
       }
 
-      if (rcToWait) {
-        await this.visionService.describeFromMessage(groupId, rcToWait, triggerMessage.userId, this.botUserId)
-          .catch(err => this.logger.debug({ err }, 'sync vision wait failed'));
+      if (rcsToWait.length > 0) {
+        // Fire all vision calls in parallel, bound total wait to 15s.
+        const visionPromise = Promise.allSettled(
+          rcsToWait.map(rc => vs.describeFromMessage(groupId, rc, triggerMessage.userId, this.botUserId))
+        );
+        const timeoutPromise = new Promise<void>(resolve => setTimeout(resolve, 15_000));
+        await Promise.race([visionPromise, timeoutPromise]).catch(err =>
+          this.logger.debug({ err }, 'sync vision wait failed'),
+        );
+        this.logger.debug(
+          { groupId, count: rcsToWait.length },
+          'chat sync vision wait finished',
+        );
       }
+
     }
 
     // ── Weighted participation scoring ───────────────────────────────────
@@ -1005,7 +1050,33 @@ export class ChatModule implements IChatModule {
     const trimmedTrigger = triggerMessage.content.trim().toLowerCase();
     const isShortAck = !isDirect && /^(ok|okay|好|好的|嗯|嗯嗯|行|行了|收到|明白|懂了|知道了|👌|👍|gg|awsl|666+)$/.test(trimmedTrigger);
 
-    const decision = (!isShortAck && (isDirect || score >= this.chatMinScore)) ? 'respond' : 'skip';
+    // Meta-commentary skip: admin talks ABOUT the bot in third person without
+    // @-mentioning it. "她第一次不知道会装傻" / "bot 又开始胡说了" / "小号学会
+    // 了" — these are dev observations between admins, not turns directed at
+    // the bot. The bot should NOT chat-reply. Pattern: contains third-person
+    // reference (她/bot/小号) + a descriptive verb phrase, and is not a direct
+    // trigger. Keeps the bot from interjecting on dev meta-discussion.
+    const rawTrigger = triggerMessage.content;
+    const isMetaCommentary = !isDirect
+      && (triggerMessage.role === 'admin' || triggerMessage.role === 'owner')
+      && /(?:她|小号|bot|Bot|BOT)(?:.{0,20})?(?:又|第一次|这次|现在|总是|还是|会|不会|不懂|学会|还没|还是不|终于|又开始|又来|装傻|胡说|乱说|正常|不正常|好像|应该|不应该)/.test(rawTrigger);
+
+    // Picture-bot command skip: short messages that are just a proper noun
+    // without any punctuation/particles are typically commands to a SEPARATE
+    // picture-posting bot (群友输入声优/角色名叫发图 bot 返图). Our bot should
+    // not chat-react to these. Pattern: ≤ 8 chars, CJK letters only, no
+    // question/exclamation/particles, not @mention/reply-to-bot.
+    const bareTrigger = rawTrigger
+      .replace(/\[CQ:[^\]]*\]/g, '')
+      .replace(/\s+/g, '')
+      .trim();
+    const isPicBotCommand = !isDirect
+      && bareTrigger.length > 0
+      && bareTrigger.length <= 8
+      && /^[\u4e00-\u9fa5A-Za-z]+$/.test(bareTrigger)
+      && !/[?？！!啊嘛呢吧呀哎哦]/.test(bareTrigger);
+
+    const decision = (!isShortAck && !isMetaCommentary && !isPicBotCommand && (isDirect || score >= this.chatMinScore)) ? 'respond' : 'skip';
     this.logger.debug({ groupId, score: +score.toFixed(3), factors, chatMinScore: this.chatMinScore, decision }, 'participation score');
 
     if (decision === 'skip') {
@@ -1119,7 +1190,7 @@ export class ChatModule implements IChatModule {
       : '';
 
     const replyContextBlock = this._isReplyToBot(triggerMessage)
-      ? `⚠️ 这条消息引用了你刚才说的话来追问。**你前面说的就是你说的**，不能现在又翻脸否认或给出相反的答案。如果前面是敷衍，现在就装傻"乱说的"/"忘了"；如果前面是真实态度，就坚持。\n\n`
+      ? `⚠️ 这条消息是对你刚才说的话的 reply-quote。**你的回复必须直接针对被引用的那句话和对方的追问内容**——不要跳到语境里别的话题（"又开始聊XX了" / "YY 是吧" 这种主动评论其他群友的发言都是错的）。优先级：被引用的内容 > 对方这条新评论 > 其他群聊语境。如果前面说的是敷衍就装傻"乱说的/忘了"，是真实态度就坚持；不要翻脸否认。\n\n`
       : '';
 
     const isAtTrigger = this._isMention(triggerMessage);
@@ -1211,6 +1282,17 @@ export class ChatModule implements IChatModule {
         this.logger.info({ groupId, reply: processed, trigger: triggerMessage.content }, 'Echo detected — dropping reply silently');
         return null;
       }
+      // Self-dedup: drop replies that are near-duplicates of a recent own reply.
+      // Gemini sometimes re-generates the same response to a repeated trigger
+      // (e.g. user posts the same name twice) despite the "don't repeat yourself"
+      // prompt rule. Hard skip if cosine on character-bigram sets > 0.7 against
+      // the last 3 own replies.
+      const recentOwn = this.botRecentOutputs.get(groupId) ?? [];
+      const nearDup = recentOwn.slice(-3).find(prev => this._bigramSim(prev, processed) > 0.7);
+      if (nearDup) {
+        this.logger.info({ groupId, reply: processed, duplicateOf: nearDup }, 'Near-duplicate of recent own reply — dropping');
+        return null;
+      }
       this._recordOwnReply(groupId, processed);
       this.engagedTopic.set(groupId, {
         tokens: extractTokens(triggerMessage.content),
@@ -1256,6 +1338,7 @@ export class ChatModule implements IChatModule {
       metaIdentityProbe: 0,
       adminBoost: 0,
       stickerRequest: 0,
+      hasImage: 0,
     };
 
     // +0.5 for admin/owner — their messages are trusted commands and should
@@ -1270,6 +1353,17 @@ export class ChatModule implements IChatModule {
     // should react to with a sticker).
     if (/发(个|一个|几个|张|点)?[表贴]情|[表贴]情[包]?$|来点.*[表贴]情/.test(msg.content)) {
       factors.stickerRequest = 0.6;
+    }
+
+    // +0.25 when the message has an image (CQ:image in raw content). Gives
+    // the bot a nudge toward commenting on picture-containing messages
+    // instead of skipping them entirely. Combined with normal factors
+    // (question/loreKw/continuity) this pushes interesting image posts over
+    // the participation threshold without triggering on every noise image.
+    // Sync vision wait above ensures the image has been described before
+    // this branch runs, so the chat prompt actually contains the image info.
+    if (/\[CQ:(image|mface),/.test(msg.rawContent)) {
+      factors.hasImage = 0.25;
     }
 
     // +1.0 @-mention of bot
@@ -1851,13 +1945,23 @@ export class ChatModule implements IChatModule {
 
   private _loadTuning(): string | null {
     if (!this.tuningPath) return null;
+    const parts: string[] = [];
+    // Short-term tuning (overwritten each cycle)
     try {
-      if (!existsSync(this.tuningPath)) return null;
-      const content = readFileSync(this.tuningPath, 'utf8').trim();
-      return content || null;
-    } catch {
-      return null;
-    }
+      if (existsSync(this.tuningPath)) {
+        const content = readFileSync(this.tuningPath, 'utf8').trim();
+        if (content) parts.push(content);
+      }
+    } catch { /* ignore */ }
+    // Long-term distilled permanent memory (cumulative across cycles)
+    try {
+      const permanentPath = path.join(path.dirname(this.tuningPath), 'tuning-permanent.md');
+      if (existsSync(permanentPath)) {
+        const content = readFileSync(permanentPath, 'utf8').trim();
+        if (content) parts.push(content);
+      }
+    } catch { /* ignore */ }
+    return parts.length > 0 ? parts.join('\n\n') : null;
   }
 
   /** Returns cached forward expansion text for rawContent, or empty string if not in cache or no forward. */

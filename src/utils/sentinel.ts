@@ -35,6 +35,17 @@ const SUBSTR_FORBIDDEN = [
   '我刚刚已经说过',
   '刚说过相关内容',
   '但刚说过',
+  // selecting-which-message-to-reply-to leaks (bot pointing at context)
+  '要接的这条',
+  '要接这条',
+  '要回这条',
+  '回这条',
+  '应该接',
+  '应该回',
+  '选这条',
+  '回复这条',
+  '这条要接',
+  '这条我接',
   // bot's own internal error-message format leaking as chat output
   '图片下载失败',
   '请稍后再试',
@@ -58,6 +69,8 @@ const SUBSTR_FORBIDDEN = [
 // Soft-forbidden: reply STARTS with these → assistant meta-framing
 const SOFT_FORBIDDEN_STARTS = [
   '好的，', '当然，', '我来', '让我', '这是一个', '这是为了', '这是因为', '以下是',
+  // arrow prefixes — bot pointing at a context message ("← 要接的这条")
+  '←', '⬅', '→', '➡',
 ];
 
 const WORD_RE = new RegExp(
@@ -112,12 +125,26 @@ const SKIP_LINE_RE = /^\s*<\s*skip\s*>\s*$/i;
 // can strip it and keep the actual content that followed.
 const LEAKED_CONTEXT_PREFIX_RE = /^\s*\[[^\]\n]{1,40}\]\s*[:：]\s*/;
 
+// Degenerate angle-bracket wrapping — model sometimes emits the trigger or an
+// abbreviation wrapped in <...> when it has no real answer and falls back to
+// "tag-style" output. Strip the outer wrapper, keep the inner text so a sane
+// reply remains (or the whole line gets dropped if that leaves nothing).
+// Matches any single-line `<xxx>` where xxx doesn't contain `<` `>` `/` — this
+// catches `<i83是谁>` / `<什么意思>` while preserving legitimate skip markers
+// (handled above) and anything with angle brackets inside a longer sentence.
+const ANGLE_WRAP_RE = /^\s*<([^<>\/\n]{1,80})>\s*$/;
+
 export function postProcess(text: string): string {
   return text
     .replace(/\[CQ:face,[^\]]*\]/g, '')    // strip [CQ:face,id=N] — user banned QQ built-in faces
     .replace(/\[CQ:mface,[^\]]*\]/g, '')   // strip [CQ:mface,...] — user banned QQ market stickers
     .split('\n')
     .filter(line => !SKIP_LINE_RE.test(line))
+    // Degenerate angle-bracket wrap: unwrap or drop
+    .map(l => {
+      const m = ANGLE_WRAP_RE.exec(l);
+      return m ? m[1]! : l;
+    })
     // Strip leaked context-marker prefixes like "[你]: " / "[你(小号)]: " / "[Alice]:"
     .map(l => l.replace(LEAKED_CONTEXT_PREFIX_RE, ''))
     .map(l => {
@@ -149,14 +176,46 @@ export function checkConfabulation(reply: string, trigger: string, context: Reco
 /**
  * True when the bot reply is essentially an echo of the trigger with little new content.
  * Used to silently drop echo replies rather than regenerating.
+ *
+ * Normalizes both sides aggressively before comparison: strips all ASCII+CJK
+ * punctuation, whitespace, full-width chars, and CQ codes (so a reply like
+ * "影色舞是什么啊?" still matches trigger "[CQ:at,qq=X] mygo的 影色舞是什么啊").
+ * Falls back to character-bigram Jaccard similarity > 0.7 for cases where
+ * the reply is a substantial subset of the trigger but not exact substring.
  */
+function _normForEcho(s: string): string {
+  return s
+    .replace(/\[CQ:[^\]]*\]/g, '')           // strip CQ codes
+    .replace(/[\s\p{P}\p{S}]/gu, '')         // strip all punctuation + whitespace + symbols (unicode-aware)
+    .toLowerCase();
+}
+
+function _bigrams(s: string): Set<string> {
+  const out = new Set<string>();
+  if (s.length < 2) { if (s) out.add(s); return out; }
+  for (let i = 0; i < s.length - 1; i++) out.add(s.slice(i, i + 2));
+  return out;
+}
+
+function _jaccard(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  let inter = 0;
+  for (const x of a) if (b.has(x)) inter++;
+  return inter / (a.size + b.size - inter);
+}
+
 export function isEcho(reply: string, trigger: string): boolean {
-  const t = trigger.trim().toLowerCase();
-  const r = reply.trim().toLowerCase();
+  const t = _normForEcho(trigger);
+  const r = _normForEcho(reply);
   if (!t || !r) return false;
   if (r === t) return true;
   if (r.includes(t) && r.length < t.length * 1.5) return true;
   if (t.includes(r) && t.length > r.length) return true;
+  // Fallback: character-bigram similarity. Catches near-echo cases where
+  // the reply added/dropped a few chars (e.g. trailing "?", "啊", "嘛")
+  // or swapped order slightly. Threshold 0.7 is conservative for Chinese.
+  const sim = _jaccard(_bigrams(r), _bigrams(t));
+  if (sim >= 0.7) return true;
   return false;
 }
 

@@ -1,4 +1,4 @@
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { writeFileSync, mkdirSync, existsSync, readFileSync, copyFileSync } from 'node:fs';
 import path from 'node:path';
 import type { IClaudeClient, ClaudeModel } from '../ai/claude.js';
 import type {
@@ -107,11 +107,19 @@ ${factsText}
 ## Recent moderation flags (last 24h)
 ${modText}`;
 
-    const systemPrompt = `You are a tuning agent for a QQ group bot persona'd as a 邦批 (BanG Dream fan). Analyze the recent bot outputs and produce ONLY a structured system-prompt snippet that the bot will read directly on its next turn. Do NOT write prose commentary or analysis paragraphs — output ONLY the four markdown sections below, in Chinese, with bullet points under each. Keep each bullet concise and actionable (≤20 chars preferred). If a section has nothing to add, write "（无）" as its only bullet.
+    // Seed the reflection with the existing permanent-memory file so the LLM
+    // knows what's already been learned long-term and can avoid duplicating
+    // or contradicting those lessons.
+    const permanentPath = path.join(path.dirname(this.opts.outputPath), 'tuning-permanent.md');
+    const existingPermanent = existsSync(permanentPath)
+      ? readFileSync(permanentPath, 'utf8').slice(0, 3000)
+      : '（无）';
+
+    const systemPrompt = `You are a tuning agent for a QQ group bot persona'd as a 邦批 (BanG Dream fan). Analyze the recent bot outputs and produce ONLY a structured system-prompt snippet that the bot will read directly on its next turn. Do NOT write prose commentary or analysis paragraphs — output ONLY the FIVE markdown sections below, in Chinese, with bullet points under each. Keep each bullet concise and actionable (≤20 chars preferred). If a section has nothing to add, write "（无）" as its only bullet.
 
 Output format (exact headers required):
 ## 继续这样做
-- <rule>
+- <rule for the NEXT hour>
 
 ## 不要再这样
 - <anti-pattern>
@@ -120,7 +128,15 @@ Output format (exact headers required):
 - <phrase or sentence pattern to avoid>
 
 ## 补充记忆
-- <fact about recent group context or corrections>`;
+- <fact about recent group context or corrections>
+
+## 永久记住的 (long-term)
+- <high-value lesson that should be remembered forever, not just the next hour>
+
+The "永久记住的" section is special: only put entries here that represent STABLE, LONG-TERM lessons — persona calibration insights, canonical fandom corrections the user has taught, user preference patterns, or architectural understandings of the group. Do NOT repeat short-term tuning here. Do NOT add anything already present in the existing permanent memory below (skip duplicates). If nothing meets this bar, write "（无）".
+
+Existing permanent memory (do not duplicate these):
+${existingPermanent}`;
 
     let reflection: string;
     try {
@@ -142,13 +158,91 @@ Output format (exact headers required):
 ${reflection}
 `;
 
+    const outputDir = path.dirname(this.opts.outputPath);
+    const archiveDir = path.join(outputDir, 'tuning-archive');
+
     try {
-      mkdirSync(path.dirname(this.opts.outputPath), { recursive: true });
+      mkdirSync(outputDir, { recursive: true });
+      // Archive: copy previous tuning.md (if exists) to timestamped file before
+      // overwrite. Filename uses local-time slug safe for Windows.
+      if (existsSync(this.opts.outputPath)) {
+        try {
+          mkdirSync(archiveDir, { recursive: true });
+          const slug = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
+          const archivePath = path.join(archiveDir, `tuning-${slug}.md`);
+          copyFileSync(this.opts.outputPath, archivePath);
+        } catch (archiveErr) {
+          logger.warn({ err: archiveErr }, 'tuning archive failed — continuing with write');
+        }
+      }
       writeFileSync(this.opts.outputPath, md, 'utf8');
       logger.info({ outputPath: this.opts.outputPath, groupId: this.opts.groupId, replies: recent.length }, 'self-reflection written');
     } catch (err) {
       logger.error({ err, outputPath: this.opts.outputPath }, 'self-reflection file write failed');
       throw err;
+    }
+
+    // Distill-merge the permanent memory: extract "## 永久记住的" section from
+    // this cycle's reflection, combine with the existing permanent file, and
+    // run a SECOND LLM call to dedupe/compact the merged content. This keeps
+    // tuning-permanent.md bounded instead of growing unbounded via append.
+    await this._updatePermanentMemory(reflection, permanentPath);
+  }
+
+  /**
+   * Extract the `## 永久记住的` section from the latest reflection, merge it
+   * with the existing permanent-memory file, and distill the combined content
+   * via an LLM call so duplicates/outdated entries collapse.
+   */
+  private async _updatePermanentMemory(reflection: string, permanentPath: string): Promise<void> {
+    // Extract "## 永久记住的" block from the reflection
+    const match = reflection.match(/##\s*永久记住的[^\n]*\n([\s\S]*?)(?=\n##\s|\n*$)/);
+    if (!match) {
+      logger.debug('no 永久记住的 section in reflection — skip permanent merge');
+      return;
+    }
+    const newBullets = match[1]!.trim();
+    if (!newBullets || /^[-*]?\s*（?无）?$/.test(newBullets.replace(/^[-*]\s*/gm, '').trim())) {
+      logger.debug('permanent section empty — skip merge');
+      return;
+    }
+
+    const existing = existsSync(permanentPath)
+      ? readFileSync(permanentPath, 'utf8')
+      : '';
+
+    const mergePrompt = `你是一个长期记忆整理器。下面是一个邦多利群聊 bot 的「永久记住的」长期记忆文件，和本次反思新加入的候选条目。任务：\n\n1. 合并两部分\n2. **去重** — 语义相同的只保留最清晰那条\n3. **淘汰** — 去掉已经过时 / 跟其它条目矛盾 / 太琐碎 / 只是短期 tuning 不该存永久的\n4. **压缩** — 相似主题合并成一条（比如多条都是"XX 是 YY 的 CV" → 合并成一条列表）\n5. 输出严格 markdown，标题保持 \`# 永久记忆 (distilled)\`，下面只用无序列表（\`- xxx\`），每条 ≤ 40 字\n6. 总条目数不超过 50 条。如果超过 50，砍掉最不重要的\n\n只输出 markdown，不要前后的解释。如果合并后为空，输出 "# 永久记忆 (distilled)\n\n（无）"。`;
+
+    const userContent = `## 现有永久记忆
+${existing || '（空）'}
+
+## 本次新增候选
+${newBullets}`;
+
+    let distilled: string;
+    try {
+      const resp = await this.opts.claude.complete({
+        model: REFLECTION_MODEL as ClaudeModel,
+        maxTokens: 2000,
+        system: [{ text: mergePrompt, cache: true }],
+        messages: [{ role: 'user', content: userContent }],
+      });
+      distilled = resp.text.trim();
+    } catch (err) {
+      logger.warn({ err }, 'permanent-memory distill LLM call failed — keeping existing file unchanged');
+      return;
+    }
+
+    if (!distilled || distilled.length < 10) {
+      logger.warn({ len: distilled?.length }, 'permanent-memory distill output too short — skip write');
+      return;
+    }
+
+    try {
+      writeFileSync(permanentPath, distilled + '\n', 'utf8');
+      logger.info({ permanentPath, len: distilled.length }, 'permanent memory distilled');
+    } catch (err) {
+      logger.error({ err, permanentPath }, 'permanent memory write failed');
     }
   }
 
