@@ -1,0 +1,862 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QQ Bot 审核后台</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #f5f5f5;
+    --panel: #ffffff;
+    --border: #e5e7eb;
+    --text: #111827;
+    --text2: #6b7280;
+    --filter-bg: #f9fafb;
+    --btn-hover: rgba(0,0,0,0.06);
+    --row-unreviewed: #f8f8ff;
+    --row-approved: #f0fff4;
+    --row-rejected: #fff5f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f0f14;
+      --panel: #1a1a24;
+      --border: #2d2d3d;
+      --text: #e5e7eb;
+      --text2: #9ca3af;
+      --filter-bg: #16161f;
+      --btn-hover: rgba(255,255,255,0.08);
+      --row-unreviewed: #1a1a2e;
+      --row-approved: #0d2b1a;
+      --row-rejected: #2b0d0d;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f0f14;
+    --panel: #1a1a24;
+    --border: #2d2d3d;
+    --text: #e5e7eb;
+    --text2: #9ca3af;
+    --filter-bg: #16161f;
+    --btn-hover: rgba(255,255,255,0.08);
+    --row-unreviewed: #1a1a2e;
+    --row-approved: #0d2b1a;
+    --row-rejected: #2b0d0d;
+  }
+  :root[data-theme="light"] {
+    --bg: #f5f5f5;
+    --panel: #ffffff;
+    --border: #e5e7eb;
+    --text: #111827;
+    --text2: #6b7280;
+    --filter-bg: #f9fafb;
+    --btn-hover: rgba(0,0,0,0.06);
+    --row-unreviewed: #f8f8ff;
+    --row-approved: #f0fff4;
+    --row-rejected: #fff5f5;
+  }
+
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+    min-height: 100vh;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 20px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+  header h1 { font-size: 18px; font-weight: 700; }
+  #theme-btn {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 4px 12px;
+    cursor: pointer;
+    color: var(--text);
+    font-size: 13px;
+  }
+  #theme-btn:hover { background: var(--btn-hover); }
+
+  /* Stats bar */
+  #stats-bar {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    padding: 12px 20px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+  }
+  .stat-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+  }
+  .stat-label { font-size: 12px; color: var(--text2); }
+  .stat-value { font-size: 22px; font-weight: 700; }
+  .stat-dot::after { content: ' ●'; color: #f97316; font-size: 14px; }
+
+  /* Filter bar */
+  #filter-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 20px;
+    background: var(--filter-bg);
+    border-bottom: 1px solid var(--border);
+  }
+  #filter-bar label { font-size: 13px; color: var(--text2); margin-right: 4px; }
+  #filter-bar select {
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 13px;
+  }
+  .severity-checks { display: flex; gap: 6px; align-items: center; }
+  .severity-checks label { color: var(--text); margin: 0; }
+  .status-radios { display: flex; gap: 10px; align-items: center; }
+  .status-radios label { color: var(--text); margin: 0; }
+  #apply-btn {
+    background: #2563eb;
+    color: #fff;
+    border: none;
+    border-radius: 5px;
+    padding: 5px 16px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  #apply-btn:hover { background: #1d4ed8; }
+
+  /* Main content */
+  main { padding: 16px 20px; }
+
+  /* Table */
+  .table-wrap { overflow-x: auto; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  thead th {
+    background: var(--filter-bg);
+    border-bottom: 2px solid var(--border);
+    padding: 8px 10px;
+    text-align: left;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text2);
+    white-space: nowrap;
+  }
+  tbody tr { border-bottom: 1px solid var(--border); cursor: pointer; }
+  tbody tr:last-child { border-bottom: none; }
+  tbody tr.reviewed-0 { background: var(--row-unreviewed); }
+  tbody tr.reviewed-1 { background: var(--row-approved); }
+  tbody tr.reviewed-2 { background: var(--row-rejected); }
+  tbody tr:hover { filter: brightness(0.96); }
+  td { padding: 7px 10px; vertical-align: middle; }
+
+  /* Column widths */
+  .col-id     { width: 60px; font-weight: 600; }
+  .col-time   { width: 140px; white-space: nowrap; }
+  .col-group  { width: 110px; }
+  .col-user   { width: 110px; }
+  .col-sev    { width: 80px; }
+  .col-action { width: 80px; }
+  .col-reason { /* remaining */ }
+  .col-status { width: 90px; }
+  .col-ops    { width: 110px; white-space: nowrap; }
+
+  /* Truncate helpers */
+  .truncate { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+
+  /* Badges */
+  .badge {
+    display: inline-block;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 0.8em;
+    font-weight: 700;
+    line-height: 1.4;
+  }
+  .badge-sev-1, .badge-sev-2 { background: #f59e0b; color: #000; }
+  .badge-sev-3 { background: #ea580c; color: #fff; }
+  .badge-sev-4 { background: #dc2626; color: #fff; }
+  .badge-sev-5 { background: #7f1d1d; color: #fff; }
+  .badge-reviewed-0 { background: #6b7280; color: #fff; }
+  .badge-reviewed-1 { background: #16a34a; color: #fff; }
+  .badge-reviewed-2 { background: #dc2626; color: #fff; }
+  .badge-appeal { background: #2563eb; color: #fff; font-size: 0.75em; margin-left: 4px; }
+
+  /* Action buttons */
+  .btn-approve, .btn-reject {
+    background: transparent;
+    border-radius: 4px;
+    padding: 3px 10px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    transition: background 0.15s;
+  }
+  .btn-approve { border: 1.5px solid #16a34a; color: #16a34a; }
+  .btn-approve:hover:not(:disabled) { background: rgba(22,163,74,0.1); }
+  .btn-reject  { border: 1.5px solid #dc2626; color: #dc2626; margin-left: 4px; }
+  .btn-reject:hover:not(:disabled)  { background: rgba(220,38,38,0.1); }
+  .reviewed-1 .btn-approve,
+  .reviewed-1 .btn-reject,
+  .reviewed-2 .btn-approve,
+  .reviewed-2 .btn-reject { opacity: 0.6; }
+  .btn-approve:disabled, .btn-reject:disabled { cursor: wait; }
+  .err-inline { color: #dc2626; font-size: 11px; display: block; margin-top: 2px; }
+
+  /* Accordion detail row */
+  tr.detail-row td {
+    background: var(--filter-bg);
+    border-top: 1px dashed var(--border);
+    padding: 12px 16px;
+    cursor: default;
+  }
+  .detail-grid {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 4px 16px;
+    font-size: 13px;
+  }
+  .detail-key { color: var(--text2); white-space: nowrap; }
+  .detail-val { color: var(--text); word-break: break-all; }
+  .detail-reason-box {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 8px;
+    font-family: monospace;
+    font-size: 12px;
+    white-space: pre-wrap;
+    word-break: break-all;
+    margin-top: 4px;
+  }
+
+  /* Empty state */
+  #empty-state {
+    text-align: center;
+    padding: 60px 20px;
+    color: #9ca3af;
+    display: none;
+  }
+  #empty-state p:first-child { font-size: 16px; font-weight: 600; margin-bottom: 8px; }
+
+  /* Load error */
+  #load-error {
+    background: #fef2f2;
+    color: #dc2626;
+    border: 1px solid #fca5a5;
+    border-radius: 6px;
+    padding: 12px 16px;
+    margin-bottom: 12px;
+    display: none;
+  }
+
+  /* Pagination */
+  #pagination {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    padding: 14px 0;
+    font-size: 14px;
+  }
+  .page-btn {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 5px 16px;
+    cursor: pointer;
+    color: var(--text);
+    font-size: 13px;
+  }
+  .page-btn:hover:not(:disabled) { background: var(--btn-hover); }
+  .page-btn:disabled { opacity: 0.4; cursor: default; }
+  #page-info { color: var(--text2); }
+
+  /* Responsive */
+  @media (max-width: 768px) {
+    #stats-bar { grid-template-columns: 1fr 1fr; }
+    #filter-bar { flex-direction: column; align-items: flex-start; }
+    main { padding: 10px; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>QQ Bot 审核后台</h1>
+  <button id="theme-btn">深色/浅色切换</button>
+</header>
+
+<div id="stats-bar">
+  <div class="stat-card">
+    <span class="stat-label">总计</span>
+    <span class="stat-value" id="stat-total">—</span>
+  </div>
+  <div class="stat-card">
+    <span class="stat-label">待审核</span>
+    <span class="stat-value stat-dot" id="stat-unreviewed">—</span>
+  </div>
+  <div class="stat-card">
+    <span class="stat-label">已批准</span>
+    <span class="stat-value" id="stat-approved">—</span>
+  </div>
+  <div class="stat-card">
+    <span class="stat-label">已拒绝</span>
+    <span class="stat-value" id="stat-rejected">—</span>
+  </div>
+</div>
+
+<div id="filter-bar">
+  <div>
+    <label for="filter-group">群组</label>
+    <select id="filter-group">
+      <option value="">全部群组</option>
+    </select>
+  </div>
+  <div class="severity-checks">
+    <label>严重度</label>
+    <label><input type="checkbox" name="sev" value="1"> 1</label>
+    <label><input type="checkbox" name="sev" value="2"> 2</label>
+    <label><input type="checkbox" name="sev" value="3"> 3</label>
+    <label><input type="checkbox" name="sev" value="4"> 4</label>
+    <label><input type="checkbox" name="sev" value="5"> 5</label>
+  </div>
+  <div class="status-radios">
+    <label><input type="radio" name="status" value="all" checked> 全部</label>
+    <label><input type="radio" name="status" value="unreviewed"> 待审核</label>
+    <label><input type="radio" name="status" value="approved"> 已批准</label>
+    <label><input type="radio" name="status" value="rejected"> 已拒绝</label>
+  </div>
+  <div>
+    <label for="filter-time">时间范围</label>
+    <select id="filter-time">
+      <option value="all">全部</option>
+      <option value="7">最近 7 天</option>
+      <option value="30">最近 30 天</option>
+    </select>
+  </div>
+  <button id="apply-btn">应用</button>
+</div>
+
+<main>
+  <div id="load-error">加载失败，请刷新页面重试。</div>
+  <div class="table-wrap">
+    <table id="records-table">
+      <thead>
+        <tr>
+          <th class="col-id">ID</th>
+          <th class="col-time">时间</th>
+          <th class="col-group">群组</th>
+          <th class="col-user">用户</th>
+          <th class="col-sev">严重度</th>
+          <th class="col-action">操作类型</th>
+          <th class="col-reason">原因摘要</th>
+          <th class="col-status">审核状态</th>
+          <th class="col-ops">操作</th>
+        </tr>
+      </thead>
+      <tbody id="records-body"></tbody>
+    </table>
+    <div id="empty-state">
+      <p>暂无审核记录</p>
+      <p>当 bot 自动处罚（警告/禁言/踢出）用户后，相关记录将在此处显示，供管理员审核标注。</p>
+    </div>
+  </div>
+  <div id="pagination">
+    <button class="page-btn" id="prev-btn" disabled>← 上一页</button>
+    <span id="page-info">第 — / — 页</span>
+    <button class="page-btn" id="next-btn" disabled>下一页 →</button>
+  </div>
+</main>
+
+<script>
+'use strict';
+
+// ---- State ----
+const state = {
+  page: 1,
+  limit: 20,
+  total: 0,
+  filters: { group: '', status: 'all', severity: [], timeRange: 'all' },
+  stats: { total: 0, unreviewed: 0, approved: 0, rejected: 0 },
+  expandedRowId: null,
+  detailCache: {},
+};
+
+// ---- Theme ----
+(function initTheme() {
+  const saved = localStorage.getItem('mod-review-theme');
+  if (saved) document.documentElement.setAttribute('data-theme', saved);
+})();
+
+document.getElementById('theme-btn').addEventListener('click', () => {
+  const cur = document.documentElement.getAttribute('data-theme');
+  const next = cur === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  localStorage.setItem('mod-review-theme', next);
+});
+
+// ---- API ----
+async function apiFetch(path, opts = {}) {
+  const res = await fetch(path, {
+    headers: { 'Content-Type': 'application/json' },
+    ...opts,
+  });
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); } catch { data = { error: text }; }
+  return { ok: res.ok, status: res.status, data };
+}
+
+// ---- Helpers ----
+function truncate(str, n) {
+  if (!str) return '';
+  return str.length > n ? str.slice(0, n) + '…' : str;
+}
+
+function fmtTimestamp(ts, full = false) {
+  if (!ts) return '—';
+  const d = new Date(ts * 1000);
+  if (full) {
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  }
+  const pad = n => String(n).padStart(2, '0');
+  return `${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function sevBadge(sev) {
+  if (!sev && sev !== 0) return '—';
+  const cls = `badge badge-sev-${Math.min(5, Math.max(1, sev))}`;
+  const el = document.createElement('span');
+  el.className = cls;
+  el.textContent = String(sev);
+  return el;
+}
+
+function reviewedBadge(reviewed) {
+  const labels = { 0: '待审核', 1: '已批准', 2: '已拒绝' };
+  const el = document.createElement('span');
+  el.className = `badge badge-reviewed-${reviewed}`;
+  el.textContent = labels[reviewed] ?? '未知';
+  return el;
+}
+
+function actionLabel(action) {
+  const map = { warn: '警告', delete: '删除', ban: '禁言', kick: '踢出', none: '无' };
+  return map[action] ?? action;
+}
+
+function setTextSafe(el, text) {
+  el.textContent = text;
+}
+
+// ---- Stats ----
+async function loadStats() {
+  const { ok, data } = await apiFetch('/mod/stats');
+  if (!ok) return; // show — placeholders (already set in HTML)
+  state.stats = { total: data.total, unreviewed: data.unreviewed, approved: data.approved, rejected: data.rejected };
+  renderStats();
+}
+
+function renderStats() {
+  document.getElementById('stat-total').textContent = String(state.stats.total);
+  document.getElementById('stat-unreviewed').textContent = String(state.stats.unreviewed);
+  document.getElementById('stat-approved').textContent = String(state.stats.approved);
+  document.getElementById('stat-rejected').textContent = String(state.stats.rejected);
+}
+
+function adjustStats(oldReviewed, newVerdict) {
+  // oldReviewed: 0=unreviewed,1=approved,2=rejected; newVerdict: 1 or 2
+  if (oldReviewed === 0) state.stats.unreviewed = Math.max(0, state.stats.unreviewed - 1);
+  else if (oldReviewed === 1) state.stats.approved = Math.max(0, state.stats.approved - 1);
+  else if (oldReviewed === 2) state.stats.rejected = Math.max(0, state.stats.rejected - 1);
+
+  if (newVerdict === 1) state.stats.approved += 1;
+  else if (newVerdict === 2) state.stats.rejected += 1;
+  renderStats();
+}
+
+// ---- Filters ----
+function readFilters() {
+  state.filters.group = document.getElementById('filter-group').value;
+  state.filters.status = document.querySelector('input[name="status"]:checked').value;
+  state.filters.severity = Array.from(document.querySelectorAll('input[name="sev"]:checked')).map(el => el.value);
+  state.filters.timeRange = document.getElementById('filter-time').value;
+}
+
+function buildQuery() {
+  const params = new URLSearchParams();
+  params.set('page', String(state.page));
+  params.set('limit', String(state.limit));
+  if (state.filters.group) params.set('group', state.filters.group);
+  if (state.filters.status !== 'all') params.set('status', state.filters.status);
+  if (state.filters.severity.length === 1) {
+    params.set('severity', state.filters.severity[0]);
+  } else if (state.filters.severity.length > 1) {
+    const sorted = state.filters.severity.map(Number).sort((a, b) => a - b);
+    params.set('severity', `${sorted[0]}-${sorted[sorted.length - 1]}`);
+  }
+  // timeRange is front-end only hint (API doesn't support it yet); skip for v1
+  return '/mod/list?' + params.toString();
+}
+
+// ---- Group dropdown ----
+const knownGroups = new Set();
+function updateGroupDropdown(records) {
+  const sel = document.getElementById('filter-group');
+  records.forEach(r => {
+    if (r.groupId && !knownGroups.has(r.groupId)) {
+      knownGroups.add(r.groupId);
+      const opt = document.createElement('option');
+      opt.value = r.groupId;
+      opt.textContent = r.groupId;
+      sel.appendChild(opt);
+    }
+  });
+}
+
+// ---- Records table ----
+async function loadRecords() {
+  const errEl = document.getElementById('load-error');
+  errEl.style.display = 'none';
+
+  const { ok, data } = await apiFetch(buildQuery());
+  if (!ok) {
+    errEl.style.display = 'block';
+    return;
+  }
+
+  state.total = data.total;
+  const records = data.records;
+
+  updateGroupDropdown(records);
+  renderTable(records);
+  renderPagination();
+}
+
+function renderTable(records) {
+  const tbody = document.getElementById('records-body');
+  tbody.innerHTML = '';
+  state.expandedRowId = null;
+
+  const empty = document.getElementById('empty-state');
+  if (records.length === 0) {
+    empty.style.display = 'block';
+    document.getElementById('records-table').style.display = 'none';
+    return;
+  }
+  empty.style.display = 'none';
+  document.getElementById('records-table').style.display = '';
+
+  records.forEach(rec => {
+    const tr = document.createElement('tr');
+    tr.className = `reviewed-${rec.reviewed}`;
+    tr.dataset.id = String(rec.id);
+    tr.dataset.reviewed = String(rec.reviewed);
+
+    // ID
+    const tdId = document.createElement('td');
+    tdId.className = 'col-id';
+    setTextSafe(tdId, String(rec.id));
+    tr.appendChild(tdId);
+
+    // Time
+    const tdTime = document.createElement('td');
+    tdTime.className = 'col-time';
+    setTextSafe(tdTime, fmtTimestamp(rec.timestamp));
+    tr.appendChild(tdTime);
+
+    // Group
+    const tdGroup = document.createElement('td');
+    tdGroup.className = 'col-group';
+    const gSpan = document.createElement('span');
+    gSpan.className = 'truncate';
+    gSpan.style.maxWidth = '100px';
+    gSpan.title = rec.groupId ?? '';
+    setTextSafe(gSpan, truncate(rec.groupId ?? '—', 10));
+    tdGroup.appendChild(gSpan);
+    tr.appendChild(tdGroup);
+
+    // User
+    const tdUser = document.createElement('td');
+    tdUser.className = 'col-user';
+    const uSpan = document.createElement('span');
+    uSpan.className = 'truncate';
+    uSpan.style.maxWidth = '100px';
+    uSpan.title = rec.userId ?? '';
+    setTextSafe(uSpan, truncate(rec.userId ?? '—', 10));
+    tdUser.appendChild(uSpan);
+    tr.appendChild(tdUser);
+
+    // Severity
+    const tdSev = document.createElement('td');
+    tdSev.className = 'col-sev';
+    if (rec.severity != null) tdSev.appendChild(sevBadge(rec.severity));
+    else setTextSafe(tdSev, '—');
+    tr.appendChild(tdSev);
+
+    // Action
+    const tdAction = document.createElement('td');
+    tdAction.className = 'col-action';
+    setTextSafe(tdAction, actionLabel(rec.action));
+    tr.appendChild(tdAction);
+
+    // Reason
+    const tdReason = document.createElement('td');
+    tdReason.className = 'col-reason';
+    setTextSafe(tdReason, truncate(rec.reason ?? '', 60));
+    if (rec.appealed !== 0) {
+      const badge = document.createElement('span');
+      badge.className = 'badge badge-appeal';
+      badge.textContent = '申诉';
+      tdReason.appendChild(badge);
+    }
+    tr.appendChild(tdReason);
+
+    // Reviewed badge
+    const tdStatus = document.createElement('td');
+    tdStatus.className = 'col-status';
+    tdStatus.dataset.reviewedCell = '1';
+    tdStatus.appendChild(reviewedBadge(rec.reviewed));
+    tr.appendChild(tdStatus);
+
+    // Action buttons
+    const tdOps = document.createElement('td');
+    tdOps.className = 'col-ops';
+    tdOps.addEventListener('click', e => e.stopPropagation()); // don't trigger accordion
+
+    const btnApprove = document.createElement('button');
+    btnApprove.className = 'btn-approve';
+    btnApprove.textContent = '批准';
+    btnApprove.dataset.action = 'approved';
+
+    const btnReject = document.createElement('button');
+    btnReject.className = 'btn-reject';
+    btnReject.textContent = '拒绝';
+    btnReject.dataset.action = 'rejected';
+
+    tdOps.appendChild(btnApprove);
+    tdOps.appendChild(btnReject);
+    tr.appendChild(tdOps);
+
+    tbody.appendChild(tr);
+  });
+}
+
+// ---- Event delegation on tbody ----
+document.getElementById('records-body').addEventListener('click', async (e) => {
+  const target = e.target;
+  const tr = target.closest('tr[data-id]');
+  if (!tr) return;
+
+  const id = parseInt(tr.dataset.id, 10);
+
+  // Approve/reject button click
+  const action = target.dataset.action;
+  if (action === 'approved' || action === 'rejected') {
+    e.stopPropagation();
+    await handleVerdict(tr, id, action);
+    return;
+  }
+
+  // Accordion expand/collapse
+  toggleDetail(tr, id);
+});
+
+async function handleVerdict(tr, id, verdict) {
+  const btnApprove = tr.querySelector('.btn-approve');
+  const btnReject = tr.querySelector('.btn-reject');
+  const oldText = verdict === 'approved' ? btnApprove.textContent : btnReject.textContent;
+  const oldReviewed = parseInt(tr.dataset.reviewed, 10);
+
+  btnApprove.disabled = true;
+  btnReject.disabled = true;
+  if (verdict === 'approved') btnApprove.textContent = '…';
+  else btnReject.textContent = '…';
+
+  // Remove previous inline error
+  const prevErr = tr.nextElementSibling;
+  if (prevErr && prevErr.dataset.errFor === String(id)) prevErr.remove();
+
+  const { ok } = await apiFetch(`/mod/${id}/review`, {
+    method: 'POST',
+    body: JSON.stringify({ verdict }),
+  });
+
+  btnApprove.disabled = false;
+  btnReject.disabled = false;
+  if (verdict === 'approved') btnApprove.textContent = oldText;
+  else btnReject.textContent = oldText;
+
+  if (!ok) {
+    const errRow = document.createElement('tr');
+    errRow.dataset.errFor = String(id);
+    const errTd = document.createElement('td');
+    errTd.colSpan = 9;
+    errTd.style.cssText = 'color:#dc2626;font-size:12px;padding:4px 10px;';
+    errTd.textContent = '操作失败，请重试';
+    errRow.appendChild(errTd);
+    tr.insertAdjacentElement('afterend', errRow);
+    setTimeout(() => errRow.remove(), 2000);
+    return;
+  }
+
+  // Success: update row in-place
+  const newVerdict = verdict === 'approved' ? 1 : 2;
+  adjustStats(oldReviewed, newVerdict);
+
+  tr.className = `reviewed-${newVerdict}`;
+  tr.dataset.reviewed = String(newVerdict);
+
+  const statusCell = tr.querySelector('[data-reviewed-cell]');
+  statusCell.innerHTML = '';
+  statusCell.appendChild(reviewedBadge(newVerdict));
+
+  // Invalidate cached detail
+  delete state.detailCache[id];
+}
+
+async function toggleDetail(tr, id) {
+  // Close any open detail
+  const existingDetail = document.querySelector('tr.detail-row');
+  if (existingDetail) {
+    existingDetail.remove();
+    if (state.expandedRowId === id) {
+      state.expandedRowId = null;
+      return;
+    }
+  }
+  state.expandedRowId = id;
+
+  // Insert loading row
+  const loadRow = document.createElement('tr');
+  loadRow.className = 'detail-row';
+  loadRow.dataset.detailFor = String(id);
+  const loadTd = document.createElement('td');
+  loadTd.colSpan = 9;
+  loadTd.textContent = '加载中…';
+  loadRow.appendChild(loadTd);
+  tr.insertAdjacentElement('afterend', loadRow);
+
+  // Use cache or fetch
+  let detail = state.detailCache[id];
+  if (!detail) {
+    const { ok, data } = await apiFetch(`/mod/${id}`);
+    if (!ok) {
+      loadTd.textContent = '加载详情失败';
+      return;
+    }
+    detail = data;
+    state.detailCache[id] = detail;
+  }
+
+  renderDetail(loadRow, loadTd, detail);
+}
+
+function renderDetail(detailRow, td, data) {
+  const rec = data.record;
+  const appeal = data.appeal;
+
+  td.innerHTML = '';
+  td.style.padding = '12px 16px';
+
+  const grid = document.createElement('div');
+  grid.className = 'detail-grid';
+
+  function addRow(key, valNode) {
+    const k = document.createElement('span');
+    k.className = 'detail-key';
+    k.textContent = key;
+    const v = document.createElement('span');
+    v.className = 'detail-val';
+    if (typeof valNode === 'string') {
+      v.textContent = valNode;
+    } else {
+      v.appendChild(valNode);
+    }
+    grid.appendChild(k);
+    grid.appendChild(v);
+  }
+
+  addRow('消息 ID', rec.msgId ?? '—');
+  addRow('处罚时间', fmtTimestamp(rec.timestamp, true));
+  addRow('群组', rec.groupId ?? '—');
+  addRow('用户', rec.userId ?? '—');
+  addRow('置信度', rec.severity != null ? `严重度: ${rec.severity}` : '—');
+
+  const reasonBox = document.createElement('div');
+  reasonBox.className = 'detail-reason-box';
+  reasonBox.textContent = rec.reason ?? '—';
+
+  const reasonLabel = document.createElement('span');
+  reasonLabel.className = 'detail-key';
+  reasonLabel.textContent = 'LLM 判断原因';
+  const reasonVal = document.createElement('span');
+  reasonVal.className = 'detail-val';
+  reasonVal.appendChild(reasonBox);
+  grid.appendChild(reasonLabel);
+  grid.appendChild(reasonVal);
+
+  if (appeal) {
+    const appealLabels = { 1: '已提交', 2: '已处理' };
+    const reversedLabel = rec.reversed ? '已撤销' : '等待审核';
+    addRow('申诉信息', `申诉状态: ${appealLabels[appeal.appealed] ?? '未知'}  处理结果: ${reversedLabel}`);
+  }
+
+  td.appendChild(grid);
+}
+
+// ---- Pagination ----
+function renderPagination() {
+  const totalPages = Math.max(1, Math.ceil(state.total / state.limit));
+  document.getElementById('page-info').textContent = `第 ${state.page} / ${totalPages} 页`;
+  document.getElementById('prev-btn').disabled = state.page <= 1;
+  document.getElementById('next-btn').disabled = state.page >= totalPages;
+}
+
+document.getElementById('prev-btn').addEventListener('click', () => {
+  if (state.page > 1) { state.page--; loadRecords(); document.querySelector('table').scrollIntoView(); }
+});
+document.getElementById('next-btn').addEventListener('click', () => {
+  const totalPages = Math.ceil(state.total / state.limit);
+  if (state.page < totalPages) { state.page++; loadRecords(); document.querySelector('table').scrollIntoView(); }
+});
+
+// ---- Apply filters ----
+document.getElementById('apply-btn').addEventListener('click', () => {
+  readFilters();
+  state.page = 1;
+  loadRecords();
+});
+
+// ---- Init ----
+loadStats();
+loadRecords();
+</script>
+</body>
+</html>
