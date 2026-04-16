@@ -39,6 +39,30 @@ export interface ModerationRecord {
   appealed: 0 | 1 | 2;
   reversed: boolean;
   timestamp: number;
+  // --- review fields (§13) ---
+  reviewed: 0 | 1 | 2;    // 0=unreviewed, 1=approved, 2=rejected
+  reviewedBy: string | null;
+  reviewedAt: number | null;
+}
+
+export interface ModerationReviewFilters {
+  groupId?: string;
+  reviewed?: 0 | 1 | 2;
+  severityMin?: number;
+  severityMax?: number;
+}
+
+export interface ModerationStats {
+  total: number;
+  unreviewed: number;
+  approved: number;
+  rejected: number;
+  byGroup: Record<string, {
+    total: number;
+    unreviewed: number;
+    approved: number;
+    rejected: number;
+  }>;
 }
 
 export interface GroupConfig {
@@ -143,7 +167,7 @@ export interface IUserRepository {
 }
 
 export interface IModerationRepository {
-  insert(record: Omit<ModerationRecord, 'id'>): ModerationRecord;
+  insert(record: Omit<ModerationRecord, 'id' | 'reviewed' | 'reviewedBy' | 'reviewedAt'>): ModerationRecord;
   findById(id: number): ModerationRecord | null;
   findByMsgId(msgId: string): ModerationRecord | null;
   findRecentByUser(userId: string, groupId: string, windowMs: number): ModerationRecord[];
@@ -151,6 +175,22 @@ export interface IModerationRepository {
   findPendingAppeal(userId: string, groupId: string): ModerationRecord | null;
   update(id: number, patch: Partial<Pick<ModerationRecord, 'appealed' | 'reversed'>>): void;
   countWarnsByUser(userId: string, groupId: string, withinMs: number): number;
+
+  // --- new: review panel methods (§13) ---
+  getForReview(
+    filters: ModerationReviewFilters,
+    page: number,   // 1-based
+    limit: number   // 1..100
+  ): { records: ModerationRecord[]; total: number };
+
+  markReviewed(
+    id: number,
+    verdict: 1 | 2,      // 1=approved, 2=rejected
+    reviewedBy: string,
+    reviewedAt: number   // unix seconds
+  ): void;
+
+  getStats(): ModerationStats;
 }
 
 export interface IGroupConfigRepository {
@@ -398,6 +438,7 @@ interface ModerationRow {
   id: number; msg_id: string; group_id: string; user_id: string;
   violation: number; severity: number | null; action: string;
   reason: string; appealed: number; reversed: number; timestamp: number;
+  reviewed: number; reviewed_by: string | null; reviewed_at: number | null;
 }
 
 interface GroupConfigRow {
@@ -480,6 +521,9 @@ function modFromRow(row: ModerationRow): ModerationRecord {
     appealed: row.appealed as 0 | 1 | 2,
     reversed: row.reversed !== 0,
     timestamp: row.timestamp,
+    reviewed: (row.reviewed ?? 0) as 0 | 1 | 2,
+    reviewedBy: row.reviewed_by ?? null,
+    reviewedAt: row.reviewed_at ?? null,
   };
 }
 
@@ -671,7 +715,7 @@ class UserRepository implements IUserRepository {
 class ModerationRepository implements IModerationRepository {
   constructor(private readonly db: DatabaseSync) {}
 
-  insert(record: Omit<ModerationRecord, 'id'>): ModerationRecord {
+  insert(record: Omit<ModerationRecord, 'id' | 'reviewed' | 'reviewedBy' | 'reviewedAt'>): ModerationRecord {
     const stmt = this.db.prepare(`
       INSERT INTO moderation_log (msg_id, group_id, user_id, violation, severity, action, reason, appealed, reversed, timestamp)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -681,7 +725,7 @@ class ModerationRepository implements IModerationRepository {
       record.violation ? 1 : 0, record.severity, record.action,
       record.reason, record.appealed, record.reversed ? 1 : 0, record.timestamp
     );
-    return { ...record, id: Number(result.lastInsertRowid) };
+    return { ...record, id: Number(result.lastInsertRowid), reviewed: 0, reviewedBy: null, reviewedAt: null };
   }
 
   findById(id: number): ModerationRecord | null {
@@ -732,6 +776,85 @@ class ModerationRepository implements IModerationRepository {
       "SELECT COUNT(*) as count FROM moderation_log WHERE user_id = ? AND group_id = ? AND action = 'warn' AND timestamp >= ?"
     ).get(userId, groupId, since) as unknown as CountRow;
     return row.count;
+  }
+
+  getForReview(
+    filters: ModerationReviewFilters,
+    page: number,
+    limit: number,
+  ): { records: ModerationRecord[]; total: number } {
+    // NOTE: OFFSET-based pagination is acceptable for v1 manual review use-case.
+    // At very large row counts (tens of thousands) this will slow; migrate to
+    // cursor-based pagination (WHERE id < cursor) in a future iteration.
+    const clauses: string[] = [];
+    const params: (string | number)[] = [];
+
+    if (filters.groupId !== undefined) {
+      clauses.push('group_id = ?');
+      params.push(filters.groupId);
+    }
+    if (filters.reviewed !== undefined) {
+      clauses.push('reviewed = ?');
+      params.push(filters.reviewed);
+    }
+    if (filters.severityMin !== undefined) {
+      clauses.push('severity >= ?');
+      params.push(filters.severityMin);
+    }
+    if (filters.severityMax !== undefined) {
+      clauses.push('severity <= ?');
+      params.push(filters.severityMax);
+    }
+
+    const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+    const offset = (page - 1) * limit;
+
+    const countRow = this.db.prepare(
+      `SELECT COUNT(*) as count FROM moderation_log ${where}`
+    ).get(...params) as unknown as CountRow;
+    const total = countRow.count;
+
+    const rows = this.db.prepare(
+      `SELECT * FROM moderation_log ${where} ORDER BY timestamp DESC LIMIT ? OFFSET ?`
+    ).all(...params, limit, offset) as unknown as ModerationRow[];
+
+    return { records: rows.map(modFromRow), total };
+  }
+
+  markReviewed(id: number, verdict: 1 | 2, reviewedBy: string, reviewedAt: number): void {
+    this.db.prepare(
+      'UPDATE moderation_log SET reviewed = ?, reviewed_by = ?, reviewed_at = ? WHERE id = ?'
+    ).run(verdict, reviewedBy, reviewedAt, id);
+  }
+
+  getStats(): ModerationStats {
+    interface StatRow { group_id: string; reviewed: number; cnt: number }
+    const rows = this.db.prepare(
+      `SELECT group_id, reviewed, COUNT(*) as cnt FROM moderation_log GROUP BY group_id, reviewed`
+    ).all() as unknown as StatRow[];
+
+    const stats: ModerationStats = { total: 0, unreviewed: 0, approved: 0, rejected: 0, byGroup: {} };
+
+    for (const row of rows) {
+      const g = row.group_id;
+      if (!stats.byGroup[g]) stats.byGroup[g] = { total: 0, unreviewed: 0, approved: 0, rejected: 0 };
+
+      stats.byGroup[g]!.total += row.cnt;
+      stats.total += row.cnt;
+
+      if (row.reviewed === 0) {
+        stats.unreviewed += row.cnt;
+        stats.byGroup[g]!.unreviewed += row.cnt;
+      } else if (row.reviewed === 1) {
+        stats.approved += row.cnt;
+        stats.byGroup[g]!.approved += row.cnt;
+      } else if (row.reviewed === 2) {
+        stats.rejected += row.cnt;
+        stats.byGroup[g]!.rejected += row.cnt;
+      }
+    }
+
+    return stats;
   }
 }
 
@@ -1969,5 +2092,15 @@ export class Database {
     `);
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_bandori_lives_start_date ON bandori_lives(start_date)`);
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_bandori_lives_last_seen  ON bandori_lives(last_seen_at)`);
+
+    // INVARIANT: moderation_log rows must never be deleted. The daily punishment counter
+    // (group_config.punishments_today) is a rate-limiter and may reset; moderation_log
+    // rows are permanent audit/training records.
+    //
+    // Moderation review columns (§13) — idempotent; each ALTER is guarded individually.
+    try { this._db.exec(`ALTER TABLE moderation_log ADD COLUMN reviewed    INTEGER NOT NULL DEFAULT 0`); } catch { /* already exists */ }
+    try { this._db.exec(`ALTER TABLE moderation_log ADD COLUMN reviewed_by TEXT`); } catch { /* already exists */ }
+    try { this._db.exec(`ALTER TABLE moderation_log ADD COLUMN reviewed_at INTEGER`); } catch { /* already exists */ }
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_mod_log_reviewed ON moderation_log(reviewed, group_id, timestamp DESC)`);
   }
 }

@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import type { IBotReplyRepository, ILocalStickerRepository } from '../storage/db.js';
+import type { IBotReplyRepository, ILocalStickerRepository, IModerationRepository } from '../storage/db.js';
 import { createLogger } from '../utils/logger.js';
 
 const logger = createLogger('rating-portal');
@@ -38,12 +38,30 @@ function extractStickerKeys(botReply: string): string[] {
   return keys;
 }
 
+/**
+ * Parse a severity query param. Accepts single integer ("3") or range ("3-5").
+ * Returns { min, max } on success or null if invalid.
+ */
+function parseSeverityParam(raw: string): { min: number; max: number } | null {
+  const rangeParts = raw.split('-');
+  if (rangeParts.length === 2) {
+    const min = parseInt(rangeParts[0]!, 10);
+    const max = parseInt(rangeParts[1]!, 10);
+    if (isNaN(min) || isNaN(max) || min > max) return null;
+    return { min, max };
+  }
+  const val = parseInt(raw, 10);
+  if (isNaN(val)) return null;
+  return { min: val, max: val };
+}
+
 export class RatingPortalServer {
   private readonly server = createServer((req, res) => void this._handle(req, res));
 
   constructor(
     private readonly repo: IBotReplyRepository,
     private readonly groupId: string,
+    private readonly moderation: IModerationRepository,
     private readonly localStickers?: ILocalStickerRepository,
   ) {}
 
@@ -62,6 +80,128 @@ export class RatingPortalServer {
     const { pathname } = url;
 
     res.setHeader('Access-Control-Allow-Origin', '*');
+
+    // --- Moderation review routes (§13) ---
+
+    if (req.method === 'GET' && pathname === '/mod') {
+      const htmlPath = fileURLToPath(new URL('./mod-review.html', import.meta.url));
+      try {
+        const html = readFileSync(htmlPath, 'utf8');
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(html);
+      } catch {
+        // HTML not yet available (designer delivering later); return minimal placeholder
+        const placeholder = '<!DOCTYPE html><html><body><table><tr><td>Moderation Review UI pending</td></tr></table></body></html>';
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(placeholder);
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && pathname === '/mod/stats') {
+      json(res, 200, this.moderation.getStats());
+      return;
+    }
+
+    if (req.method === 'GET' && pathname === '/mod/list') {
+      // Parse and validate query params
+      const statusRaw = url.searchParams.get('status') ?? 'all';
+      const validStatuses = ['all', 'unreviewed', 'approved', 'rejected'];
+      if (!validStatuses.includes(statusRaw)) {
+        json(res, 400, { error: `invalid param: status must be one of ${validStatuses.join('|')}` });
+        return;
+      }
+
+      const severityRaw = url.searchParams.get('severity');
+      let severityMin: number | undefined;
+      let severityMax: number | undefined;
+      if (severityRaw !== null) {
+        const parsed = parseSeverityParam(severityRaw);
+        if (parsed === null) {
+          json(res, 400, { error: 'invalid param: severity must be an integer or N-M range' });
+          return;
+        }
+        severityMin = parsed.min;
+        severityMax = parsed.max;
+      }
+
+      const pageRaw = parseInt(url.searchParams.get('page') ?? '1', 10);
+      if (isNaN(pageRaw) || pageRaw < 1) {
+        json(res, 400, { error: 'invalid param: page must be >= 1' });
+        return;
+      }
+
+      const limitRaw = parseInt(url.searchParams.get('limit') ?? '20', 10);
+      if (isNaN(limitRaw) || limitRaw < 1 || limitRaw > 100) {
+        json(res, 400, { error: 'invalid param: limit must be 1-100' });
+        return;
+      }
+
+      const reviewedFilter: 0 | 1 | 2 | undefined =
+        statusRaw === 'unreviewed' ? 0 :
+        statusRaw === 'approved' ? 1 :
+        statusRaw === 'rejected' ? 2 :
+        undefined;
+
+      const { records, total } = this.moderation.getForReview(
+        {
+          groupId: url.searchParams.get('group') ?? undefined,
+          reviewed: reviewedFilter,
+          severityMin,
+          severityMax,
+        },
+        pageRaw,
+        limitRaw,
+      );
+
+      json(res, 200, { records, page: pageRaw, limit: limitRaw, total });
+      return;
+    }
+
+    // GET /mod/:id
+    if (req.method === 'GET' && /^\/mod\/(\d+)$/.test(pathname)) {
+      const id = parseInt(pathname.split('/')[2]!, 10);
+      const record = this.moderation.findById(id);
+      if (!record) {
+        json(res, 404, { error: 'not found' });
+        return;
+      }
+      const body: Record<string, unknown> = { record };
+      if (record.appealed !== 0) {
+        body['appeal'] = { appealed: record.appealed, reversed: record.reversed };
+      }
+      json(res, 200, body);
+      return;
+    }
+
+    // POST /mod/:id/review
+    if (req.method === 'POST' && /^\/mod\/(\d+)\/review$/.test(pathname)) {
+      const id = parseInt(pathname.split('/')[2]!, 10);
+      let body: { verdict?: string };
+      try {
+        body = JSON.parse(await readBody(req)) as { verdict?: string };
+      } catch {
+        json(res, 400, { error: 'invalid json' });
+        return;
+      }
+      const { verdict } = body;
+      if (verdict !== 'approved' && verdict !== 'rejected') {
+        json(res, 400, { error: 'verdict must be "approved" or "rejected"' });
+        return;
+      }
+      const existing = this.moderation.findById(id);
+      if (!existing) {
+        json(res, 404, { error: 'not found' });
+        return;
+      }
+      const numericVerdict: 1 | 2 = verdict === 'approved' ? 1 : 2;
+      this.moderation.markReviewed(id, numericVerdict, 'admin', Math.floor(Date.now() / 1000));
+      logger.info({ id, verdict }, 'moderation record reviewed');
+      json(res, 200, { ok: true });
+      return;
+    }
+
+    // --- Existing rating portal routes ---
 
     if (req.method === 'GET' && pathname === '/') {
       const htmlPath = fileURLToPath(new URL('./rating-portal.html', import.meta.url));
