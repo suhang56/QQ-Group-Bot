@@ -88,6 +88,7 @@ Hard invariants (enforced by code review + tests):
 - **@xenova/transformers** for local embeddings (MiniLM-L6-v2, lazy-loaded)
 - **node-html-parser** for the bandori-live scraper (no jsdom, no cheerio)
 - **NapCat** as the QQ protocol adapter (OneBot v11 WebSocket)
+- **cross-env** handles `--experimental-sqlite` flag automatically in all npm scripts (Node 22.x compatibility)
 
 ## Setup
 
@@ -129,9 +130,9 @@ cp .env.example .env
 ### Run
 
 ```bash
-npm run dev            # tsx src/index.ts (hot TypeScript)
+npm run dev            # tsx src/index.ts (hot TypeScript, --experimental-sqlite auto-set via cross-env)
 npm run build          # compile to dist/
-node dist/index.js     # production
+npm start              # production (cross-env NODE_OPTIONS=--experimental-sqlite node dist/index.js)
 npm run typecheck      # tsc --noEmit
 ```
 
