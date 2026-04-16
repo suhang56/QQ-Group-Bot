@@ -396,7 +396,15 @@ ${offenseHistory}${ragSection}${rejectionSection}`;
     }
 
     // Rate limit — uncached vision calls only
-    const hourKey = `${target.groupId}:${Math.floor(now / 3600)}`;
+    // Periodic cleanup: remove stale hour keys (older than 2 hours)
+    const currentHour = Math.floor(now / 3600);
+    if (this.imageRateCounts.size > 100) {
+      for (const k of this.imageRateCounts.keys()) {
+        const hourPart = parseInt(k.split(':').pop() ?? '0', 10);
+        if (currentHour - hourPart > 2) this.imageRateCounts.delete(k);
+      }
+    }
+    const hourKey = `${target.groupId}:${currentHour}`;
     const count = this.imageRateCounts.get(hourKey) ?? 0;
     if (count >= IMAGE_MOD_RATE_LIMIT_PER_HOUR) {
       this.logger.warn({ groupId: target.groupId, count }, 'image mod rate limit exceeded — skipping');

@@ -154,7 +154,7 @@ export function extractUserStickers(
 
   for (const m of messages) {
     // Check rawContent first (has full CQ codes), then content as fallback
-    const textToScan = m.rawContent || m.content;
+    const textToScan = m.rawContent ?? m.content;
     const matches = textToScan.matchAll(/\[CQ:(mface|image),[^\]]+\]/g);
     for (const match of matches) {
       const code = match[0];

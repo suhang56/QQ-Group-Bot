@@ -236,13 +236,17 @@ export function postProcess(text: string): string {
 const CONFABULATION_RE = /我刚说过了|我早就说了|我都说过了|这不是我刚说的|我不是说过了吗|两个意思我都说过/;
 
 /**
- * Detect and warn on confabulation patterns — bot claiming it explained something it didn't.
- * Logs at warn level for tracking; does NOT drop (may be legit in rare cases).
+ * Detect confabulation patterns — bot claiming it explained something it didn't.
+ * Returns a short fallback reply if confabulation is detected, null otherwise.
+ * Soft-drop: replace the confabulated reply with a safe fallback instead of
+ * sending the hallucinated "I already said" claim.
  */
-export function checkConfabulation(reply: string, trigger: string, context: Record<string, unknown>): void {
+export function checkConfabulation(reply: string, trigger: string, context: Record<string, unknown>): string | null {
   if (CONFABULATION_RE.test(reply)) {
-    logger.warn({ ...context, trigger, reply }, 'confabulation pattern detected');
+    logger.info({ ...context, trigger, reply }, 'confabulation soft-drop — replacing with fallback');
+    return '...';
   }
+  return null;
 }
 
 /**

@@ -667,7 +667,8 @@ export class ChatModule implements IChatModule {
   private _recordOwnReply(groupId: string, reply: string): void {
     let arr = this.botRecentOutputs.get(groupId) ?? [];
     arr = [...arr, reply];
-    if (arr.length > 5) arr = arr.slice(-5);
+    const BOT_OUTPUT_WINDOW = 10;
+    if (arr.length > BOT_OUTPUT_WINDOW) arr = arr.slice(-BOT_OUTPUT_WINDOW);
     this.botRecentOutputs.set(groupId, arr);
 
     // Track mface keys for rotation cooldown (delegated to StickerFirstModule)
@@ -1256,8 +1257,9 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
         this.logger.debug({ groupId }, 'Claude opted out — dropping reply silently');
         return null;
       }
-      // Confabulation detector: warn if bot claims it already said something
-      checkConfabulation(processed, triggerMessage.content, { groupId });
+      // Confabulation detector: soft-drop if bot claims it already said something
+      const confabFallback = checkConfabulation(processed, triggerMessage.content, { groupId });
+      if (confabFallback !== null) return null;
       // Echo detector: drop replies that are essentially the trigger parroted back
       if (isEcho(processed, triggerMessage.content)) {
         this.logger.info({ groupId, reply: processed, trigger: triggerMessage.content }, 'Echo detected — dropping reply silently');

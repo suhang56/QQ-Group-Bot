@@ -2027,21 +2027,21 @@ describe('ChatModule — self-repetition avoidance', () => {
     expect(prompt).toContain('bot reply');
   });
 
-  it('botRecentOutputs caps at 5 entries', async () => {
+  it('botRecentOutputs caps at 10 entries', async () => {
     const chat = makeChat();
-    // Simulate 6 replies by calling with unique content each time
-    for (let i = 0; i < 6; i++) {
+    // Simulate 11 replies by calling with unique content each time
+    for (let i = 0; i < 11; i++) {
       claude.mockResolvedValueOnce({ text: `reply${i}`, inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 });
       db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: `msg${i}`, timestamp: Math.floor(Date.now() / 1000) + i, deleted: false });
       await chat.generateReply('g1', makeMsg({ content: `msg${i}` }), []);
     }
     claude.mockClear();
-    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'trigger', timestamp: Math.floor(Date.now() / 1000) + 10, deleted: false });
+    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'trigger', timestamp: Math.floor(Date.now() / 1000) + 20, deleted: false });
     await chat.generateReply('g1', makeMsg({ content: 'trigger' }), []);
     const prompt = (claude.mock.calls[0]![0] as { messages: Array<{ content: string }> }).messages[0]!.content as string;
-    // reply0 (oldest) should be evicted; reply1-reply5 remain
+    // reply0 (oldest) should be evicted; reply1-reply10 remain
     expect(prompt).not.toContain('reply0');
-    expect(prompt).toContain('reply5');
+    expect(prompt).toContain('reply10');
   });
 
   it('botRecentOutputs is isolated per group', async () => {
@@ -2192,7 +2192,7 @@ describe('ChatModule — confabulation guard', () => {
     });
   });
 
-  it('confabulation pattern in reply triggers warn log', async () => {
+  it('confabulation pattern in reply triggers soft-drop (returns null)', async () => {
     const { checkConfabulation } = await import('../src/utils/sentinel.js');
     const db = new Database(':memory:');
     const claude = vi.fn().mockResolvedValue({
@@ -2205,9 +2205,9 @@ describe('ChatModule — confabulation guard', () => {
       { botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999, moodProactiveEnabled: false, deflectCacheEnabled: false },
     );
     db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: '你说过什么', timestamp: Math.floor(Date.now() / 1000), deleted: false });
-    // Should still return the reply (confabulation logs but doesn't drop)
+    // Confabulation is now soft-dropped (returns null instead of the confabulated reply)
     const result = await chat.generateReply('g1', makeMsg({ content: '你说过什么' }), []);
-    expect(result).toBe('我都说过了有啥区别');
+    expect(result).toBeNull();
     // Verify checkConfabulation detects the pattern
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     checkConfabulation('我都说过了有啥区别', '你说过什么', { groupId: 'g1' });
