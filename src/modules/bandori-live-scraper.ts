@@ -14,12 +14,21 @@ export interface BandoriLiveScraperOptions {
 }
 
 export const BANDORI_LIVE_KEYWORDS: string[] = [
+  // Event/show language (zh/ja/en)
   'live', 'ライブ', '演唱会', '公演', '演出', '场', '会场', '场馆',
-  '票', 'チケット', 'ticket',
-  'Roselia', "MyGO!!!!!",  'Ave Mujica', "Poppin'Party", 'Afterglow',
-  'Hello Happy World!', 'HHW', 'Pastel Palettes', 'Morfonica',
-  'RAISE A SUILEN', 'RAS', 'CRYCHIC',
+  '活动', '活動', 'イベント', 'event', 'fes', '音乐祭', '音樂祭',
+  '巡演', '巡回', 'ツアー', 'tour', '周年', '周年庆', '排期', '日程',
+  '票', 'チケット', 'ticket', '单独ライブ',
+  // Canonical band names
+  'Roselia', "MyGO!!!!!", 'MyGO', 'Ave Mujica', "Poppin'Party", 'Afterglow',
+  'Hello Happy World!', 'Hello, Happy World!', 'Pastel Palettes', 'Morfonica',
+  'RAISE A SUILEN', 'CRYCHIC',
+  // Shortforms (lowercase because matching is .toLowerCase())
+  'ppp', 'popipa', 'ras', 'mygo', 'mjk', 'mujica', 'hhw', 'hhp',
+  'pasupare', 'morfo', 'ag',
+  // Chinese/Japanese band name variants
   '波普派对', '余晖', '彩色调色板', '彩帕', '玫瑰利亚',
+  'ロゼリア', 'アヴェムジカ', 'モルフォニカ', 'マイゴ', 'パスパレ', 'ハロハピ',
 ];
 
 export function _hasBandoriLiveKeyword(text: string): boolean {
