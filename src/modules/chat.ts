@@ -26,6 +26,7 @@ import { tokenizeLore as _tokenizeLore, extractTokens as _extractTokens, extract
 import { loadGroupJargon, formatJargonBlock } from './jargon-provider.js';
 import { makeEngagementDecision, type EngagementSignals } from './engagement-decision.js';
 import { scoreComprehension, type ComprehensionContext } from '../services/comprehension-scorer.js';
+import { ConversationStateTracker } from './conversation-state.js';
 
 export interface IChatModule {
   generateReply(groupId: string, triggerMessage: GroupMessage, _recentMessages: GroupMessage[]): Promise<string | null>;
@@ -693,6 +694,7 @@ export class ChatModule implements IChatModule {
   private readonly deflectionEngine: IDeflectionEngine | null;
   // per-group: whether the last generateReply call returned an evasive reply
   private readonly lastEvasiveReply = new Map<string, boolean>();
+  private readonly conversationState = new ConversationStateTracker();
   // per-group: fact ids injected into the system prompt of the last generateReply.
   // Router reads this right after generateReply returns to wire into self-learning.rememberInjection.
   private readonly lastInjectedFactIds = new Map<string, number[]>();
@@ -797,6 +799,7 @@ export class ChatModule implements IChatModule {
       clearInterval(this.deflectRefillTimer);
       this.deflectRefillTimer = null;
     }
+    this.conversationState.destroy();
   }
 
   getMoodTracker(): MoodTracker {
@@ -1076,6 +1079,13 @@ export class ChatModule implements IChatModule {
       }
 
     }
+
+    // ── Feed conversation state tracker ──────────────────────────────────
+    const jargonTermsForState = loadGroupJargon(this.db.rawDb, groupId).map(j => j.term);
+    this.conversationState.tick(
+      groupId, triggerMessage.content, triggerMessage.userId,
+      triggerMessage.timestamp, jargonTermsForState,
+    );
 
     // ── Weighted participation scoring ───────────────────────────────────
     const recent3 = this.db.messages.getRecent(groupId, 3);
@@ -1390,7 +1400,11 @@ export class ChatModule implements IChatModule {
     const moodSignal = detectMoodSignal(immediateChron as Array<{ content: string }>);
     const moodHint = buildMoodHint(moodSignal);
 
-    const userContent = `${liveBlock}${replyContextBlock}${keywordSection}${wideSection}${mediumSection}${immediateSection}${avoidSection}以上语境里 [你(昵称)] 是你自己说过的，[别人昵称] 是群友说的。**不要把群友的话当成你自己说过的**。${atMentionDirective}${youAddressedDirective}${moodHint}
+    // P2: conversation state context injection (user-role, not system-role)
+    const convStateHint = this.conversationState.formatForPrompt(groupId);
+    const convStateLine = convStateHint ? `\n${convStateHint}` : '';
+
+    const userContent = `${liveBlock}${replyContextBlock}${keywordSection}${wideSection}${mediumSection}${immediateSection}${avoidSection}以上语境里 [你(昵称)] 是你自己说过的，[别人昵称] 是群友说的。**不要把群友的话当成你自己说过的**。${atMentionDirective}${youAddressedDirective}${moodHint}${convStateLine}
 
 ← 要接的这条 — 只输出一个：${isAtTrigger ? '一条自然反应（不能是 <skip>）' : '<skip> 或 一条自然反应'}。${distinctSpeakers >= 3 ? `\n最近 ${distinctSpeakers} 个群友同时聊，可以用"你们"集体称呼。` : ''}
 ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMessage.content) ? '\n**注意**: 这条消息有人直接骂你。**绝对不要回"自言自语吗"/"在骂谁"** — 那是 bot tell。要么硬怼回去，要么 <skip>。' : ''}`;
