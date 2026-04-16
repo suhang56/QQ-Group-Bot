@@ -886,7 +886,7 @@ export class Router implements IRouter {
         this.db.moderation.insert({
           msgId: msg.messageId, groupId: msg.groupId, userId: msg.userId,
           violation: true, severity: 5, action: 'delete',
-          reason: verdict.reason, appealed: 0, reversed: false, timestamp: msg.timestamp,
+          reason: verdict.reason, appealed: 0, reversed: false, timestamp: msg.timestamp, originalContent: msg.content,
         });
       } catch (err) {
         this.logger.error({ err }, 'image auto-delete moderation insert failed');
@@ -905,7 +905,7 @@ export class Router implements IRouter {
         this.db.moderation.insert({
           msgId: msg.messageId, groupId: msg.groupId, userId: msg.userId,
           violation: true, severity: verdict.severity, action: 'none',
-          reason: verdict.reason, appealed: 0, reversed: false, timestamp: msg.timestamp,
+          reason: verdict.reason, appealed: 0, reversed: false, timestamp: msg.timestamp, originalContent: msg.content,
         });
       } catch (err) {
         this.logger.error({ err }, 'image log-only moderation insert failed');

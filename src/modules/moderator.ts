@@ -256,7 +256,7 @@ ${offenseHistory}${ragSection}${rejectionSection}`;
         msgId: msg.messageId, groupId: msg.groupId, userId: msg.userId,
         violation: false, severity: null, action: 'none',
         reason: parsed.reason, appealed: 0, reversed: false,
-        timestamp: msg.timestamp,
+        timestamp: msg.timestamp, originalContent: msg.content,
       });
       return verdict;
     }
@@ -268,7 +268,7 @@ ${offenseHistory}${ragSection}${rejectionSection}`;
         msgId: msg.messageId, groupId: msg.groupId, userId: msg.userId,
         violation: true, severity: parsed.severity, action: 'none',
         reason: `[low-confidence ${parsed.confidence.toFixed(2)}] ${parsed.reason}`, appealed: 0, reversed: false,
-        timestamp: msg.timestamp,
+        timestamp: msg.timestamp, originalContent: msg.content,
       });
       return verdict;
     }
@@ -280,7 +280,7 @@ ${offenseHistory}${ragSection}${rejectionSection}`;
         msgId: msg.messageId, groupId: msg.groupId, userId: msg.userId,
         violation: true, severity: parsed.severity, action: 'none',
         reason: parsed.reason, appealed: 0, reversed: false,
-        timestamp: msg.timestamp,
+        timestamp: msg.timestamp, originalContent: msg.content,
       });
       return verdict;
     }
@@ -291,7 +291,7 @@ ${offenseHistory}${ragSection}${rejectionSection}`;
       msgId: msg.messageId, groupId: msg.groupId, userId: msg.userId,
       violation: true, severity: parsed.severity, action: 'none',
       reason: parsed.reason, appealed: 0, reversed: false,
-      timestamp: msg.timestamp,
+      timestamp: msg.timestamp, originalContent: msg.content,
     });
     this.logger.info({ groupId: msg.groupId, userId: msg.userId, severity: parsed.severity, reason: parsed.reason }, 'violation queued for admin approval');
     return verdict;
@@ -463,7 +463,7 @@ watchlist 命中 → category: "watchlist"，components_seen 列出命中片段
       this.moderation.insert({
         msgId: msg.messageId, groupId: msg.groupId, userId: msg.userId,
         violation: true, severity, action: 'warn', reason,
-        appealed: 0, reversed: false, timestamp: msg.timestamp,
+        appealed: 0, reversed: false, timestamp: msg.timestamp, originalContent: msg.content,
       });
       this.configs.incrementPunishments(msg.groupId);
       this.logger.info({ groupId: msg.groupId, userId: msg.userId, severity, action: 'warn', reason }, 'punishment executed');
@@ -478,7 +478,7 @@ watchlist 命中 → category: "watchlist"，components_seen 列出命中片段
       this.moderation.insert({
         msgId: msg.messageId, groupId: msg.groupId, userId: msg.userId,
         violation: true, severity, action: 'ban', reason,
-        appealed: 0, reversed: false, timestamp: msg.timestamp,
+        appealed: 0, reversed: false, timestamp: msg.timestamp, originalContent: msg.content,
       });
       this.configs.incrementPunishments(msg.groupId);
       this.logger.info({ groupId: msg.groupId, userId: msg.userId, severity, action: 'ban', durationSeconds: 600, reason }, 'punishment executed');
@@ -498,7 +498,7 @@ watchlist 命中 → category: "watchlist"，components_seen 列出命中片段
       this.moderation.insert({
         msgId: msg.messageId, groupId: msg.groupId, userId: msg.userId,
         violation: true, severity: 5, action: 'kick', reason,
-        appealed: 0, reversed: false, timestamp: msg.timestamp,
+        appealed: 0, reversed: false, timestamp: msg.timestamp, originalContent: msg.content,
       });
       this.configs.incrementPunishments(msg.groupId);
       this.logger.info({ groupId: msg.groupId, userId: msg.userId, severity: 5, action: 'kick', reason }, 'punishment executed');
@@ -510,7 +510,7 @@ watchlist 命中 → category: "watchlist"，components_seen 列出命中片段
       this.moderation.insert({
         msgId: msg.messageId, groupId: msg.groupId, userId: msg.userId,
         violation: true, severity: 4, action: 'ban', reason,
-        appealed: 0, reversed: false, timestamp: msg.timestamp,
+        appealed: 0, reversed: false, timestamp: msg.timestamp, originalContent: msg.content,
       });
       this.configs.incrementPunishments(msg.groupId);
       this.logger.info({ groupId: msg.groupId, userId: msg.userId, severity: 4, action: 'ban', reason, note: 'opus-downgraded' }, 'punishment executed');

@@ -39,6 +39,8 @@ export interface ModerationRecord {
   appealed: 0 | 1 | 2;
   reversed: boolean;
   timestamp: number;
+  /** Original message content captured at assessment time. Null for legacy records. */
+  originalContent: string | null;
   // --- review fields (§13) ---
   reviewed: 0 | 1 | 2;    // 0=unreviewed, 1=approved, 2=rejected
   reviewedBy: string | null;
@@ -527,6 +529,7 @@ function modFromRow(row: ModerationRow): ModerationRecord {
     appealed: row.appealed as 0 | 1 | 2,
     reversed: row.reversed !== 0,
     timestamp: row.timestamp,
+    originalContent: (row as unknown as Record<string, unknown>).original_content as string | null ?? null,
     reviewed: (row.reviewed ?? 0) as 0 | 1 | 2,
     reviewedBy: row.reviewed_by ?? null,
     reviewedAt: row.reviewed_at ?? null,
@@ -737,13 +740,14 @@ class ModerationRepository implements IModerationRepository {
 
   insert(record: Omit<ModerationRecord, 'id' | 'reviewed' | 'reviewedBy' | 'reviewedAt'>): ModerationRecord {
     const stmt = this.db.prepare(`
-      INSERT INTO moderation_log (msg_id, group_id, user_id, violation, severity, action, reason, appealed, reversed, timestamp)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO moderation_log (msg_id, group_id, user_id, violation, severity, action, reason, appealed, reversed, timestamp, original_content)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const result = stmt.run(
       record.msgId, record.groupId, record.userId,
       record.violation ? 1 : 0, record.severity, record.action,
-      record.reason, record.appealed, record.reversed ? 1 : 0, record.timestamp
+      record.reason, record.appealed, record.reversed ? 1 : 0, record.timestamp,
+      record.originalContent ?? null,
     );
     return { ...record, id: Number(result.lastInsertRowid), reviewed: 0, reviewedBy: null, reviewedAt: null };
   }
@@ -2127,6 +2131,9 @@ export class Database {
     try { this._db.exec(`ALTER TABLE moderation_log ADD COLUMN reviewed    INTEGER NOT NULL DEFAULT 0`); } catch { /* already exists */ }
     try { this._db.exec(`ALTER TABLE moderation_log ADD COLUMN reviewed_by TEXT`); } catch { /* already exists */ }
     try { this._db.exec(`ALTER TABLE moderation_log ADD COLUMN reviewed_at INTEGER`); } catch { /* already exists */ }
+    // original_content: store the message text at assessment time so the review
+    // panel doesn't need to do a flaky timestamp-based lookup.
+    try { this._db.exec(`ALTER TABLE moderation_log ADD COLUMN original_content TEXT`); } catch { /* already exists */ }
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_mod_log_reviewed ON moderation_log(reviewed, group_id, timestamp DESC)`);
   }
 }

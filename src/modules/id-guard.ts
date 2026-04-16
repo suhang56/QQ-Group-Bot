@@ -97,7 +97,7 @@ export class IdCardGuard {
         reason,
         appealed: 0,
         reversed: false,
-        timestamp: msg.timestamp,
+        timestamp: msg.timestamp, originalContent: msg.content,
       });
     } catch (err) {
       this.logger.error({ err }, 'id-guard moderation insert failed');

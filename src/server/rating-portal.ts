@@ -179,15 +179,16 @@ export class RatingPortalServer {
       if (record.appealed !== 0) {
         body['appeal'] = { appealed: record.appealed, reversed: record.reversed };
       }
-      // Fetch the original message + surrounding context.
-      // moderation_log.msg_id is a short NapCat ID; messages.source_message_id
-      // is a long NapCat ID — they don't match. Fall back to timestamp+userId
-      // proximity search. Use findNearTimestamp() for direct SQL rather than
-      // getRecent().filter() which only searches the N most recent messages.
+      // Original message: prefer originalContent stored at assessment time;
+      // fall back to timestamp-based lookup for legacy records.
       const modTs = record.timestamp;
-      const origMsg = this.messages.findNearTimestamp(record.groupId, record.userId, modTs, 120);
-      if (origMsg) {
-        body['originalMessage'] = { content: origMsg.content, nickname: origMsg.nickname, userId: origMsg.userId, timestamp: origMsg.timestamp };
+      if (record.originalContent) {
+        body['originalMessage'] = { content: record.originalContent, userId: record.userId, timestamp: record.timestamp, nickname: null };
+      } else {
+        const origMsg = this.messages.findNearTimestamp(record.groupId, record.userId, modTs, 120);
+        if (origMsg) {
+          body['originalMessage'] = { content: origMsg.content, nickname: origMsg.nickname, userId: origMsg.userId, timestamp: origMsg.timestamp };
+        }
       }
       // Nearby context: all messages in the group within ±2 min of the moderation event
       const nearby = this.messages.getAroundTimestamp(record.groupId, modTs, 120, 10);
