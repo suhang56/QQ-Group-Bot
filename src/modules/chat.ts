@@ -416,6 +416,68 @@ export function extractTopFaces(messages: Array<{ content: string }>, topN: numb
     .map(([id]) => id);
 }
 
+// ── Mood signal detection for context injection (T1 tone-humanize) ──────
+// Lightweight heuristic: scan recent messages for playful/tense signals.
+// Returns a mood hint string for user-role context, or empty string.
+
+const PLAYFUL_TERMS = new Set([
+  '哈哈', '哈哈哈', '草', '嘿嘿', '笑死', '绷不住', '嘎嘎', '咕咕',
+  'xd', 'XD', 'hhh', '哈', '嘻嘻', '乐', '好笑', '哦哦哦', '啊啊啊',
+  '哈哈哈哈', '笑了', '绷', '太草了', '6', '666', '真的假的',
+  'www', 'ww', '呜呜', '嘤', '哭了', '呜呜呜', '救命',
+]);
+
+const TENSE_TERMS = new Set([
+  '滚', '操', '妈的', '傻逼', 'sb', '废物', '智障', '煞笔',
+  '吵架', '别骂', '骂人', '喷', '尼玛', '狗',
+]);
+
+/**
+ * Detect mood signal from recent messages.
+ * Returns 'playful' | 'tense' | null.
+ * Exported for testing.
+ */
+export function detectMoodSignal(
+  recentMessages: Array<{ content: string }>,
+  windowSize = 5,
+): 'playful' | 'tense' | null {
+  const window = recentMessages.slice(-windowSize);
+  if (window.length === 0) return null;
+
+  let playfulHits = 0;
+  let tenseHits = 0;
+
+  for (const msg of window) {
+    const text = msg.content.toLowerCase();
+    // Check each term as substring (handles "哈哈哈哈" matching "哈哈")
+    for (const term of PLAYFUL_TERMS) {
+      if (text.includes(term.toLowerCase())) { playfulHits++; break; }
+    }
+    for (const term of TENSE_TERMS) {
+      if (text.includes(term.toLowerCase())) { tenseHits++; break; }
+    }
+  }
+
+  // Threshold: >= 2 messages with signal
+  if (tenseHits >= 2) return 'tense';
+  if (playfulHits >= 2) return 'playful';
+  return null;
+}
+
+/**
+ * Build a mood hint for user-role context injection.
+ * Soft hint, not a tone override — respects feedback_dont_stack_persona_overrides.
+ */
+export function buildMoodHint(mood: 'playful' | 'tense' | null): string {
+  if (mood === 'playful') {
+    return '\n（当前群聊氛围：玩梗/开心，跟着玩比 dismiss 更自然）';
+  }
+  if (mood === 'tense') {
+    return '\n（当前群聊氛围：紧张/冲突，谨慎回应，别火上浇油）';
+  }
+  return '';
+}
+
 const MAX_OUTGOING_IDS = 50;
 
 export class ChatModule implements IChatModule {
@@ -1190,7 +1252,11 @@ export class ChatModule implements IChatModule {
       }
     }
 
-    const userContent = `${liveBlock}${replyContextBlock}${keywordSection}${wideSection}${mediumSection}${immediateSection}${avoidSection}以上语境里 [你(昵称)] 是你自己说过的，[别人昵称] 是群友说的。**不要把群友的话当成你自己说过的**。${atMentionDirective}${youAddressedDirective}
+    // T1 tone-humanize: detect mood signal from recent context for soft hint injection
+    const moodSignal = detectMoodSignal(immediateChron as Array<{ content: string }>);
+    const moodHint = buildMoodHint(moodSignal);
+
+    const userContent = `${liveBlock}${replyContextBlock}${keywordSection}${wideSection}${mediumSection}${immediateSection}${avoidSection}以上语境里 [你(昵称)] 是你自己说过的，[别人昵称] 是群友说的。**不要把群友的话当成你自己说过的**。${atMentionDirective}${youAddressedDirective}${moodHint}
 
 ← 要接的这条 — 只输出一个：${isAtTrigger ? '一条自然反应（不能是 <skip>）' : '<skip> 或 一条自然反应'}。${distinctSpeakers >= 3 ? `\n最近 ${distinctSpeakers} 个群友同时聊，可以用"你们"集体称呼。` : ''}
 ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMessage.content) ? '\n**注意**: 这条消息有人直接骂你。**绝对不要回"自言自语吗"/"在骂谁"** — 那是 bot tell。要么硬怼回去，要么 <skip>。' : ''}`;
