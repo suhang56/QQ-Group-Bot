@@ -64,3 +64,59 @@
 - New tests: 33
 - Pre-existing failures: 15 (all in lore-retrieval.test.ts, fixture-dependent)
 - New failures introduced: 0
+
+---
+
+## Tone-Humanize 专项 (A+B+C 组合)
+
+**实施日期：** 2026-04-16
+**最终测试状态：** 1690 passed / 15 failed (pre-existing lore-retrieval)
+**tsc --noEmit：** clean
+
+### T0：方案 A — persona 词池/例子改写 (e115f14)
+
+**改动：**
+- `chat.ts:272`：被调侃时增加接梗等价分支（跟着玩/好奇词池），与反怼概率相当
+- `chat.ts:312`：集体称呼三例全换为中性/跟着玩语气（"你们玩什么呢"/"突然好热闹"/"??我也要"），消除居高临下旁观句式
+- 未新增 persona 硬规则（净新增 0 条），仅改现有例子和词池排列
+- dismissive 拒绝词池（烦/关我屁事/想屁吃）完整保留
+
+**测试：** 5 个 unit test（playful 词池验证、旧例子移除、新例子存在、边界感保留、圈内底线未动）
+**mhy 回归：** 15 个 pre-existing failure 不变，无新增退化
+
+### T1：方案 B — 情绪对齐软提示注入 (8770aaa)
+
+**改动：**
+- 新增 `detectMoodSignal(recentMessages, windowSize=5)` 函数，检测 playful/tense/null 三档情绪
+- 新增 `buildMoodHint(mood)` 生成 user-role 软提示
+- 在 `userContent` 组装段注入 mood hint（user-role，非 system-role，不与 persona 冲突）
+- 梗词集合含 bandori 圈常用词（嘎嘎/咕咕/草/哈哈/笑死/绷不住 等）
+- hint 不含 `<skip>` 控制 token，不向 deflection/mimic 泄漏
+
+**测试：** 11 个 unit test（playful/tense/null 检测、阈值、窗口、混合优先级、空输入、控制 token 隔离）
+**mhy 回归：** PASS（无变化）
+
+### T2：方案 C — 骨架级近重复检测 (084c21d)
+
+**改动：**
+- 新增 `extractSkeleton(text)` 函数，将内容词替换为 `_`，保留虚词/标点/结构词
+- 新增 `skeletonSimilarity(a, b)` 基于 bigram Jaccard 比较骨架
+- 在 near-dup 检测段后增加骨架检测，阈值 0.6，窗口 5
+- 捕获「你们又在 X 了」/「你们又在 Y 了」等句式重复（bigram Jaccard 漏过的 case）
+- 与 echo 检测正交独立，与 P1-7 同批
+- 更新 `chat.test.ts` 集体称呼例子断言适配 T0 改动
+
+**测试：** 12 个 unit test（骨架提取、相似度、空字符串、核心用例、不同长度不误判）
+**mhy 回归：** PASS（无变化）
+
+### 总计
+
+| 项目 | 数值 |
+|------|------|
+| 新增 test | 28 (tone-humanize.test.ts) |
+| 总 test | 1705 (was 1676) |
+| 通过 | 1690 |
+| 失败 | 15 (全部 pre-existing) |
+| 新增失败 | 0 |
+| commit 数 | 3 (e115f14, 8770aaa, 084c21d) |
+| 净新增 persona 规则 | 0 |
