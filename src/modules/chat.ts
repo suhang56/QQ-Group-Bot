@@ -9,7 +9,7 @@ import { ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
 import { lurkerDefaults, chatHistoryDefaults, RUNTIME_CHAT_MODEL, CHAT_QWEN_MODEL, CHAT_QWEN_DISABLED, CHAT_DEEPSEEK_MODEL, DEEPSEEK_ENABLED } from '../config.js';
 import { parseFaces } from '../utils/qqface.js';
-import { sentinelCheck, postProcess, sanitize, applyPersonaFilters, isEcho, checkConfabulation, hasForbiddenContent, HARDENED_SYSTEM } from '../utils/sentinel.js';
+import { sentinelCheck, postProcess, sanitize, applyPersonaFilters, isEcho, checkConfabulation, hasForbiddenContent, HARDENED_SYSTEM, entityGuard, qaReportRegenHint, hasCoreferenceSelfReference, outsiderToneRegenHint, detectInsultEchoRisk } from '../utils/sentinel.js';
 import { buildStickerSection, getStickerPool, type LiveStickerEntry } from '../utils/stickers.js';
 import { MoodTracker, PROACTIVE_POOLS, type MoodDescription } from './mood.js';
 import type { ICharModule } from './char.js';
@@ -23,6 +23,11 @@ import { buildAliasMap, extractEntities, buildLorePayload } from './lore-retriev
 import type { ILoreLoader } from './lore-loader.js';
 import type { IDeflectionEngine } from './deflection-engine.js';
 import { tokenizeLore as _tokenizeLore, extractTokens as _extractTokens, extractKeywords as _extractKeywords } from '../utils/text-tokenize.js';
+import { loadGroupJargon, formatJargonBlock } from './jargon-provider.js';
+import { makeEngagementDecision, type EngagementSignals } from './engagement-decision.js';
+import { scoreComprehensionSafe, type ComprehensionContext } from '../services/comprehension-scorer.js';
+import { ConversationStateTracker } from './conversation-state.js';
+import { pickVariant, buildVariantSystemPrompt, type VariantContext } from './prompt-variants.js';
 
 export interface IChatModule {
   generateReply(groupId: string, triggerMessage: GroupMessage, _recentMessages: GroupMessage[]): Promise<string | null>;
@@ -220,7 +225,7 @@ export const SILENCE_BREAKER_POOL = [
 export type DeflectCategory =
   | 'identity' | 'task' | 'memory' | 'recite'
   | 'curse' | 'silence' | 'mood_happy' | 'mood_bored' | 'mood_annoyed'
-  | 'at_only';
+  | 'at_only' | 'confused';
 
 export const DEFLECT_SITUATIONS: Record<DeflectCategory, string> = {
   identity: '有人怀疑你是机器人/AI，想让你承认身份。你不承认，轻描淡写绕开。',
@@ -233,6 +238,7 @@ export const DEFLECT_SITUATIONS: Record<DeflectCategory, string> = {
   mood_bored: '你很无聊，想来一句"好困""没意思"之类的。',
   mood_annoyed: '你有点烦，想发泄一句，不针对任何人。',
   at_only: '有人艾特了你但没说话，只是点了一下你。你的反应是简短的"？"或者"叫我干嘛"之类，看到@就随便回一下。',
+  confused: '有人跟你说了一句你完全不懂的话/黑话/方言/缩写，你听不懂。你的反应是自然地表示困惑，不要试图分析或解释那句话。',
 };
 
 export const DEFLECT_FALLBACKS: Record<DeflectCategory, string[]> = {
@@ -246,6 +252,7 @@ export const DEFLECT_FALLBACKS: Record<DeflectCategory, string[]> = {
   mood_bored: ['好困', '没意思', '无聊', ''],
   mood_annoyed: ['烦', '没意思', '哎'],
   at_only: ['?', '嗯?', '叫我干嘛', '说话啊', '艾特我干啥', '?怎么了', '什么事', '在', '咋了'],
+  confused: ['啊？', '我听不懂', '什么来着', '？？', '啥意思', '你说啥', '没听懂', '嗯？', '这是什么', '听不懂'],
 };
 
 export const BANGDREAM_PERSONA = `# 你的身份
@@ -688,6 +695,7 @@ export class ChatModule implements IChatModule {
   private readonly deflectionEngine: IDeflectionEngine | null;
   // per-group: whether the last generateReply call returned an evasive reply
   private readonly lastEvasiveReply = new Map<string, boolean>();
+  private readonly conversationState = new ConversationStateTracker();
   // per-group: fact ids injected into the system prompt of the last generateReply.
   // Router reads this right after generateReply returns to wire into self-learning.rememberInjection.
   private readonly lastInjectedFactIds = new Map<string, number[]>();
@@ -769,6 +777,20 @@ export class ChatModule implements IChatModule {
     }
   }
 
+  /**
+   * Restore botRecentOutputs from bot_replies table for all known groups.
+   * Call once after construction to survive process restarts.
+   */
+  restoreBotRecentOutputs(groupIds: ReadonlyArray<string>, limit = 10): void {
+    for (const gid of groupIds) {
+      const texts = this.db.botReplies.getRecentTexts(gid, limit);
+      if (texts.length > 0) {
+        this.botRecentOutputs.set(gid, texts);
+        this.logger.debug({ groupId: gid, count: texts.length }, 'Restored botRecentOutputs from DB');
+      }
+    }
+  }
+
   destroy(): void {
     if (this.moodProactiveTimer) {
       clearInterval(this.moodProactiveTimer);
@@ -778,6 +800,7 @@ export class ChatModule implements IChatModule {
       clearInterval(this.deflectRefillTimer);
       this.deflectRefillTimer = null;
     }
+    this.conversationState.destroy();
   }
 
   getMoodTracker(): MoodTracker {
@@ -1058,24 +1081,24 @@ export class ChatModule implements IChatModule {
 
     }
 
+    // ── Feed conversation state tracker ──────────────────────────────────
+    const jargonTermsForState = loadGroupJargon(this.db.rawDb, groupId).map(j => j.term);
+    this.conversationState.tick(
+      groupId, triggerMessage.content, triggerMessage.userId,
+      triggerMessage.timestamp, jargonTermsForState,
+    );
+
     // ── Weighted participation scoring ───────────────────────────────────
     const recent3 = this.db.messages.getRecent(groupId, 3);
     const recent5 = this.db.messages.getRecent(groupId, this.chatBurstCount);
     const { score, factors, isDirect } = this._computeWeightedScore(groupId, triggerMessage, now, recent3, recent5);
 
     // Short-ack skip: messages like "ok"/"行了"/"嗯"/"好的"/"收到" are
-    // acknowledgments, not conversation turns. They shouldn't trigger a reply
-    // even when continuity + adminBoost push the score above threshold.
-    // Direct triggers (mention / reply-to-bot) still respond normally.
+    // acknowledgments, not conversation turns.
     const trimmedTrigger = triggerMessage.content.trim().toLowerCase();
     const isShortAck = !isDirect && /^(ok|okay|好|好的|嗯|嗯嗯|行|行了|收到|明白|懂了|知道了|👌|👍|gg|awsl|666+)$/.test(trimmedTrigger);
 
-    // Meta-commentary skip: admin talks ABOUT the bot in third person without
-    // @-mentioning it. "她第一次不知道会装傻" / "bot 又开始胡说了" / "小号学会
-    // 了" — these are dev observations between admins, not turns directed at
-    // the bot. The bot should NOT chat-reply. Pattern: contains third-person
-    // reference (她/bot/小号) + a descriptive verb phrase, and is not a direct
-    // trigger. Keeps the bot from interjecting on dev meta-discussion.
+    // Meta-commentary skip: admin talks ABOUT the bot in third person
     const rawTrigger = triggerMessage.content;
     const isMetaCommentary = !isDirect
       && (triggerMessage.role === 'admin' || triggerMessage.role === 'owner')
@@ -1083,33 +1106,67 @@ export class ChatModule implements IChatModule {
 
     const isPicBotCommand = this._isPicBotCommand(groupId, rawTrigger, isDirect);
 
-    const decision = (!isShortAck && !isMetaCommentary && !isPicBotCommand && (isDirect || score >= this.chatMinScore)) ? 'respond' : 'skip';
-    this.logger.debug({ groupId, score: +score.toFixed(3), factors, chatMinScore: this.chatMinScore, decision }, 'participation score');
+    // Input-pattern shortcuts: detect adversarial patterns
+    const isProbe = IDENTITY_PROBE.test(triggerMessage.content);
+    const isTask  = !isProbe && TASK_REQUEST.test(triggerMessage.content);
+    const isInject = !isProbe && !isTask && MEMORY_INJECT.test(triggerMessage.content);
+    const isHarass = !isProbe && !isTask && !isInject && SEXUAL_HARASSMENT.test(triggerMessage.content);
+    const isAdversarial = isProbe || isTask || isInject || isHarass;
 
-    if (decision === 'skip') {
+    // ── Comprehension scoring (BEFORE Claude call) ────────────────────
+    const comprehensionCtx: ComprehensionContext = {
+      loreKeywords: this._getLoreKeywords(groupId),
+      jargonTerms: loadGroupJargon(this.db.rawDb, groupId).map(j => j.term.toLowerCase()),
+      aliasKeys: this._getAliasKeys(groupId),
+    };
+    const { score: comprehensionScore } = scoreComprehensionSafe(triggerMessage.content, comprehensionCtx);
+
+    // ── Engagement decision (decision BEFORE Claude call) ─────────────
+    const engagementSignals: EngagementSignals = {
+      isMention: this._isMention(triggerMessage),
+      isReplyToBot: this._isReplyToBot(triggerMessage),
+      participationScore: score,
+      minScore: this.chatMinScore,
+      isShortAck,
+      isMetaCommentary,
+      isPicBotCommand,
+      comprehensionScore,
+      isAdversarial,
+      isPureAtMention: false, // already handled above
+    };
+    const engagementDecision = makeEngagementDecision(engagementSignals);
+
+    this.logger.debug({
+      groupId,
+      score: +score.toFixed(3),
+      factors,
+      comprehension: +comprehensionScore.toFixed(2),
+      engagement: engagementDecision.strength,
+      reason: engagementDecision.reason,
+    }, 'engagement decision');
+
+    if (!engagementDecision.shouldReply) {
       return null;
     }
 
     // Record last-reply timestamp for silence factor (applies to all replies)
     this.lastProactiveReply.set(groupId, now);
 
-    // Input-pattern shortcuts: bypass Claude entirely for known adversarial patterns
-    const isProbe = IDENTITY_PROBE.test(triggerMessage.content);
-    const isTask  = !isProbe && TASK_REQUEST.test(triggerMessage.content);
-    const isInject = !isProbe && !isTask && MEMORY_INJECT.test(triggerMessage.content);
-    const isHarass = !isProbe && !isTask && !isInject && SEXUAL_HARASSMENT.test(triggerMessage.content);
-
-    if (isProbe || isTask || isInject || isHarass) {
-      const isCurse = this._teaseIncrement(groupId, triggerMessage.userId, now);
-      if (isCurse) return this._generateDeflection('curse', triggerMessage);
-      if (isHarass) return this._generateDeflection('curse', triggerMessage); // harassment → always curse-tier
-      if (isProbe) return this._generateDeflection('identity', triggerMessage);
-      if (isTask) {
-        // Distinguish recite-style exploits from generic task requests
-        const isRecite = /(背|接龙|续写|恩师|接下[一]?句|继续[背念说])/i.test(triggerMessage.content);
-        return this._generateDeflection(isRecite ? 'recite' : 'task', triggerMessage);
+    // React path: deflection without calling Claude
+    if (engagementDecision.strength === 'react') {
+      if (isAdversarial) {
+        const isCurse = this._teaseIncrement(groupId, triggerMessage.userId, now);
+        if (isCurse) return this._generateDeflection('curse', triggerMessage);
+        if (isHarass) return this._generateDeflection('curse', triggerMessage); // harassment → always curse-tier
+        if (isProbe) return this._generateDeflection('identity', triggerMessage);
+        if (isTask) {
+          const isRecite = /(背|接龙|续写|恩师|接下[一]?句|继续[背念说])/i.test(triggerMessage.content);
+          return this._generateDeflection(isRecite ? 'recite' : 'task', triggerMessage);
+        }
+        return this._generateDeflection('memory', triggerMessage);
       }
-      return this._generateDeflection('memory', triggerMessage);
+      // Non-adversarial react: low comprehension → confused deflection
+      return this._generateDeflection('confused', triggerMessage);
     }
 
     // ── Mood update ───────────────────────────────────────────────────────
@@ -1344,7 +1401,11 @@ export class ChatModule implements IChatModule {
     const moodSignal = detectMoodSignal(immediateChron as Array<{ content: string }>);
     const moodHint = buildMoodHint(moodSignal);
 
-    const userContent = `${liveBlock}${replyContextBlock}${keywordSection}${wideSection}${mediumSection}${immediateSection}${avoidSection}以上语境里 [你(昵称)] 是你自己说过的，[别人昵称] 是群友说的。**不要把群友的话当成你自己说过的**。${atMentionDirective}${youAddressedDirective}${moodHint}
+    // P2: conversation state context injection (user-role, not system-role)
+    const convStateHint = this.conversationState.formatForPrompt(groupId);
+    const convStateLine = convStateHint ? `\n${convStateHint}` : '';
+
+    const userContent = `${liveBlock}${replyContextBlock}${keywordSection}${wideSection}${mediumSection}${immediateSection}${avoidSection}以上语境里 [你(昵称)] 是你自己说过的，[别人昵称] 是群友说的。**不要把群友的话当成你自己说过的**。${atMentionDirective}${youAddressedDirective}${moodHint}${convStateLine}
 
 ← 要接的这条 — 只输出一个：${isAtTrigger ? '一条自然反应（不能是 <skip>）' : '<skip> 或 一条自然反应'}。${distinctSpeakers >= 3 ? `\n最近 ${distinctSpeakers} 个群友同时聊，可以用"你们"集体称呼。` : ''}
 ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMessage.content) ? '\n**注意**: 这条消息有人直接骂你。**绝对不要回"自言自语吗"/"在骂谁"** — 那是 bot tell。要么硬怼回去，要么 <skip>。' : ''}`;
@@ -1359,6 +1420,31 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     const charModeActive = !!(this.db.groupConfig.get(groupId)?.activeCharacterId && this.charModule);
     const tuningBlock = charModeActive ? null : this._loadTuning();
 
+    // P3-2: Pick prompt variant based on conversation context
+    const convSnapshot = this.conversationState.getSnapshot(groupId);
+    const sensitiveEntityHit = /hhw|hello.*happy|声优|cv|中之人|键政|政治|黑粉|毒唯|引战/i.test(triggerMessage.content);
+    const activeJokeHit = convSnapshot.activeJokes.length > 0;
+    const variantCtx: VariantContext = {
+      activeJokeHit,
+      sensitiveEntityHit,
+      personaRoleCard: '', // role card is already in systemPrompt
+    };
+    const variant = pickVariant(variantCtx);
+    const variantBlock = buildVariantSystemPrompt(variantCtx).systemPrompt;
+    this.logger.debug({ groupId, variant, activeJokeHit, sensitiveEntityHit }, 'prompt variant selected');
+
+    // P3-3: <group-context> block with currentTopics + activeJokes for LLM
+    const groupContextParts: string[] = [];
+    if (convSnapshot.currentTopics.length > 0) {
+      groupContextParts.push(`当前话题: ${convSnapshot.currentTopics.map(t => t.word).join(', ')}`);
+    }
+    if (convSnapshot.activeJokes.length > 0) {
+      groupContextParts.push(`活跃梗: ${convSnapshot.activeJokes.map(j => `${j.term}(已重复${j.count}次)`).join(', ')}`);
+    }
+    const groupContextBlock = groupContextParts.length > 0
+      ? `<group-context>\n${groupContextParts.join('\n')}\n</group-context>`
+      : '';
+
     const pickedModel = this._pickChatModel(groupId, triggerMessage, factors);
     this.logger.debug(
       { groupId, pickedModel, trigger: triggerMessage.content.slice(0, 50) },
@@ -1366,16 +1452,15 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     );
 
     const chatRequest = (hardened = false) => this.claude.complete({
-      // Hardened-regen path always escalates to Sonnet for safety, regardless
-      // of the normal routing decision.
       model: hardened ? RUNTIME_CHAT_MODEL : pickedModel,
       maxTokens: 300,
-      // identity prompt is cached; mood section appended (cache:true required by type, API ignores dups)
       system: hardened
         ? [{ text: HARDENED_SYSTEM, cache: true }]
         : [
             { text: systemPrompt, cache: true },
             { text: STATIC_CHAT_DIRECTIVES, cache: true },
+            { text: variantBlock, cache: true },
+            ...(groupContextBlock ? [{ text: groupContextBlock, cache: true as const }] : []),
             ...(moodSection ? [{ text: moodSection, cache: true as const }] : []),
             ...(contextStickerSection ? [{ text: contextStickerSection, cache: true as const }] : []),
             ...(rotatedStickerSection ? [{ text: rotatedStickerSection, cache: true as const }] : []),
@@ -1400,7 +1485,77 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       // Use whitelist-aware mface filtering: keep mface codes whose key is
       // in the group's learned sticker pool (P0-1 fix for mface strip bug)
       const mfaceKeys = this.localStickerRepo?.getMfaceKeys(groupId) ?? null;
-      const processed = applyPersonaFilters(sanitize(text), mfaceKeys);
+      let processed = applyPersonaFilters(sanitize(text), mfaceKeys);
+
+      // P3-4a: Entity guard — replace disparagement with neutral fallback
+      const entityReplacement = entityGuard(processed);
+      if (entityReplacement !== null) {
+        this.logger.info({ groupId, original: processed, replacement: entityReplacement }, 'entity-guard replaced output');
+        processed = entityReplacement;
+      }
+
+      // P3-4b: QA-report detector — flag overly declarative output for regen
+      const qaHint = qaReportRegenHint(processed);
+      if (qaHint) {
+        this.logger.info({ groupId, original: processed }, 'qa-report-detector flagged — regenerating with casual hint');
+        try {
+          const regenResponse = await chatRequest(true);
+          const regenText = applyPersonaFilters(sanitize(regenResponse.text), mfaceKeys);
+          if (regenText && !qaReportRegenHint(regenText)) {
+            processed = regenText;
+          }
+        } catch {
+          // keep original if regen fails
+        }
+      }
+
+      // P3-4c: Coreference guard — detect "在说{speakerNick}" self-reference
+      if (hasCoreferenceSelfReference(processed, [triggerMessage.nickname])) {
+        this.logger.info({ groupId, original: processed, speaker: triggerMessage.nickname }, 'coreference-guard flagged — regenerating');
+        try {
+          const regenResponse = await chatRequest(true);
+          const regenText = applyPersonaFilters(sanitize(regenResponse.text), mfaceKeys);
+          if (regenText && !hasCoreferenceSelfReference(regenText, [triggerMessage.nickname])) {
+            processed = regenText;
+          }
+        } catch {
+          // keep original if regen fails
+        }
+      }
+
+      // Case 6: Outsider commentator tone — "你们都X啊" / "你们在X什么"
+      const outsiderHint = outsiderToneRegenHint(processed);
+      if (outsiderHint) {
+        this.logger.info({ groupId, original: processed }, 'outsider-tone flagged — regenerating');
+        try {
+          const regenResponse = await chatRequest(true);
+          const regenText = applyPersonaFilters(sanitize(regenResponse.text), mfaceKeys);
+          if (regenText && !outsiderToneRegenHint(regenText)) {
+            processed = regenText;
+          }
+        } catch {
+          // keep original if regen fails
+        }
+      }
+
+      // Case 8: Insult echo — bot agrees with insult targeting a groupmate
+      const recentHumanContents = _recentMessages
+        .filter(m => m.userId !== this.botUserId)
+        .slice(-4)
+        .map(m => m.content);
+      if (detectInsultEchoRisk(processed, recentHumanContents)) {
+        this.logger.info({ groupId, original: processed }, 'insult-echo flagged — regenerating');
+        try {
+          const regenResponse = await chatRequest(true);
+          const regenText = applyPersonaFilters(sanitize(regenResponse.text), mfaceKeys);
+          if (regenText && !detectInsultEchoRisk(regenText, recentHumanContents)) {
+            processed = regenText;
+          }
+        } catch {
+          // keep original if regen fails
+        }
+      }
+
       // Claude explicitly skips this trigger
       if (/^<skip>\s*$/i.test(processed)) {
         this.logger.debug({ groupId, trigger: triggerMessage.content }, 'Claude explicitly skipped');
@@ -2141,7 +2296,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
   private async _refillAllDeflectCategories(): Promise<void> {
     const allCategories: DeflectCategory[] = [
       'identity', 'task', 'memory', 'recite',
-      'curse', 'silence', 'mood_happy', 'mood_bored', 'mood_annoyed', 'at_only',
+      'curse', 'silence', 'mood_happy', 'mood_bored', 'mood_annoyed', 'at_only', 'confused',
     ];
     await Promise.allSettled(allCategories.map(c => this._refillDeflectCategory(c)));
   }
@@ -2159,6 +2314,27 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       if (loreTokens.has(token)) return true;
     }
     return false;
+  }
+
+  /** Get lore keywords set for comprehension scoring. Triggers cache population if needed. */
+  private _getLoreKeywords(groupId: string): ReadonlySet<string> {
+    // Ensure lore is loaded to populate cache
+    if (this.loreLoader) {
+      this.loreLoader.hasLoreKeyword(groupId, '');
+    } else {
+      this._loadRelevantLore(groupId, '', []);
+    }
+    return this.loreKeywordsCache.get(groupId) ?? new Set();
+  }
+
+  /** Get alias map keys for comprehension scoring. */
+  private _getAliasKeys(groupId: string): ReadonlyArray<string> {
+    const chunkMap = this.loreChunkAliasMap.get(groupId);
+    if (chunkMap) return [...chunkMap.keys()];
+    // Also check loreAliasIndex (per-member lore)
+    const aliasIndex = this.loreAliasIndex.get(groupId);
+    if (aliasIndex) return [...aliasIndex.keys()];
+    return [];
   }
 
   /**
@@ -2660,6 +2836,10 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       ? `\n\n# 关于这个群\n${lore}`
       : '';
 
+    // Inject learned jargon from jargon_candidates table
+    const jargonEntries = loadGroupJargon(this.db.rawDb, groupId);
+    const jargonSection = formatJargonBlock(jargonEntries);
+
     const imageAwarenessLine = this.visionService
       ? '\n\n如果消息里有 〔你看到那张图是：XXX〕 格式，那是**你自己看到的图的内容**，直接基于它做反应，不要反问"XXX 是什么"，不要说"描述"二字。'
       : '';
@@ -2675,7 +2855,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       ? '\n如果有人问 "群规 / 群里有什么规定" 之类，直接列出上面 ## 本群的规矩 段落里的实际规矩（用自己的口吻，不要照抄官方话术），绝对不要说 "没群规" / "不知道" / "想发什么发什么" 之类。'
       : '';
 
-    const text = `${personaBase}${adminStyleSection}${loreSection}${rulesBlock}${imageAwarenessLine}\n\n---\n简短自然（普通闲聊 1-3 句话；涉及列举 / 计数 / 时间线 / 多人信息且事实段落有料时允许 2-4 行展开）。群友提到群里的人名、梗、黑话，基于上面资料回答；不知道的就"啥来的"，不要装懂。${rulesInstruction}${outputRules}`;
+    const text = `${personaBase}${adminStyleSection}${loreSection}${jargonSection}${rulesBlock}${imageAwarenessLine}\n\n---\n简短自然（普通闲聊 1-3 句话；涉及列举 / 计数 / 时间线 / 多人信息且事实段落有料时允许 2-4 行展开）。群友提到群里的人名、梗、黑话，基于上面资料回答；不知道的就"啥来的"，不要装懂。${rulesInstruction}${outputRules}`;
 
     // Only cache the full text when NOT using per-member lore (lore varies per call)
     if (!hasPerMemberLore) {

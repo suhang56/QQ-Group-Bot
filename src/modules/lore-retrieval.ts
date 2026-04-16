@@ -2,6 +2,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { tokenizeLore } from '../utils/text-tokenize.js';
 import { createLogger } from '../utils/logger.js';
+import type { LearnedFact } from '../storage/db.js';
 
 const logger = createLogger('lore-retrieval');
 
@@ -18,9 +19,10 @@ const TOTAL_CAP = 8000;
  * Extracts aliases from:
  *   1. ### headings: names, parenthesized aliases, slash-separated variants
  *   2. | **bold** | table entries: meme/slang terms, slash-separated variants
+ *   3. learned_facts with topic containing '别名' (e.g. "X又叫Y" → Y maps to X's chunk)
  * Single-character tokens are excluded.
  */
-export function buildAliasMap(chunksPath: string): Map<string, number[]> {
+export function buildAliasMap(chunksPath: string, learnedAliasFacts?: ReadonlyArray<LearnedFact>): Map<string, number[]> {
   const aliasMap = new Map<string, number[]>();
 
   let raw: string;
@@ -108,6 +110,46 @@ export function buildAliasMap(chunksPath: string): Map<string, number[]> {
       } else {
         aliasMap.set(alias, [chunkIndex]);
       }
+    }
+  }
+
+  // 3. Merge learned alias facts: "X又叫Y" / "X也叫Y" / "X的别名是Y"
+  // Pattern: extract the subject (X) and the new alias (Y), then find X in the
+  // existing aliasMap to determine which chunk(s) Y should point to.
+  if (learnedAliasFacts && learnedAliasFacts.length > 0) {
+    let merged = 0;
+    // Patterns: "X又叫Y", "X也叫Y", "X的别名是Y", "Y是X的别名", "Y就是X"
+    const ALIAS_PATTERNS = [
+      /^(.{2,20})(?:又叫|也叫|也称|别名是|的别名(?:是|叫))(.{2,20})$/,
+      /^(.{2,20})(?:就是|其实是)(.{2,20})$/,
+    ];
+    for (const fact of learnedAliasFacts) {
+      const text = fact.fact.trim();
+      for (const pattern of ALIAS_PATTERNS) {
+        const m = pattern.exec(text);
+        if (!m) continue;
+        const subject = m[1]!.trim().toLowerCase();
+        const newAlias = m[2]!.trim().toLowerCase();
+        if (newAlias.length < 2) break;
+
+        // Find which chunks the subject (or its existing aliases) maps to
+        const subjectChunks = aliasMap.get(subject);
+        if (subjectChunks && subjectChunks.length > 0) {
+          const existing = aliasMap.get(newAlias);
+          if (existing) {
+            for (const idx of subjectChunks) {
+              if (!existing.includes(idx)) existing.push(idx);
+            }
+          } else {
+            aliasMap.set(newAlias, [...subjectChunks]);
+          }
+          merged++;
+        }
+        break; // only match one pattern per fact
+      }
+    }
+    if (merged > 0) {
+      logger.debug({ chunksPath, mergedFromLearnedFacts: merged }, 'Learned alias facts merged into alias map');
     }
   }
 

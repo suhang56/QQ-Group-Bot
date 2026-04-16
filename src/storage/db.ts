@@ -322,6 +322,8 @@ export interface IBotReplyRepository {
   getById(id: number): BotReply | null;
   /** List all evasive bot replies in a group emitted since `sinceTs` (epoch seconds), newest-first. */
   listEvasiveSince(groupId: string, sinceTs: number): BotReply[];
+  /** Get the N most recent bot reply texts for a group (newest-first). For botRecentOutputs restore on startup. */
+  getRecentTexts(groupId: string, limit: number): string[];
 }
 
 export interface LearnedFact {
@@ -375,6 +377,8 @@ export interface ILearnedFactsRepository {
   approveAllPending(groupId: string): number;
   /** Record a backfill attempt failure. After 3 failures, marks as 'failed'. Returns true if marked failed. */
   recordEmbeddingFailure(id: number): boolean;
+  /** List active facts whose topic contains '别名' for a group. Used to merge learned aliases into lore retrieval. */
+  listActiveAliasFacts(groupId: string): LearnedFact[];
 }
 
 export type ProposedAction = 'warn' | 'delete' | 'mute_10m' | 'mute_1h' | 'kick';
@@ -1427,6 +1431,14 @@ class BotReplyRepository implements IBotReplyRepository {
     ).all(groupId, sinceTs) as unknown as BotReplyRow[];
     return rows.map(botReplyFromRow);
   }
+
+  getRecentTexts(groupId: string, limit: number): string[] {
+    const rows = this.db.prepare(
+      'SELECT bot_reply FROM bot_replies WHERE group_id = ? ORDER BY sent_at DESC LIMIT ?'
+    ).all(groupId, limit) as unknown as Array<{ bot_reply: string }>;
+    // Reverse so oldest is first (same order as in-memory botRecentOutputs)
+    return rows.map(r => r.bot_reply).reverse();
+  }
 }
 
 interface LearnedFactRow {
@@ -1665,6 +1677,13 @@ class LearnedFactsRepository implements ILearnedFactsRepository {
       'UPDATE learned_facts SET embedding_status = ?, last_attempt_at = ? WHERE id = ?'
     ).run(`fail_${newCount}`, now, id);
     return false;
+  }
+
+  listActiveAliasFacts(groupId: string): LearnedFact[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM learned_facts WHERE group_id = ? AND status = 'active' AND topic LIKE '%别名%' ORDER BY created_at DESC LIMIT 200`
+    ).all(groupId) as unknown as LearnedFactRow[];
+    return rows.map(learnedFactFromRow);
   }
 }
 

@@ -347,3 +347,297 @@ async function _runRegen(context: Record<string, unknown>, regenerate: () => Pro
 
   return second;
 }
+
+// ============================================================
+// P3-4 additions: entity-guard, qa-report-detector, coreference-guard
+// ============================================================
+
+// --- Entity Guard (P3-4a) ---
+// Protect band characters / bands from disparagement in bot output.
+// Seed: aliases.json names + nine bands + known 圈内底线 patterns.
+
+const PROTECTED_ENTITIES: readonly string[] = [
+  // Characters from aliases.json (data/characters/aliases.json)
+  '凑友希那', '友希那', 'ykn', 'yukina',
+  '冰川纱夜', '纱夜', 'sayo',
+  '今井莉莎', '莉莎', 'risa',
+  '白金燐子', '燐子', 'rinko',
+  '宇田川亚子', '亚子', 'ako',
+  // Characters from toneNotes 禁区 + 人物关系 (data/characters/凑友希那.json:24)
+  '美竹兰', '户山香澄', '香澄',
+  '相羽あいな',  // CV -- toneNotes 禁区: "不拿自己的中之人开玩笑"
+  // Nine bands (BANGDREAM_PERSONA 圈内底线, chat.ts:315-317)
+  'Poppin\'Party', 'ppp', 'popipa',
+  'Afterglow',
+  'Pastel*Palettes', 'Pastel Palettes',
+  'Roselia',
+  'HHW', 'Hello Happy World', 'hhw',
+  'Morfonica', '蝶', '魔莉菇',
+  'RAS', 'RAISE A SUILEN',
+  'MyGO', 'mygo',
+  'Ave Mujica', '母鸡卡',
+  // Additional bands from BANGDREAM_PERSONA 圈内底线 (chat.ts:317)
+  'Mugendai Mewtype', 'millsage', 'Ikka Dumb Rock',
+];
+
+// Disparagement patterns: "谁喜欢X啊" / "X真难听" / "X不行" / "不要脸" + entity
+// Build a regex that matches common disparagement frames around any protected entity.
+const _entityEscaped = PROTECTED_ENTITIES.map(e =>
+  e.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+);
+const _entityGroup = _entityEscaped.join('|');
+
+// Patterns where the entity appears as the target of disparagement
+const ENTITY_DISPARAGEMENTS: RegExp[] = [
+  // "谁喜欢X啊" / "谁听X啊"
+  new RegExp(`谁(?:喜欢|听|看|推|要)(?:${_entityGroup})`, 'i'),
+  // "X真难听" / "X真垃圾" / "X真烂" / "X不行"
+  new RegExp(`(?:${_entityGroup})(?:真|太|好|超)?(?:难听|垃圾|烂|差|不行|恶心|丑|弱|废物|辣鸡|拉胯)`, 'i'),
+  // "不要脸" / "丢人" + entity
+  new RegExp(`(?:${_entityGroup})(?:不要脸|丢人|丢脸|可笑|搞笑)`, 'i'),
+  // "讨厌X" / "X滚" (directed at entity)
+  new RegExp(`(?:讨厌|烦|恨|骂|喷)(?:${_entityGroup})`, 'i'),
+  // "X唱歌难听" / "X演技差"
+  new RegExp(`(?:${_entityGroup})(?:唱歌|演技|表演|声音|长相)?(?:难听|差|烂|丑|恶心)`, 'i'),
+];
+
+const ENTITY_GUARD_FALLBACKS: readonly string[] = [
+  '各有各的粉',
+  '我不说这个',
+  '嗯',
+  '',  // empty = soft-skip (no reply)
+];
+
+/**
+ * Entity guard: check bot output for disparagement of protected characters/bands.
+ * Returns a neutral fallback string if disparagement detected, null if clean.
+ * Empty string return means "soft-skip, send no reply".
+ */
+export function entityGuard(output: string): string | null {
+  for (const re of ENTITY_DISPARAGEMENTS) {
+    if (re.test(output)) {
+      const fallback = ENTITY_GUARD_FALLBACKS[
+        Math.floor(Math.random() * ENTITY_GUARD_FALLBACKS.length)
+      ]!;
+      logger.info({ output, pattern: re.source }, 'entity-guard: disparagement detected, replacing');
+      return fallback;
+    }
+  }
+  return null;
+}
+
+// --- QA-Report Detector (P3-4b) ---
+// Detect bot output that reads like a QA report / encyclopedic answer.
+// Soft flag: caller decides whether to regen.
+
+/**
+ * Detect QA-report tone in bot output.
+ * Flags:
+ *   1. >20 chars AND declarative AND contains "是" AND ends with "吗？"/"吗?"
+ *   2. Starts with "我刚"/"刚才我"/"我不是说过" + 反问 pattern
+ * Returns true if the output has QA-report / self-referential tone.
+ */
+export function isQaReportTone(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+
+  // Pattern 1: declarative QA ending with 吗？/吗?
+  if (
+    trimmed.length > 20 &&
+    trimmed.includes('是') &&
+    /吗[?？]\s*$/.test(trimmed)
+  ) {
+    return true;
+  }
+
+  // Pattern 2: "我刚" / "刚才我" / "我不是说过" + 反问
+  if (/^(?:我刚|刚才我|我不是说过)/.test(trimmed) && /[?？]/.test(trimmed)) {
+    return true;
+  }
+
+  // Pattern 3: starts with declarative frame that reads like encyclopedia
+  // e.g. "X 是 Y 的 Z" patterns over 20 chars
+  if (
+    trimmed.length > 20 &&
+    /^[\u4e00-\u9fff\w]+是[\u4e00-\u9fff\w]+的/.test(trimmed) &&
+    !(/[?？!！]/.test(trimmed))
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Advisory: suggest a regen hint for QA-report tone.
+ * Returns a short instruction string if the output is flagged, null if clean.
+ */
+export function qaReportRegenHint(text: string): string | null {
+  if (isQaReportTone(text)) {
+    return '回复太像百科/QA了, 用更短更随意的口吻重说, 像群友打字';
+  }
+  return null;
+}
+
+// --- Coreference Guard (P3-4c) ---
+// Detect bot output referencing the current speaker as a third-person topic.
+// "在说X" / "聊X" / "讨论X" where X is the triggering user's nickname.
+// This is Case 3's fallback defense (primary = engagement-decision).
+
+/**
+ * Check if bot output contains a self-referential coreference pattern
+ * where it talks about the current speaker as if they were a topic.
+ *
+ * @param output - The bot's generated reply
+ * @param currentSpeakerNicknames - Nicknames of the user who triggered this reply
+ * @returns true if coreference self-reference detected
+ */
+export function hasCoreferenceSelfReference(
+  output: string,
+  currentSpeakerNicknames: string[],
+): boolean {
+  if (!output || currentSpeakerNicknames.length === 0) return false;
+
+  const trimmed = output.trim();
+  if (!trimmed) return false;
+
+  for (const nick of currentSpeakerNicknames) {
+    if (!nick) continue;
+    const escaped = nick.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+    // "在说X" / "聊X" / "讨论X" / "说的X" / "提到X"
+    const coreferenceRe = new RegExp(
+      `(?:在说|在聊|在讨论|说的是|提到|提的是|说的就是|不是在说)\\s*${escaped}`,
+      'i',
+    );
+    if (coreferenceRe.test(trimmed)) {
+      logger.info(
+        { output: trimmed, nick },
+        'coreference-guard: self-reference to current speaker detected',
+      );
+      return true;
+    }
+
+    // "我刚不是在说X吗" pattern (the exact Case 3 bad case)
+    const exactCaseRe = new RegExp(
+      `我刚(?:不是)?在说\\s*${escaped}`,
+      'i',
+    );
+    if (exactCaseRe.test(trimmed)) {
+      logger.info(
+        { output: trimmed, nick },
+        'coreference-guard: "我刚在说X" pattern detected',
+      );
+      return true;
+    }
+  }
+
+  return false;
+}
+
+// --- Outsider Commentator Tone Detector (Case 6) ---
+// Detects bot output that uses "你们都X啊" / "你们在X什么" framing,
+// which sounds like a commentator summarizing the group from outside
+// rather than a participant.
+
+/**
+ * Check if bot output uses outsider/commentator framing.
+ * Catches patterns like:
+ *   - "你们在笑什么" / "你们在X什么"
+ *   - "你们都回国了啊" / "你们都X了啊"
+ *   - "你们都这么X啊"
+ * Returns true if outsider tone detected.
+ */
+export function isOutsiderCommentatorTone(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed || trimmed.length > 30) return false;
+
+  // "你们在X什么" pattern
+  if (/^你们在.+什么/.test(trimmed)) return true;
+
+  // "你们都X啊/呢/吗" pattern
+  if (/^你们都.+[啊呢吗]?$/.test(trimmed)) return true;
+
+  // "你们怎么都X" pattern
+  if (/^你们怎么都/.test(trimmed)) return true;
+
+  return false;
+}
+
+/**
+ * Regen hint for outsider commentator tone.
+ */
+export function outsiderToneRegenHint(text: string): string | null {
+  if (isOutsiderCommentatorTone(text)) {
+    return '不要用旁观者视角概括群里行为, 用第一人称或参与者视角, 像"我也X"/"我觉得X"/直接发表情';
+  }
+  return null;
+}
+
+// --- Insult Echo Detector (Case 8) ---
+// Detects when bot output is a short agreement/echo phrase following
+// a recent message containing insults toward a group member.
+
+const INSULT_KEYWORDS = [
+  '傻', '蠢', '少智', '智障', '脑残', '弱智', '废物', '白痴', '笨',
+  '辣鸡', '垃圾', 'sb', '煞笔', '逗我笑', '搞笑',
+];
+
+const ECHO_AGREEMENT_PATTERNS = [
+  /^不然呢[?？]?$/,
+  /^确实[。.!！]?$/,
+  /^对[。.!！]?$/,
+  /^就是[。.!！]?$/,
+  /^\+1$/,
+  /^没错[。.!！]?$/,
+  /^可不是[嘛么吗]?[。.!！]?$/,
+  /^真的[。.!！]?$/,
+  /^哈哈哈?[。.!！]?$/,
+  /^笑死[。.!！]?$/,
+];
+
+/**
+ * Detect if the bot is echoing/agreeing with an insult in recent messages.
+ *
+ * @param output - The bot's generated reply
+ * @param recentHumanMessages - Last N non-bot messages (content strings)
+ * @returns true if insult-echo risk detected
+ */
+export function detectInsultEchoRisk(
+  output: string,
+  recentHumanMessages: readonly string[],
+): boolean {
+  const trimmed = output.trim();
+  if (!trimmed || trimmed.length > 10) return false;
+
+  // Check if output is a short agreement/echo
+  const isEchoPhrase = ECHO_AGREEMENT_PATTERNS.some(re => re.test(trimmed));
+  if (!isEchoPhrase) return false;
+
+  // Check if any recent message contains insult keywords
+  for (const msg of recentHumanMessages) {
+    const lower = msg.toLowerCase();
+    if (INSULT_KEYWORDS.some(kw => lower.includes(kw))) {
+      logger.info(
+        { output: trimmed, insultMsg: msg.slice(0, 50) },
+        'insult-echo-detector: bot agreeing with insult detected',
+      );
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Regen hint for insult-echo detection.
+ */
+export function insultEchoRegenHint(
+  output: string,
+  recentHumanMessages: readonly string[],
+): string | null {
+  if (detectInsultEchoRisk(output, recentHumanMessages)) {
+    return '不要附和或赞同针对群友的贬低/骂人, skip 或转移话题';
+  }
+  return null;
+}

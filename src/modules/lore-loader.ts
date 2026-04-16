@@ -14,6 +14,7 @@ import path from 'node:path';
 import { createLogger } from '../utils/logger.js';
 import { tokenizeLore } from '../utils/text-tokenize.js';
 import { buildAliasMap, extractEntities, buildLorePayload } from './lore-retrieval.js';
+import type { LearnedFact } from '../storage/db.js';
 
 const logger = createLogger('lore-loader');
 
@@ -44,12 +45,16 @@ export class LoreLoader implements ILoreLoader {
   private readonly loreAliasIndex = new Map<string, Map<string, string>>();
   private readonly loreChunkAliasMap = new Map<string, Map<string, number[]>>();
   private readonly loreOverviewCache = new Map<string, string | null>();
+  private readonly learnedFactsProvider: ((groupId: string) => LearnedFact[]) | null;
 
   constructor(
     private readonly loreDirPath: string,
     private readonly loreSizeCapBytes: number,
     private readonly tuningPath: string | null,
-  ) {}
+    learnedFactsProvider?: (groupId: string) => LearnedFact[],
+  ) {
+    this.learnedFactsProvider = learnedFactsProvider ?? null;
+  }
 
   hasPerMemberLore(groupId: string): boolean {
     return this.loreAliasIndex.has(groupId) && (this.loreAliasIndex.get(groupId)?.size ?? 0) > 0;
@@ -181,7 +186,8 @@ export class LoreLoader implements ILoreLoader {
     if (!existsSync(chunksPath)) return undefined;
 
     if (!this.loreChunkAliasMap.has(groupId)) {
-      this.loreChunkAliasMap.set(groupId, buildAliasMap(chunksPath));
+      const aliasFacts = this.learnedFactsProvider ? this.learnedFactsProvider(groupId) : undefined;
+      this.loreChunkAliasMap.set(groupId, buildAliasMap(chunksPath, aliasFacts));
     }
     const chunkAliasMap = this.loreChunkAliasMap.get(groupId)!;
 
