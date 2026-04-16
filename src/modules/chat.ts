@@ -1162,16 +1162,37 @@ export class ChatModule implements IChatModule {
     let liveBlock = '';
     if (this.bandoriLiveRepo && _hasBandoriLiveKeyword(triggerMessage.content)) {
       const today = new Date().toISOString().slice(0, 10);
+      const currentYear = new Date().getFullYear();
+      const currentMonth = new Date().getMonth() + 1;
       let rows: BandoriLiveRow[] = [];
       const triggerLower = triggerMessage.content.toLowerCase();
-      // Band alias → canonical band name in the bands[] JSON stored in DB.
-      // First match wins. Order matters: check longer aliases first to avoid
-      // "ras" matching inside "raisesuilen" incorrectly (use word-ish regex).
+      const triggerText = triggerMessage.content;
+
+      // Month extraction from trigger
+      const CHINESE_MONTH_NUMS: Record<string, number> = {
+        '\u4e00': 1, '\u4e8c': 2, '\u4e09': 3, '\u56db': 4, '\u4e94': 5, '\u516d': 6,
+        '\u4e03': 7, '\u516b': 8, '\u4e5d': 9, '\u5341': 10, '\u5341\u4e00': 11, '\u5341\u4e8c': 12,
+      };
+      let queriedMonth: number | null = null;
+      const digitMonthMatch = triggerText.match(/(\d{1,2})\s*\u6708/);
+      const chineseMonthMatch = triggerText.match(/(\u5341\u4e00|\u5341\u4e8c|[\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341])\s*\u6708/);
+      if (digitMonthMatch) {
+        const m = parseInt(digitMonthMatch[1]!, 10);
+        if (m >= 1 && m <= 12) queriedMonth = m;
+      } else if (chineseMonthMatch) {
+        queriedMonth = CHINESE_MONTH_NUMS[chineseMonthMatch[1]!] ?? null;
+      } else if (/\u4e0b\u4e2a\u6708|\u4e0b\u6708/.test(triggerText)) {
+        queriedMonth = currentMonth === 12 ? 1 : currentMonth + 1;
+      } else if (/\u8fd9\u4e2a\u6708|\u8fd9\u6708|\u672c\u6708/.test(triggerText)) {
+        queriedMonth = currentMonth;
+      }
+
+      // Band alias matching
       const bandAliases: Array<[RegExp, string]> = [
         [/raise\s*a\s*suilen|raisesuilen|\bras\b/i, 'RAISE A SUILEN'],
         [/ave\s*mujica|mujica|\bmjk\b|アヴェムジカ/i, 'Ave Mujica'],
         [/mygo!*|マイゴ|マイゴー/i, 'MyGO'],
-        [/poppin[’'`]?party|popipa|\bppp\b|波普派对/i, "Poppin'Party"],
+        [/poppin[''`]?party|popipa|\bppp\b|波普派对/i, "Poppin'Party"],
         [/afterglow|\bag\b|余晖|アフターグロー/i, 'Afterglow'],
         [/hello[,\s]*happy\s*world|\bhhw\b|ハロハピ/i, 'Hello, Happy World!'],
         [/pastel\s*palettes|pasupare|\bpp\b|彩色调色板|彩帕|パスパレ/i, 'Pastel Palettes'],
@@ -1183,8 +1204,22 @@ export class ChatModule implements IChatModule {
       for (const [re, canonical] of bandAliases) {
         if (re.test(triggerLower)) mentionedBands.push(canonical);
       }
-      if (mentionedBands.length > 0) {
-        // Fetch up to 5 per mentioned band, dedupe by eventKey, cap at 6 total.
+
+      // ── Query strategy ─────────────────────────────────────────────
+      if (queriedMonth !== null) {
+        // Month-based query: "6月有什么live" / "下个月live"
+        const queryYear = queriedMonth < currentMonth ? currentYear + 1 : currentYear;
+        const startIso = `${queryYear}-${String(queriedMonth).padStart(2, '0')}-01`;
+        const endDay = new Date(queryYear, queriedMonth, 0).getDate();
+        const endIso = `${queryYear}-${String(queriedMonth).padStart(2, '0')}-${String(endDay).padStart(2, '0')}`;
+        rows = this.bandoriLiveRepo.searchByDateRange(startIso, endIso, 10);
+        // If band also mentioned, filter further
+        if (mentionedBands.length > 0) {
+          rows = rows.filter(r => r.bands.some(b => mentionedBands.some(mb => b.includes(mb))));
+        }
+        rows = rows.slice(0, 6);
+      } else if (mentionedBands.length > 0) {
+        // Band-only query: "ras最近有啥live"
         const seen = new Set<string>();
         for (const band of mentionedBands) {
           for (const r of this.bandoriLiveRepo.searchByBand(band, 5)) {
@@ -1195,11 +1230,10 @@ export class ChatModule implements IChatModule {
           }
           if (rows.length >= 6) break;
         }
-        // Filter to upcoming/ongoing only: start_date null OR >= today
         rows = rows.filter(r => !r.startDate || r.startDate >= today).slice(0, 6);
       }
       if (rows.length === 0) {
-        // Fallback: no specific band OR searched band had no results → soonest overall
+        // Fallback: no month, no band → soonest overall
         rows = this.bandoriLiveRepo.getUpcoming(today, 3);
       }
       if (rows.length > 0) {

@@ -1840,6 +1840,8 @@ export interface IBandoriLiveRepository {
   getUpcoming(todayIso: string, limit?: number): BandoriLiveRow[];
   /** Case-insensitive substring search against bands JSON. Default limit: 10. */
   searchByBand(bandQuery: string, limit?: number): BandoriLiveRow[];
+  /** Events within a date range (inclusive). */
+  searchByDateRange(startIso: string, endIso: string, limit?: number): BandoriLiveRow[];
   getAll(): BandoriLiveRow[];
 }
 
@@ -1929,6 +1931,16 @@ export class BandoriLiveRepository implements IBandoriLiveRepository {
       ORDER BY CASE WHEN start_date IS NULL THEN 1 ELSE 0 END, start_date ASC
       LIMIT ?
     `).all(`%${bandQuery}%`, limit) as unknown as Array<Record<string, unknown>>;
+    return rows.map(r => this._fromRow(r));
+  }
+
+  searchByDateRange(startIso: string, endIso: string, limit = 10): BandoriLiveRow[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM bandori_lives
+      WHERE start_date >= ? AND start_date <= ?
+      ORDER BY start_date ASC
+      LIMIT ?
+    `).all(startIso, endIso, limit) as unknown as Array<Record<string, unknown>>;
     return rows.map(r => this._fromRow(r));
   }
 
