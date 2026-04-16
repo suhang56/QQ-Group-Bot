@@ -786,7 +786,9 @@ class ModerationRepository implements IModerationRepository {
     // NOTE: OFFSET-based pagination is acceptable for v1 manual review use-case.
     // At very large row counts (tens of thousands) this will slow; migrate to
     // cursor-based pagination (WHERE id < cursor) in a future iteration.
-    const clauses: string[] = [];
+    // Default: exclude action='none' (no punishment — 99% of records).
+    // Only show records where the moderator actually took action (warn/ban/kick/delete).
+    const clauses: string[] = ["action != 'none'"];
     const params: (string | number)[] = [];
 
     if (filters.groupId !== undefined) {
@@ -829,8 +831,9 @@ class ModerationRepository implements IModerationRepository {
 
   getStats(): ModerationStats {
     interface StatRow { group_id: string; reviewed: number; cnt: number }
+    // Exclude action='none' from stats — same as getForReview.
     const rows = this.db.prepare(
-      `SELECT group_id, reviewed, COUNT(*) as cnt FROM moderation_log GROUP BY group_id, reviewed`
+      `SELECT group_id, reviewed, COUNT(*) as cnt FROM moderation_log WHERE action != 'none' GROUP BY group_id, reviewed`
     ).all() as unknown as StatRow[];
 
     const stats: ModerationStats = { total: 0, unreviewed: 0, approved: 0, rejected: 0, byGroup: {} };
