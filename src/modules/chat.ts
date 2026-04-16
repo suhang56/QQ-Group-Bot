@@ -4,7 +4,7 @@ import path from 'node:path';
 import type { IClaudeClient } from '../ai/claude.js';
 import type { GroupMessage } from '../adapter/napcat.js';
 import type { Database } from '../storage/db.js';
-import type { SelfLearningModule } from './self-learning.js';
+import type { SelfLearningModule, IMemeGraphRepo } from './self-learning.js';
 import { ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
 import { lurkerDefaults, chatHistoryDefaults, RUNTIME_CHAT_MODEL, CHAT_QWEN_MODEL, CHAT_QWEN_DISABLED, CHAT_DEEPSEEK_MODEL, DEEPSEEK_ENABLED } from '../config.js';
@@ -27,7 +27,7 @@ import { loadGroupJargon, formatJargonBlock } from './jargon-provider.js';
 import { makeEngagementDecision, type EngagementSignals } from './engagement-decision.js';
 import { scoreComprehensionSafe, type ComprehensionContext } from '../services/comprehension-scorer.js';
 import { ConversationStateTracker } from './conversation-state.js';
-import { pickVariant, buildVariantSystemPrompt, type VariantContext } from './prompt-variants.js';
+import { pickVariant, buildVariantSystemPrompt, type VariantContext, type ActiveMemeJoke } from './prompt-variants.js';
 
 export interface IChatModule {
   generateReply(groupId: string, triggerMessage: GroupMessage, _recentMessages: GroupMessage[]): Promise<string | null>;
@@ -947,6 +947,11 @@ export class ChatModule implements IChatModule {
     this.charModule = charModule;
   }
 
+  /** Inject meme graph repo into internal conversation state tracker. */
+  setMemeGraphRepo(repo: IMemeGraphRepo | null): void {
+    this.conversationState.setMemeGraphRepo(repo);
+  }
+
   /** Return the key of the most recent sticker sent via sticker-first in this group, or null. */
   getLastStickerKey(groupId: string): string | null {
     return this.lastStickerKeyByGroup.get(groupId) ?? null;
@@ -1423,11 +1428,16 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     // P3-2: Pick prompt variant based on conversation context
     const convSnapshot = this.conversationState.getSnapshot(groupId);
     const sensitiveEntityHit = /hhw|hello.*happy|声优|cv|中之人|键政|政治|黑粉|毒唯|引战/i.test(triggerMessage.content);
-    const activeJokeHit = convSnapshot.activeJokes.length > 0;
+    const activeJokeHit = convSnapshot.activeJokes.length > 0 || convSnapshot.memeJokes.length > 0;
+    const activeMemeJokes: ActiveMemeJoke[] = convSnapshot.memeJokes.map(mj => ({
+      canonical: mj.canonical,
+      meaning: mj.meaning,
+    }));
     const variantCtx: VariantContext = {
       activeJokeHit,
       sensitiveEntityHit,
       personaRoleCard: '', // role card is already in systemPrompt
+      activeMemeJokes: activeMemeJokes.length > 0 ? activeMemeJokes : undefined,
     };
     const variant = pickVariant(variantCtx);
     const variantBlock = buildVariantSystemPrompt(variantCtx).systemPrompt;

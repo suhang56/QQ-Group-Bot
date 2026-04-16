@@ -83,6 +83,11 @@ export const DEEPSEEK_ENABLED = (): boolean => !!process.env['DEEPSEEK_API_KEY']
  * (matches DEEPSEEK_ENABLED pattern) so tests can toggle per-case. */
 export const FACTS_RAG_DISABLED = (): boolean => process.env['FACTS_RAG_DISABLED'] === '1';
 
+/** Kill switch for memes-v1 pipeline. Set MEMES_V1_DISABLED=1 to disable:
+ * (a) meme_graph retrieval in formatFactsForPrompt, (b) meme_graph term tick
+ * in conversation-state. Lazy-evaluated so tests can toggle per-case. */
+export const MEMES_V1_DISABLED = (): boolean => process.env['MEMES_V1_DISABLED'] === '1';
+
 export const lurkerDefaults = {
   lurkerReplyChance: 0.12,
   lurkerCooldownMs: 120_000,

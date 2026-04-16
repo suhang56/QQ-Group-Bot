@@ -5,12 +5,37 @@ import type { IEmbeddingService } from '../storage/embeddings.js';
 import { cosineSimilarity } from '../storage/embeddings.js';
 import { createLogger } from '../utils/logger.js';
 import { extractJson } from '../utils/json-extract.js';
-import { LEARN_MODEL, RESEARCH_MODEL, FACTS_RAG_DISABLED } from '../config.js';
+import { LEARN_MODEL, RESEARCH_MODEL, FACTS_RAG_DISABLED, MEMES_V1_DISABLED } from '../config.js';
 
 /** Cosine similarity floor — facts below this are dropped unless pinned.
  * MiniLM-L6-v2 is noisier on Chinese text so we set a slightly higher
  * threshold than English RAG defaults. Tune here without touching logic. */
 export const FACT_SIMILARITY_FLOOR = 0.30;
+
+/** Meme graph entry shape consumed by P4 injection. Matches MemeGraphRepo
+ * output from P0. Defined here to decouple P4 from P0 merge order. */
+export interface MemeGraphEntry {
+  readonly id: number;
+  readonly groupId: string;
+  readonly canonical: string;
+  readonly variants: readonly string[];
+  readonly meaning: string;
+  readonly originEvent: string | null;
+  readonly status: 'active' | 'demoted' | 'manual_edit';
+  readonly confidence: number;
+  readonly embeddingVec: number[] | null;
+}
+
+/** Minimal meme graph repo interface needed by P4 injection paths. */
+export interface IMemeGraphRepo {
+  findSimilarActive(
+    groupId: string,
+    embedding: number[],
+    threshold: number,
+    limit: number,
+  ): MemeGraphEntry[];
+  listActive(groupId: string): MemeGraphEntry[];
+}
 
 /**
  * Configuration for {@link SelfLearningModule}.
@@ -153,6 +178,7 @@ export class SelfLearningModule {
   private readonly researchMaxPerDayGlobal: number;
   private readonly researchEnabled: boolean;
   private readonly _embeddingService: IEmbeddingService | null;
+  private _memeGraphRepo: IMemeGraphRepo | null = null;
 
   private readonly correctionStamps: Map<string, number[]> = new Map();
   private readonly harvestStamps: Map<string, number[]> = new Map();
@@ -178,6 +204,11 @@ export class SelfLearningModule {
     this.researchMaxPerDayGlobal = opts.researchMaxPerDayGlobal ?? 30;
     this.researchEnabled = opts.researchEnabled ?? true;
     this._embeddingService = opts.embeddingService ?? null;
+  }
+
+  /** Inject meme graph repo after construction (follows setEmbeddingService pattern). */
+  setMemeGraphRepo(repo: IMemeGraphRepo | null): void {
+    this._memeGraphRepo = repo;
   }
 
   /**
@@ -376,8 +407,18 @@ export class SelfLearningModule {
       'facts filtered for prompt (semantic)',
     );
 
-    if (finalFacts.length === 0) return { text: '', factIds: [] };
-    return this._renderFacts(finalFacts);
+    if (finalFacts.length === 0) {
+      // Even with no learned facts, we may still have meme_graph entries
+      const memeBlock = this._renderMemeGraphBlock(groupId, triggerEmbedding);
+      if (memeBlock) return { text: memeBlock, factIds: [] };
+      return { text: '', factIds: [] };
+    }
+    const base = this._renderFacts(finalFacts);
+    const memeBlock = this._renderMemeGraphBlock(groupId, triggerEmbedding);
+    if (memeBlock) {
+      return { text: base.text + '\n\n' + memeBlock, factIds: base.factIds };
+    }
+    return base;
   }
 
   private _formatFactsRecency(groupId: string, limit: number, reason: string): FormattedFacts {
@@ -396,6 +437,37 @@ export class SelfLearningModule {
     );
     if (kept.length === 0) return { text: '', factIds: [] };
     return this._renderFacts(kept);
+  }
+
+  /**
+   * Retrieve top-3 meme_graph entries by embedding similarity and format
+   * as a prompt block. Returns null if kill switch is on, repo not set,
+   * or no entries match.
+   */
+  private _renderMemeGraphBlock(
+    groupId: string,
+    triggerEmbedding: number[] | null,
+  ): string | null {
+    if (MEMES_V1_DISABLED()) return null;
+    if (!this._memeGraphRepo) return null;
+    if (!triggerEmbedding) return null;
+
+    const entries = this._memeGraphRepo.findSimilarActive(groupId, triggerEmbedding, 0.3, 3);
+    const active = entries.filter(e => e.status !== 'demoted');
+    if (active.length === 0) return null;
+
+    const lines = active.map(e => {
+      const variantStr = e.variants.slice(0, 3).join('/');
+      const originStr = e.originEvent ? '. Source: ' + e.originEvent : '';
+      return `- [群梗] ${e.canonical} (${variantStr}): ${e.meaning}${originStr}`;
+    });
+
+    this.logger.debug(
+      { groupId, memeCount: active.length },
+      'meme_graph entries injected into prompt',
+    );
+
+    return `## 群内梗 — 遇到下面提到的梗/变体，可以自然使用\n${lines.join('\n')}`;
   }
 
   private _applyHedgeAndConfidenceFilter(facts: LearnedFact[]): LearnedFact[] {
