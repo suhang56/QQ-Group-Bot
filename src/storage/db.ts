@@ -455,6 +455,80 @@ export interface ILocalStickerRepository {
   setEmbeddingVec(groupId: string, key: string, vec: number[]): void;
 }
 
+// ---- Meme graph + phrase candidate types ----
+
+export type MemeGraphStatus = 'active' | 'demoted' | 'manual_edit';
+
+export interface MemeGraph {
+  id: number;
+  groupId: string;
+  canonical: string;
+  variants: string[];
+  meaning: string;
+  originEvent: string | null;
+  originMsgId: string | null;
+  originUserId: string | null;
+  originTs: number | null;
+  firstSeenCount: number | null;
+  totalCount: number;
+  confidence: number;
+  status: MemeGraphStatus;
+  embedding: number[] | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface IMemeGraphRepository {
+  insert(row: {
+    groupId: string;
+    canonical: string;
+    variants?: string[];
+    meaning: string;
+    originEvent?: string | null;
+    originMsgId?: string | null;
+    originUserId?: string | null;
+    originTs?: number | null;
+    firstSeenCount?: number | null;
+    totalCount?: number;
+    confidence?: number;
+  }): number;
+  get(id: number): MemeGraph | null;
+  getByCanonical(groupId: string, canonical: string): MemeGraph | null;
+  updateVariants(id: number, variants: string[]): void;
+  updateMeaningAndOrigin(
+    id: number, meaning: string, originEvent: string | null,
+    originMsgId: string | null, originUserId: string | null, originTs: number | null,
+  ): void;
+  updateStatus(id: number, status: MemeGraphStatus): void;
+  updateEmbedding(id: number, embedding: number[]): void;
+  listActive(groupId: string, limit: number): MemeGraph[];
+  listActiveWithEmbeddings(groupId: string): MemeGraph[];
+  findSimilarActive(groupId: string, queryEmbedding: number[], threshold: number, limit: number): MemeGraph[];
+  incrementTotalCount(id: number, delta: number): void;
+  listNullEmbedding(groupId: string, limit: number): MemeGraph[];
+}
+
+export interface PhraseCandidate {
+  groupId: string;
+  content: string;
+  gramLen: number;
+  count: number;
+  contexts: string[];
+  lastInferenceCount: number;
+  meaning: string | null;
+  isJargon: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface IPhraseCandidatesRepository {
+  upsert(groupId: string, content: string, gramLen: number, context: string | null): void;
+  list(groupId: string, minCount: number, limit: number): PhraseCandidate[];
+  listUnprocessed(groupId: string, minCount: number, limit: number): PhraseCandidate[];
+  markInferred(groupId: string, content: string, meaning: string | null, isJargon: boolean): void;
+  markPromoted(groupId: string, content: string): void;
+}
+
 // ---- Expression pattern + user style types ----
 
 export interface ExpressionPattern {
@@ -554,6 +628,22 @@ interface RuleRow {
 interface AnnouncementRow {
   id: number; group_id: string; notice_id: string; content: string;
   content_hash: string; fetched_at: number; parsed_rules: string;
+}
+
+interface MemeGraphRow {
+  id: number; group_id: string; canonical: string; variants: string;
+  meaning: string; origin_event: string | null; origin_msg_id: string | null;
+  origin_user_id: string | null; origin_ts: number | null;
+  first_seen_count: number | null; total_count: number;
+  confidence: number; status: string; embedding_vec: Buffer | null;
+  created_at: number; updated_at: number;
+}
+
+interface PhraseCandidateRow {
+  group_id: string; content: string; gram_len: number;
+  count: number; contexts: string; last_inference_count: number;
+  meaning: string | null; is_jargon: number;
+  created_at: number; updated_at: number;
 }
 
 interface CountRow { count: number }
@@ -670,6 +760,41 @@ function announcementFromRow(row: AnnouncementRow): GroupAnnouncement {
     content: row.content, contentHash: row.content_hash,
     fetchedAt: row.fetched_at,
     parsedRules: JSON.parse(row.parsed_rules) as string[],
+  };
+}
+
+function memeGraphFromRow(r: MemeGraphRow): MemeGraph {
+  let variants: string[] = [];
+  try { variants = JSON.parse(r.variants) as string[]; } catch { /* ok */ }
+  let embedding: number[] | null = null;
+  if (r.embedding_vec) {
+    const view = new Float32Array(
+      r.embedding_vec.buffer,
+      r.embedding_vec.byteOffset,
+      r.embedding_vec.byteLength / 4,
+    );
+    embedding = Array.from(view);
+  }
+  return {
+    id: r.id, groupId: r.group_id, canonical: r.canonical,
+    variants, meaning: r.meaning,
+    originEvent: r.origin_event, originMsgId: r.origin_msg_id,
+    originUserId: r.origin_user_id, originTs: r.origin_ts,
+    firstSeenCount: r.first_seen_count, totalCount: r.total_count,
+    confidence: r.confidence,
+    status: (r.status as MemeGraphStatus) ?? 'active',
+    embedding, createdAt: r.created_at, updatedAt: r.updated_at,
+  };
+}
+
+function phraseCandidateFromRow(r: PhraseCandidateRow): PhraseCandidate {
+  let contexts: string[] = [];
+  try { contexts = JSON.parse(r.contexts) as string[]; } catch { /* ok */ }
+  return {
+    groupId: r.group_id, content: r.content, gramLen: r.gram_len,
+    count: r.count, contexts, lastInferenceCount: r.last_inference_count,
+    meaning: r.meaning, isJargon: r.is_jargon !== 0,
+    createdAt: r.created_at, updatedAt: r.updated_at,
   };
 }
 
@@ -2054,6 +2179,195 @@ export class BandoriLiveRepository implements IBandoriLiveRepository {
   }
 }
 
+// ---- Meme graph repository ----
+
+class MemeGraphRepository implements IMemeGraphRepository {
+  constructor(private readonly db: DatabaseSync) {}
+
+  insert(row: {
+    groupId: string;
+    canonical: string;
+    variants?: string[];
+    meaning: string;
+    originEvent?: string | null;
+    originMsgId?: string | null;
+    originUserId?: string | null;
+    originTs?: number | null;
+    firstSeenCount?: number | null;
+    totalCount?: number;
+    confidence?: number;
+  }): number {
+    const now = Math.floor(Date.now() / 1000);
+    const variants = JSON.stringify(row.variants ?? []);
+    const result = this.db.prepare(`
+      INSERT INTO meme_graph
+        (group_id, canonical, variants, meaning, origin_event, origin_msg_id,
+         origin_user_id, origin_ts, first_seen_count, total_count,
+         confidence, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+    `).run(
+      row.groupId, row.canonical, variants, row.meaning,
+      row.originEvent ?? null, row.originMsgId ?? null,
+      row.originUserId ?? null, row.originTs ?? null,
+      row.firstSeenCount ?? null, row.totalCount ?? 0,
+      row.confidence ?? 0.5, now, now,
+    );
+    return Number(result.lastInsertRowid);
+  }
+
+  get(id: number): MemeGraph | null {
+    const row = this.db.prepare('SELECT * FROM meme_graph WHERE id = ?')
+      .get(id) as MemeGraphRow | undefined;
+    return row ? memeGraphFromRow(row) : null;
+  }
+
+  getByCanonical(groupId: string, canonical: string): MemeGraph | null {
+    const row = this.db.prepare(
+      'SELECT * FROM meme_graph WHERE group_id = ? AND canonical = ?'
+    ).get(groupId, canonical) as MemeGraphRow | undefined;
+    return row ? memeGraphFromRow(row) : null;
+  }
+
+  updateVariants(id: number, variants: string[]): void {
+    const now = Math.floor(Date.now() / 1000);
+    this.db.prepare(
+      'UPDATE meme_graph SET variants = ?, updated_at = ? WHERE id = ?'
+    ).run(JSON.stringify(variants), now, id);
+  }
+
+  updateMeaningAndOrigin(
+    id: number, meaning: string, originEvent: string | null,
+    originMsgId: string | null, originUserId: string | null, originTs: number | null,
+  ): void {
+    // Respect manual_edit: do not overwrite if admin has manually edited
+    const now = Math.floor(Date.now() / 1000);
+    this.db.prepare(`
+      UPDATE meme_graph SET
+        meaning = ?, origin_event = ?, origin_msg_id = ?,
+        origin_user_id = ?, origin_ts = ?, updated_at = ?
+      WHERE id = ? AND status != 'manual_edit'
+    `).run(meaning, originEvent, originMsgId, originUserId, originTs, now, id);
+  }
+
+  updateStatus(id: number, status: MemeGraphStatus): void {
+    const now = Math.floor(Date.now() / 1000);
+    this.db.prepare(
+      'UPDATE meme_graph SET status = ?, updated_at = ? WHERE id = ?'
+    ).run(status, now, id);
+  }
+
+  updateEmbedding(id: number, embedding: number[]): void {
+    const buf = embeddingToBuffer(embedding);
+    this.db.prepare(
+      'UPDATE meme_graph SET embedding_vec = ? WHERE id = ?'
+    ).run(buf, id);
+  }
+
+  listActive(groupId: string, limit: number): MemeGraph[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM meme_graph WHERE group_id = ? AND status = 'active' ORDER BY total_count DESC, updated_at DESC LIMIT ?`
+    ).all(groupId, limit) as unknown as MemeGraphRow[];
+    return rows.map(memeGraphFromRow);
+  }
+
+  listActiveWithEmbeddings(groupId: string): MemeGraph[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM meme_graph WHERE group_id = ? AND status = 'active' AND embedding_vec IS NOT NULL ORDER BY updated_at DESC LIMIT 500`
+    ).all(groupId) as unknown as MemeGraphRow[];
+    return rows.map(memeGraphFromRow);
+  }
+
+  findSimilarActive(groupId: string, queryEmbedding: number[], threshold: number, limit: number): MemeGraph[] {
+    const candidates = this.listActiveWithEmbeddings(groupId);
+    const scored: Array<{ meme: MemeGraph; cosine: number }> = [];
+    for (const cand of candidates) {
+      if (!cand.embedding) continue;
+      const c = cosineSimilarity(queryEmbedding, cand.embedding);
+      if (c >= threshold) {
+        scored.push({ meme: cand, cosine: c });
+      }
+    }
+    scored.sort((a, b) => b.cosine - a.cosine);
+    return scored.slice(0, limit).map(s => s.meme);
+  }
+
+  incrementTotalCount(id: number, delta: number): void {
+    const now = Math.floor(Date.now() / 1000);
+    this.db.prepare(
+      'UPDATE meme_graph SET total_count = total_count + ?, updated_at = ? WHERE id = ?'
+    ).run(delta, now, id);
+  }
+
+  listNullEmbedding(groupId: string, limit: number): MemeGraph[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM meme_graph WHERE group_id = ? AND status = 'active' AND embedding_vec IS NULL ORDER BY id LIMIT ?`
+    ).all(groupId, limit) as unknown as MemeGraphRow[];
+    return rows.map(memeGraphFromRow);
+  }
+}
+
+// ---- Phrase candidates repository ----
+
+class PhraseCandidatesRepository implements IPhraseCandidatesRepository {
+  constructor(private readonly db: DatabaseSync) {}
+
+  upsert(groupId: string, content: string, gramLen: number, context: string | null): void {
+    const now = Math.floor(Date.now() / 1000);
+    const existing = this.db.prepare(
+      'SELECT count, contexts FROM phrase_candidates WHERE group_id = ? AND content = ?'
+    ).get(groupId, content) as { count: number; contexts: string } | undefined;
+
+    if (existing) {
+      let contexts: string[] = [];
+      try { contexts = JSON.parse(existing.contexts) as string[]; } catch { /* ok */ }
+      if (context && contexts.length < 10) {
+        contexts.push(context);
+      }
+      this.db.prepare(
+        'UPDATE phrase_candidates SET count = count + 1, contexts = ?, updated_at = ? WHERE group_id = ? AND content = ?'
+      ).run(JSON.stringify(contexts), now, groupId, content);
+    } else {
+      const contexts = context ? JSON.stringify([context]) : '[]';
+      this.db.prepare(`
+        INSERT INTO phrase_candidates
+          (group_id, content, gram_len, count, contexts, last_inference_count, meaning, is_jargon, created_at, updated_at)
+        VALUES (?, ?, ?, 1, ?, 0, NULL, 0, ?, ?)
+      `).run(groupId, content, gramLen, contexts, now, now);
+    }
+  }
+
+  list(groupId: string, minCount: number, limit: number): PhraseCandidate[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM phrase_candidates WHERE group_id = ? AND count >= ? ORDER BY count DESC LIMIT ?'
+    ).all(groupId, minCount, limit) as unknown as PhraseCandidateRow[];
+    return rows.map(phraseCandidateFromRow);
+  }
+
+  listUnprocessed(groupId: string, minCount: number, limit: number): PhraseCandidate[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM phrase_candidates WHERE group_id = ? AND count >= ? AND last_inference_count < count ORDER BY count DESC LIMIT ?'
+    ).all(groupId, minCount, limit) as unknown as PhraseCandidateRow[];
+    return rows.map(phraseCandidateFromRow);
+  }
+
+  markInferred(groupId: string, content: string, meaning: string | null, isJargon: boolean): void {
+    const now = Math.floor(Date.now() / 1000);
+    this.db.prepare(`
+      UPDATE phrase_candidates SET
+        meaning = ?, is_jargon = ?, last_inference_count = count, updated_at = ?
+      WHERE group_id = ? AND content = ?
+    `).run(meaning, isJargon ? 1 : 0, now, groupId, content);
+  }
+
+  markPromoted(groupId: string, content: string): void {
+    // Mark a phrase candidate as promoted to meme_graph (soft-delete via is_jargon=2)
+    const now = Math.floor(Date.now() / 1000);
+    this.db.prepare(
+      'UPDATE phrase_candidates SET is_jargon = 2, updated_at = ? WHERE group_id = ? AND content = ?'
+    ).run(now, groupId, content);
+  }
+}
+
 // ---- Expression pattern repository ----
 
 interface ExpressionPatternRow {
@@ -2197,6 +2511,8 @@ export class Database {
   readonly bandoriLives: IBandoriLiveRepository;
   readonly expressionPatterns: IExpressionPatternRepository;
   readonly userStyles: IUserStyleRepository;
+  readonly memeGraph: IMemeGraphRepository;
+  readonly phraseCandidates: IPhraseCandidatesRepository;
 
   private readonly _db: DatabaseSync;
 
@@ -2229,6 +2545,8 @@ export class Database {
     this.bandoriLives = new BandoriLiveRepository(this._db);
     this.expressionPatterns = new ExpressionPatternRepository(this._db);
     this.userStyles = new UserStyleRepository(this._db);
+    this.memeGraph = new MemeGraphRepository(this._db);
+    this.phraseCandidates = new PhraseCandidatesRepository(this._db);
   }
 
   /** Execute arbitrary SQL — intended for bulk-import scripts and migrations only. */
@@ -2585,6 +2903,48 @@ export class Database {
         rating INTEGER, rating_comment TEXT, rated_at INTEGER
       )
     `);
+
+    // meme_graph — auto-detected group memes with variant clustering.
+    this._db.exec(`
+      CREATE TABLE IF NOT EXISTS meme_graph (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id TEXT NOT NULL,
+        canonical TEXT NOT NULL,
+        variants TEXT NOT NULL DEFAULT '[]',
+        meaning TEXT NOT NULL,
+        origin_event TEXT,
+        origin_msg_id TEXT,
+        origin_user_id TEXT,
+        origin_ts INTEGER,
+        first_seen_count INTEGER,
+        total_count INTEGER DEFAULT 0,
+        confidence REAL NOT NULL DEFAULT 0.5,
+        status TEXT NOT NULL DEFAULT 'active',
+        embedding_vec BLOB,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(group_id, canonical)
+      )
+    `);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_meme_graph_group_active ON meme_graph(group_id, status) WHERE status='active'`);
+
+    // phrase_candidates — multi-word phrase candidates (2-5 gram).
+    this._db.exec(`
+      CREATE TABLE IF NOT EXISTS phrase_candidates (
+        group_id              TEXT    NOT NULL,
+        content               TEXT    NOT NULL,
+        gram_len              INTEGER NOT NULL,
+        count                 INTEGER NOT NULL DEFAULT 1,
+        contexts              TEXT    NOT NULL DEFAULT '[]',
+        last_inference_count  INTEGER NOT NULL DEFAULT 0,
+        meaning               TEXT,
+        is_jargon             INTEGER NOT NULL DEFAULT 0,
+        created_at            INTEGER NOT NULL,
+        updated_at            INTEGER NOT NULL,
+        PRIMARY KEY (group_id, content)
+      )
+    `);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_phrase_group_count ON phrase_candidates(group_id, count DESC)`);
   }
 
   /**
