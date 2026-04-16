@@ -15,7 +15,7 @@ import { MoodTracker, PROACTIVE_POOLS, type MoodDescription } from './mood.js';
 import type { ICharModule } from './char.js';
 import type { VisionService } from './vision.js';
 import type { IEmbeddingService } from '../storage/embeddings.js';
-import type { ILocalStickerRepository, IImageDescriptionRepository, IForwardCacheRepository, IBandoriLiveRepository } from '../storage/db.js';
+import type { ILocalStickerRepository, IImageDescriptionRepository, IForwardCacheRepository, IBandoriLiveRepository, BandoriLiveRow } from '../storage/db.js';
 import { cosineSimilarity } from '../storage/embeddings.js';
 import type { IStickerFirstModule } from './sticker-first.js';
 import { _hasBandoriLiveKeyword, _formatLiveBlock } from './bandori-live-scraper.js';
@@ -1258,12 +1258,54 @@ export class ChatModule implements IChatModule {
 
     // Bandori live knowledge injection — user-role context prefix, not system prompt.
     // Fires only when trigger message contains a live-related keyword (flat match).
+    // If a specific band is mentioned, filter by that band via searchByBand so
+    // "ras 最近有啥 live" returns actual RAS lives, not the 3 soonest events
+    // overall (which may all be from other bands).
     let liveBlock = '';
     if (this.bandoriLiveRepo && _hasBandoriLiveKeyword(triggerMessage.content)) {
       const today = new Date().toISOString().slice(0, 10);
-      const upcoming = this.bandoriLiveRepo.getUpcoming(today, 3);
-      if (upcoming.length > 0) {
-        liveBlock = _formatLiveBlock(upcoming) + '\n\n';
+      let rows: BandoriLiveRow[] = [];
+      const triggerLower = triggerMessage.content.toLowerCase();
+      // Band alias → canonical band name in the bands[] JSON stored in DB.
+      // First match wins. Order matters: check longer aliases first to avoid
+      // "ras" matching inside "raisesuilen" incorrectly (use word-ish regex).
+      const bandAliases: Array<[RegExp, string]> = [
+        [/raise\s*a\s*suilen|raisesuilen|\bras\b/i, 'RAISE A SUILEN'],
+        [/ave\s*mujica|mujica|\bmjk\b|アヴェムジカ/i, 'Ave Mujica'],
+        [/mygo!*|マイゴ|マイゴー/i, 'MyGO'],
+        [/poppin[’'`]?party|popipa|\bppp\b|波普派对/i, "Poppin'Party"],
+        [/afterglow|\bag\b|余晖|アフターグロー/i, 'Afterglow'],
+        [/hello[,\s]*happy\s*world|\bhhw\b|ハロハピ/i, 'Hello, Happy World!'],
+        [/pastel\s*palettes|pasupare|\bpp\b|彩色调色板|彩帕|パスパレ/i, 'Pastel Palettes'],
+        [/morfonica|モルフォニカ|モニカ/i, 'Morfonica'],
+        [/roselia|ロゼリア|玫瑰利亚/i, 'Roselia'],
+        [/crychic/i, 'CRYCHIC'],
+      ];
+      const mentionedBands: string[] = [];
+      for (const [re, canonical] of bandAliases) {
+        if (re.test(triggerLower)) mentionedBands.push(canonical);
+      }
+      if (mentionedBands.length > 0) {
+        // Fetch up to 5 per mentioned band, dedupe by eventKey, cap at 6 total.
+        const seen = new Set<string>();
+        for (const band of mentionedBands) {
+          for (const r of this.bandoriLiveRepo.searchByBand(band, 5)) {
+            if (!seen.has(r.eventKey)) {
+              seen.add(r.eventKey);
+              rows.push(r);
+            }
+          }
+          if (rows.length >= 6) break;
+        }
+        // Filter to upcoming/ongoing only: start_date null OR >= today
+        rows = rows.filter(r => !r.startDate || r.startDate >= today).slice(0, 6);
+      }
+      if (rows.length === 0) {
+        // Fallback: no specific band OR searched band had no results → soonest overall
+        rows = this.bandoriLiveRepo.getUpcoming(today, 3);
+      }
+      if (rows.length > 0) {
+        liveBlock = _formatLiveBlock(rows) + '\n\n';
       }
     }
 
