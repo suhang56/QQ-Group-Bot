@@ -25,7 +25,7 @@ import type { IDeflectionEngine } from './deflection-engine.js';
 import { tokenizeLore as _tokenizeLore, extractTokens as _extractTokens, extractKeywords as _extractKeywords } from '../utils/text-tokenize.js';
 import { loadGroupJargon, formatJargonBlock } from './jargon-provider.js';
 import { makeEngagementDecision, type EngagementSignals } from './engagement-decision.js';
-import { scoreComprehension, type ComprehensionContext } from '../services/comprehension-scorer.js';
+import { scoreComprehensionSafe, type ComprehensionContext } from '../services/comprehension-scorer.js';
 import { ConversationStateTracker } from './conversation-state.js';
 import { pickVariant, buildVariantSystemPrompt, type VariantContext } from './prompt-variants.js';
 
@@ -1119,7 +1119,7 @@ export class ChatModule implements IChatModule {
       jargonTerms: loadGroupJargon(this.db.rawDb, groupId).map(j => j.term.toLowerCase()),
       aliasKeys: this._getAliasKeys(groupId),
     };
-    const comprehensionScore = scoreComprehension(triggerMessage.content, comprehensionCtx);
+    const { score: comprehensionScore } = scoreComprehensionSafe(triggerMessage.content, comprehensionCtx);
 
     // ── Engagement decision (decision BEFORE Claude call) ─────────────
     const engagementSignals: EngagementSignals = {

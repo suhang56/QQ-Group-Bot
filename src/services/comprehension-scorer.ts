@@ -109,6 +109,23 @@ export function scoreComprehension(
   return finalScore;
 }
 
+/**
+ * Safe wrapper around scoreComprehension: catches any unexpected error
+ * (e.g. from future embedding integration or bad tokenizer input) and
+ * returns a skip-favoring default (0.3) so the engagement gate fails safe.
+ */
+export function scoreComprehensionSafe(
+  messageContent: string,
+  context: ComprehensionContext,
+): { score: number; reason?: string } {
+  try {
+    return { score: scoreComprehension(messageContent, context) };
+  } catch (err) {
+    logger.warn({ err }, 'comprehension scoring failed, defaulting to low');
+    return { score: 0.3, reason: 'scoring-error' };
+  }
+}
+
 // Common short ASCII words that are NOT domain abbreviations.
 // Keep this conservative — only add words that would cause false positives
 // in the "unknown domain slang" detection.
