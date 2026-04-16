@@ -441,6 +441,8 @@ export interface ILocalStickerRepository {
   getMfaceKeys(groupId: string): Set<string>;
   /** Return all unblocked stickers for this group (no sorting, no limit). For Thompson sampling. */
   getAllCandidates(groupId: string): LocalSticker[];
+  /** Count unblocked stickers for a group (for status display). */
+  countByGroup(groupId: string): number;
   /** Get the cached embedding vector for a sticker. Returns null if not cached. */
   getEmbeddingVec(groupId: string, key: string): number[] | null;
   /** Store an embedding vector for a sticker as a BLOB. */
@@ -1742,6 +1744,13 @@ class LocalStickerRepository implements ILocalStickerRepository {
       count: r.count, firstSeen: r.first_seen, lastSeen: r.last_seen,
       usagePositive: r.usage_positive, usageNegative: r.usage_negative,
     }));
+  }
+
+  countByGroup(groupId: string): number {
+    const row = this.db.prepare(
+      `SELECT COUNT(*) as cnt FROM local_stickers WHERE group_id = ? AND COALESCE(blocked, 0) = 0`
+    ).get(groupId) as { cnt: number };
+    return row.cnt;
   }
 
   getEmbeddingVec(groupId: string, key: string): number[] | null {

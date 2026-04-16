@@ -181,7 +181,7 @@ export class MimicModule implements IMimicModule {
   private readonly stickerSectionCache = new Map<string, string>();
   /** Track last 3 sticker CQ codes used in mimic for rotation. */
   private readonly recentMimicStickers: string[] = [];
-  private static readonly STICKER_ROTATION_SIZE = 3;
+  private static readonly STICKER_ROTATION_SIZE = 10;
   private static readonly MIN_USER_STICKERS = 5;
 
   constructor(

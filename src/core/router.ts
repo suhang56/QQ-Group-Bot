@@ -1993,8 +1993,7 @@ ${ctxLine}
 
     this.commands.set('stickerfirst_status', async (msg, _args, config) => {
       if (msg.role !== 'admin' && msg.role !== 'owner') return;
-      const stickers = this.db.localStickers.getTopByGroup(msg.groupId, 9999);
-      const count = stickers.length;
+      const count = this.db.localStickers.countByGroup(msg.groupId);
       const onOff = config.stickerFirstEnabled ? 'ON' : 'OFF';
       // Last sticker sent time: not tracked at router level, report 暂无
       await this.adapter.send(msg.groupId,
