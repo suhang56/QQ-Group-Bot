@@ -5,6 +5,7 @@ import type { IClaudeClient, ClaudeResponse } from '../src/ai/claude.js';
 import type { GroupMessage } from '../src/adapter/napcat.js';
 import { Database } from '../src/storage/db.js';
 import { ClaudeApiError } from '../src/utils/errors.js';
+import type { IEmbeddingService } from '../src/storage/embeddings.js';
 import { initLogger } from '../src/utils/logger.js';
 
 initLogger({ level: 'silent' });
@@ -3021,38 +3022,48 @@ describe('ChatModule — mface rotation', () => {
     expect(section).toBe('');
   });
 
-  it('recentMfaceByGroup: _recordOwnReply extracts mface emoji_ids', () => {
+  it('mface tracking: _recordOwnReply delegates to stickerFirst.recordMfaceOutput', () => {
+    const mockStickerFirst = {
+      pickSticker: vi.fn(),
+      suppressSticker: vi.fn(),
+      recordMfaceOutput: vi.fn(),
+      getRecentMfaceKeys: vi.fn().mockReturnValue(new Set<string>()),
+    };
     const chat = new ChatModule(
       { complete: vi.fn() } as unknown as IClaudeClient,
       db,
-      { botUserId: BOT_ID },
+      { botUserId: BOT_ID, stickerFirst: mockStickerFirst },
     );
     const reply = '来了 [CQ:mface,emoji_id=abc123,emoji_package_id=100,key=k1,summary=[笑]]';
     (chat as unknown as { _recordOwnReply: (g: string, r: string) => void })._recordOwnReply('g1', reply);
 
-    const recentMap = (chat as unknown as { recentMfaceByGroup: Map<string, string[]> }).recentMfaceByGroup;
-    expect(recentMap.get('g1')).toContain('abc123');
+    expect(mockStickerFirst.recordMfaceOutput).toHaveBeenCalledWith('g1', ['abc123']);
   });
 
-  it('recentMfaceByGroup: capped at 8 after many replies', () => {
-    const chat = new ChatModule(
-      { complete: vi.fn() } as unknown as IClaudeClient,
-      db,
-      { botUserId: BOT_ID },
-    );
-    const record = (chat as unknown as { _recordOwnReply: (g: string, r: string) => void })._recordOwnReply.bind(chat);
+  it('mface tracking: StickerFirstModule caps at 8 after many calls', async () => {
+    const { StickerFirstModule } = await import('../src/modules/sticker-first.js');
+    const mockRepo = {
+      upsert: vi.fn(), getTopByGroup: vi.fn().mockReturnValue([]),
+      getAllCandidates: vi.fn().mockReturnValue([]),
+      recordUsage: vi.fn(), setSummary: vi.fn(),
+      listMissingSummary: vi.fn().mockReturnValue([]),
+      blockSticker: vi.fn(), unblockSticker: vi.fn(),
+      getMfaceKeys: vi.fn().mockReturnValue(new Set()),
+    };
+    const mockEmbedder = { isReady: false, embed: vi.fn(), waitReady: vi.fn() };
+    const sf = new StickerFirstModule(mockRepo, mockEmbedder as unknown as IEmbeddingService);
     for (let i = 0; i < 12; i++) {
-      record('g1', `[CQ:mface,emoji_id=id${i},emoji_package_id=100,key=k${i},summary=[面]]`);
+      sf.recordMfaceOutput('g1', [`id${i}`]);
     }
-    const recent = (chat as unknown as { recentMfaceByGroup: Map<string, string[]> }).recentMfaceByGroup.get('g1') ?? [];
-    expect(recent.length).toBe(8);
-    // Should have the last 8 keys
-    expect(recent).toContain('id11');
-    expect(recent).not.toContain('id0');
-    expect(recent).not.toContain('id3');
+    const recent = sf.getRecentMfaceKeys('g1');
+    // 12 individual calls of 1 key each -> capped at 8 most recent
+    expect(recent.size).toBe(8);
+    expect(recent.has('id11')).toBe(true);
+    expect(recent.has('id0')).toBe(false);
+    expect(recent.has('id3')).toBe(false);
   });
 
-  it('_buildRotatedStickerSection excludes recently-used mfaces', async () => {
+  it('_buildRotatedStickerSection excludes recently-used mfaces via stickerFirst', async () => {
     // Build a pool with 3 stickers using the sticker module
     const { buildStickerSection } = await import('../src/utils/stickers.js');
     const fs = await import('node:fs');
@@ -3072,11 +3083,14 @@ describe('ChatModule — mface rotation', () => {
     const claude = { complete: vi.fn().mockResolvedValue({ text: '标', inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 }) } as unknown as IClaudeClient;
     await buildStickerSection(groupId, tmpDir, 10, claude);
 
-    const chat = new ChatModule(claude, db, { botUserId: BOT_ID });
-    // Mark x1 and x2 as recently used
-    const record = (chat as unknown as { _recordOwnReply: (g: string, r: string) => void })._recordOwnReply.bind(chat);
-    record(groupId, '[CQ:mface,emoji_id=x1,emoji_package_id=100,key=k0,summary=[面0]]');
-    record(groupId, '[CQ:mface,emoji_id=x2,emoji_package_id=100,key=k1,summary=[面1]]');
+    // Mock stickerFirst that reports x1,x2 as recently used
+    const mockStickerFirst = {
+      pickSticker: vi.fn(),
+      suppressSticker: vi.fn(),
+      recordMfaceOutput: vi.fn(),
+      getRecentMfaceKeys: vi.fn().mockReturnValue(new Set(['x1', 'x2'])),
+    };
+    const chat = new ChatModule(claude, db, { botUserId: BOT_ID, stickerFirst: mockStickerFirst });
 
     const section = (chat as unknown as { _buildRotatedStickerSection: (g: string) => string })._buildRotatedStickerSection(groupId);
 

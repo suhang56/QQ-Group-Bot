@@ -514,8 +514,7 @@ export class ChatModule implements IChatModule {
   private readonly loreOverviewCache = new Map<string, string | null>();
   // sticker section: groupId -> formatted section string (loaded async once)
   private readonly stickerSectionCache = new Map<string, string>();
-  // recent mface keys bot has sent per group: capped at 8, used for rotation cooldown
-  private readonly recentMfaceByGroup = new Map<string, string[]>();
+  // recentMfaceByGroup removed: tracking moved to StickerFirstModule (unified suppress owner)
   // outgoing message IDs per group (capped at MAX_OUTGOING_IDS)
   private readonly outgoingMsgIds = new Map<string, Set<number>>();
   // last proactive reply timestamp per group (for silence factor)
@@ -728,12 +727,10 @@ export class ChatModule implements IChatModule {
     if (arr.length > 5) arr = arr.slice(-5);
     this.botRecentOutputs.set(groupId, arr);
 
-    // Track mface keys for rotation cooldown
+    // Track mface keys for rotation cooldown (delegated to StickerFirstModule)
     const mfaceKeys = [...reply.matchAll(/\[CQ:mface,[^\]]*\bemoji_id=([^,\]]+)/g)].map(m => m[1]!.trim());
-    if (mfaceKeys.length > 0) {
-      let recent = this.recentMfaceByGroup.get(groupId) ?? [];
-      recent = [...recent, ...mfaceKeys].slice(-8);
-      this.recentMfaceByGroup.set(groupId, recent);
+    if (mfaceKeys.length > 0 && this.stickerFirst) {
+      this.stickerFirst.recordMfaceOutput(groupId, mfaceKeys);
     }
   }
 
@@ -1698,7 +1695,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     const pool = getStickerPool(groupId);
     if (!pool || pool.length === 0) return '';
 
-    const recentKeys = new Set(this.recentMfaceByGroup.get(groupId) ?? []);
+    const recentKeys = this.stickerFirst?.getRecentMfaceKeys(groupId) ?? new Set<string>();
     // Extract emoji_id from each cqCode for cooldown comparison
     const filtered = pool.filter(s => {
       const m = s.cqCode.match(/\bemoji_id=([^,\]]+)/);
