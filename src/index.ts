@@ -45,6 +45,10 @@ import { JargonMiner } from './modules/jargon-miner.js';
 import { RatingPortalServer } from './server/rating-portal.js';
 import { TuningGenerator } from './server/tuning-generator.js';
 
+// ============================================================
+// PHASE 1: Infrastructure (logger, env, PID lock, database)
+// ============================================================
+
 // 1. Bootstrap logger
 const logLevel = process.env['LOG_LEVEL'] ?? 'info';
 const logDir = path.join(process.cwd(), 'data', 'logs');
@@ -92,6 +96,10 @@ process.on('exit', () => { try { fs.unlinkSync(pidPath); } catch { /* ignore */ 
 const dbPath = process.env['DB_PATH'] ?? 'data/bot.db';
 const db = new Database(dbPath);
 logger.info({ dbPath }, 'Database opened');
+
+// ============================================================
+// PHASE 2: Services (LLM providers, embeddings, adapters)
+// ============================================================
 
 // 4. Instantiate services (bootstrap order per architecture §5.2)
 const botUserId = process.env['BOT_QQ_ID'] ?? '';
@@ -175,6 +183,10 @@ void embedder.waitReady().then(() => {
   }
 });
 router.setSelfLearning(selfLearning);
+
+// ============================================================
+// PHASE 3: Modules (chat, mimic, moderation, stickers, etc.)
+// ============================================================
 
 // Tuning path is group-specific; falls back to data/tuning.md if no active group
 const tuningGroupId = process.env['ACTIVE_GROUPS']?.split(',')[0]?.trim();
