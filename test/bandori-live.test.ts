@@ -301,6 +301,39 @@ describe('_parseEvents', () => {
       expect(events1[i]!.rawHash).toBe(events2[i]!.rawHash);
     }
   });
+
+  // Regression test against a real snapshot of https://bang-dream.com/events/
+  // captured 2026-04-15. Locks in the real-site BEM selectors so we don't
+  // accidentally revert to synthetic .event-card class names in a refactor.
+  it('parses the real bang-dream.com/events/ snapshot correctly', () => {
+    const html = fixture('bandori-events-live-snapshot.html');
+    const events = _parseEvents(html);
+    // Real page has 20 article.p-live-event-list__item blocks
+    expect(events.length).toBeGreaterThanOrEqual(15);
+    // Every parsed event should have title + detailUrl (core fields)
+    for (const e of events) {
+      expect(e.title.length).toBeGreaterThan(0);
+      expect(e.detailUrl).toMatch(/^https:\/\/bang-dream\.com\//);
+    }
+    // Should find specific known events with correctly parsed Japanese dates
+    const morfonica = events.find(e => e.title.includes('Morfonica単独ライブ'));
+    expect(morfonica).toBeDefined();
+    expect(morfonica!.startDate).toBe('2026-09-22');
+    expect(morfonica!.venue).toBe('TACHIKAWA STAGE GARDEN');
+    expect(morfonica!.bands).toContain('Morfonica');
+
+    // Date range case: "2026年8月29日(土)・30日(日)" → start+end same month
+    const roselia = events.find(e => e.title.includes('Lehre der Rose'));
+    expect(roselia).toBeDefined();
+    expect(roselia!.startDate).toBe('2026-08-29');
+    expect(roselia!.endDate).toBe('2026-08-30');
+    expect(roselia!.bands).toContain('Roselia');
+
+    // Multi-band event case
+    const lucky = events.find(e => e.title.includes('LuckyFes'));
+    expect(lucky).toBeDefined();
+    expect(lucky!.bands.length).toBeGreaterThanOrEqual(1);
+  });
 });
 
 // ====================================================================

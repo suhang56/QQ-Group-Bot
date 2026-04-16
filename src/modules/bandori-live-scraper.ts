@@ -32,40 +32,56 @@ export function _hasBandoriLiveKeyword(text: string): boolean {
 // ---------------------------------------------------------------
 
 /**
- * Convert "2026.07.18" or "2026/07/18" → "2026-07-18".
+ * Convert various date formats → "2026-07-18".
+ * Supported:
+ *   "2026.07.18" / "2026/07/18" / "2026-07-18" (ISO-ish)
+ *   "2026年7月18日" / "2026年7月18日(土)" (Japanese, actually used by bang-dream.com)
  * Returns null if unparseable.
  */
 function _normDate(raw: string): string | null {
-  const m = raw.trim().match(/(\d{4})[./](\d{1,2})[./](\d{1,2})/);
-  if (!m) return null;
-  return `${m[1]}-${m[2]!.padStart(2, '0')}-${m[3]!.padStart(2, '0')}`;
+  const trimmed = raw.trim();
+  // Japanese format: 2026年7月18日 (may be followed by (曜日) weekday suffix)
+  const ja = trimmed.match(/(\d{4})年(\d{1,2})月(\d{1,2})日/);
+  if (ja) return `${ja[1]}-${ja[2]!.padStart(2, '0')}-${ja[3]!.padStart(2, '0')}`;
+  // ISO-ish: 2026.07.18 / 2026/07/18 / 2026-07-18
+  const iso = trimmed.match(/(\d{4})[./-](\d{1,2})[./-](\d{1,2})/);
+  if (iso) return `${iso[1]}-${iso[2]!.padStart(2, '0')}-${iso[3]!.padStart(2, '0')}`;
+  return null;
 }
 
 /**
  * Parse a date string into { startDate, endDate }.
  * Supports:
- *   "2026.07.18〜2026.07.19"
- *   "2026.07.18~2026.07.19"
- *   "2026.07.18"
+ *   "2026.07.18〜2026.07.19"  (ISO range, full)
+ *   "2026年9月22日(火・祝)"   (Japanese single, bang-dream.com format)
+ *   "2026年8月29日(土)・30日(日)"  (Japanese range where end reuses start's year/month)
+ *   "2026.07.18" / "2026年10月5日"  (single)
  *   "" or unparseable → both null (logs E043)
  */
 function _parseDateRange(raw: string): { startDate: string | null; endDate: string | null } {
   const trimmed = raw.trim();
   if (!trimmed) return { startDate: null, endDate: null };
 
-  // Range separator: 〜 (U+301C) or ~ or ー or to
-  const sep = trimmed.match(/[〜~ー]/);
-  if (sep) {
-    const parts = trimmed.split(/[〜~ー]/);
-    const start = _normDate(parts[0] ?? '');
-    const end = _normDate(parts[1] ?? '');
-    if (!start) {
-      logger.warn({ raw }, 'E043: bandori date parse failed');
-      return { startDate: null, endDate: null };
-    }
-    return { startDate: start, endDate: end };
+  // Japanese range shorthand: "2026年8月29日(土)・30日(日)" — second date omits 年/月
+  const jaRange = trimmed.match(/(\d{4})年(\d{1,2})月(\d{1,2})日(?:\([^)]*\))?\s*[・〜~ー～]\s*(\d{1,2})日/);
+  if (jaRange) {
+    const y = jaRange[1]!;
+    const mo = jaRange[2]!.padStart(2, '0');
+    const d1 = jaRange[3]!.padStart(2, '0');
+    const d2 = jaRange[4]!.padStart(2, '0');
+    return { startDate: `${y}-${mo}-${d1}`, endDate: `${y}-${mo}-${d2}` };
   }
 
+  // ISO or long-form range: "2026.07.18〜2026.07.19" (two full dates)
+  const sep = trimmed.match(/[〜~ー～]/);
+  if (sep) {
+    const parts = trimmed.split(/[〜~ー～]/);
+    const start = _normDate(parts[0] ?? '');
+    const end = _normDate(parts[1] ?? '');
+    if (start) return { startDate: start, endDate: end };
+  }
+
+  // Single date (ISO or Japanese with optional (曜日) suffix)
   const single = _normDate(trimmed);
   if (!single) {
     logger.warn({ raw }, 'E043: bandori date parse failed');
@@ -130,33 +146,70 @@ export function _parseEvents(html: string): ParsedEvent[] {
     // Remove noise elements before parsing
     root.querySelectorAll('script, style, nav, footer, header').forEach(el => el.remove());
 
-    const cards = root.querySelectorAll('article.event-card, div.event-card, .event-item, li.event-card');
+    // Real selector from https://bang-dream.com/events/ (verified 2026-04-15).
+    // Fallback selector `.event-card` is kept for synthetic test fixtures.
+    const cards = root.querySelectorAll(
+      'article.p-live-event-list__item, article.event-card, div.event-card, .event-item, li.event-card'
+    );
     if (cards.length === 0) return [];
 
     const results: ParsedEvent[] = [];
     for (const card of cards) {
-      const titleEl = card.querySelector('.event-title, h2, h3, .title');
+      // Title: real site uses .p-live-event-list__item-title; fallback for fixtures
+      const titleEl = card.querySelector(
+        '.p-live-event-list__item-title, .event-title, h2, h3, .title'
+      );
       const title = titleEl?.text.trim() ?? '';
       if (!title) continue;
 
-      const dateEl = card.querySelector('.event-date, .date, time');
-      const rawDate = dateEl?.text.trim() ?? '';
+      // Date: real site has h2.date label + <p> sibling inside .p-live-event-list__item-description.
+      // Use the <p> children of the description block — first <p> is the date.
+      let rawDate = '';
+      const descEl = card.querySelector('.p-live-event-list__item-description');
+      if (descEl) {
+        const ps = descEl.querySelectorAll('p');
+        if (ps.length > 0) rawDate = ps[0]?.text.trim() ?? '';
+      }
+      if (!rawDate) {
+        // Fallback for fixture structure: direct .event-date / .date / time element
+        const dateEl = card.querySelector('.event-date, .date, time');
+        rawDate = dateEl?.text.trim() ?? '';
+      }
       const { startDate, endDate } = _parseDateRange(rawDate);
 
-      const venueEl = card.querySelector('.event-venue, .venue');
-      const venue = venueEl?.text.trim() || null;
+      // Venue: second <p> in description block; or fallback .event-venue
+      let venue: string | null = null;
+      if (descEl) {
+        const ps = descEl.querySelectorAll('p');
+        if (ps.length >= 2) venue = ps[1]?.text.trim() || null;
+      }
+      if (!venue) {
+        const venueEl = card.querySelector('.event-venue, .venue');
+        venue = venueEl?.text.trim() || null;
+      }
 
+      // City: real site doesn't have a separate city field in the card; use fallback
       const cityEl = card.querySelector('.event-city, .city');
       const city = cityEl?.text.trim() || null;
 
-      const bandsEl = card.querySelector('.event-bands, .bands, .artist');
-      const bandsRaw = bandsEl?.text.trim() ?? '';
-      const bands = bandsRaw ? bandsRaw.split(/[,、·・\/]/).map(b => b.trim()).filter(Boolean) : [];
+      // Bands: real site has multiple <span class="p-live-event-list__item-artist-item">
+      let bands: string[] = [];
+      const bandSpans = card.querySelectorAll('.p-live-event-list__item-artist-item');
+      if (bandSpans.length > 0) {
+        bands = bandSpans.map(s => s.text.trim()).filter(Boolean);
+      } else {
+        const bandsEl = card.querySelector('.event-bands, .bands, .artist');
+        const bandsRaw = bandsEl?.text.trim() ?? '';
+        bands = bandsRaw ? bandsRaw.split(/[,、·・\/]/).map(b => b.trim()).filter(Boolean) : [];
+      }
 
       const ticketEl = card.querySelector('.event-ticket, .ticket, .ticket-info');
       const ticketInfoText = ticketEl?.text.trim() || null;
 
-      const linkEl = card.querySelector('a.event-detail-link, a[href*="/events/"]');
+      // Link: real site's a.p-live-event-list__item-link OR legacy a.event-detail-link
+      const linkEl = card.querySelector(
+        'a.p-live-event-list__item-link, a.event-detail-link, a[href*="/events/"]'
+      );
       const rawHref = linkEl?.getAttribute('href') ?? null;
       const detailUrl = rawHref
         ? (rawHref.startsWith('http') ? rawHref : `https://bang-dream.com${rawHref}`)
