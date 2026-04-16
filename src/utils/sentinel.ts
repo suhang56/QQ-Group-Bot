@@ -7,6 +7,14 @@ const WORD_FORBIDDEN = [
   'claude', 'chatgpt', 'gpt', 'anthropic', 'openai', 'llm',
 ];
 
+// Self-identifying "bot" leaks: any demonstrative/pronoun followed by "bot" or
+// "AI" is the bot talking about itself as a bot. Examples seen in prod:
+//   "哈哈哈哈你这个bot屁股歪了"   ← bot said this about itself
+//   "这个bot又坏了"                ← same
+//   "我这bot" / "作为bot" / "bot的意思"
+// Pattern matches: 你/我/他/她/它/这(个|种|位)/那(个|种|位)/作为 + optional space + bot|ai
+const BOT_SELFREF_RE = /(?:你|我|他|她|它|这个|那个|这种|那种|这位|那位|作为|身为|一个|这|那)\s*(?:bot|ai)\b/i;
+
 // Chinese/multi-char phrases always forbidden as substrings
 const SUBSTR_FORBIDDEN = [
   '克劳德', '机器人', '助手', 'a.i.',
@@ -83,6 +91,9 @@ export function hasForbiddenContent(text: string): string | null {
   if (m) return m[0]!;
 
   if (text.includes('---')) return '---';
+
+  const selfRef = BOT_SELFREF_RE.exec(text);
+  if (selfRef) return selfRef[0]!;
 
   const lower = text.toLowerCase();
   for (const phrase of SUBSTR_FORBIDDEN) {

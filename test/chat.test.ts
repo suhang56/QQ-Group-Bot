@@ -1927,7 +1927,11 @@ describe('ChatModule — tiered 50/20/10 context scope', () => {
     insertN(50);
     await makeChat().generateReply('g1', makeMsg(), []);
     const prompt = getPrompt();
-    const arrowCount = (prompt.match(/← 要接的这条/g) ?? []).length;
+    // The immediate-context line must carry exactly one "← 要接的这条" tag
+    // (prompt body may reference the marker in its directive text — filter those out).
+    const immediateBlock = prompt.split('# 当前 thread 语境')[1] ?? '';
+    const directiveCut = immediateBlock.split('# 🎯 唯一目标')[0] ?? immediateBlock;
+    const arrowCount = (directiveCut.match(/← 要接的这条/g) ?? []).length;
     expect(arrowCount).toBe(1);
   });
 
@@ -1943,7 +1947,8 @@ describe('ChatModule — tiered 50/20/10 context scope', () => {
     insertN(3);
     await makeChat().generateReply('g1', makeMsg(), []);
     const prompt = getPrompt();
-    expect(prompt).toContain('标了 ← 的那条消息值不值得你开口');
+    expect(prompt).toContain('# 🎯 唯一目标');
+    expect(prompt).toContain('← 要接的这条');
     expect(prompt).toContain('只输出一个：<skip> 或 一条自然反应');
   });
 
