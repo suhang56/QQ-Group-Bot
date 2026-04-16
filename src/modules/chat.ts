@@ -9,7 +9,7 @@ import { ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
 import { lurkerDefaults, chatHistoryDefaults, RUNTIME_CHAT_MODEL, CHAT_QWEN_MODEL, CHAT_QWEN_DISABLED, CHAT_DEEPSEEK_MODEL, DEEPSEEK_ENABLED } from '../config.js';
 import { parseFaces } from '../utils/qqface.js';
-import { sentinelCheck, postProcess, sanitize, applyPersonaFilters, isEcho, checkConfabulation, hasForbiddenContent, HARDENED_SYSTEM, entityGuard, qaReportRegenHint } from '../utils/sentinel.js';
+import { sentinelCheck, postProcess, sanitize, applyPersonaFilters, isEcho, checkConfabulation, hasForbiddenContent, HARDENED_SYSTEM, entityGuard, qaReportRegenHint, hasCoreferenceSelfReference } from '../utils/sentinel.js';
 import { buildStickerSection, getStickerPool, type LiveStickerEntry } from '../utils/stickers.js';
 import { MoodTracker, PROACTIVE_POOLS, type MoodDescription } from './mood.js';
 import type { ICharModule } from './char.js';
@@ -1502,6 +1502,20 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
           const regenResponse = await chatRequest(true);
           const regenText = applyPersonaFilters(sanitize(regenResponse.text), mfaceKeys);
           if (regenText && !qaReportRegenHint(regenText)) {
+            processed = regenText;
+          }
+        } catch {
+          // keep original if regen fails
+        }
+      }
+
+      // P3-4c: Coreference guard — detect "在说{speakerNick}" self-reference
+      if (hasCoreferenceSelfReference(processed, [triggerMessage.nickname])) {
+        this.logger.info({ groupId, original: processed, speaker: triggerMessage.nickname }, 'coreference-guard flagged — regenerating');
+        try {
+          const regenResponse = await chatRequest(true);
+          const regenText = applyPersonaFilters(sanitize(regenResponse.text), mfaceKeys);
+          if (regenText && !hasCoreferenceSelfReference(regenText, [triggerMessage.nickname])) {
             processed = regenText;
           }
         } catch {
