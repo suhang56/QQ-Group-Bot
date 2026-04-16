@@ -274,6 +274,7 @@ export class BandoriLiveScraper {
       return;
     }
     this.timer = setTimeout(() => void this._runAndSchedule(), this.initialDelayMs);
+    this.timer.unref?.();
     logger.info({ intervalMs: this.intervalMs, initialDelayMs: this.initialDelayMs }, 'bandori-live scraper started');
   }
 
@@ -292,6 +293,7 @@ export class BandoriLiveScraper {
       logger.error({ err }, 'bandori-live scrape failed');
     }
     this.timer = setTimeout(() => void this._runAndSchedule(), this.intervalMs);
+    this.timer.unref?.();
   }
 
   async scrape(): Promise<number> {
