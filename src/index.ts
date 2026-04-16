@@ -289,7 +289,11 @@ adapter.on('notice.group_increase', (groupId, userId) => {
 });
 
 adapter.on('notice.group_poke', (notice) => {
-  if (ACTIVE_GROUPS.length > 0 && !ACTIVE_GROUPS.includes(notice.groupId)) return;
+  logger.info(notice, 'group poke notice received');
+  if (ACTIVE_GROUPS.length > 0 && !ACTIVE_GROUPS.includes(notice.groupId)) {
+    logger.info({ groupId: notice.groupId, activeGroups: ACTIVE_GROUPS }, 'group poke ignored: inactive group');
+    return;
+  }
   void router.dispatchPoke(notice);
 });
 

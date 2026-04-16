@@ -46,9 +46,9 @@ export class PokeModule implements IPokeModule {
 
   constructor(private readonly options: PokeModuleOptions) {
     this.replies = options.replies?.length ? options.replies : DEFAULT_REPLIES;
-    this.replyChance = options.replyChance ?? 0.45;
-    this.userCooldownMs = options.userCooldownMs ?? 60_000;
-    this.groupCooldownMs = options.groupCooldownMs ?? 30_000;
+    this.replyChance = options.replyChance ?? 1;
+    this.userCooldownMs = options.userCooldownMs ?? 15_000;
+    this.groupCooldownMs = options.groupCooldownMs ?? 10_000;
     this.burstWindowMs = options.burstWindowMs ?? 60_000;
     this.burstLimit = options.burstLimit ?? 3;
     this.burstMuteMs = options.burstMuteMs ?? 5 * 60_000;

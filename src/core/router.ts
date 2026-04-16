@@ -222,16 +222,46 @@ export class Router implements IRouter {
 
   async dispatchPoke(notice: GroupPokeNotice): Promise<void> {
     try {
-      if (!this.botUserId) return;
-      if (!notice.groupId || !notice.userId || !notice.targetId) return;
-      if (notice.targetId !== this.botUserId) return;
+      if (!this.botUserId) {
+        this.logger.warn({ groupId: notice.groupId }, 'poke ignored: BOT_QQ_ID is not configured');
+        return;
+      }
+      if (!notice.groupId || !notice.userId || !notice.targetId) {
+        this.logger.info({ notice }, 'poke ignored: malformed notice');
+        return;
+      }
       if (!this.pokeModule) return;
 
+      const normalized = this._normalizePokeNotice(notice);
+      if (!normalized) {
+        this.logger.info(
+          { groupId: notice.groupId, userId: notice.userId, targetId: notice.targetId, botUserId: this.botUserId },
+          'poke ignored: not targeting bot',
+        );
+        return;
+      }
+
       const config = this.db.groupConfig.get(notice.groupId) ?? this._defaultConfig(notice.groupId);
-      await this.pokeModule.handle(notice, config);
+      await this.pokeModule.handle(normalized, config);
     } catch (err) {
       this.logger.warn({ err, groupId: notice.groupId, userId: notice.userId }, 'dispatchPoke failed');
     }
+  }
+
+  private _normalizePokeNotice(notice: GroupPokeNotice): GroupPokeNotice | null {
+    if (notice.targetId === this.botUserId) return notice;
+
+    // Some OneBot/NapCat builds report poke notices as user_id=target and
+    // target_id=operator. Normalize that shape so a bot-target poke still works.
+    if (notice.userId === this.botUserId && notice.targetId !== this.botUserId) {
+      return {
+        ...notice,
+        userId: notice.operatorId !== this.botUserId ? notice.operatorId : notice.targetId,
+        targetId: this.botUserId,
+      };
+    }
+
+    return null;
   }
 
   async dispatch(msg: GroupMessage): Promise<void> {

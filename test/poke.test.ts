@@ -57,6 +57,21 @@ describe('PokeModule', () => {
     expect(adapter.send).toHaveBeenCalledWith('g1', 'pong');
   });
 
+  it('responds by default without depending on random chance', async () => {
+    const adapter = makeMockAdapter();
+    const mod = new PokeModule({
+      adapter,
+      botUserId: BOT_ID,
+      replies: ['pong'],
+      random: () => 0.99,
+      now: () => 1000,
+    });
+
+    await mod.handle(makeNotice(), defaultGroupConfig('g1'));
+
+    expect(adapter.send).toHaveBeenCalledWith('g1', 'pong');
+  });
+
   it('rate-limits repeated pokes in the same group', async () => {
     let now = 1000;
     const adapter = makeMockAdapter();
@@ -131,6 +146,15 @@ describe('Router poke dispatch', () => {
 
     expect(poke.handle).toHaveBeenCalledTimes(1);
     expect(db.messages.getRecent('g1', 10)).toEqual([]);
+  });
+
+  it('normalizes reversed poke notices where user_id is the bot', async () => {
+    await router.dispatchPoke(makeNotice({ userId: BOT_ID, targetId: 'u1', operatorId: 'u1' }));
+
+    expect(poke.handle).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: 'u1', targetId: BOT_ID }),
+      expect.anything(),
+    );
   });
 
   it('ignores pokes aimed at other users', async () => {
