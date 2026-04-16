@@ -24,6 +24,7 @@ import { NameImagesModule } from './modules/name-images.js';
 import { PokeModule } from './modules/poke.js';
 import { LoreUpdater } from './modules/lore-updater.js';
 import { LoreLoader } from './modules/lore-loader.js';
+import { DeflectionEngine } from './modules/deflection-engine.js';
 import { chatHistoryDefaults } from './config.js';
 import { SelfLearningModule } from './modules/self-learning.js';
 import { runFactEmbeddingBackfill, BACKFILL_INTERVAL_MS } from './modules/fact-embedding-backfill.js';
@@ -184,6 +185,7 @@ const tuningPath = tuningGroupId
 const vision = new VisionService(claude, adapter, db.imageDescriptions);
 const stickerFirst = new StickerFirstModule(db.localStickers, embedder);
 const loreLoader = new LoreLoader(chatHistoryDefaults.loreDirPath, chatHistoryDefaults.loreSizeCapBytes, tuningPath);
+const deflectionEngine = new DeflectionEngine(claude, { cacheEnabled: true });
 
 const bandoriEnabled = process.env['BANDORI_SCRAPE_ENABLED'] !== 'false';
 const bandoriScraper = new BandoriLiveScraper(db.bandoriLives, {
@@ -191,6 +193,7 @@ const bandoriScraper = new BandoriLiveScraper(db.bandoriLives, {
   intervalMs: parseInt(process.env['BANDORI_SCRAPE_INTERVAL_MS'] ?? '86400000', 10),
 });
 bandoriScraper.start();
+deflectionEngine.start();
 
 const chat = new ChatModule(claude, db, {
   botUserId, deflectCacheEnabled: true, visionService: vision,
@@ -200,6 +203,7 @@ const chat = new ChatModule(claude, db, {
   stickerFirst,
   bandoriLiveRepo: bandoriEnabled ? db.bandoriLives : undefined,
   loreLoader,
+  deflectionEngine,
 });
 router.setChat(chat);
 router.setVisionService(vision);

@@ -21,6 +21,7 @@ import type { IStickerFirstModule } from './sticker-first.js';
 import { _hasBandoriLiveKeyword, _formatLiveBlock } from './bandori-live-scraper.js';
 import { buildAliasMap, extractEntities, buildLorePayload } from './lore-retrieval.js';
 import type { ILoreLoader } from './lore-loader.js';
+import type { IDeflectionEngine } from './deflection-engine.js';
 import { tokenizeLore as _tokenizeLore, extractTokens as _extractTokens, extractKeywords as _extractKeywords } from '../utils/text-tokenize.js';
 
 export interface IChatModule {
@@ -96,6 +97,7 @@ interface ChatOptions {
   stickerFirst?: IStickerFirstModule;
   bandoriLiveRepo?: IBandoriLiveRepository;
   loreLoader?: ILoreLoader;
+  deflectionEngine?: IDeflectionEngine;
 }
 
 export interface ScoreFactors {
@@ -533,6 +535,7 @@ export class ChatModule implements IChatModule {
   private readonly stickerFirst: IStickerFirstModule | null;
   private readonly bandoriLiveRepo: IBandoriLiveRepository | null;
   private readonly loreLoader: ILoreLoader | null;
+  private readonly deflectionEngine: IDeflectionEngine | null;
   // per-group: whether the last generateReply call returned an evasive reply
   private readonly lastEvasiveReply = new Map<string, boolean>();
   // per-group: fact ids injected into the system prompt of the last generateReply.
@@ -595,6 +598,7 @@ export class ChatModule implements IChatModule {
     this.stickerFirst = options.stickerFirst ?? null;
     this.bandoriLiveRepo = options.bandoriLiveRepo ?? null;
     this.loreLoader = options.loreLoader ?? null;
+    this.deflectionEngine = options.deflectionEngine ?? null;
 
     if (this.moodProactiveEnabled) {
       this.moodProactiveTimer = setInterval(
@@ -1869,6 +1873,11 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
 
   /** Pop one deflection from cache (refill async if low), fall back to static pool on empty. */
   private async _generateDeflection(category: DeflectCategory, triggerMsg: GroupMessage): Promise<string> {
+    if (this.deflectionEngine) {
+      return this.deflectionEngine.generateDeflection(category, { content: triggerMsg.content });
+    }
+
+    // Inline fallback
     const cache = this.deflectCache.get(category) ?? [];
 
     if (this.deflectCacheEnabled) {
