@@ -376,6 +376,10 @@ export interface ILocalStickerRepository {
   recordUsage(groupId: string, key: string, positive: boolean): void;
   setSummary(groupId: string, key: string, summary: string): void;
   listMissingSummary(groupId: string, limit: number): LocalSticker[];
+  /** Mark a sticker as blocked so it's excluded from top queries / sticker-first. */
+  blockSticker(groupId: string, key: string): boolean;
+  /** Unblock a previously blocked sticker. */
+  unblockSticker(groupId: string, key: string): boolean;
 }
 
 // ---- Raw row types from SQLite ----
@@ -1422,7 +1426,7 @@ class LocalStickerRepository implements ILocalStickerRepository {
 
   getTopByGroup(groupId: string, limit: number): LocalSticker[] {
     const rows = this.db.prepare(`
-      SELECT * FROM local_stickers WHERE group_id = ?
+      SELECT * FROM local_stickers WHERE group_id = ? AND COALESCE(blocked, 0) = 0
       ORDER BY (usage_positive - usage_negative) DESC, count DESC LIMIT ?
     `).all(groupId, limit) as unknown as Array<{
       id: number; group_id: string; key: string; type: string;
@@ -1438,6 +1442,20 @@ class LocalStickerRepository implements ILocalStickerRepository {
       count: r.count, firstSeen: r.first_seen, lastSeen: r.last_seen,
       usagePositive: r.usage_positive, usageNegative: r.usage_negative,
     }));
+  }
+
+  blockSticker(groupId: string, key: string): boolean {
+    const result = this.db.prepare(
+      'UPDATE local_stickers SET blocked = 1 WHERE group_id = ? AND key = ?'
+    ).run(groupId, key);
+    return Number(result.changes ?? 0) > 0;
+  }
+
+  unblockSticker(groupId: string, key: string): boolean {
+    const result = this.db.prepare(
+      'UPDATE local_stickers SET blocked = 0 WHERE group_id = ? AND key = ?'
+    ).run(groupId, key);
+    return Number(result.changes ?? 0) > 0;
   }
 
   recordUsage(groupId: string, key: string, positive: boolean): void {
@@ -1899,6 +1917,9 @@ export class Database {
     // /char feature columns on group_config — added for BanG Dream character role-play.
     try { this._db.exec(`ALTER TABLE group_config ADD COLUMN active_character_id TEXT`); } catch { /* already exists */ }
     try { this._db.exec(`ALTER TABLE group_config ADD COLUMN char_started_by TEXT`); } catch { /* already exists */ }
+
+    // local_stickers.blocked — banned stickers are excluded from top queries.
+    try { this._db.exec(`ALTER TABLE local_stickers ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0`); } catch { /* already exists */ }
 
     // forward_cache — pre-expanded 合并转发 content, keyed by forward_id, TTL 24h.
     this._db.exec(`

@@ -1891,5 +1891,38 @@ ${ctxLine}
       await this.adapter.send(msg.groupId,
         `【表情包优先模式状态】\n开关: ${onOff}\n匹配阈值: ${config.stickerFirstThreshold}\n本群本地表情包库大小: ${count} 张\n最近发送表情包时间: 暂无`);
     });
+
+    // /sticker_ban — mark the most recent sticker sent by the bot as blocked,
+    // so it won't be picked by sticker-first or surfaced in the sticker section again.
+    this.commands.set('sticker_ban', async (msg, _args, _config) => {
+      if (msg.role !== 'admin' && msg.role !== 'owner') return;
+      if (!this.chatModule) {
+        await this.adapter.send(msg.groupId, '聊天模块没启动，没法封');
+        return;
+      }
+      const key = this.chatModule.getLastStickerKey(msg.groupId);
+      if (!key) {
+        await this.adapter.send(msg.groupId, '没找到最近发送的表情包记录（bot 这次会话可能还没发过表情，或刚重启）');
+        return;
+      }
+      const ok = this.db.localStickers.blockSticker(msg.groupId, key);
+      if (ok) {
+        await this.adapter.send(msg.groupId, `封了。key=${key}`);
+      } else {
+        await this.adapter.send(msg.groupId, `没封上，DB 里找不到这个表情（key=${key}）`);
+      }
+    });
+
+    // /sticker_unban <key> — manual unban by key.
+    this.commands.set('sticker_unban', async (msg, args, _config) => {
+      if (msg.role !== 'admin' && msg.role !== 'owner') return;
+      const key = args[0]?.trim();
+      if (!key) {
+        await this.adapter.send(msg.groupId, '用法: /sticker_unban <key>');
+        return;
+      }
+      const ok = this.db.localStickers.unblockSticker(msg.groupId, key);
+      await this.adapter.send(msg.groupId, ok ? `解封 ${key}` : `找不到 ${key}`);
+    });
   }
 }

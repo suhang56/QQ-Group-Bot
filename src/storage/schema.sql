@@ -164,6 +164,7 @@ CREATE TABLE IF NOT EXISTS local_stickers (
   last_seen         INTEGER NOT NULL,
   usage_positive    INTEGER NOT NULL DEFAULT 0,
   usage_negative    INTEGER NOT NULL DEFAULT 0,
+  blocked           INTEGER NOT NULL DEFAULT 0,
   UNIQUE(group_id, key)
 );
 

@@ -31,6 +31,7 @@ export interface IChatModule {
   recordOutgoingMessage(groupId: string, msgId: number): void;
   markReplyToUser(groupId: string, userId: string): void;
   invalidateLore(groupId: string): void;
+  getLastStickerKey(groupId: string): string | null;
   tickStickerRefresh(groupId: string): void;
   getMoodTracker(): MoodTracker;
   noteAdminActivity(groupId: string, userId: string, nickname: string, content: string): void;
@@ -689,6 +690,9 @@ export class ChatModule implements IChatModule {
   private readonly chatContextImmediate: number;
   // per-group: bot's last 5 outgoing reply texts (for "avoid repeating" injection)
   private readonly botRecentOutputs = new Map<string, string[]>();
+  // per-group: key of the most recent sticker the bot sent via sticker-first.
+  // Used by /sticker_ban to identify the target when admin says "don't use that one".
+  private readonly lastStickerKeyByGroup = new Map<string, string>();
   // per-group: active topic engagement state (set when bot replies, consumed in scoring)
   private readonly engagedTopic = new Map<string, { tokens: Set<string>; until: number; msgCount: number }>();
   // per-group: admin userId → { nickname, samples[] } (populated from live messages)
@@ -939,6 +943,11 @@ export class ChatModule implements IChatModule {
 
   setCharModule(charModule: ICharModule): void {
     this.charModule = charModule;
+  }
+
+  /** Return the key of the most recent sticker sent via sticker-first in this group, or null. */
+  getLastStickerKey(groupId: string): string | null {
+    return this.lastStickerKeyByGroup.get(groupId) ?? null;
   }
 
   /** Evict lore + identity caches for a group so next message re-reads the updated file. */
@@ -1436,6 +1445,7 @@ export class ChatModule implements IChatModule {
             );
             if (choice) {
               this.stickerFirst.suppressSticker(groupId, choice.key);
+              this.lastStickerKeyByGroup.set(groupId, choice.key);
               this._recordOwnReply(groupId, choice.cqCode);
               this.logger.info({ groupId, key: choice.key, score: choice.score }, 'sticker-first: sending sticker instead of text');
               return choice.cqCode;
