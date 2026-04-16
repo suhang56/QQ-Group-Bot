@@ -196,7 +196,12 @@ const tuningPath = tuningGroupId
 
 const vision = new VisionService(claude, adapter, db.imageDescriptions);
 const stickerFirst = new StickerFirstModule(db.localStickers, embedder);
-const loreLoader = new LoreLoader(chatHistoryDefaults.loreDirPath, chatHistoryDefaults.loreSizeCapBytes, tuningPath);
+const loreLoader = new LoreLoader(
+  chatHistoryDefaults.loreDirPath,
+  chatHistoryDefaults.loreSizeCapBytes,
+  tuningPath,
+  (groupId: string) => db.learnedFacts.listActiveAliasFacts(groupId),
+);
 const deflectionEngine = new DeflectionEngine(claude, { cacheEnabled: true });
 
 const bandoriEnabled = process.env['BANDORI_SCRAPE_ENABLED'] !== 'false';
@@ -217,6 +222,8 @@ const chat = new ChatModule(claude, db, {
   loreLoader,
   deflectionEngine,
 });
+// Restore bot recent outputs from DB so dedup survives restarts
+chat.restoreBotRecentOutputs(ACTIVE_GROUPS);
 router.setChat(chat);
 router.setStickerFirst(stickerFirst);
 router.setVisionService(vision);

@@ -23,6 +23,7 @@ import { buildAliasMap, extractEntities, buildLorePayload } from './lore-retriev
 import type { ILoreLoader } from './lore-loader.js';
 import type { IDeflectionEngine } from './deflection-engine.js';
 import { tokenizeLore as _tokenizeLore, extractTokens as _extractTokens, extractKeywords as _extractKeywords } from '../utils/text-tokenize.js';
+import { loadGroupJargon, formatJargonBlock } from './jargon-provider.js';
 
 export interface IChatModule {
   generateReply(groupId: string, triggerMessage: GroupMessage, _recentMessages: GroupMessage[]): Promise<string | null>;
@@ -766,6 +767,20 @@ export class ChatModule implements IChatModule {
         this.deflectCacheRefreshIntervalMs,
       );
       this.deflectRefillTimer.unref?.();
+    }
+  }
+
+  /**
+   * Restore botRecentOutputs from bot_replies table for all known groups.
+   * Call once after construction to survive process restarts.
+   */
+  restoreBotRecentOutputs(groupIds: ReadonlyArray<string>, limit = 10): void {
+    for (const gid of groupIds) {
+      const texts = this.db.botReplies.getRecentTexts(gid, limit);
+      if (texts.length > 0) {
+        this.botRecentOutputs.set(gid, texts);
+        this.logger.debug({ groupId: gid, count: texts.length }, 'Restored botRecentOutputs from DB');
+      }
     }
   }
 
@@ -2660,6 +2675,10 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       ? `\n\n# 关于这个群\n${lore}`
       : '';
 
+    // Inject learned jargon from jargon_candidates table
+    const jargonEntries = loadGroupJargon(this.db.rawDb, groupId);
+    const jargonSection = formatJargonBlock(jargonEntries);
+
     const imageAwarenessLine = this.visionService
       ? '\n\n如果消息里有 〔你看到那张图是：XXX〕 格式，那是**你自己看到的图的内容**，直接基于它做反应，不要反问"XXX 是什么"，不要说"描述"二字。'
       : '';
@@ -2675,7 +2694,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       ? '\n如果有人问 "群规 / 群里有什么规定" 之类，直接列出上面 ## 本群的规矩 段落里的实际规矩（用自己的口吻，不要照抄官方话术），绝对不要说 "没群规" / "不知道" / "想发什么发什么" 之类。'
       : '';
 
-    const text = `${personaBase}${adminStyleSection}${loreSection}${rulesBlock}${imageAwarenessLine}\n\n---\n简短自然（普通闲聊 1-3 句话；涉及列举 / 计数 / 时间线 / 多人信息且事实段落有料时允许 2-4 行展开）。群友提到群里的人名、梗、黑话，基于上面资料回答；不知道的就"啥来的"，不要装懂。${rulesInstruction}${outputRules}`;
+    const text = `${personaBase}${adminStyleSection}${loreSection}${jargonSection}${rulesBlock}${imageAwarenessLine}\n\n---\n简短自然（普通闲聊 1-3 句话；涉及列举 / 计数 / 时间线 / 多人信息且事实段落有料时允许 2-4 行展开）。群友提到群里的人名、梗、黑话，基于上面资料回答；不知道的就"啥来的"，不要装懂。${rulesInstruction}${outputRules}`;
 
     // Only cache the full text when NOT using per-member lore (lore varies per call)
     if (!hasPerMemberLore) {
