@@ -7,6 +7,8 @@
  */
 
 import { createLogger } from '../utils/logger.js';
+import { MEMES_V1_DISABLED } from '../config.js';
+import type { IMemeGraphRepo } from './self-learning.js';
 
 const logger = createLogger('conversation-state');
 
@@ -37,9 +39,18 @@ export interface JokeRecord {
   readonly firstSeen: number;
 }
 
+/** A meme-backed active joke — set on first match, no 3-hit threshold. */
+export interface MemeJokeRecord {
+  readonly canonical: string;
+  readonly meaning: string;
+  readonly count: number;
+  readonly firstSeen: number;
+}
+
 export interface ConversationSnapshot {
   readonly currentTopics: ReadonlyArray<Topic>;
   readonly activeJokes: ReadonlyArray<JokeRecord>;
+  readonly memeJokes: ReadonlyArray<MemeJokeRecord>;
   readonly participantCount: number;
   readonly windowStart: number;
 }
@@ -54,17 +65,24 @@ interface GroupState {
   messages: TimestampedMessage[];
   wordFreq: Map<string, number>;
   jargonFreq: Map<string, { count: number; firstSeen: number }>;
+  memeJokeFreq: Map<string, { meaning: string; count: number; firstSeen: number }>;
   participants: Map<string, number>; // userId → lastActiveTs
 }
 
 export class ConversationStateTracker {
   private readonly states = new Map<string, GroupState>();
   private pruneTimer: ReturnType<typeof setInterval> | null = null;
+  private _memeGraphRepo: IMemeGraphRepo | null = null;
 
   constructor() {
     // Periodic cleanup of stale groups
     this.pruneTimer = setInterval(() => this._pruneStaleGroups(), WINDOW_MS);
     this.pruneTimer.unref?.();
+  }
+
+  /** Inject meme graph repo after construction (follows setEmbeddingService pattern). */
+  setMemeGraphRepo(repo: IMemeGraphRepo | null): void {
+    this._memeGraphRepo = repo;
   }
 
   destroy(): void {
@@ -120,6 +138,9 @@ export class ConversationStateTracker {
       state.jargonFreq = newJargonFreq;
     }
 
+    // Scan for meme_graph matches — marks activeJoke on first hit (no 3-hit threshold)
+    this._scanMemeMatches(groupId, content, now, state);
+
     // Expire old messages outside the window
     this._expireOldMessages(groupId, now);
   }
@@ -130,7 +151,7 @@ export class ConversationStateTracker {
   getSnapshot(groupId: string): ConversationSnapshot {
     const state = this.states.get(groupId);
     if (!state) {
-      return { currentTopics: [], activeJokes: [], participantCount: 0, windowStart: Date.now() };
+      return { currentTopics: [], activeJokes: [], memeJokes: [], participantCount: 0, windowStart: Date.now() };
     }
 
     const now = Date.now();
@@ -149,6 +170,16 @@ export class ConversationStateTracker {
       .slice(0, MAX_JOKES)
       .map(([term, v]) => ({ term, count: v.count, firstSeen: v.firstSeen }));
 
+    // Meme-backed jokes: always active on first hit (no threshold)
+    const memeJokes: MemeJokeRecord[] = [...state.memeJokeFreq.entries()]
+      .slice(0, MAX_JOKES)
+      .map(([canonical, v]) => ({
+        canonical,
+        meaning: v.meaning,
+        count: v.count,
+        firstSeen: v.firstSeen,
+      }));
+
     const windowStart = state.messages.length > 0
       ? state.messages[0]!.timestamp
       : now;
@@ -156,6 +187,7 @@ export class ConversationStateTracker {
     return {
       currentTopics: sortedWords,
       activeJokes,
+      memeJokes,
       participantCount: state.participants.size,
       windowStart,
     };
@@ -197,6 +229,7 @@ export class ConversationStateTracker {
         messages: [],
         wordFreq: new Map(),
         jargonFreq: new Map(),
+        memeJokeFreq: new Map(),
         participants: new Map(),
       };
       this.states.set(groupId, state);
@@ -248,10 +281,82 @@ export class ConversationStateTracker {
       }
     }
 
+    // Rebuild memeJokeFreq from remaining messages
+    const newMemeJokeFreq = new Map<string, { meaning: string; count: number; firstSeen: number }>();
+    if (this._memeGraphRepo && !MEMES_V1_DISABLED()) {
+      const allMemes = this._memeGraphRepo.listActive(groupId);
+      for (const msg of newMessages) {
+        const contentLower = msg.content.toLowerCase();
+        for (const entry of allMemes) {
+          const terms = [entry.canonical, ...entry.variants];
+          const matched = terms.some(t => contentLower.includes(t.toLowerCase()));
+          if (matched) {
+            const existing = newMemeJokeFreq.get(entry.canonical);
+            if (existing) {
+              newMemeJokeFreq.set(entry.canonical, {
+                meaning: existing.meaning,
+                count: existing.count + 1,
+                firstSeen: existing.firstSeen,
+              });
+            } else {
+              newMemeJokeFreq.set(entry.canonical, {
+                meaning: entry.meaning,
+                count: 1,
+                firstSeen: msg.timestamp,
+              });
+            }
+          }
+        }
+      }
+    }
+
     state.messages = newMessages;
     state.wordFreq = newWordFreq;
     state.jargonFreq = newJargonFreq;
+    state.memeJokeFreq = newMemeJokeFreq;
     state.participants = newParticipants;
+  }
+
+  /**
+   * Scan message content against meme_graph entries. On first match,
+   * immediately marks memeJokeFreq (no 3-hit threshold like jargon).
+   */
+  private _scanMemeMatches(
+    groupId: string,
+    content: string,
+    nowMs: number,
+    state: GroupState,
+  ): void {
+    if (MEMES_V1_DISABLED()) return;
+    if (!this._memeGraphRepo) return;
+
+    const entries = this._memeGraphRepo.listActive(groupId);
+    if (entries.length === 0) return;
+
+    const contentLower = content.toLowerCase();
+    const newMemeJokeFreq = new Map(state.memeJokeFreq);
+
+    for (const entry of entries) {
+      const terms = [entry.canonical, ...entry.variants];
+      const matched = terms.some(t => contentLower.includes(t.toLowerCase()));
+      if (matched) {
+        const existing = newMemeJokeFreq.get(entry.canonical);
+        if (existing) {
+          newMemeJokeFreq.set(entry.canonical, {
+            meaning: existing.meaning,
+            count: existing.count + 1,
+            firstSeen: existing.firstSeen,
+          });
+        } else {
+          newMemeJokeFreq.set(entry.canonical, {
+            meaning: entry.meaning,
+            count: 1,
+            firstSeen: nowMs,
+          });
+        }
+      }
+    }
+    state.memeJokeFreq = newMemeJokeFreq;
   }
 
   /**

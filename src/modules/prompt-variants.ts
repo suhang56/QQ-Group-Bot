@@ -9,11 +9,19 @@
 
 export type Variant = 'banter' | 'default' | 'careful';
 
+/** Meme-backed active joke info for prompt injection. */
+export interface ActiveMemeJoke {
+  readonly canonical: string;
+  readonly meaning: string;
+}
+
 export interface VariantContext {
   activeJokeHit: boolean;
   sensitiveEntityHit: boolean;
   personaRoleCard: string;
   groupName?: string;
+  /** Meme-graph-backed active jokes to inject into banter variant. */
+  activeMemeJokes?: readonly ActiveMemeJoke[];
 }
 
 // --- Identity grounding block (shared by ALL variants) ---
@@ -98,10 +106,20 @@ export function buildVariantSystemPrompt(ctx: VariantContext): {
   const identity = buildIdentityGrounding(ctx.groupName);
   const rules = VARIANT_RULES[variant];
 
+  // For banter variant, inject active meme joke info if available
+  let memeJokeLine = '';
+  if (variant === 'banter' && ctx.activeMemeJokes && ctx.activeMemeJokes.length > 0) {
+    const entries = ctx.activeMemeJokes.map(
+      j => `${j.canonical} -- ${j.meaning}`
+    ).join('; ');
+    memeJokeLine = '\n[当前正活跃的梗: ' + entries + ']';
+  }
+
   const systemPrompt =
     identity + '\n\n' +
     ctx.personaRoleCard + '\n\n' +
-    rules;
+    rules +
+    memeJokeLine;
 
   return { variant, systemPrompt };
 }
