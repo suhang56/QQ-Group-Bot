@@ -34,6 +34,7 @@ export class AnnouncementSyncModule {
     this.intervalHandle = setInterval(() => {
       void this._syncAll(groupIds);
     }, this.refreshIntervalMs);
+    this.intervalHandle.unref?.();
     this.logger.info({ groupCount: groupIds.length, intervalMs: this.refreshIntervalMs }, 'announcement-sync started');
   }
 

@@ -68,6 +68,7 @@ export class AliasMiner {
       () => this._run().catch(err => this.logger.error({ err }, 'alias-miner run failed')),
       5 * 60_000,
     );
+    this.firstTimer.unref?.();
     this.timer = setInterval(
       () => this._run().catch(err => this.logger.error({ err }, 'alias-miner run failed')),
       this.intervalMs,

@@ -41,6 +41,7 @@ export class SelfReflectionLoop {
     this.timer = setTimeout(() => {
       void this._runAndSchedule();
     }, INITIAL_DELAY_MS);
+    this.timer.unref?.();
     logger.info({ groupId: this.opts.groupId, outputPath: this.opts.outputPath }, 'self-reflection loop started');
   }
 
@@ -48,6 +49,7 @@ export class SelfReflectionLoop {
     this.timer = setTimeout(() => {
       void this._runAndSchedule();
     }, HOURLY_MS);
+    this.timer.unref?.();
   }
 
   private async _runAndSchedule(): Promise<void> {

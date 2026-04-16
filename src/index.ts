@@ -415,6 +415,8 @@ const shutdown = async () => {
   chat.destroy();
   if (factBackfillTimer) clearInterval(factBackfillTimer);
   stickerCapture.stopBackfillLoop();
+  bandoriScraper.stop();
+  deflectionEngine.stop();
   router.dispose();
   ratingPortal?.stop();
   await adapter.disconnect();
