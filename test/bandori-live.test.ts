@@ -403,13 +403,15 @@ describe('_formatLiveBlock', () => {
 
   it('contains header', () => {
     const block = _formatLiveBlock(sampleEvents);
-    expect(block).toContain('【近期 BanG Dream! Live 信息】');
+    expect(block).toContain('【近期 BanG Dream! Live 信息');
   });
 
-  it('contains UX guidance fragment', () => {
+  it('contains directive guidance forbidding evasive "looking for" replies', () => {
     const block = _formatLiveBlock(sampleEvents);
-    expect(block).toContain('以上是刚拿到的 Live 排期信息');
-    expect(block).toContain('绝对不要把上面的信息当成列表原文输出');
+    // New directive is stricter — forbids "看看"/"我去查" and tells the
+    // LLM it already has the data instead of treating it as optional.
+    expect(block).toContain('你**已经有数据了**');
+    expect(block).toContain('禁止说"看看有没有"');
   });
 
   it('formats date range correctly', () => {
