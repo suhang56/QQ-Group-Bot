@@ -9,7 +9,7 @@ import { ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
 import { lurkerDefaults, chatHistoryDefaults, RUNTIME_CHAT_MODEL, CHAT_QWEN_MODEL, CHAT_QWEN_DISABLED, CHAT_DEEPSEEK_MODEL, DEEPSEEK_ENABLED } from '../config.js';
 import { parseFaces } from '../utils/qqface.js';
-import { sentinelCheck, postProcess, isEcho, checkConfabulation, hasForbiddenContent, HARDENED_SYSTEM } from '../utils/sentinel.js';
+import { sentinelCheck, postProcess, sanitize, applyPersonaFilters, isEcho, checkConfabulation, hasForbiddenContent, HARDENED_SYSTEM } from '../utils/sentinel.js';
 import { buildStickerSection, getStickerPool, type LiveStickerEntry } from '../utils/stickers.js';
 import { MoodTracker, PROACTIVE_POOLS, type MoodDescription } from './mood.js';
 import type { ICharModule } from './char.js';
@@ -1298,7 +1298,10 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
         { groupId, userId: triggerMessage.userId },
         async () => (await chatRequest(true)).text,
       );
-      const processed = postProcess(text);
+      // Use whitelist-aware mface filtering: keep mface codes whose key is
+      // in the group's learned sticker pool (P0-1 fix for mface strip bug)
+      const mfaceKeys = this.localStickerRepo?.getMfaceKeys(groupId) ?? null;
+      const processed = applyPersonaFilters(sanitize(text), mfaceKeys);
       // Claude explicitly skips this trigger
       if (/^<skip>\s*$/i.test(processed)) {
         this.logger.debug({ groupId, trigger: triggerMessage.content }, 'Claude explicitly skipped');

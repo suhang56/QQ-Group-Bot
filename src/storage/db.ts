@@ -437,6 +437,8 @@ export interface ILocalStickerRepository {
   blockSticker(groupId: string, key: string): boolean;
   /** Unblock a previously blocked sticker. */
   unblockSticker(groupId: string, key: string): boolean;
+  /** Return the set of mface keys known for this group (unblocked only). */
+  getMfaceKeys(groupId: string): Set<string>;
 }
 
 // ---- Expression pattern + user style types ----
@@ -1708,6 +1710,13 @@ class LocalStickerRepository implements ILocalStickerRepository {
     this.db.prepare(
       `UPDATE local_stickers SET ${col} = ${col} + 1 WHERE group_id = ? AND key = ?`
     ).run(groupId, key);
+  }
+
+  getMfaceKeys(groupId: string): Set<string> {
+    const rows = this.db.prepare(
+      `SELECT key FROM local_stickers WHERE group_id = ? AND type = 'mface' AND COALESCE(blocked, 0) = 0`
+    ).all(groupId) as Array<{ key: string }>;
+    return new Set(rows.map(r => r.key));
   }
 
   setSummary(groupId: string, key: string, summary: string): void {
