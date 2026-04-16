@@ -47,6 +47,7 @@ export class MemeClusterer {
   private readonly memeGraph: IMemeGraphRepo;
   private readonly phraseCandidates: IPhraseCandidatesRepo;
   private readonly claude: IClaudeClient;
+  private readonly embeddingService: IEmbeddingService | null;
   private readonly logger: Logger;
   private readonly now: () => number;
   private readonly maxOriginInfer: number;
@@ -56,6 +57,7 @@ export class MemeClusterer {
     this.memeGraph = opts.memeGraph;
     this.phraseCandidates = opts.phraseCandidates;
     this.claude = opts.claude;
+    this.embeddingService = opts.embeddingService ?? null;
     this.logger = opts.logger ?? createLogger('meme-clusterer');
     this.now = opts.now ?? (() => Date.now());
     this.maxOriginInfer = opts.maxOriginInferPerCycle ?? MAX_ORIGIN_INFER_PER_CYCLE;
@@ -83,7 +85,7 @@ export class MemeClusterer {
           this._addVariant(matched, candidate);
         } else {
           // Create new meme_graph entry
-          const newEntry = this._createEntry(groupId, candidate);
+          const newEntry = await this._createEntry(groupId, candidate);
           existingEntries.push(newEntry);
 
           // Try to infer origin if budget allows
@@ -232,11 +234,27 @@ export class MemeClusterer {
     );
   }
 
-  private _createEntry(
+  private async _createEntry(
     groupId: string,
     candidate: { content: string; meaning: string; count: number },
-  ): MemeGraphEntry {
+  ): Promise<MemeGraphEntry> {
     const nowSec = Math.floor(this.now() / 1000);
+
+    // Compute embedding at insert time if service is ready
+    let embeddingVec: number[] | null = null;
+    if (this.embeddingService?.isReady) {
+      try {
+        embeddingVec = await this.embeddingService.embed(
+          candidate.content + ' ' + candidate.meaning,
+        );
+      } catch (err) {
+        this.logger.warn(
+          { err, content: candidate.content },
+          'embedding at insert time failed, will be backfilled later',
+        );
+      }
+    }
+
     const newEntry: Omit<MemeGraphEntry, 'id'> = {
       groupId,
       canonical: candidate.content,
@@ -250,14 +268,14 @@ export class MemeClusterer {
       totalCount: candidate.count,
       confidence: BASE_CONFIDENCE,
       status: 'active',
-      embeddingVec: null,
+      embeddingVec,
       createdAt: nowSec,
       updatedAt: nowSec,
     };
 
     const id = this.memeGraph.insert(newEntry);
     this.logger.info(
-      { groupId, canonical: candidate.content, id },
+      { groupId, canonical: candidate.content, id, hasEmbedding: embeddingVec !== null },
       'new meme_graph entry created',
     );
 

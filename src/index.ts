@@ -28,6 +28,7 @@ import { DeflectionEngine } from './modules/deflection-engine.js';
 import { chatHistoryDefaults } from './config.js';
 import { SelfLearningModule } from './modules/self-learning.js';
 import { runFactEmbeddingBackfill, BACKFILL_INTERVAL_MS } from './modules/fact-embedding-backfill.js';
+import { runMemeEmbeddingBackfill, MEME_BACKFILL_INTERVAL_MS } from './modules/meme-embedding-backfill.js';
 import { VisionService } from './modules/vision.js';
 import { StickerCaptureService } from './modules/sticker-capture.js';
 import { WelcomeModule } from './modules/welcome.js';
@@ -164,6 +165,7 @@ const selfLearning = new SelfLearningModule({
 });
 
 let factBackfillTimer: NodeJS.Timeout | null = null;
+let memeBackfillTimer: NodeJS.Timeout | null = null;
 void embedder.waitReady().then(() => {
   if (embedder.isReady) {
     logger.info('Embedding model ready');
@@ -182,6 +184,19 @@ void embedder.waitReady().then(() => {
       });
     }, BACKFILL_INTERVAL_MS);
     factBackfillTimer.unref?.();
+
+    // Meme graph embedding backfill (same pattern as facts)
+    if (!memesDisabled) {
+      void runMemeEmbeddingBackfill(db.memeGraph, embedder, logger).catch(err => {
+        logger.warn({ err }, 'meme embedding backfill failed');
+      });
+      memeBackfillTimer = setInterval(() => {
+        void runMemeEmbeddingBackfill(db.memeGraph, embedder, logger).catch(err => {
+          logger.warn({ err }, 'periodic meme embedding backfill failed');
+        });
+      }, MEME_BACKFILL_INTERVAL_MS);
+      memeBackfillTimer.unref?.();
+    }
   }
 });
 router.setSelfLearning(selfLearning);
@@ -337,6 +352,7 @@ const memeClusterer = memesDisabled ? null : new MemeClusterer({
   memeGraph: db.memeGraph,
   phraseCandidates: db.phraseCandidates,
   claude,
+  embeddingService: embedder,
 });
 
 const harvest = new OpportunisticHarvest({
@@ -474,6 +490,7 @@ const shutdown = async () => {
   relationshipTracker.dispose();
   chat.destroy();
   if (factBackfillTimer) clearInterval(factBackfillTimer);
+  if (memeBackfillTimer) clearInterval(memeBackfillTimer);
   stickerCapture.stopBackfillLoop();
   bandoriScraper.stop();
   deflectionEngine.stop();

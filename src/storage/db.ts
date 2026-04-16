@@ -527,6 +527,7 @@ export interface IMemeGraphRepo {
   ): MemeGraphEntry[];
   listActiveWithEmbeddings(groupId: string): MemeGraphEntry[];
   listNullEmbedding(groupId: string, limit: number): MemeGraphEntry[];
+  listAllNullEmbedding(limit: number): MemeGraphEntry[];
   findById(id: number): MemeGraphEntry | null;
   adminEdit(id: number, fields: Partial<Pick<MemeGraphEntry,
     'canonical' | 'variants' | 'meaning' | 'status'>>): void;

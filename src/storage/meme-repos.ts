@@ -249,6 +249,15 @@ export class MemeGraphRepository implements IMemeGraphRepo {
     return rows.map(r => memeGraphFromRow(r as Parameters<typeof memeGraphFromRow>[0]));
   }
 
+  listAllNullEmbedding(limit: number): MemeGraphEntry[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM meme_graph WHERE embedding_vec IS NULL
+       AND status IN ('active', 'manual_edit')
+       ORDER BY updated_at DESC LIMIT ?`
+    ).all(limit) as unknown[];
+    return rows.map(r => memeGraphFromRow(r as Parameters<typeof memeGraphFromRow>[0]));
+  }
+
   findById(id: number): MemeGraphEntry | null {
     const row = this.db.prepare('SELECT * FROM meme_graph WHERE id = ?').get(id) as unknown;
     if (!row) return null;
@@ -273,9 +282,11 @@ export class MemeGraphRepository implements IMemeGraphRepo {
       values.push(fields.meaning);
     }
 
-    // Always set status to 'manual_edit' when admin edits
+    // Honor caller-provided status if valid, otherwise default to 'manual_edit'
+    const validStatuses = new Set(['active', 'demoted', 'manual_edit']);
+    const status = fields.status && validStatuses.has(fields.status) ? fields.status : 'manual_edit';
     updates.push('status = ?');
-    values.push('manual_edit');
+    values.push(status);
 
     updates.push('updated_at = ?');
     values.push(Math.floor(Date.now() / 1000));
