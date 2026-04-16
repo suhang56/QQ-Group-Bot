@@ -8,7 +8,7 @@ import type { SelfLearningModule } from './self-learning.js';
 import type { IMemeGraphRepository } from '../storage/db.js';
 import { ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
-import { lurkerDefaults, chatHistoryDefaults, RUNTIME_CHAT_MODEL, CHAT_QWEN_MODEL, CHAT_QWEN_DISABLED, CHAT_DEEPSEEK_MODEL, DEEPSEEK_ENABLED } from '../config.js';
+import { lurkerDefaults, chatHistoryDefaults, RUNTIME_CHAT_MODEL, CHAT_QWEN_MODEL, CHAT_QWEN_DISABLED, CHAT_DEEPSEEK_MODEL, DEEPSEEK_ENABLED, MEMES_V1_DISABLED } from '../config.js';
 import { parseFaces } from '../utils/qqface.js';
 import { sentinelCheck, postProcess, sanitize, applyPersonaFilters, isEcho, checkConfabulation, hasForbiddenContent, HARDENED_SYSTEM, entityGuard, qaReportRegenHint, hasCoreferenceSelfReference, outsiderToneRegenHint, detectInsultEchoRisk } from '../utils/sentinel.js';
 import { buildStickerSection, getStickerPool, type LiveStickerEntry } from '../utils/stickers.js';
@@ -27,7 +27,7 @@ import { tokenizeLore as _tokenizeLore, extractTokens as _extractTokens, extract
 import { loadGroupJargon, formatJargonBlock } from './jargon-provider.js';
 import { makeEngagementDecision, type EngagementSignals } from './engagement-decision.js';
 import { scoreComprehensionSafe, type ComprehensionContext } from '../services/comprehension-scorer.js';
-import { ConversationStateTracker } from './conversation-state.js';
+import { ConversationStateTracker, type MemeTerm } from './conversation-state.js';
 import { pickVariant, buildVariantSystemPrompt, type VariantContext, type ActiveMemeJoke } from './prompt-variants.js';
 
 export interface IChatModule {
@@ -697,6 +697,7 @@ export class ChatModule implements IChatModule {
   // per-group: whether the last generateReply call returned an evasive reply
   private readonly lastEvasiveReply = new Map<string, boolean>();
   private readonly conversationState = new ConversationStateTracker();
+  private _memeGraphRepo: IMemeGraphRepository | null = null;
   // per-group: fact ids injected into the system prompt of the last generateReply.
   // Router reads this right after generateReply returns to wire into self-learning.rememberInjection.
   private readonly lastInjectedFactIds = new Map<string, number[]>();
@@ -948,9 +949,9 @@ export class ChatModule implements IChatModule {
     this.charModule = charModule;
   }
 
-  /** Inject meme graph repo into internal conversation state tracker. */
+  /** Inject meme graph repo for loading meme terms at tick time. */
   setMemeGraphRepo(repo: IMemeGraphRepository | null): void {
-    this.conversationState.setMemeGraphRepo(repo);
+    this._memeGraphRepo = repo;
   }
 
   /** Return the key of the most recent sticker sent via sticker-first in this group, or null. */
@@ -1089,9 +1090,18 @@ export class ChatModule implements IChatModule {
 
     // ── Feed conversation state tracker ──────────────────────────────────
     const jargonTermsForState = loadGroupJargon(this.db.rawDb, groupId).map(j => j.term);
+    // Load meme terms from meme_graph for first-hit matching (cached at cycle boundary)
+    const memeTermsForState: MemeTerm[] = (!MEMES_V1_DISABLED() && this._memeGraphRepo)
+      ? this._memeGraphRepo.listActive(groupId, 50).map(e => ({
+          canonical: e.canonical,
+          variants: e.variants,
+          meaning: e.meaning,
+        }))
+      : [];
     this.conversationState.tick(
       groupId, triggerMessage.content, triggerMessage.userId,
       triggerMessage.timestamp, jargonTermsForState,
+      memeTermsForState.length > 0 ? memeTermsForState : undefined,
     );
 
     // ── Weighted participation scoring ───────────────────────────────────

@@ -7,8 +7,6 @@
  */
 
 import { createLogger } from '../utils/logger.js';
-import { MEMES_V1_DISABLED } from '../config.js';
-import type { IMemeGraphRepository } from '../storage/db.js';
 
 const logger = createLogger('conversation-state');
 
@@ -37,6 +35,13 @@ export interface JokeRecord {
   readonly term: string;
   readonly count: number;
   readonly firstSeen: number;
+}
+
+/** Meme term passed to tick() for first-hit matching (cached at cycle boundary). */
+export interface MemeTerm {
+  readonly canonical: string;
+  readonly variants: readonly string[];
+  readonly meaning: string;
 }
 
 /** A meme-backed active joke — set on first match, no 3-hit threshold. */
@@ -72,17 +77,11 @@ interface GroupState {
 export class ConversationStateTracker {
   private readonly states = new Map<string, GroupState>();
   private pruneTimer: ReturnType<typeof setInterval> | null = null;
-  private _memeGraphRepo: IMemeGraphRepository | null = null;
 
   constructor() {
     // Periodic cleanup of stale groups
     this.pruneTimer = setInterval(() => this._pruneStaleGroups(), WINDOW_MS);
     this.pruneTimer.unref?.();
-  }
-
-  /** Inject meme graph repo after construction (follows setEmbeddingService pattern). */
-  setMemeGraphRepo(repo: IMemeGraphRepository | null): void {
-    this._memeGraphRepo = repo;
   }
 
   destroy(): void {
@@ -101,6 +100,7 @@ export class ConversationStateTracker {
     userId: string,
     timestamp: number,
     knownJargon?: ReadonlyArray<string>,
+    knownMemes?: ReadonlyArray<MemeTerm>,
   ): void {
     const state = this._getOrCreateState(groupId);
     const now = timestamp * 1000; // convert to ms if seconds
@@ -139,7 +139,9 @@ export class ConversationStateTracker {
     }
 
     // Scan for meme_graph matches — marks activeJoke on first hit (no 3-hit threshold)
-    this._scanMemeMatches(groupId, content, now, state);
+    if (knownMemes && knownMemes.length > 0) {
+      this._scanMemeMatches(content, now, state, knownMemes);
+    }
 
     // Expire old messages outside the window
     this._expireOldMessages(groupId, now);
@@ -281,26 +283,25 @@ export class ConversationStateTracker {
       }
     }
 
-    // Rebuild memeJokeFreq from remaining messages
+    // Rebuild memeJokeFreq from remaining messages using known canonicals.
+    // We can only rebuild counts for terms already tracked in state — new
+    // terms are added via tick(), not during expiration.
     const newMemeJokeFreq = new Map<string, { meaning: string; count: number; firstSeen: number }>();
-    if (this._memeGraphRepo && !MEMES_V1_DISABLED()) {
-      const allMemes = this._memeGraphRepo.listActive(groupId, 50);
+    if (state.memeJokeFreq.size > 0) {
       for (const msg of newMessages) {
         const contentLower = msg.content.toLowerCase();
-        for (const entry of allMemes) {
-          const terms = [entry.canonical, ...entry.variants];
-          const matched = terms.some(t => contentLower.includes(t.toLowerCase()));
-          if (matched) {
-            const existing = newMemeJokeFreq.get(entry.canonical);
+        for (const [canonical, info] of state.memeJokeFreq) {
+          if (contentLower.includes(canonical.toLowerCase())) {
+            const existing = newMemeJokeFreq.get(canonical);
             if (existing) {
-              newMemeJokeFreq.set(entry.canonical, {
+              newMemeJokeFreq.set(canonical, {
                 meaning: existing.meaning,
                 count: existing.count + 1,
                 firstSeen: existing.firstSeen,
               });
             } else {
-              newMemeJokeFreq.set(entry.canonical, {
-                meaning: entry.meaning,
+              newMemeJokeFreq.set(canonical, {
+                meaning: info.meaning,
                 count: 1,
                 firstSeen: msg.timestamp,
               });
@@ -318,38 +319,33 @@ export class ConversationStateTracker {
   }
 
   /**
-   * Scan message content against meme_graph entries. On first match,
+   * Scan message content against cached meme terms. On first match,
    * immediately marks memeJokeFreq (no 3-hit threshold like jargon).
+   * Terms are cached at cycle boundary and passed in, not queried per-tick.
    */
   private _scanMemeMatches(
-    groupId: string,
     content: string,
     nowMs: number,
     state: GroupState,
+    knownMemes: ReadonlyArray<MemeTerm>,
   ): void {
-    if (MEMES_V1_DISABLED()) return;
-    if (!this._memeGraphRepo) return;
-
-    const entries = this._memeGraphRepo.listActive(groupId, 50);
-    if (entries.length === 0) return;
-
     const contentLower = content.toLowerCase();
     const newMemeJokeFreq = new Map(state.memeJokeFreq);
 
-    for (const entry of entries) {
-      const terms = [entry.canonical, ...entry.variants];
+    for (const meme of knownMemes) {
+      const terms = [meme.canonical, ...meme.variants];
       const matched = terms.some(t => contentLower.includes(t.toLowerCase()));
       if (matched) {
-        const existing = newMemeJokeFreq.get(entry.canonical);
+        const existing = newMemeJokeFreq.get(meme.canonical);
         if (existing) {
-          newMemeJokeFreq.set(entry.canonical, {
+          newMemeJokeFreq.set(meme.canonical, {
             meaning: existing.meaning,
             count: existing.count + 1,
             firstSeen: existing.firstSeen,
           });
         } else {
-          newMemeJokeFreq.set(entry.canonical, {
-            meaning: entry.meaning,
+          newMemeJokeFreq.set(meme.canonical, {
+            meaning: meme.meaning,
             count: 1,
             firstSeen: nowMs,
           });

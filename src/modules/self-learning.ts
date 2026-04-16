@@ -432,8 +432,8 @@ export class SelfLearningModule {
     if (!triggerEmbedding) return null;
 
     const entries = this._memeGraphRepo.findSimilarActive(groupId, triggerEmbedding, 0.3, 3);
-    // findSimilarActive already filters active, but double-check
-    const active = entries.filter(e => e.status === 'active');
+    // Include 'active' and 'manual_edit' (admin-curated still visible), exclude 'demoted'
+    const active = entries.filter(e => e.status !== 'demoted');
     if (active.length === 0) return null;
 
     const lines = active.map(e => {
