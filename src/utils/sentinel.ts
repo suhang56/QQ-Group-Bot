@@ -357,22 +357,27 @@ async function _runRegen(context: Record<string, unknown>, regenerate: () => Pro
 // Seed: aliases.json names + nine bands + known 圈内底线 patterns.
 
 const PROTECTED_ENTITIES: readonly string[] = [
-  // Characters from aliases.json
+  // Characters from aliases.json (data/characters/aliases.json)
   '凑友希那', '友希那', 'ykn', 'yukina',
   '冰川纱夜', '纱夜', 'sayo',
   '今井莉莎', '莉莎', 'risa',
   '白金燐子', '燐子', 'rinko',
   '宇田川亚子', '亚子', 'ako',
-  // Nine bands (BANGDREAM_PERSONA 圈内底线)
+  // Characters from toneNotes 禁区 + 人物关系 (data/characters/凑友希那.json:24)
+  '美竹兰', '户山香澄', '香澄',
+  '相羽あいな',  // CV -- toneNotes 禁区: "不拿自己的中之人开玩笑"
+  // Nine bands (BANGDREAM_PERSONA 圈内底线, chat.ts:315-317)
   'Poppin\'Party', 'ppp', 'popipa',
   'Afterglow',
-  'Pastel*Palettes', 'Pastel Palettes', 'pp',
+  'Pastel*Palettes', 'Pastel Palettes',
   'Roselia',
   'HHW', 'Hello Happy World', 'hhw',
   'Morfonica', '蝶', '魔莉菇',
   'RAS', 'RAISE A SUILEN',
   'MyGO', 'mygo',
   'Ave Mujica', '母鸡卡',
+  // Additional bands from BANGDREAM_PERSONA 圈内底线 (chat.ts:317)
+  'Mugendai Mewtype', 'millsage', 'Ikka Dumb Rock',
 ];
 
 // Disparagement patterns: "谁喜欢X啊" / "X真难听" / "X不行" / "不要脸" + entity
