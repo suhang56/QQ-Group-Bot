@@ -182,23 +182,19 @@ export class RatingPortalServer {
       // Fetch the original message + surrounding context.
       // moderation_log.msg_id is a short NapCat ID; messages.source_message_id
       // is a long NapCat ID — they don't match. Fall back to timestamp+userId
-      // proximity search within a ±10s window.
+      // proximity search. Use findNearTimestamp() for direct SQL rather than
+      // getRecent().filter() which only searches the N most recent messages.
       const modTs = record.timestamp;
-      const recent = this.messages.getRecent(record.groupId, 200);
-      const origMsg = recent.find(m =>
-        m.userId === record.userId && Math.abs(m.timestamp - modTs) <= 10
-      );
+      const origMsg = this.messages.findNearTimestamp(record.groupId, record.userId, modTs, 120);
       if (origMsg) {
         body['originalMessage'] = { content: origMsg.content, nickname: origMsg.nickname, userId: origMsg.userId, timestamp: origMsg.timestamp };
       }
-      // Nearby messages: within 2 min of moderation timestamp
-      const nearby = recent
-        .filter(m => Math.abs(m.timestamp - modTs) <= 120)
-        .slice(0, 10)
-        .sort((a, b) => a.timestamp - b.timestamp)
-        .map(m => ({ nickname: m.nickname, content: m.content, timestamp: m.timestamp, userId: m.userId }));
+      // Nearby context: all messages in the group within ±2 min of the moderation event
+      const nearby = this.messages.getAroundTimestamp(record.groupId, modTs, 120, 10);
       if (nearby.length > 0) {
-        body['contextMessages'] = nearby;
+        body['contextMessages'] = nearby.map(m => ({
+          nickname: m.nickname, content: m.content, timestamp: m.timestamp, userId: m.userId,
+        }));
       }
       json(res, 200, body);
       return;

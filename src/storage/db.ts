@@ -160,6 +160,10 @@ export interface IMessageRepository {
   getTopUsers(groupId: string, limit: number): TopUser[];
   softDelete(msgId: string): void;
   findBySourceId(sourceMessageId: string): Message | null;
+  /** Find a message near a timestamp from a specific user (±windowSec). For mod-review lookups. */
+  findNearTimestamp(groupId: string, userId: string, timestamp: number, windowSec: number): Message | null;
+  /** Get messages around a timestamp in a group (±windowSec, up to limit). For mod-review context. */
+  getAroundTimestamp(groupId: string, timestamp: number, windowSec: number, limit: number): Message[];
 }
 
 export interface IUserRepository {
@@ -681,6 +685,20 @@ class MessageRepository implements IMessageRepository {
       'SELECT * FROM messages WHERE source_message_id = ? LIMIT 1'
     ).get(sourceMessageId) as MessageRow | undefined;
     return row ? msgFromRow(row) : null;
+  }
+
+  findNearTimestamp(groupId: string, userId: string, timestamp: number, windowSec: number): Message | null {
+    const row = this.db.prepare(
+      `SELECT * FROM messages WHERE group_id = ? AND user_id = ? AND ABS(timestamp - ?) <= ? AND deleted = 0 ORDER BY ABS(timestamp - ?) ASC LIMIT 1`
+    ).get(groupId, userId, timestamp, windowSec, timestamp) as MessageRow | undefined;
+    return row ? msgFromRow(row) : null;
+  }
+
+  getAroundTimestamp(groupId: string, timestamp: number, windowSec: number, limit: number): Message[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM messages WHERE group_id = ? AND ABS(timestamp - ?) <= ? AND deleted = 0 ORDER BY timestamp ASC LIMIT ?`
+    ).all(groupId, timestamp, windowSec, limit) as unknown as MessageRow[];
+    return rows.map(msgFromRow);
   }
 }
 
