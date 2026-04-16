@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import type { ClaudeModel } from '../ai/claude.js';
 import type { IEmbeddingService } from './embeddings.js';
 import { cosineSimilarity } from './embeddings.js';
+import { MemeGraphRepository, PhraseCandidatesRepository } from './meme-repos.js';
 
 // ---- Domain types ----
 
@@ -563,6 +564,71 @@ export interface IUserStyleRepository {
   listAll(groupId: string): Array<{ userId: string; nickname: string; style: StyleJsonData; updatedAt: number }>;
 }
 
+// ---- Meme graph (memes-v1) ----
+
+export interface MemeGraphEntry {
+  id: number;
+  groupId: string;
+  canonical: string;
+  variants: string[];                     // parsed from JSON
+  meaning: string;
+  originEvent: string | null;
+  originMsgId: string | null;
+  originUserId: string | null;
+  originTs: number | null;
+  firstSeenCount: number;
+  totalCount: number;
+  confidence: number;
+  status: 'active' | 'demoted' | 'manual_edit';
+  embeddingVec: number[] | null;          // parsed from BLOB
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface IMemeGraphRepo {
+  insert(entry: Omit<MemeGraphEntry, 'id'>): number;
+  update(id: number, fields: Partial<Pick<MemeGraphEntry,
+    'variants' | 'meaning' | 'originEvent' | 'originMsgId' |
+    'originUserId' | 'originTs' | 'totalCount' | 'confidence' |
+    'status' | 'embeddingVec'>>): void;
+  findByCanonical(groupId: string, canonical: string): MemeGraphEntry | null;
+  findByVariant(groupId: string, term: string): MemeGraphEntry[];
+  listActive(groupId: string, limit: number): MemeGraphEntry[];
+  listActiveWithEmbeddings(groupId: string): MemeGraphEntry[];
+  listNullEmbedding(groupId: string, limit: number): MemeGraphEntry[];
+  findById(id: number): MemeGraphEntry | null;
+  adminEdit(id: number, fields: Partial<Pick<MemeGraphEntry,
+    'canonical' | 'variants' | 'meaning' | 'status'>>): void;
+}
+
+// ---- Phrase candidates (memes-v1) ----
+
+export interface PhraseCandidateRow {
+  groupId: string;
+  content: string;
+  gramLen: number;
+  count: number;
+  contexts: string[];                     // parsed from JSON
+  lastInferenceCount: number;
+  meaning: string | null;
+  isJargon: number;                       // 0=unknown, 1=confirmed, 2=promoted
+  promoted: number;                       // 0=unpromoted, 1=promoted
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface IPhraseCandidatesRepo {
+  upsert(groupId: string, content: string, gramLen: number,
+         context: string, nowSec: number): void;
+  findAtThreshold(groupId: string, thresholds: number[],
+                  limit: number): PhraseCandidateRow[];
+  updateInference(groupId: string, content: string,
+                  meaning: string | null, isJargon: boolean,
+                  count: number, nowSec: number): void;
+  listUnpromoted(groupId: string): PhraseCandidateRow[];
+  markPromoted(groupId: string, content: string, gramLen: number, nowSec: number): void;
+}
+
 // ---- Raw row types from SQLite ----
 
 interface MessageRow {
@@ -648,6 +714,7 @@ interface PhraseCandidateRow {
 }
 
 interface CountRow { count: number }
+
 
 // ---- Mappers ----
 
@@ -2841,11 +2908,54 @@ export class Database {
     `);
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_jargon_group_count ON jargon_candidates(group_id, count DESC)`);
 
-    // jargon_candidates.promoted — tracks whether a candidate has been promoted
-    // to meme_graph. 0=unpromoted, 1=promoted. Existing is_jargon=2 was the old
-    // "promoted to learned_facts" marker and remains backward compatible.
+    // jargon_candidates.promoted — memes-v1 column for marking candidates promoted to meme_graph
     try { this._db.exec(`ALTER TABLE jargon_candidates ADD COLUMN promoted INTEGER NOT NULL DEFAULT 0`); } catch { /* already exists */ }
 
+    // phrase_candidates — multi-word jargon candidates (2-5 grams) for memes-v1
+    this._db.exec(`
+      CREATE TABLE IF NOT EXISTS phrase_candidates (
+        group_id              TEXT    NOT NULL,
+        content               TEXT    NOT NULL,
+        gram_len              INTEGER NOT NULL,
+        count                 INTEGER NOT NULL DEFAULT 1,
+        contexts              TEXT    NOT NULL DEFAULT '[]',
+        last_inference_count  INTEGER NOT NULL DEFAULT 0,
+        meaning               TEXT,
+        is_jargon             INTEGER NOT NULL DEFAULT 0,
+        promoted              INTEGER NOT NULL DEFAULT 0,
+        created_at            INTEGER NOT NULL,
+        updated_at            INTEGER NOT NULL,
+        PRIMARY KEY (group_id, content, gram_len)
+      )
+    `);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_phrase_group_count ON phrase_candidates(group_id, count DESC)`);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_phrase_unpromoted ON phrase_candidates(group_id, is_jargon, promoted) WHERE is_jargon = 1 AND promoted = 0`);
+
+    // meme_graph — clustered meme entries after inference + variant aggregation (memes-v1)
+    this._db.exec(`
+      CREATE TABLE IF NOT EXISTS meme_graph (
+        id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id           TEXT    NOT NULL,
+        canonical          TEXT    NOT NULL,
+        variants           TEXT    NOT NULL DEFAULT '[]',
+        meaning            TEXT    NOT NULL,
+        origin_event       TEXT,
+        origin_msg_id      TEXT,
+        origin_user_id     TEXT,
+        origin_ts          INTEGER,
+        first_seen_count   INTEGER NOT NULL DEFAULT 1,
+        total_count        INTEGER NOT NULL DEFAULT 1,
+        confidence         REAL    NOT NULL DEFAULT 0.5,
+        status             TEXT    NOT NULL DEFAULT 'active',
+        embedding_vec      BLOB,
+        created_at         INTEGER NOT NULL,
+        updated_at         INTEGER NOT NULL,
+        UNIQUE(group_id, canonical)
+      )
+    `);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_meme_group_active ON meme_graph(group_id, status) WHERE status IN ('active', 'manual_edit')`);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_meme_group_updated ON meme_graph(group_id, updated_at DESC)`);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_meme_null_embedding ON meme_graph(id) WHERE embedding_vec IS NULL`);
     // interaction_stats + social_relations — relationship tracker (H2).
     this._db.exec(`
       CREATE TABLE IF NOT EXISTS interaction_stats (

@@ -83,13 +83,15 @@ export const DEEPSEEK_ENABLED = (): boolean => !!process.env['DEEPSEEK_API_KEY']
  * (matches DEEPSEEK_ENABLED pattern) so tests can toggle per-case. */
 export const FACTS_RAG_DISABLED = (): boolean => process.env['FACTS_RAG_DISABLED'] === '1';
 
-/** Kill switch for memes-v1 pipeline. Set MEMES_V1_DISABLED=1 to bypass
- * phrase-miner scheduling, meme-clusterer, and meme_graph retrieval/injection.
+/** Kill switch for memes-v1 pipeline. Set MEMES_V1_DISABLED=1 to disable:
+ * (a) phrase-miner scheduling in onCycleComplete, (b) meme-clusterer scheduling,
+ * (c) meme_graph retrieval in formatFactsForPrompt, (d) meme_graph term tick in conversation-state.
  * Schema/tables still exist; only runtime paths are gated. */
 export const MEMES_V1_DISABLED = (): boolean => process.env['MEMES_V1_DISABLED'] === '1';
 
-/** Cosine similarity threshold for embedding-based variant clustering.
- * Default 0.78 is conservative — substring matching handles most cases. */
+/** Cosine similarity threshold for meme variant clustering via embedding service.
+ * Below this threshold, two term embeddings are not considered variants.
+ * Default 0.78 balances substring matching with semantic synonym detection. */
 export const MEME_CLUSTER_THRESHOLD = parseFloat(process.env['MEME_CLUSTER_THRESHOLD'] ?? '0.78');
 export const lurkerDefaults = {
   lurkerReplyChance: 0.12,

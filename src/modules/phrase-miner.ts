@@ -1,0 +1,354 @@
+import type { DatabaseSync } from 'node:sqlite';
+import type { IClaudeClient, ClaudeModel } from '../ai/claude.js';
+import type { IMessageRepository } from '../storage/db.js';
+import type { Logger } from 'pino';
+import { createLogger } from '../utils/logger.js';
+import { extractJson } from '../utils/json-extract.js';
+import { JARGON_MODEL } from '../config.js';
+import { COMMON_WORDS } from './jargon-miner.js';
+
+// ---- Stub interface for P0 repo (merge feat/memes-v1-p0 when available) ----
+// TODO merge P0
+
+export interface IPhraseCandidatesRepo {
+  upsert(groupId: string, content: string, gramLen: number, context: string, nowSec: number): void;
+  getAtThresholds(groupId: string, thresholds: number[], maxResults: number): PhraseCandidateRow[];
+  updateInference(groupId: string, content: string, meaning: string | null, isJargon: number, count: number, nowSec: number): void;
+}
+
+export interface PhraseCandidateRow {
+  group_id: string;
+  content: string;
+  gram_len: number;
+  count: number;
+  contexts: string;
+  last_inference_count: number;
+  meaning: string | null;
+  is_jargon: number;
+  promoted: number;
+  created_at: number;
+  updated_at: number;
+}
+
+// ---- Constants ----
+
+/** Count thresholds at which LLM inference is triggered (lower than jargon-miner; phrases collide less). */
+export const INFERENCE_THRESHOLDS = [3, 5, 8, 15];
+/** Max candidates to infer per cycle. */
+const MAX_INFER_PER_CYCLE = 5;
+/** N-gram range. */
+export const MIN_GRAM = 2;
+export const MAX_GRAM = 5;
+/** Messages to scan per extraction cycle. */
+const DEFAULT_WINDOW = 500;
+/** Max context sentences stored per candidate. */
+const MAX_CONTEXTS = 10;
+/** Max total char length of a phrase candidate. */
+const MAX_PHRASE_CHARS = 30;
+/** Min total char length of a phrase candidate. */
+const MIN_PHRASE_CHARS = 4;
+
+// Duplicated from jargon-miner (not exported there; DO NOT touch jargon-miner in this commit)
+const TOKEN_SPLIT_RE = /[\s,，。！？!?;；:：、\-—…\[\]【】（）()「」《》<>""''~～·`#\n\r\t]+/;
+const CQ_CODE_RE = /\[CQ:[^\]]+\]/g;
+
+export interface PhraseMinerOptions {
+  db: DatabaseSync;
+  messages: IMessageRepository;
+  claude: IClaudeClient;
+  phraseCandidates?: IPhraseCandidatesRepo;
+  activeGroups: string[];
+  logger?: Logger;
+  windowMessages?: number;
+  /** Injected for testing */
+  now?: () => number;
+}
+
+interface PhraseCandidate {
+  groupId: string;
+  content: string;
+  gramLen: number;
+  count: number;
+  contexts: string[];
+  lastInferenceCount: number;
+  meaning: string | null;
+  isJargon: number;
+  promoted: number;
+}
+
+function rowToCandidate(row: PhraseCandidateRow): PhraseCandidate {
+  let contexts: string[];
+  try {
+    contexts = JSON.parse(row.contexts);
+  } catch {
+    contexts = [];
+  }
+  return {
+    groupId: row.group_id,
+    content: row.content,
+    gramLen: row.gram_len,
+    count: row.count,
+    contexts,
+    lastInferenceCount: row.last_inference_count,
+    meaning: row.meaning,
+    isJargon: row.is_jargon,
+    promoted: row.promoted,
+  };
+}
+
+export class PhraseMiner {
+  private readonly db: DatabaseSync;
+  private readonly messages: IMessageRepository;
+  private readonly claude: IClaudeClient;
+  private readonly repo: IPhraseCandidatesRepo | null;
+  private readonly activeGroups: string[];
+  private readonly logger: Logger;
+  private readonly windowMessages: number;
+  private readonly now: () => number;
+
+  constructor(opts: PhraseMinerOptions) {
+    this.db = opts.db;
+    this.messages = opts.messages;
+    this.claude = opts.claude;
+    this.repo = opts.phraseCandidates ?? null;
+    this.activeGroups = opts.activeGroups;
+    this.logger = opts.logger ?? createLogger('phrase-miner');
+    this.windowMessages = opts.windowMessages ?? DEFAULT_WINDOW;
+    this.now = opts.now ?? (() => Date.now());
+  }
+
+  /**
+   * Main entry point -- extract candidates then infer meanings for one group.
+   * Promotion to meme_graph is P2's job.
+   */
+  async run(groupId: string): Promise<void> {
+    this.extractCandidates(groupId);
+    await this.inferPhrase(groupId);
+  }
+
+  /**
+   * Run for all active groups.
+   */
+  async runAll(): Promise<void> {
+    for (const groupId of this.activeGroups) {
+      try {
+        await this.run(groupId);
+      } catch (err) {
+        this.logger.error({ err, groupId }, 'phrase-miner run failed');
+      }
+    }
+  }
+
+  /**
+   * Extract n-gram phrase candidates from recent messages.
+   * For gram_len in 2..5, slide window across tokens and produce contiguous phrases.
+   */
+  extractCandidates(groupId: string): void {
+    const recent = this.messages.getRecent(groupId, this.windowMessages);
+    const nowSec = Math.floor(this.now() / 1000);
+
+    for (const msg of recent) {
+      const cleaned = msg.content.replace(CQ_CODE_RE, ' ');
+      const tokens = cleaned.split(TOKEN_SPLIT_RE).filter(Boolean);
+
+      if (tokens.length < MIN_GRAM) continue;
+
+      const contextSentence = msg.content.length > 100
+        ? msg.content.slice(0, 100) + '...'
+        : msg.content;
+
+      for (let gramLen = MIN_GRAM; gramLen <= MAX_GRAM; gramLen++) {
+        if (tokens.length < gramLen) break;
+
+        for (let i = 0; i <= tokens.length - gramLen; i++) {
+          const phraseTokens = tokens.slice(i, i + gramLen);
+
+          // Skip if ALL tokens are common words
+          if (phraseTokens.every(t => COMMON_WORDS.has(t))) continue;
+
+          const phrase = phraseTokens.join('');
+          // Length filters
+          if (phrase.length < MIN_PHRASE_CHARS || phrase.length > MAX_PHRASE_CHARS) continue;
+
+          this._upsertCandidate(groupId, phrase, gramLen, contextSentence, nowSec);
+        }
+      }
+    }
+  }
+
+  /**
+   * For candidates at threshold boundaries, ask LLM to determine if
+   * the phrase has a group-specific meaning.
+   */
+  async inferPhrase(groupId: string): Promise<void> {
+    const placeholders = INFERENCE_THRESHOLDS.map(() => '?').join(',');
+    const rows = this.db.prepare(`
+      SELECT * FROM phrase_candidates
+      WHERE group_id = ?
+        AND count IN (${placeholders})
+        AND count > last_inference_count
+      ORDER BY count DESC
+      LIMIT ?
+    `).all(
+      groupId,
+      ...INFERENCE_THRESHOLDS,
+      MAX_INFER_PER_CYCLE,
+    ) as unknown as PhraseCandidateRow[];
+
+    if (rows.length === 0) return;
+
+    const candidates = rows.map(rowToCandidate);
+
+    for (const candidate of candidates) {
+      try {
+        await this._inferSingle(candidate);
+      } catch (err) {
+        this.logger.warn({ err, groupId, content: candidate.content }, 'phrase inference failed');
+      }
+    }
+  }
+
+  // ---- Private helpers ----
+
+  private _upsertCandidate(groupId: string, content: string, gramLen: number, context: string, nowSec: number): void {
+    if (this.repo) {
+      this.repo.upsert(groupId, content, gramLen, context, nowSec);
+      return;
+    }
+
+    // Fallback: direct DB access (until P0 repo is merged)
+    const existing = this.db.prepare(
+      'SELECT contexts, count FROM phrase_candidates WHERE group_id = ? AND content = ?'
+    ).get(groupId, content) as { contexts: string; count: number } | undefined;
+
+    if (existing) {
+      let contexts: string[];
+      try {
+        contexts = JSON.parse(existing.contexts);
+      } catch {
+        contexts = [];
+      }
+      if (contexts.length >= MAX_CONTEXTS) {
+        contexts = contexts.slice(contexts.length - MAX_CONTEXTS + 1);
+      }
+      contexts.push(context);
+
+      this.db.prepare(`
+        UPDATE phrase_candidates
+        SET count = count + 1, contexts = ?, updated_at = ?
+        WHERE group_id = ? AND content = ?
+      `).run(JSON.stringify(contexts), nowSec, groupId, content);
+    } else {
+      this.db.prepare(`
+        INSERT INTO phrase_candidates
+          (group_id, content, gram_len, count, contexts, last_inference_count, meaning, is_jargon, promoted, created_at, updated_at)
+        VALUES (?, ?, ?, 1, ?, 0, NULL, 0, 0, ?, ?)
+      `).run(groupId, content, gramLen, JSON.stringify([context]), nowSec, nowSec);
+    }
+  }
+
+  private async _inferSingle(candidate: PhraseCandidate): Promise<void> {
+    const contextBlock = candidate.contexts.slice(0, 5).map((c, i) => `${i + 1}. ${c}`).join('\n');
+
+    // Prompt 1: with group context
+    const withContextPrompt = `这个群聊里「${candidate.content}」这个短语出现了${candidate.count}次。上下文：
+${contextBlock}
+这个短语在这个群里是什么意思？回答JSON: {"meaning": "..."}`;
+
+    // Prompt 2: without context (general meaning)
+    const withoutContextPrompt = `「${candidate.content}」是什么意思？回答JSON: {"meaning": "..."}`;
+
+    let withContextMeaning: string | null = null;
+    let withoutContextMeaning: string | null = null;
+
+    try {
+      const resp1 = await this.claude.complete({
+        model: JARGON_MODEL as ClaudeModel,
+        maxTokens: 256,
+        system: [{ text: '你是一个群聊黑话分析助手，只输出 JSON。', cache: true }],
+        messages: [{ role: 'user', content: withContextPrompt }],
+      });
+      const parsed1 = extractJson<{ meaning: string }>(resp1.text);
+      withContextMeaning = parsed1?.meaning ?? null;
+    } catch (err) {
+      this.logger.warn({ err, content: candidate.content }, 'with-context LLM call failed');
+      return;
+    }
+
+    try {
+      const resp2 = await this.claude.complete({
+        model: JARGON_MODEL as ClaudeModel,
+        maxTokens: 256,
+        system: [{ text: '你是一个词义解释助手，只输出 JSON。', cache: true }],
+        messages: [{ role: 'user', content: withoutContextPrompt }],
+      });
+      const parsed2 = extractJson<{ meaning: string }>(resp2.text);
+      withoutContextMeaning = parsed2?.meaning ?? null;
+    } catch (err) {
+      this.logger.warn({ err, content: candidate.content }, 'without-context LLM call failed');
+      return;
+    }
+
+    if (!withContextMeaning) {
+      this._updateInferenceCount(candidate.groupId, candidate.content, candidate.count);
+      return;
+    }
+
+    const isJargon = this._meaningsDiffer(withContextMeaning, withoutContextMeaning);
+
+    const nowSec = Math.floor(this.now() / 1000);
+    this.db.prepare(`
+      UPDATE phrase_candidates
+      SET meaning = ?, is_jargon = ?, last_inference_count = ?, updated_at = ?
+      WHERE group_id = ? AND content = ?
+    `).run(
+      withContextMeaning,
+      isJargon ? 1 : 0,
+      candidate.count,
+      nowSec,
+      candidate.groupId,
+      candidate.content,
+    );
+
+    this.logger.info(
+      { groupId: candidate.groupId, content: candidate.content, isJargon, withContextMeaning, withoutContextMeaning },
+      'phrase inference complete',
+    );
+  }
+
+  /**
+   * Reuses jargon-miner's comparison logic: if meanings share < 40% of
+   * their characters, they are considered different (group-specific meaning).
+   * Missing without-context meaning also counts as "different".
+   */
+  _meaningsDiffer(withContext: string, withoutContext: string | null): boolean {
+    if (withoutContext === null || withoutContext === undefined) return true;
+
+    const a = withContext.toLowerCase();
+    const b = withoutContext.toLowerCase();
+
+    if (a.length === 0 && b.length === 0) return false;
+
+    if (a.includes(b) || b.includes(a)) return false;
+
+    const setA = new Set(a);
+    const setB = new Set(b);
+    let overlap = 0;
+    for (const ch of setA) {
+      if (setB.has(ch)) overlap++;
+    }
+    const unionSize = new Set([...setA, ...setB]).size;
+    const similarity = unionSize > 0 ? overlap / unionSize : 0;
+
+    return similarity < 0.4;
+  }
+
+  private _updateInferenceCount(groupId: string, content: string, count: number): void {
+    const nowSec = Math.floor(this.now() / 1000);
+    this.db.prepare(`
+      UPDATE phrase_candidates
+      SET last_inference_count = ?, updated_at = ?
+      WHERE group_id = ? AND content = ?
+    `).run(count, nowSec, groupId, content);
+  }
+}

@@ -6,7 +6,7 @@ import { cosineSimilarity } from '../storage/embeddings.js';
 import { createLogger } from '../utils/logger.js';
 import { extractJson } from '../utils/json-extract.js';
 import { LEARN_MODEL, RESEARCH_MODEL, FACTS_RAG_DISABLED, MEMES_V1_DISABLED } from '../config.js';
-import type { IMemeGraphRepository, MemeGraph } from '../storage/db.js';
+import type { IMemeGraphRepository } from '../storage/db.js';
 
 /** Cosine similarity floor — facts below this are dropped unless pinned.
  * MiniLM-L6-v2 is noisier on Chinese text so we set a slightly higher
@@ -14,7 +14,7 @@ import type { IMemeGraphRepository, MemeGraph } from '../storage/db.js';
 export const FACT_SIMILARITY_FLOOR = 0.30;
 
 /** Re-export P0 types for downstream modules that import from self-learning. */
-export type { IMemeGraphRepository, MemeGraph } from '../storage/db.js';
+export type { IMemeGraphRepository } from '../storage/db.js';
 
 /**
  * Configuration for {@link SelfLearningModule}.
