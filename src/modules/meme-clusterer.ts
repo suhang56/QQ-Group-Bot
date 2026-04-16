@@ -240,7 +240,7 @@ export class MemeClusterer {
     const newEntry: Omit<MemeGraphEntry, 'id'> = {
       groupId,
       canonical: candidate.content,
-      variants: [],
+      variants: [candidate.content],
       meaning: candidate.meaning,
       originEvent: null,
       originMsgId: null,
