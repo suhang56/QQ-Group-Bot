@@ -22,9 +22,9 @@ const DEFAULT_WINDOW = 500;
 
 // Regex for splitting messages into tokens: whitespace, common punctuation,
 // CQ code boundaries, and Chinese/CJK punctuation.
-const TOKEN_SPLIT_RE = /[\s,，。！？!?;；:：、\-—…\[\]【】（）()「」《》<>""''~～·`#\n\r\t]+/;
+export const TOKEN_SPLIT_RE = /[\s,，。！？!?;；:：、\-—…\[\]【】（）()「」《》<>""''~～·`#\n\r\t]+/;
 // CQ code pattern (e.g. [CQ:at,qq=123456])
-const CQ_CODE_RE = /\[CQ:[^\]]+\]/g;
+export const CQ_CODE_RE = /\[CQ:[^\]]+\]/g;
 // Pure numbers (including decimals)
 const PURE_NUMBER_RE = /^\d+\.?\d*$/;
 
