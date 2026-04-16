@@ -169,7 +169,7 @@ export class DeflectionEngine implements IDeflectionEngine {
   private async _refillAll(): Promise<void> {
     const allCategories: DeflectCategory[] = [
       'identity', 'task', 'memory', 'recite',
-      'curse', 'silence', 'mood_happy', 'mood_bored', 'mood_annoyed', 'at_only',
+      'curse', 'silence', 'mood_happy', 'mood_bored', 'mood_annoyed', 'at_only', 'confused',
     ];
     await Promise.allSettled(allCategories.map(c => this._refillCategory(c)));
   }

@@ -24,6 +24,8 @@ import type { ILoreLoader } from './lore-loader.js';
 import type { IDeflectionEngine } from './deflection-engine.js';
 import { tokenizeLore as _tokenizeLore, extractTokens as _extractTokens, extractKeywords as _extractKeywords } from '../utils/text-tokenize.js';
 import { loadGroupJargon, formatJargonBlock } from './jargon-provider.js';
+import { makeEngagementDecision, type EngagementSignals } from './engagement-decision.js';
+import { scoreComprehension, type ComprehensionContext } from '../services/comprehension-scorer.js';
 
 export interface IChatModule {
   generateReply(groupId: string, triggerMessage: GroupMessage, _recentMessages: GroupMessage[]): Promise<string | null>;
@@ -221,7 +223,7 @@ export const SILENCE_BREAKER_POOL = [
 export type DeflectCategory =
   | 'identity' | 'task' | 'memory' | 'recite'
   | 'curse' | 'silence' | 'mood_happy' | 'mood_bored' | 'mood_annoyed'
-  | 'at_only';
+  | 'at_only' | 'confused';
 
 export const DEFLECT_SITUATIONS: Record<DeflectCategory, string> = {
   identity: '有人怀疑你是机器人/AI，想让你承认身份。你不承认，轻描淡写绕开。',
@@ -234,6 +236,7 @@ export const DEFLECT_SITUATIONS: Record<DeflectCategory, string> = {
   mood_bored: '你很无聊，想来一句"好困""没意思"之类的。',
   mood_annoyed: '你有点烦，想发泄一句，不针对任何人。',
   at_only: '有人艾特了你但没说话，只是点了一下你。你的反应是简短的"？"或者"叫我干嘛"之类，看到@就随便回一下。',
+  confused: '有人跟你说了一句你完全不懂的话/黑话/方言/缩写，你听不懂。你的反应是自然地表示困惑，不要试图分析或解释那句话。',
 };
 
 export const DEFLECT_FALLBACKS: Record<DeflectCategory, string[]> = {
@@ -247,6 +250,7 @@ export const DEFLECT_FALLBACKS: Record<DeflectCategory, string[]> = {
   mood_bored: ['好困', '没意思', '无聊', ''],
   mood_annoyed: ['烦', '没意思', '哎'],
   at_only: ['?', '嗯?', '叫我干嘛', '说话啊', '艾特我干啥', '?怎么了', '什么事', '在', '咋了'],
+  confused: ['啊？', '我听不懂', '什么来着', '？？', '啥意思', '你说啥', '没听懂', '嗯？', '这是什么', '听不懂'],
 };
 
 export const BANGDREAM_PERSONA = `# 你的身份
@@ -1079,18 +1083,11 @@ export class ChatModule implements IChatModule {
     const { score, factors, isDirect } = this._computeWeightedScore(groupId, triggerMessage, now, recent3, recent5);
 
     // Short-ack skip: messages like "ok"/"行了"/"嗯"/"好的"/"收到" are
-    // acknowledgments, not conversation turns. They shouldn't trigger a reply
-    // even when continuity + adminBoost push the score above threshold.
-    // Direct triggers (mention / reply-to-bot) still respond normally.
+    // acknowledgments, not conversation turns.
     const trimmedTrigger = triggerMessage.content.trim().toLowerCase();
     const isShortAck = !isDirect && /^(ok|okay|好|好的|嗯|嗯嗯|行|行了|收到|明白|懂了|知道了|👌|👍|gg|awsl|666+)$/.test(trimmedTrigger);
 
-    // Meta-commentary skip: admin talks ABOUT the bot in third person without
-    // @-mentioning it. "她第一次不知道会装傻" / "bot 又开始胡说了" / "小号学会
-    // 了" — these are dev observations between admins, not turns directed at
-    // the bot. The bot should NOT chat-reply. Pattern: contains third-person
-    // reference (她/bot/小号) + a descriptive verb phrase, and is not a direct
-    // trigger. Keeps the bot from interjecting on dev meta-discussion.
+    // Meta-commentary skip: admin talks ABOUT the bot in third person
     const rawTrigger = triggerMessage.content;
     const isMetaCommentary = !isDirect
       && (triggerMessage.role === 'admin' || triggerMessage.role === 'owner')
@@ -1098,33 +1095,67 @@ export class ChatModule implements IChatModule {
 
     const isPicBotCommand = this._isPicBotCommand(groupId, rawTrigger, isDirect);
 
-    const decision = (!isShortAck && !isMetaCommentary && !isPicBotCommand && (isDirect || score >= this.chatMinScore)) ? 'respond' : 'skip';
-    this.logger.debug({ groupId, score: +score.toFixed(3), factors, chatMinScore: this.chatMinScore, decision }, 'participation score');
+    // Input-pattern shortcuts: detect adversarial patterns
+    const isProbe = IDENTITY_PROBE.test(triggerMessage.content);
+    const isTask  = !isProbe && TASK_REQUEST.test(triggerMessage.content);
+    const isInject = !isProbe && !isTask && MEMORY_INJECT.test(triggerMessage.content);
+    const isHarass = !isProbe && !isTask && !isInject && SEXUAL_HARASSMENT.test(triggerMessage.content);
+    const isAdversarial = isProbe || isTask || isInject || isHarass;
 
-    if (decision === 'skip') {
+    // ── Comprehension scoring (BEFORE Claude call) ────────────────────
+    const comprehensionCtx: ComprehensionContext = {
+      loreKeywords: this._getLoreKeywords(groupId),
+      jargonTerms: loadGroupJargon(this.db.rawDb, groupId).map(j => j.term.toLowerCase()),
+      aliasKeys: this._getAliasKeys(groupId),
+    };
+    const comprehensionScore = scoreComprehension(triggerMessage.content, comprehensionCtx);
+
+    // ── Engagement decision (decision BEFORE Claude call) ─────────────
+    const engagementSignals: EngagementSignals = {
+      isMention: this._isMention(triggerMessage),
+      isReplyToBot: this._isReplyToBot(triggerMessage),
+      participationScore: score,
+      minScore: this.chatMinScore,
+      isShortAck,
+      isMetaCommentary,
+      isPicBotCommand,
+      comprehensionScore,
+      isAdversarial,
+      isPureAtMention: false, // already handled above
+    };
+    const engagementDecision = makeEngagementDecision(engagementSignals);
+
+    this.logger.debug({
+      groupId,
+      score: +score.toFixed(3),
+      factors,
+      comprehension: +comprehensionScore.toFixed(2),
+      engagement: engagementDecision.strength,
+      reason: engagementDecision.reason,
+    }, 'engagement decision');
+
+    if (!engagementDecision.shouldReply) {
       return null;
     }
 
     // Record last-reply timestamp for silence factor (applies to all replies)
     this.lastProactiveReply.set(groupId, now);
 
-    // Input-pattern shortcuts: bypass Claude entirely for known adversarial patterns
-    const isProbe = IDENTITY_PROBE.test(triggerMessage.content);
-    const isTask  = !isProbe && TASK_REQUEST.test(triggerMessage.content);
-    const isInject = !isProbe && !isTask && MEMORY_INJECT.test(triggerMessage.content);
-    const isHarass = !isProbe && !isTask && !isInject && SEXUAL_HARASSMENT.test(triggerMessage.content);
-
-    if (isProbe || isTask || isInject || isHarass) {
-      const isCurse = this._teaseIncrement(groupId, triggerMessage.userId, now);
-      if (isCurse) return this._generateDeflection('curse', triggerMessage);
-      if (isHarass) return this._generateDeflection('curse', triggerMessage); // harassment → always curse-tier
-      if (isProbe) return this._generateDeflection('identity', triggerMessage);
-      if (isTask) {
-        // Distinguish recite-style exploits from generic task requests
-        const isRecite = /(背|接龙|续写|恩师|接下[一]?句|继续[背念说])/i.test(triggerMessage.content);
-        return this._generateDeflection(isRecite ? 'recite' : 'task', triggerMessage);
+    // React path: deflection without calling Claude
+    if (engagementDecision.strength === 'react') {
+      if (isAdversarial) {
+        const isCurse = this._teaseIncrement(groupId, triggerMessage.userId, now);
+        if (isCurse) return this._generateDeflection('curse', triggerMessage);
+        if (isHarass) return this._generateDeflection('curse', triggerMessage); // harassment → always curse-tier
+        if (isProbe) return this._generateDeflection('identity', triggerMessage);
+        if (isTask) {
+          const isRecite = /(背|接龙|续写|恩师|接下[一]?句|继续[背念说])/i.test(triggerMessage.content);
+          return this._generateDeflection(isRecite ? 'recite' : 'task', triggerMessage);
+        }
+        return this._generateDeflection('memory', triggerMessage);
       }
-      return this._generateDeflection('memory', triggerMessage);
+      // Non-adversarial react: low comprehension → confused deflection
+      return this._generateDeflection('confused', triggerMessage);
     }
 
     // ── Mood update ───────────────────────────────────────────────────────
@@ -2156,7 +2187,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
   private async _refillAllDeflectCategories(): Promise<void> {
     const allCategories: DeflectCategory[] = [
       'identity', 'task', 'memory', 'recite',
-      'curse', 'silence', 'mood_happy', 'mood_bored', 'mood_annoyed', 'at_only',
+      'curse', 'silence', 'mood_happy', 'mood_bored', 'mood_annoyed', 'at_only', 'confused',
     ];
     await Promise.allSettled(allCategories.map(c => this._refillDeflectCategory(c)));
   }
@@ -2174,6 +2205,27 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       if (loreTokens.has(token)) return true;
     }
     return false;
+  }
+
+  /** Get lore keywords set for comprehension scoring. Triggers cache population if needed. */
+  private _getLoreKeywords(groupId: string): ReadonlySet<string> {
+    // Ensure lore is loaded to populate cache
+    if (this.loreLoader) {
+      this.loreLoader.hasLoreKeyword(groupId, '');
+    } else {
+      this._loadRelevantLore(groupId, '', []);
+    }
+    return this.loreKeywordsCache.get(groupId) ?? new Set();
+  }
+
+  /** Get alias map keys for comprehension scoring. */
+  private _getAliasKeys(groupId: string): ReadonlyArray<string> {
+    const chunkMap = this.loreChunkAliasMap.get(groupId);
+    if (chunkMap) return [...chunkMap.keys()];
+    // Also check loreAliasIndex (per-member lore)
+    const aliasIndex = this.loreAliasIndex.get(groupId);
+    if (aliasIndex) return [...aliasIndex.keys()];
+    return [];
   }
 
   /**
