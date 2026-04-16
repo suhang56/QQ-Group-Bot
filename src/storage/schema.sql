@@ -227,3 +227,23 @@ CREATE TABLE IF NOT EXISTS forward_cache (
   fetched_at        INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_forward_cache_fetched ON forward_cache(fetched_at);
+
+-- bandori_lives: daily-scraped BanG Dream! live event schedule.
+-- fetched_at / last_seen_at are unix seconds.
+CREATE TABLE IF NOT EXISTS bandori_lives (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_key        TEXT    NOT NULL UNIQUE,
+  title            TEXT    NOT NULL,
+  start_date       TEXT,                          -- YYYY-MM-DD, NULL if unparseable
+  end_date         TEXT,                          -- YYYY-MM-DD, NULL if single-day or unknown
+  venue            TEXT,
+  city             TEXT,
+  bands            TEXT    NOT NULL DEFAULT '[]', -- JSON array
+  detail_url       TEXT,
+  ticket_info_text TEXT,
+  fetched_at       INTEGER NOT NULL,              -- unix seconds
+  last_seen_at     INTEGER NOT NULL,              -- unix seconds
+  raw_hash         TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bandori_lives_start_date ON bandori_lives(start_date);
+CREATE INDEX IF NOT EXISTS idx_bandori_lives_last_seen  ON bandori_lives(last_seen_at);

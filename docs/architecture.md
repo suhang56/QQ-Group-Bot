@@ -1220,3 +1220,353 @@ These must hold unconditionally. Developer must not weaken any of them:
 | Threshold 0.55 too conservative (feature rarely fires) | Medium | Low — feature appears inactive | Document in `/stickerfirst_status` output; admin can lower threshold |
 | `context_samples` JSON parse failure | Low | Low — sticker excluded from candidates | Developer must JSON.parse inside try/catch; exclude malformed rows |
 | Sticker file missing from disk after DB record exists | Low | Low — sticker excluded | `existsSync(localPath)` filter before scoring |
+
+---
+
+
+## 11. BanG Dream Live Scraper — Iteration Contract
+
+### 11.1 Feature Summary
+
+A daily background scraper that fetches the official BanG Dream event listing (`https://bang-dream.com/events/`), parses upcoming/ongoing live events, and stores them in a new `bandori_lives` SQLite table. No user-facing commands. No push broadcast. No per-group toggle — feature is always-on; only env var gating via `BANDORI_SCRAPE_ENABLED`. Knowledge is injected passively into the LLM's user-role context when the incoming message contains live-related keywords, allowing the bot to mention upcoming lives organically.
+
+**No `ScoreFactors.liveKw` field.** Keyword detection gates injection only — it does not affect the reply-or-skip score.
+
+---
+
+### 11.2 HTML Parser Choice
+
+**Decision: node-html-parser** (new `dependencies` entry in package.json).
+
+Rationale:
+- `package.json` currently has no DOM parser (no cheerio, no node-html-parser, no happy-dom, no jsdom).
+- node-html-parser: pure JS, zero native deps, ~100 KB, CSS selector support sufficient for event card extraction.
+- jsdom is explicitly rejected — too heavy, browser emulation not needed.
+- cheerio: acceptable but heavier than node-html-parser for this use case.
+
+**Parse strategy**: DOM selector parsing only. Strip `<script>`, `<style>`, `<nav>`, `<footer>`, `<header>` before parsing. Look for `<article>`, `div.event-card`, or equivalent containers. If 0 events parsed, log WARN (E042) at HIGH severity and return 0 — do NOT throw, do NOT call Claude (no fallback in v1, per spec §12.15).
+
+---
+
+### 11.3 Fetch Strategy
+
+```
+User-Agent: BanGDreamFanBot/1.0 (QQ group assistant; non-commercial)
+Timeout: 15 000 ms
+Retry: none — on any error, log WARN and skip until next cycle
+Robots.txt: respect; if events path disallowed, log WARN and skip
+```
+
+One GET request per scrape cycle. No session cookies. Network error → E040. HTTP non-2xx → E041. No retry — reschedule is handled by the cron loop.
+
+---
+
+### 11.4 Module Interface
+
+**src/modules/bandori-live-scraper.ts**
+
+```typescript
+export interface BandoriLiveScraperOptions {
+  enabled?: boolean;          // default true (from BANDORI_SCRAPE_ENABLED env)
+  intervalMs?: number;        // default 86_400_000 (from BANDORI_SCRAPE_INTERVAL_MS env)
+  initialDelayMs?: number;    // default 60_000 — avoids blocking boot
+  sourceUrl?: string;         // default "https://bang-dream.com/events/"
+  requestTimeoutMs?: number;  // default 15_000
+}
+
+export class BandoriLiveScraper {
+  constructor(
+    private readonly repo: IBandoriLiveRepository,
+    options?: BandoriLiveScraperOptions,
+  ) {}
+
+  /** Start the scheduled loop. Synchronous and non-blocking — first run fires after initialDelayMs. */
+  start(): void;
+
+  /** Stop the loop (for graceful shutdown). */
+  stop(): void;
+
+  /**
+   * Run one full scrape cycle immediately.
+   * Returns number of events upserted. Does NOT throw on network/parse failures — logs WARN and returns 0.
+   */
+  async scrape(): Promise<number>;
+}
+
+/** Flat keyword list for injection trigger detection. Exported for chat.ts to import. */
+export const BANDORI_LIVE_KEYWORDS: string[];
+```
+
+**Cron loop pattern** (follows `SelfReflectionLoop` — setTimeout + reschedule-after-completion, NOT setInterval):
+
+```typescript
+start(): void {
+  if (!this.enabled) { logger.info('bandori-live scraper disabled (BANDORI_SCRAPE_ENABLED=false)'); return; }
+  this.timer = setTimeout(() => void this._runAndSchedule(), this.initialDelayMs);
+  logger.info({ intervalMs: this.intervalMs, initialDelayMs: this.initialDelayMs }, 'bandori-live scraper started');
+}
+
+private async _runAndSchedule(): Promise<void> {
+  try {
+    const n = await this.scrape();
+    logger.info({ eventsUpserted: n }, 'bandori-live scrape complete');
+  } catch (err) {
+    logger.error({ err }, 'bandori-live scrape failed');
+  }
+  // Always reschedule, even on error
+  this.timer = setTimeout(() => void this._runAndSchedule(), this.intervalMs);
+}
+```
+
+setTimeout (not setInterval) avoids overlap on slow scrapes.
+
+**src/storage/db.ts** — new domain type and repository interface:
+
+```typescript
+export interface BandoriLiveRow {
+  id: number;
+  eventKey: string;         // SHA-256 hex of detail_url (first 16 chars), stable dedup key
+  title: string;
+  startDate: string | null; // YYYY-MM-DD
+  endDate: string | null;   // YYYY-MM-DD
+  venue: string | null;
+  city: string | null;
+  bands: string[];          // deserialized from JSON column
+  detailUrl: string | null;
+  ticketInfoText: string | null;
+  fetchedAt: number;        // unix seconds
+  lastSeenAt: number;       // unix seconds
+  rawHash: string;          // SHA-256 of sorted canonical JSON of parsed fields
+}
+
+export interface IBandoriLiveRepository {
+  /** Insert new or update existing row matched by event_key. See upsert semantics below. */
+  upsert(row: Omit<BandoriLiveRow, 'id'>): void;
+
+  /**
+   * Events where start_date >= todayIso AND (start_date <= todayIso + 60 days OR start_date IS NULL),
+   * ordered ascending by start_date (NULLs last). Default limit: 3.
+   * The 60-day window per UX section 10.5; NULL-date events always included (date TBD).
+   */
+  getUpcoming(todayIso: string, limit?: number): BandoriLiveRow[];
+
+  /**
+   * Events where bands JSON array contains bandQuery (case-insensitive substring).
+   * Ordered ascending by start_date (NULLs last). Default limit: 10.
+   */
+  searchByBand(bandQuery: string, limit?: number): BandoriLiveRow[];
+
+  /** All rows ordered by start_date ascending (NULLs last). No hard limit. For diagnostics. */
+  getAll(): BandoriLiveRow[];
+}
+```
+
+**`event_key`**: `createHash('sha256').update(detailUrl ?? title).digest('hex').slice(0, 16)`
+
+**`raw_hash`**: `createHash('sha256').update(JSON.stringify({ title, startDate, endDate, venue, city, bands: bands.slice().sort(), ticketInfoText })).digest('hex')` — bands sorted for determinism (EC-19).
+
+**Upsert semantics**:
+- `event_key` absent: INSERT full row; `fetchedAt = lastSeenAt = nowUnixSecs`.
+- `event_key` present, `raw_hash` unchanged: UPDATE `lastSeenAt` only; do not touch `fetchedAt`.
+- `event_key` present, `raw_hash` changed: UPDATE all fields except `fetchedAt`; update `lastSeenAt`.
+- Events absent from the current scrape are NOT touched — `lastSeenAt` is not decremented (historical retention, EC-4).
+
+---
+
+### 11.5 Database Schema
+
+**schema.sql addition** (fresh-install path — `CREATE TABLE IF NOT EXISTS` is idempotent):
+
+```sql
+CREATE TABLE IF NOT EXISTS bandori_lives (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_key        TEXT    NOT NULL UNIQUE,
+  title            TEXT    NOT NULL,
+  start_date       TEXT,                          -- YYYY-MM-DD, NULL if unparseable
+  end_date         TEXT,                          -- YYYY-MM-DD, NULL if single-day or unknown
+  venue            TEXT,
+  city             TEXT,
+  bands            TEXT    NOT NULL DEFAULT '[]', -- JSON array
+  detail_url       TEXT,
+  ticket_info_text TEXT,
+  fetched_at       INTEGER NOT NULL,              -- unix seconds
+  last_seen_at     INTEGER NOT NULL,              -- unix seconds
+  raw_hash         TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bandori_lives_start_date ON bandori_lives(start_date);
+CREATE INDEX IF NOT EXISTS idx_bandori_lives_last_seen  ON bandori_lives(last_seen_at);
+```
+
+**Migration** (`src/storage/db.ts` → `_runMigrations()`): Add an identical `CREATE TABLE IF NOT EXISTS` block following the existing `name_images` / `live_stickers` pattern. No `ALTER TABLE` required — this is a wholly new table; `CREATE TABLE IF NOT EXISTS` handles both fresh and existing DBs idempotently (EC-11).
+
+---
+
+### 11.6 Chat Injection Hook
+
+**Location**: `src/modules/chat.ts` — inside `generateReply()`, user-role context assembly. NOT the system prompt — per project invariant §1: static system prompts, user content in user-role (same pattern as existing `factsBlock`).
+
+**Keyword detection** — flat substring match, no compound threshold:
+
+```typescript
+// Constant defined and exported from bandori-live-scraper.ts:
+export const BANDORI_LIVE_KEYWORDS = [
+  'live', 'ライブ', '演唱会', '公演', '演出', '场', '会场', '场馆',
+  '票', 'チケット', 'ticket',
+  "Roselia", "MyGO!!!!!", "Ave Mujica", "Poppin'Party", "Afterglow",
+  "Hello Happy World!", "HHW", "Pastel Palettes", "Morfonica",
+  "RAISE A SUILEN", "RAS", "CRYCHIC",
+  "波普派对", "余晖", "彩色调色板", "彩帕", "玫瑰利亚",
+];
+
+function _hasBandoriLiveKeyword(text: string): boolean {
+  const lower = text.toLowerCase();
+  return BANDORI_LIVE_KEYWORDS.some(kw => lower.includes(kw.toLowerCase()));
+}
+```
+
+**Injection step** (single conditional block, minimal blast radius):
+
+```typescript
+let liveBlock = '';
+if (this.bandoriLiveRepo && _hasBandoriLiveKeyword(triggerMessage.content)) {
+  const today = new Date().toISOString().slice(0, 10);
+  const upcoming = this.bandoriLiveRepo.getUpcoming(today, 3);
+  if (upcoming.length > 0) {
+    liveBlock = _formatLiveBlock(upcoming) + '\n\n';
+  }
+}
+const userContent = `${liveBlock}${replyContextBlock}${keywordSection}...`;
+```
+
+Cap: `getUpcoming(today, 3)` — maximum 3 entries (EC-16). Prepended before conversation history.
+
+**New optional constructor option** in `ChatModule`:
+
+```typescript
+bandoriLiveRepo?: IBandoriLiveRepository;
+```
+
+No change to `IChatModule` interface. If undefined, injection path is skipped silently.
+
+**No `GroupConfig` change.** No `bandoriLiveEnabled` field. Not in `defaultGroupConfig`. Feature is global, env-var-gated only.
+
+---
+
+### 11.7 Context Block Format
+
+Per spec §12.7.3 and UX §10.1–§10.2:
+
+```typescript
+function _formatLiveBlock(events: BandoriLiveRow[]): string {
+  const lines = events.map(e => {
+    const dateStr = e.startDate
+      ? (e.endDate && e.endDate !== e.startDate ? `${e.startDate} ~ ${e.endDate}` : e.startDate)
+      : '日程未定';
+    const bandsStr = e.bands.length > 0 ? e.bands.join(' / ') : '未知乐队';
+    const venueStr = [e.venue, e.city].filter(Boolean).join('・') || '场馆未定';
+    const ticketStr = e.ticketInfoText ? `（${e.ticketInfoText.slice(0, 40)}）` : '';
+    return `- ${e.title}｜${dateStr}｜${bandsStr}｜${venueStr}${ticketStr}`;
+  });
+  // UX §10.2 guidance fragment — exact text mandated by Designer; do not paraphrase
+  const guidance = '（以上是刚拿到的 Live 排期信息，仅供你参考。如果和话题相关，可以像群里的粉丝一样自然聊几句——比如说说哪场你期待或者票还有没有；如果话题无关，就当没看到。绝对不要把上面的信息当成列表原文输出，要融入对话语气。）';
+  return `【近期 BanG Dream! Live 信息】\n${lines.join('\n')}\n${guidance}`;
+}
+```
+
+**Past event handling** (UX §10.5 decision): v1 does NOT inject past events. `getUpcoming` filters `start_date >= today`. Past-event injection deferred to v2.
+
+---
+
+### 11.8 Bootstrap Wiring (index.ts)
+
+```typescript
+const bandoriEnabled = process.env.BANDORI_SCRAPE_ENABLED !== 'false';
+const bandoriLiveRepo = db.bandoriLives; // via Database facade
+
+const bandoriScraper = new BandoriLiveScraper(bandoriLiveRepo, {
+  enabled: bandoriEnabled,
+  intervalMs: parseInt(process.env.BANDORI_SCRAPE_INTERVAL_MS ?? '86400000', 10),
+});
+bandoriScraper.start(); // synchronous, non-blocking; first scrape after 60s
+
+const chatModule = new ChatModule({
+  ...existingOptions,
+  bandoriLiveRepo: bandoriEnabled ? bandoriLiveRepo : undefined,
+});
+```
+
+---
+
+### 11.9 Environment Variables
+
+| Variable | Type | Default | Description |
+|---|---|---|---|
+| `BANDORI_SCRAPE_ENABLED` | `'true'`/`'false'` | `'true'` | Set `'false'` to disable scraper and injection entirely |
+| `BANDORI_SCRAPE_INTERVAL_MS` | integer string | `'86400000'` (24h) | Scrape repeat interval in milliseconds |
+
+Both read from `process.env` in `src/index.ts`. Not stored in `group_config` or `defaultGroupConfig`. Document in `.env.example` with timezone caveat: scraper fires relative to process startup time, not at a fixed wall-clock time.
+
+---
+
+### 11.10 Error Handling
+
+| Code | Name | Cause | Behavior |
+|---|---|---|---|
+| E040 | BANDORI_NETWORK_ERROR | Fetch threw (DNS/timeout) | Log WARN; `scrape()` returns 0; existing DB rows retained; reschedule normally |
+| E041 | BANDORI_HTTP_ERROR | HTTP response status >= 400 | Log WARN with status code; `scrape()` returns 0; existing DB rows retained |
+| E042 | BANDORI_PARSE_ZERO | Valid HTML but zero event cards found | Log WARN HIGH with first 200 chars of HTML; `scrape()` returns 0 |
+| E043 | BANDORI_DATE_PARSE | Individual event date string unparseable | Log WARN with raw dateText; set `startDate`/`endDate` to null; continue inserting row |
+
+Scraper always reschedules after any error. No crash on any of the above.
+
+---
+
+### 11.11 Risk Table
+
+| Risk | Likelihood | Impact | Mitigation |
+|---|---|---|---|
+| bang-dream.com HTML structure changes | High (external site) | Medium — zero events parsed | E042 WARN HIGH logged; existing DB rows retained for injection; admin sees log |
+| Robots.txt disallows events path | Low (1 req/day, identified bot UA) | Medium | Respect disallow; log WARN; document in `.env.example` |
+| Live keyword injection over-triggers | Medium | Low — occasional live mention | Flat keyword list carefully scoped; hard cap at 3 entries |
+| Timezone drift | Low | Low | Timer relative to startup; once-per-day cadence sufficient per spec |
+| DB grows with stale past events | Low | Low | `getUpcoming` filters by date; live events per year are finite |
+| `rawHash` non-determinism | Low | Medium — spurious updates | Bands sorted before hashing; EC-19 is mandatory |
+| Scraper blocks bot startup | N/A (mitigated) | High if triggered | `start()` returns synchronously; first scrape after 60s delay |
+| Injection tone regresses | Low | Low | `_formatLiveBlock` embeds exact UX §10.2 guidance fragment; Reviewer validates sentinel |
+
+---
+
+### 11.12 Test Plan
+
+**Single test file**: `test/bandori-live.test.ts` (unit + integration; real `:memory:` SQLite for repo tests).
+
+**Fixtures**:
+- `test/fixtures/bandori-events-normal.html` — valid page with 3 events (one with date range, one no date)
+- `test/fixtures/bandori-events-empty.html` — valid HTML, zero event cards
+- `test/fixtures/bandori-events-malformed.html` — truncated/invalid HTML
+
+**Edge case coverage (all 19 mandatory — SOUL RULE)**:
+
+| EC | Description |
+|---|---|
+| EC-1 | Fresh DB: `scrape()` stores all events; `eventsUpserted > 0`; `fetchedAt = lastSeenAt = now` |
+| EC-2 | Re-scrape identical HTML: all rows' `lastSeenAt` updated; no new rows; `rawHash` unchanged |
+| EC-3 | Re-scrape with changed event field: `rawHash` changes; all fields updated except `fetchedAt`; `lastSeenAt` advances |
+| EC-4 | Event absent from scrape: `lastSeenAt` NOT updated; row retained in DB |
+| EC-5 | Network error: E040 WARN logged; `scrape()` returns 0; no crash; no rows modified |
+| EC-6 | HTTP 500: E041 WARN logged; same as EC-5 |
+| EC-7 | Malformed HTML: 0 rows inserted; E042 WARN logged; no crash |
+| EC-8 | Zero-event HTML: E042 WARN HIGH logged; `scrape()` returns 0; existing rows untouched |
+| EC-9 | Event with no date: `startDate = null`, `endDate = null`; E043 WARN; row still inserted with null dates |
+| EC-10 | Date range `"2026.05.10~2026.05.11"`: `startDate = "2026-05-10"`, `endDate = "2026-05-11"` |
+| EC-11 | Migration on pre-existing DB: `CREATE TABLE IF NOT EXISTS` adds table; existing tables unaffected |
+| EC-12 | `getUpcoming`: returns only events where `start_date >= today`, ASC order; past rows excluded |
+| EC-13 | `searchByBand("Roselia")`: returns matching entries; case-insensitive; non-matching excluded |
+| EC-14 | Trigger "Roselia live": `_hasBandoriLiveKeyword = true`; `liveBlock` injected into `userContent` |
+| EC-15 | Trigger "今天吃啥": `_hasBandoriLiveKeyword = false`; `liveBlock` empty; `userContent` unchanged |
+| EC-16 | 10 upcoming events in DB: only 3 rows injected via `getUpcoming(today, 3)` |
+| EC-17 | `start()` returns synchronously; first scrape fires after 60s (verified via fake timers) |
+| EC-18 | `BANDORI_SCRAPE_ENABLED=false`: `start()` logs disabled and returns; no timer set; `bandoriLiveRepo` undefined in `ChatModule`; no injection |
+| EC-19 | `rawHash` identical across two calls with identical input (bands sorted in canonical JSON) |
+
+Coverage target: >=80% line coverage for `src/modules/bandori-live-scraper.ts` and the `IBandoriLiveRepository` implementation. All 19 ECs mandatory before Reviewer sign-off.

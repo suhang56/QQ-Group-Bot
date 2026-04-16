@@ -1550,6 +1550,133 @@ class WelcomeLogRepository implements IWelcomeLogRepository {
   }
 }
 
+// ---- BandoriLive ----
+
+export interface BandoriLiveRow {
+  id: number;
+  eventKey: string;
+  title: string;
+  startDate: string | null;
+  endDate: string | null;
+  venue: string | null;
+  city: string | null;
+  bands: string[];
+  detailUrl: string | null;
+  ticketInfoText: string | null;
+  fetchedAt: number;
+  lastSeenAt: number;
+  rawHash: string;
+}
+
+export interface IBandoriLiveRepository {
+  upsert(row: Omit<BandoriLiveRow, 'id'>): void;
+  /**
+   * Events where start_date >= todayIso AND (start_date <= todayIso + 60 days OR start_date IS NULL),
+   * ordered ascending by start_date (NULLs last). Default limit: 3.
+   */
+  getUpcoming(todayIso: string, limit?: number): BandoriLiveRow[];
+  /** Case-insensitive substring search against bands JSON. Default limit: 10. */
+  searchByBand(bandQuery: string, limit?: number): BandoriLiveRow[];
+  getAll(): BandoriLiveRow[];
+}
+
+export class BandoriLiveRepository implements IBandoriLiveRepository {
+  constructor(private readonly db: DatabaseSync) {}
+
+  private _fromRow(r: Record<string, unknown>): BandoriLiveRow {
+    let bands: string[] = [];
+    try { bands = JSON.parse(r.bands as string) as string[]; } catch { /* ok */ }
+    return {
+      id: r.id as number,
+      eventKey: r.event_key as string,
+      title: r.title as string,
+      startDate: (r.start_date as string | null) ?? null,
+      endDate: (r.end_date as string | null) ?? null,
+      venue: (r.venue as string | null) ?? null,
+      city: (r.city as string | null) ?? null,
+      bands,
+      detailUrl: (r.detail_url as string | null) ?? null,
+      ticketInfoText: (r.ticket_info_text as string | null) ?? null,
+      fetchedAt: r.fetched_at as number,
+      lastSeenAt: r.last_seen_at as number,
+      rawHash: r.raw_hash as string,
+    };
+  }
+
+  upsert(row: Omit<BandoriLiveRow, 'id'>): void {
+    const nowSecs = Math.floor(Date.now() / 1000);
+    const bandsJson = JSON.stringify(row.bands);
+    const existing = this.db.prepare(
+      'SELECT raw_hash, fetched_at FROM bandori_lives WHERE event_key = ?'
+    ).get(row.eventKey) as { raw_hash: string; fetched_at: number } | undefined;
+
+    if (!existing) {
+      this.db.prepare(`
+        INSERT INTO bandori_lives
+          (event_key, title, start_date, end_date, venue, city, bands, detail_url,
+           ticket_info_text, fetched_at, last_seen_at, raw_hash)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        row.eventKey, row.title, row.startDate ?? null, row.endDate ?? null,
+        row.venue ?? null, row.city ?? null, bandsJson, row.detailUrl ?? null,
+        row.ticketInfoText ?? null, nowSecs, nowSecs, row.rawHash,
+      );
+      return;
+    }
+
+    if (existing.raw_hash === row.rawHash) {
+      // Only bump lastSeenAt
+      this.db.prepare(
+        'UPDATE bandori_lives SET last_seen_at = ? WHERE event_key = ?'
+      ).run(nowSecs, row.eventKey);
+    } else {
+      // rawHash changed — update all fields except fetched_at
+      this.db.prepare(`
+        UPDATE bandori_lives SET
+          title = ?, start_date = ?, end_date = ?, venue = ?, city = ?,
+          bands = ?, detail_url = ?, ticket_info_text = ?,
+          last_seen_at = ?, raw_hash = ?
+        WHERE event_key = ?
+      `).run(
+        row.title, row.startDate ?? null, row.endDate ?? null,
+        row.venue ?? null, row.city ?? null, bandsJson, row.detailUrl ?? null,
+        row.ticketInfoText ?? null, nowSecs, row.rawHash, row.eventKey,
+      );
+    }
+  }
+
+  getUpcoming(todayIso: string, limit = 3): BandoriLiveRow[] {
+    // 60-day window
+    const d = new Date(todayIso);
+    d.setDate(d.getDate() + 60);
+    const windowEnd = d.toISOString().slice(0, 10);
+    const rows = this.db.prepare(`
+      SELECT * FROM bandori_lives
+      WHERE (start_date IS NULL OR (start_date >= ? AND start_date <= ?))
+      ORDER BY CASE WHEN start_date IS NULL THEN 1 ELSE 0 END, start_date ASC
+      LIMIT ?
+    `).all(todayIso, windowEnd, limit) as unknown as Array<Record<string, unknown>>;
+    return rows.map(r => this._fromRow(r));
+  }
+
+  searchByBand(bandQuery: string, limit = 10): BandoriLiveRow[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM bandori_lives
+      WHERE LOWER(bands) LIKE LOWER(?)
+      ORDER BY CASE WHEN start_date IS NULL THEN 1 ELSE 0 END, start_date ASC
+      LIMIT ?
+    `).all(`%${bandQuery}%`, limit) as unknown as Array<Record<string, unknown>>;
+    return rows.map(r => this._fromRow(r));
+  }
+
+  getAll(): BandoriLiveRow[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM bandori_lives ORDER BY CASE WHEN start_date IS NULL THEN 1 ELSE 0 END, start_date ASC`
+    ).all() as unknown as Array<Record<string, unknown>>;
+    return rows.map(r => this._fromRow(r));
+  }
+}
+
 // ---- Main Database class ----
 
 export class Database {
@@ -1570,6 +1697,7 @@ export class Database {
   readonly pendingModeration: IPendingModerationRepository;
   readonly welcomeLog: IWelcomeLogRepository;
   readonly modRejections: IModRejectionRepository;
+  readonly bandoriLives: IBandoriLiveRepository;
 
   private readonly _db: DatabaseSync;
 
@@ -1596,6 +1724,7 @@ export class Database {
     this.pendingModeration = new PendingModerationRepository(this._db);
     this.welcomeLog = new WelcomeLogRepository(this._db);
     this.modRejections = new ModRejectionRepository(this._db);
+    this.bandoriLives = new BandoriLiveRepository(this._db);
   }
 
   /** Execute arbitrary SQL — intended for bulk-import scripts and migrations only. */
@@ -1797,5 +1926,27 @@ export class Database {
       )
     `);
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_mod_rejections_group_ts ON mod_rejections(group_id, created_at DESC)`);
+
+    // bandori_lives — daily-scraped BanG Dream! live event schedule.
+    // CREATE TABLE IF NOT EXISTS handles both fresh installs and existing DBs idempotently.
+    this._db.exec(`
+      CREATE TABLE IF NOT EXISTS bandori_lives (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_key        TEXT    NOT NULL UNIQUE,
+        title            TEXT    NOT NULL,
+        start_date       TEXT,
+        end_date         TEXT,
+        venue            TEXT,
+        city             TEXT,
+        bands            TEXT    NOT NULL DEFAULT '[]',
+        detail_url       TEXT,
+        ticket_info_text TEXT,
+        fetched_at       INTEGER NOT NULL,
+        last_seen_at     INTEGER NOT NULL,
+        raw_hash         TEXT    NOT NULL
+      )
+    `);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_bandori_lives_start_date ON bandori_lives(start_date)`);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_bandori_lives_last_seen  ON bandori_lives(last_seen_at)`);
   }
 }
