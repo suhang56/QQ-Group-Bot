@@ -43,6 +43,7 @@ import { RelationshipTracker } from './modules/relationship-tracker.js';
 import { AffinityModule } from './modules/affinity.js';
 import { JargonMiner } from './modules/jargon-miner.js';
 import { PhraseMiner } from './modules/phrase-miner.js';
+import { MemeClusterer } from './modules/meme-clusterer.js';
 import { RatingPortalServer } from './server/rating-portal.js';
 import { TuningGenerator } from './server/tuning-generator.js';
 
@@ -317,6 +318,15 @@ const phraseMiner = memesDisabled ? null : new PhraseMiner({
   activeGroups: ACTIVE_GROUPS,
 });
 
+const memeClusterer = memesDisabled ? null : new MemeClusterer({
+  db: db.rawDb,
+  memeGraphRepo: db.memeGraph,
+  phraseCandidatesRepo: db.phraseCandidates,
+  embeddingService: embedder,
+  claude,
+  activeGroups: ACTIVE_GROUPS,
+});
+
 const harvest = new OpportunisticHarvest({
   messages: db.messages,
   learnedFacts: db.learnedFacts,
@@ -331,6 +341,11 @@ const harvest = new OpportunisticHarvest({
     }
     if (phraseMiner) {
       void phraseMiner.runAll().catch((err) => logger.error({ err }, 'phrase-miner failed'));
+    }
+    // Meme clusterer runs AFTER jargon-miner and phrase-miner so it can
+    // pick up freshly-promoted candidates from both pipelines.
+    if (memeClusterer) {
+      void memeClusterer.runAll().catch((err) => logger.error({ err }, 'meme-clusterer failed'));
     }
   },
 });

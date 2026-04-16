@@ -156,11 +156,18 @@ export class JargonMiner {
   /**
    * Main entry point — extract → infer → promote for a single group.
    * Designed to piggyback on opportunistic-harvest's _run cycle.
+   *
+   * When MEMES_V1_DISABLED is not set, promoteToFacts is skipped because
+   * MemeClusterer handles promotion to meme_graph instead.
    */
   async run(groupId: string): Promise<void> {
     this.extractCandidates(groupId);
     await this.inferJargon(groupId);
-    this.promoteToFacts(groupId);
+    // Legacy promote path: only runs when memes-v1 pipeline is disabled
+    // (kill switch on). Otherwise MemeClusterer handles promotion to meme_graph.
+    if (process.env['MEMES_V1_DISABLED'] === '1') {
+      this.promoteToFacts(groupId);
+    }
   }
 
   /**
