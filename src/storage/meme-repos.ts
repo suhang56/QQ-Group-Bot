@@ -5,6 +5,7 @@
 
 import { DatabaseSync } from 'node:sqlite';
 import type { MemeGraphEntry, IMemeGraphRepo, PhraseCandidateRow, IPhraseCandidatesRepo } from './db.js';
+import { cosineSimilarity } from './embeddings.js';
 
 // ---- Row mappers ----
 
@@ -211,6 +212,25 @@ export class MemeGraphRepository implements IMemeGraphRepo {
        ORDER BY updated_at DESC LIMIT ?`
     ).all(groupId, limit) as unknown[];
     return rows.map(r => memeGraphFromRow(r as Parameters<typeof memeGraphFromRow>[0]));
+  }
+
+  findSimilarActive(
+    groupId: string,
+    queryEmbedding: number[],
+    threshold: number,
+    limit: number,
+  ): MemeGraphEntry[] {
+    const candidates = this.listActiveWithEmbeddings(groupId);
+    const scored: Array<{ entry: MemeGraphEntry; sim: number }> = [];
+    for (const entry of candidates) {
+      if (!entry.embeddingVec) continue;
+      const sim = cosineSimilarity(queryEmbedding, entry.embeddingVec);
+      if (sim >= threshold) {
+        scored.push({ entry, sim });
+      }
+    }
+    scored.sort((a, b) => b.sim - a.sim);
+    return scored.slice(0, limit).map(s => s.entry);
   }
 
   listActiveWithEmbeddings(groupId: string): MemeGraphEntry[] {

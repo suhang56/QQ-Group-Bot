@@ -1,6 +1,6 @@
 import type { Logger } from 'pino';
 import type { IClaudeClient, ClaudeModel } from '../ai/claude.js';
-import type { Database, LearnedFact } from '../storage/db.js';
+import type { Database, LearnedFact, IMemeGraphRepo } from '../storage/db.js';
 import type { IEmbeddingService } from '../storage/embeddings.js';
 import { cosineSimilarity } from '../storage/embeddings.js';
 import { createLogger } from '../utils/logger.js';
@@ -12,30 +12,7 @@ import { LEARN_MODEL, RESEARCH_MODEL, FACTS_RAG_DISABLED, MEMES_V1_DISABLED } fr
  * threshold than English RAG defaults. Tune here without touching logic. */
 export const FACT_SIMILARITY_FLOOR = 0.30;
 
-/** Meme graph entry shape consumed by P4 injection. Matches MemeGraphRepo
- * output from P0. Defined here to decouple P4 from P0 merge order. */
-export interface MemeGraphEntry {
-  readonly id: number;
-  readonly groupId: string;
-  readonly canonical: string;
-  readonly variants: readonly string[];
-  readonly meaning: string;
-  readonly originEvent: string | null;
-  readonly status: 'active' | 'demoted' | 'manual_edit';
-  readonly confidence: number;
-  readonly embeddingVec: number[] | null;
-}
-
-/** Minimal meme graph repo interface needed by P4 injection paths. */
-export interface IMemeGraphRepo {
-  findSimilarActive(
-    groupId: string,
-    embedding: number[],
-    threshold: number,
-    limit: number,
-  ): MemeGraphEntry[];
-  listActive(groupId: string): MemeGraphEntry[];
-}
+export type { IMemeGraphRepo };
 
 /**
  * Configuration for {@link SelfLearningModule}.

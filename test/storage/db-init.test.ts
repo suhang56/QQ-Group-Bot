@@ -36,6 +36,8 @@ describe('Database fresh init', () => {
     'user_affinity',
     'expression_patterns',
     'user_styles',
+    'meme_graph',
+    'phrase_candidates',
   ];
 
   it('creates all expected tables on fresh in-memory DB', () => {
@@ -123,6 +125,60 @@ describe('Database fresh init', () => {
       ]) {
         expect(colNames, `missing group_config column: ${col}`).toContain(col);
       }
+    } finally {
+      db.close();
+    }
+  });
+
+  it('meme_graph has expected columns on fresh DB', () => {
+    const db = new Database(':memory:');
+    try {
+      const cols = db.rawDb
+        .prepare("PRAGMA table_info(meme_graph)")
+        .all() as Array<{ name: string }>;
+      const colNames = cols.map(c => c.name);
+      for (const col of [
+        'id', 'group_id', 'canonical', 'variants', 'meaning',
+        'origin_event', 'origin_msg_id', 'origin_user_id', 'origin_ts',
+        'first_seen_count', 'total_count', 'confidence', 'status',
+        'embedding_vec', 'created_at', 'updated_at',
+      ]) {
+        expect(colNames, `missing meme_graph column: ${col}`).toContain(col);
+      }
+
+      const indexes = db.rawDb
+        .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='meme_graph'")
+        .all() as Array<{ name: string }>;
+      const idxNames = indexes.map(i => i.name);
+      expect(idxNames).toContain('idx_meme_group_active');
+      expect(idxNames).toContain('idx_meme_group_updated');
+      expect(idxNames).toContain('idx_meme_null_embedding');
+    } finally {
+      db.close();
+    }
+  });
+
+  it('phrase_candidates has expected columns on fresh DB', () => {
+    const db = new Database(':memory:');
+    try {
+      const cols = db.rawDb
+        .prepare("PRAGMA table_info(phrase_candidates)")
+        .all() as Array<{ name: string }>;
+      const colNames = cols.map(c => c.name);
+      for (const col of [
+        'group_id', 'content', 'gram_len', 'count', 'contexts',
+        'last_inference_count', 'meaning', 'is_jargon', 'promoted',
+        'created_at', 'updated_at',
+      ]) {
+        expect(colNames, `missing phrase_candidates column: ${col}`).toContain(col);
+      }
+
+      const indexes = db.rawDb
+        .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='phrase_candidates'")
+        .all() as Array<{ name: string }>;
+      const idxNames = indexes.map(i => i.name);
+      expect(idxNames).toContain('idx_phrase_group_count');
+      expect(idxNames).toContain('idx_phrase_unpromoted');
     } finally {
       db.close();
     }

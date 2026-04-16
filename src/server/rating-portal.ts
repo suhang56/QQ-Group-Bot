@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { IBotReplyRepository, ILocalStickerRepository, IModerationRepository, IMessageRepository, IMemeGraphRepo } from '../storage/db.js';
+import { MEMES_V1_DISABLED } from '../config.js';
 import { createLogger } from '../utils/logger.js';
 
 const logger = createLogger('rating-portal');
@@ -297,6 +298,10 @@ export class RatingPortalServer {
 
     // GET /memes/:groupId — list meme_graph entries as HTML table
     if (req.method === 'GET' && /^\/memes\/([^/]+)$/.test(pathname)) {
+      if (MEMES_V1_DISABLED()) {
+        json(res, 503, { error: 'memes-v1 disabled' });
+        return;
+      }
       if (!this.memeGraphRepo) {
         json(res, 503, { error: 'memeGraphRepo not available' });
         return;
@@ -390,6 +395,10 @@ async function demoteMeme(id) {
 
     // PATCH /memes/:id — partial update canonical/variants/meaning + set status='manual_edit'
     if (req.method === 'PATCH' && /^\/memes\/(\d+)$/.test(pathname)) {
+      if (MEMES_V1_DISABLED()) {
+        json(res, 503, { error: 'memes-v1 disabled' });
+        return;
+      }
       if (!this.memeGraphRepo) {
         json(res, 503, { error: 'memeGraphRepo not available' });
         return;
@@ -416,6 +425,10 @@ async function demoteMeme(id) {
 
     // POST /memes/:id/demote — set status='demoted'
     if (req.method === 'POST' && /^\/memes\/(\d+)\/demote$/.test(pathname)) {
+      if (MEMES_V1_DISABLED()) {
+        json(res, 503, { error: 'memes-v1 disabled' });
+        return;
+      }
       if (!this.memeGraphRepo) {
         json(res, 503, { error: 'memeGraphRepo not available' });
         return;
