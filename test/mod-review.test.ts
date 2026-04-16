@@ -239,6 +239,15 @@ describe('mod-review — DB layer (IModerationRepository new methods)', () => {
     expect(records.every(r => (r.severity ?? 0) >= 3 && (r.severity ?? 0) <= 5)).toBe(true);
   });
 
+  it('getForReview filters action=none separately from punished records', () => {
+    db.moderation.insert(makeModRecord({ msgId: 'act1', action: 'warn' }));
+    db.moderation.insert(makeModRecord({ msgId: 'act2', action: 'none' }));
+
+    expect(db.moderation.getForReview({}, 1, 50).records.map(r => r.msgId)).toEqual(['act1']);
+    expect(db.moderation.getForReview({ actionFilter: 'all' }, 1, 50).records).toHaveLength(2);
+    expect(db.moderation.getForReview({ actionFilter: 'none' }, 1, 50).records.map(r => r.msgId)).toEqual(['act2']);
+  });
+
   // markReviewed and re-review overwrite (EC-6/7/9 DB layer).
   it('markReviewed sets verdict, reviewer, timestamp; re-review overwrites', () => {
     const rec = db.moderation.insert(makeModRecord());
@@ -475,5 +484,49 @@ describe('mod-review — HTTP routes (RatingPortalServer)', () => {
     const json = JSON.parse(body) as { records: ModerationRecord[] };
     expect(json.records).toHaveLength(1);
     expect(json.records[0]!.severity).toBe(3);
+  });
+
+  it('GET /mod/list action=all includes action=none records', async () => {
+    fixture.db.moderation.insert(makeModRecord({ msgId: 'ha1', action: 'warn' }));
+    fixture.db.moderation.insert(makeModRecord({ msgId: 'ha2', action: 'none' }));
+
+    const defaultResp = await fixture.get('/mod/list');
+    const defaultJson = JSON.parse(defaultResp.body) as { records: ModerationRecord[]; total: number };
+    expect(defaultJson.records.map(r => r.msgId)).toEqual(['ha1']);
+
+    const allResp = await fixture.get('/mod/list?action=all');
+    const allJson = JSON.parse(allResp.body) as { records: ModerationRecord[]; total: number };
+    expect(allJson.total).toBe(2);
+  });
+
+  it('GET /mod/:id returns original message and nearby context by timestamp fallback', async () => {
+    const ts = nowSec();
+    fixture.db.messages.insert({
+      groupId: 'g1',
+      userId: 'u2',
+      nickname: 'Bob',
+      content: 'before',
+      rawContent: 'before',
+      timestamp: ts - 5,
+      deleted: false,
+    }, 'long-before');
+    fixture.db.messages.insert({
+      groupId: 'g1',
+      userId: 'u1',
+      nickname: 'Alice',
+      content: 'bad word',
+      rawContent: 'bad word',
+      timestamp: ts,
+      deleted: false,
+    }, 'long-source-id');
+    const rec = fixture.db.moderation.insert(makeModRecord({ msgId: 'short-mod-id', userId: 'u1', timestamp: ts }));
+
+    const { body } = await fixture.get(`/mod/${rec.id}`);
+    const json = JSON.parse(body) as {
+      originalMessage?: { content: string; userId: string };
+      contextMessages?: Array<{ content: string; userId: string }>;
+    };
+    expect(json.originalMessage).toMatchObject({ content: 'bad word', userId: 'u1' });
+    expect(json.contextMessages?.map(m => m.content)).toEqual(['before', 'bad word']);
   });
 });

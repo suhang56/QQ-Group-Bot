@@ -1,7 +1,8 @@
-import type { GroupMessage, PrivateMessage, INapCatAdapter } from '../adapter/napcat.js';
+import type { GroupMessage, GroupPokeNotice, PrivateMessage, INapCatAdapter } from '../adapter/napcat.js';
 import type { Database, GroupConfig, ProposedAction } from '../storage/db.js';
 import type { RateLimiter } from './rateLimiter.js';
 import type { IChatModule } from '../modules/chat.js';
+import type { IPokeModule } from '../modules/poke.js';
 import type { MimicModule } from '../modules/mimic.js';
 import type { ModeratorModule } from '../modules/moderator.js';
 import type { NameImagesModule } from '../modules/name-images.js';
@@ -83,6 +84,7 @@ export function _extractImageFile(rawContent: string): string | null {
 
 export interface IRouter {
   dispatch(msg: GroupMessage): Promise<void>;
+  dispatchPoke(notice: GroupPokeNotice): Promise<void>;
 }
 
 export type CommandHandler = (
@@ -110,6 +112,7 @@ export class Router implements IRouter {
   private sequenceGuard: SequenceGuard | null = null;
   private visionService: VisionService | null = null;
   private charModule: ICharModule | null = null;
+  private pokeModule: IPokeModule | null = null;
   private forwardPurgeInterval: ReturnType<typeof setInterval> | null = null;
 
   // Repeater cooldown: key = `${groupId}:${content}`, value = last-triggered timestamp
@@ -203,6 +206,10 @@ export class Router implements IRouter {
     this.charModule = charModule;
   }
 
+  setPoke(pokeModule: IPokeModule): void {
+    this.pokeModule = pokeModule;
+  }
+
   dispose(): void {
     for (const timer of this.harvestTimers.values()) clearTimeout(timer);
     this.harvestTimers.clear();
@@ -211,6 +218,20 @@ export class Router implements IRouter {
     this.atMentionQueue.clear();
     this.atInFlight.clear();
     this.sequenceGuard?.dispose();
+  }
+
+  async dispatchPoke(notice: GroupPokeNotice): Promise<void> {
+    try {
+      if (!this.botUserId) return;
+      if (!notice.groupId || !notice.userId || !notice.targetId) return;
+      if (notice.targetId !== this.botUserId) return;
+      if (!this.pokeModule) return;
+
+      const config = this.db.groupConfig.get(notice.groupId) ?? this._defaultConfig(notice.groupId);
+      await this.pokeModule.handle(notice, config);
+    } catch (err) {
+      this.logger.warn({ err, groupId: notice.groupId, userId: notice.userId }, 'dispatchPoke failed');
+    }
   }
 
   async dispatch(msg: GroupMessage): Promise<void> {
@@ -310,7 +331,7 @@ export class Router implements IRouter {
         rawContent: msg.rawContent,
         timestamp: msg.timestamp,
         deleted: false,
-      });
+      }, msg.messageId || undefined);
 
       this.db.users.upsert({
         userId: msg.userId,

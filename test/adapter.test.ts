@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { WebSocketServer, WebSocket } from 'ws';
-import { NapCatAdapter, type GroupMessage } from '../src/adapter/napcat.js';
+import { NapCatAdapter, type GroupMessage, type GroupPokeNotice } from '../src/adapter/napcat.js';
 import { initLogger } from '../src/utils/logger.js';
 import { NapCatActionError } from '../src/utils/errors.js';
 import { AddressInfo } from 'node:net';
@@ -257,6 +257,61 @@ describe('NapCatAdapter', () => {
     }));
     const groupId = await noticed;
     expect(groupId).toBe('111');
+  });
+
+  it('emits notice.group_poke event for OneBot notify poke frames', async () => {
+    adapter = new NapCatAdapter(`ws://localhost:${getPort(server)}`);
+    await adapter.connect();
+
+    const noticed = waitForEvent<GroupPokeNotice>(adapter, 'notice.group_poke');
+    serverSocket!.send(JSON.stringify({
+      post_type: 'notice',
+      notice_type: 'notify',
+      sub_type: 'poke',
+      group_id: 111,
+      user_id: 222,
+      target_id: 333,
+      operator_id: 222,
+      time: 1700000000,
+    }));
+    const notice = await noticed;
+    expect(notice).toEqual({
+      groupId: '111',
+      userId: '222',
+      targetId: '333',
+      operatorId: '222',
+      timestamp: 1700000000,
+    });
+  });
+
+  it('supports notify_type poke frames and ignores malformed poke notices', async () => {
+    adapter = new NapCatAdapter(`ws://localhost:${getPort(server)}`);
+    await adapter.connect();
+
+    const spy = vi.fn();
+    adapter.on('notice.group_poke', spy);
+
+    serverSocket!.send(JSON.stringify({
+      post_type: 'notice',
+      notice_type: 'notify',
+      notify_type: 'poke',
+      group_id: 111,
+      user_id: 222,
+      target_id: 333,
+    }));
+    await sleep(50);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0]![0]).toMatchObject({ groupId: '111', userId: '222', targetId: '333' });
+
+    serverSocket!.send(JSON.stringify({
+      post_type: 'notice',
+      notice_type: 'notify',
+      sub_type: 'poke',
+      group_id: 111,
+      user_id: 222,
+    }));
+    await sleep(50);
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 
   // --- ban/kick/deleteMsg/sendPrivate with frame-shape assertions ---

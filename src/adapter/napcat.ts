@@ -22,11 +22,20 @@ export interface PrivateMessage {
   timestamp: number;
 }
 
+export interface GroupPokeNotice {
+  groupId: string;
+  userId: string;
+  targetId: string;
+  operatorId: string;
+  timestamp: number;
+}
+
 export interface AdapterEvents {
   'message.group': (msg: GroupMessage) => void;
   'message.private': (msg: PrivateMessage) => void;
   'notice.group_increase': (groupId: string, userId: string) => void;
   'notice.group_decrease': (groupId: string, userId: string) => void;
+  'notice.group_poke': (notice: GroupPokeNotice) => void;
   'error': (err: Error) => void;
   'close': () => void;
 }
@@ -74,6 +83,9 @@ interface OneBotFrame {
   message_id?: number;
   group_id?: number;
   user_id?: number;
+  target_id?: number;
+  operator_id?: number;
+  notify_type?: string;
   sender?: {
     nickname?: string;
     role?: string;
@@ -362,6 +374,20 @@ export class NapCatAdapter extends EventEmitter implements INapCatAdapter {
         super.emit('notice.group_increase', String(evt.group_id ?? ''), String(evt.user_id ?? ''));
       } else if (evt.notice_type === 'group_decrease') {
         super.emit('notice.group_decrease', String(evt.group_id ?? ''), String(evt.user_id ?? ''));
+      } else if (
+        evt.notice_type === 'notify' &&
+        (evt.sub_type === 'poke' || evt.notify_type === 'poke') &&
+        evt.group_id != null &&
+        evt.user_id != null &&
+        evt.target_id != null
+      ) {
+        super.emit('notice.group_poke', {
+          groupId: String(evt.group_id),
+          userId: String(evt.user_id),
+          targetId: String(evt.target_id),
+          operatorId: String(evt.operator_id ?? evt.user_id),
+          timestamp: evt.time ?? Math.floor(Date.now() / 1000),
+        });
       }
       return;
     }
