@@ -308,7 +308,7 @@ const ratingPortGroup = ACTIVE_GROUPS[0] ?? '';
 let ratingPortal: RatingPortalServer | null = null;
 if (ratingPortGroup) {
   const ratingPort = parseInt(process.env['RATING_PORT'] ?? '4000', 10);
-  ratingPortal = new RatingPortalServer(db.botReplies, ratingPortGroup, db.localStickers);
+  ratingPortal = new RatingPortalServer(db.botReplies, ratingPortGroup, db.moderation, db.localStickers);
   ratingPortal.start(ratingPort);
 
   // Generate tuning report on SIGUSR1
