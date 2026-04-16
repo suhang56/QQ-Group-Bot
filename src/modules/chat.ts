@@ -1362,7 +1362,12 @@ export class ChatModule implements IChatModule {
       }
 
       // ── STICKER-FIRST INTERCEPT ──────────────────────────────────────────
-      if (this.stickerFirst) {
+      // Skip sticker-first for factual queries where the text IS the payload.
+      // Right now: any reply where bandori-live knowledge was injected into
+      // the user-role context (liveBlock non-empty) — user asked about live
+      // info and expects the actual answer, not a sticker reaction.
+      const hasFactualInjection = liveBlock.length > 0;
+      if (this.stickerFirst && !hasFactualInjection) {
         const sfConfig = this.db.groupConfig.get(groupId);
         if (sfConfig?.stickerFirstEnabled) {
           try {
@@ -1379,6 +1384,8 @@ export class ChatModule implements IChatModule {
             this.logger.error({ err, groupId }, 'sticker-first: unhandled error — falling through to text');
           }
         }
+      } else if (this.stickerFirst && hasFactualInjection) {
+        this.logger.debug({ groupId }, 'sticker-first: skipped because live knowledge was injected (factual query)');
       }
       // ────────────────────────────────────────────────────────────────────
 
