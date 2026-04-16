@@ -310,6 +310,7 @@ CREATE TABLE IF NOT EXISTS jargon_candidates (
   last_inference_count  INTEGER NOT NULL DEFAULT 0,
   meaning               TEXT,
   is_jargon             INTEGER NOT NULL DEFAULT 0,
+  promoted              INTEGER NOT NULL DEFAULT 0,
   created_at            INTEGER NOT NULL,
   updated_at            INTEGER NOT NULL,
   PRIMARY KEY (group_id, content)
@@ -401,3 +402,45 @@ CREATE TABLE IF NOT EXISTS social_relations (
 );
 
 CREATE INDEX IF NOT EXISTS idx_social_relations_group ON social_relations(group_id, strength DESC);
+
+-- meme_graph: auto-detected group memes with variant clustering and provenance.
+CREATE TABLE IF NOT EXISTS meme_graph (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id TEXT NOT NULL,
+  canonical TEXT NOT NULL,
+  variants TEXT NOT NULL DEFAULT '[]',
+  meaning TEXT NOT NULL,
+  origin_event TEXT,
+  origin_msg_id TEXT,
+  origin_user_id TEXT,
+  origin_ts INTEGER,
+  first_seen_count INTEGER,
+  total_count INTEGER DEFAULT 0,
+  confidence REAL NOT NULL DEFAULT 0.5,
+  status TEXT NOT NULL DEFAULT 'active',
+  embedding_vec BLOB,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(group_id, canonical)
+);
+
+CREATE INDEX IF NOT EXISTS idx_meme_graph_group_active
+  ON meme_graph(group_id, status)
+  WHERE status='active';
+
+-- phrase_candidates: auto-detected multi-word phrase candidates (2-5 gram).
+-- Modeled after jargon_candidates with added gram_len column.
+CREATE TABLE IF NOT EXISTS phrase_candidates (
+  group_id              TEXT    NOT NULL,
+  content               TEXT    NOT NULL,
+  gram_len              INTEGER NOT NULL,
+  count                 INTEGER NOT NULL DEFAULT 1,
+  contexts              TEXT    NOT NULL DEFAULT '[]',
+  last_inference_count  INTEGER NOT NULL DEFAULT 0,
+  meaning               TEXT,
+  is_jargon             INTEGER NOT NULL DEFAULT 0,
+  created_at            INTEGER NOT NULL,
+  updated_at            INTEGER NOT NULL,
+  PRIMARY KEY (group_id, content)
+);
+CREATE INDEX IF NOT EXISTS idx_phrase_group_count ON phrase_candidates(group_id, count DESC);
