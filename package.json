@@ -5,13 +5,14 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "dev": "tsx src/index.ts",
+    "dev": "cross-env NODE_OPTIONS=--experimental-sqlite tsx src/index.ts",
+    "start": "cross-env NODE_OPTIONS=--experimental-sqlite node dist/index.js",
     "build": "tsc",
-    "test": "vitest run --coverage",
-    "test:watch": "vitest",
-    "test:integration": "vitest run --testPathPattern=integration",
+    "test": "cross-env NODE_OPTIONS=--experimental-sqlite vitest run --coverage",
+    "test:watch": "cross-env NODE_OPTIONS=--experimental-sqlite vitest",
+    "test:integration": "cross-env NODE_OPTIONS=--experimental-sqlite vitest run --testPathPattern=integration",
     "typecheck": "tsc --noEmit",
-    "import-history": "tsx scripts/import-history.ts"
+    "import-history": "cross-env NODE_OPTIONS=--experimental-sqlite tsx scripts/import-history.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.104",
@@ -26,6 +27,7 @@
     "@types/node": "^22.7.5",
     "@types/ws": "^8.5.12",
     "@vitest/coverage-v8": "^2.1.2",
+    "cross-env": "^10.1.0",
     "tsx": "^4.19.1",
     "typescript": "^5.6.3",
     "vitest": "^2.1.2",
