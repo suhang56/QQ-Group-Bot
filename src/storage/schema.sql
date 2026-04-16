@@ -33,13 +33,18 @@ CREATE TABLE IF NOT EXISTS moderation_log (
   severity  INTEGER,
   action    TEXT    NOT NULL DEFAULT 'none',
   reason    TEXT    NOT NULL DEFAULT '',
-  appealed  INTEGER NOT NULL DEFAULT 0,
-  reversed  INTEGER NOT NULL DEFAULT 0,
-  timestamp INTEGER NOT NULL
+  appealed          INTEGER NOT NULL DEFAULT 0,
+  reversed          INTEGER NOT NULL DEFAULT 0,
+  timestamp         INTEGER NOT NULL,
+  reviewed          INTEGER NOT NULL DEFAULT 0,
+  reviewed_by       TEXT,
+  reviewed_at       INTEGER,
+  original_content  TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_mod_log_user  ON moderation_log(user_id, group_id, timestamp DESC);
-CREATE INDEX IF NOT EXISTS idx_mod_log_msg   ON moderation_log(msg_id);
+CREATE INDEX IF NOT EXISTS idx_mod_log_user     ON moderation_log(user_id, group_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_mod_log_msg      ON moderation_log(msg_id);
+CREATE INDEX IF NOT EXISTS idx_mod_log_reviewed ON moderation_log(reviewed, group_id, timestamp DESC);
 
 CREATE TABLE IF NOT EXISTS rules (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -94,6 +99,19 @@ CREATE TABLE IF NOT EXISTS group_config (
   chat_persona_text                     TEXT,
   active_character_id                   TEXT,
   char_started_by                       TEXT,
+  chat_lore_enabled                     INTEGER NOT NULL DEFAULT 1,
+  repeater_enabled                      INTEGER NOT NULL DEFAULT 1,
+  repeater_min_count                    INTEGER NOT NULL DEFAULT 3,
+  repeater_cooldown_ms                  INTEGER NOT NULL DEFAULT 600000,
+  repeater_min_content_length           INTEGER NOT NULL DEFAULT 2,
+  repeater_max_content_length           INTEGER NOT NULL DEFAULT 100,
+  lore_update_enabled                   INTEGER NOT NULL DEFAULT 1,
+  lore_update_threshold                 INTEGER NOT NULL DEFAULT 200,
+  lore_update_cooldown_ms               INTEGER NOT NULL DEFAULT 1800000,
+  welcome_enabled                       INTEGER NOT NULL DEFAULT 1,
+  id_guard_enabled                      INTEGER NOT NULL DEFAULT 1,
+  sticker_first_enabled                 INTEGER NOT NULL DEFAULT 0,
+  sticker_first_threshold               REAL    NOT NULL DEFAULT 0.55,
   created_at                            TEXT    NOT NULL DEFAULT '',
   updated_at                            TEXT    NOT NULL DEFAULT ''
 );
@@ -144,7 +162,8 @@ CREATE TABLE IF NOT EXISTS bot_replies (
   sent_at              INTEGER NOT NULL,
   rating               INTEGER,
   rating_comment       TEXT,
-  rated_at             INTEGER
+  rated_at             INTEGER,
+  was_evasive          INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_bot_replies_group ON bot_replies(group_id, sent_at DESC);
@@ -184,7 +203,9 @@ CREATE TABLE IF NOT EXISTS learned_facts (
   status               TEXT    NOT NULL DEFAULT 'active',
   created_at           INTEGER NOT NULL,
   updated_at           INTEGER NOT NULL,
-  embedding_vec        BLOB
+  embedding_vec        BLOB,
+  embedding_status     TEXT    DEFAULT 'pending',
+  last_attempt_at      INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_learned_facts_group_active
@@ -294,6 +315,64 @@ CREATE TABLE IF NOT EXISTS jargon_candidates (
   PRIMARY KEY (group_id, content)
 );
 CREATE INDEX IF NOT EXISTS idx_jargon_group_count ON jargon_candidates(group_id, count DESC);
+
+-- image_mod_cache: cached image moderation verdicts, keyed by sha256 file_key, TTL 7 days.
+CREATE TABLE IF NOT EXISTS image_mod_cache (
+  file_key   TEXT    PRIMARY KEY,
+  violation  INTEGER NOT NULL,
+  severity   INTEGER NOT NULL,
+  reason     TEXT,
+  rule_id    INTEGER,
+  created_at INTEGER NOT NULL
+);
+
+-- mod_rejections: moderator self-learning false positive examples.
+CREATE TABLE IF NOT EXISTS mod_rejections (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id      TEXT    NOT NULL,
+  content       TEXT    NOT NULL,
+  reason        TEXT    NOT NULL,
+  user_nickname TEXT,
+  user_id       TEXT,
+  severity      INTEGER,
+  context_snippet TEXT,
+  created_at    INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_mod_rejections_group_ts ON mod_rejections(group_id, created_at DESC);
+
+-- user_affinity: per-group per-user affinity (好感度) tracking.
+CREATE TABLE IF NOT EXISTS user_affinity (
+  group_id         TEXT    NOT NULL,
+  user_id          TEXT    NOT NULL,
+  score            INTEGER NOT NULL DEFAULT 30,
+  last_interaction INTEGER NOT NULL,
+  updated_at       INTEGER NOT NULL,
+  PRIMARY KEY (group_id, user_id)
+);
+
+-- expression_patterns: bot reply style learning.
+CREATE TABLE IF NOT EXISTS expression_patterns (
+  group_id    TEXT    NOT NULL,
+  situation   TEXT    NOT NULL,
+  expression  TEXT    NOT NULL,
+  weight      REAL    NOT NULL DEFAULT 1.0,
+  created_at  INTEGER NOT NULL,
+  updated_at  INTEGER NOT NULL,
+  PRIMARY KEY (group_id, situation, expression)
+);
+
+CREATE INDEX IF NOT EXISTS idx_expression_patterns_group_weight ON expression_patterns(group_id, weight DESC);
+
+-- user_styles: per-user speaking style profiles.
+CREATE TABLE IF NOT EXISTS user_styles (
+  group_id    TEXT    NOT NULL,
+  user_id     TEXT    NOT NULL,
+  nickname    TEXT    NOT NULL,
+  style_json  TEXT    NOT NULL,
+  updated_at  INTEGER NOT NULL,
+  PRIMARY KEY (group_id, user_id)
+);
 
 -- interaction_stats: hourly-updated pairwise interaction counts for relationship tracking.
 CREATE TABLE IF NOT EXISTS interaction_stats (
