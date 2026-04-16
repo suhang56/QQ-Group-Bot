@@ -1585,3 +1585,276 @@ test/
 - No injection into mimic path (`MimicModule.generateMimic` is not touched)
 - No injection into proactive mood messages (no `generateReply` hook point)
 - No `ScoreFactors.liveKw` field — keyword detection is injection-only, not reply-score-affecting
+
+---
+
+## 13. Moderation Review Panel — Post-Hoc Admin Labelling & Persistence
+
+### 13.1 Overview
+
+**User request (verbatim)**: "后台让我审核ban不ban人不要expire 不然没法训练"
+
+The moderator auto-acts (warn/ban/kick) immediately and records the action in `moderation_log`. Currently those rows have no human-review lifecycle, and the daily punishment counter reset path silently risks misinterpreting as "data cleanup." There is also no UI for an admin to label past auto-actions as correct or incorrect.
+
+This feature adds:
+1. **Permanent persistence** — moderation rows are never auto-deleted. The daily punishment *counter* can still reset (it's a rate-limiter), but underlying `moderation_log` rows survive forever.
+2. **Review columns** on `moderation_log` — `reviewed`, `reviewed_by`, `reviewed_at` — so each action can be labelled approved/rejected by a human admin.
+3. **HTTP API** mounted on the existing rating portal at `:4000` — four new REST endpoints under `/mod/`.
+4. **Minimal web UI** — a single HTML page at `/mod` served from `:4000`, no build step, no React.
+5. **Repository additions** — `getForReview`, `markReviewed`, `getStats` methods on `IModerationRepository`.
+6. The bot's auto-action flow in `moderator.ts` is **not changed** — it still bans/warns/kicks immediately. Review is post-hoc labelling only.
+
+The approve/rejected labels serve as human-verified training data for future moderation prompt tuning and severity-threshold calibration.
+
+---
+
+### 13.2 Scope Boundary
+
+**In scope:**
+- `moderation_log` schema additions and ALTER migration
+- Removal of any code path that deletes or garbage-collects `moderation_log` rows
+- Four REST endpoints on `RatingPortalServer`
+- Static HTML UI at `/mod`
+- `IModerationRepository` additions: `getForReview`, `markReviewed`, `getStats`
+- Appeal records visible alongside their parent moderation action in the review panel
+- Full edge test suite (15+ cases, SOUL RULE)
+
+**Explicitly out of scope:**
+- No change to how `moderator.ts` creates or dispatches actions
+- No pre-approval gate — the bot acts first, admin labels after
+- No per-group admin auth on the HTTP endpoints (portal is localhost-only, same as rating portal)
+- No email / Telegram notifications on new unreviewed actions
+- No bulk approve/reject
+- No export to CSV / external training pipeline (raw DB rows serve that purpose)
+
+---
+
+### 13.3 Schema Changes
+
+#### 13.3.1 New columns on `moderation_log`
+
+```sql
+-- New columns added via ALTER TABLE migration (db.ts _runMigrations)
+ALTER TABLE moderation_log ADD COLUMN reviewed     INTEGER NOT NULL DEFAULT 0;
+  -- 0 = unreviewed, 1 = approved (correct action), 2 = rejected (false positive)
+ALTER TABLE moderation_log ADD COLUMN reviewed_by  TEXT;
+  -- admin identifier who reviewed; NULL until reviewed
+ALTER TABLE moderation_log ADD COLUMN reviewed_at  INTEGER;
+  -- unix seconds of review; NULL until reviewed
+
+-- Supporting index for the review list query
+CREATE INDEX IF NOT EXISTS idx_mod_log_reviewed
+  ON moderation_log(reviewed, group_id, timestamp DESC);
+```
+
+#### 13.3.2 `ModerationRecord` TypeScript type
+
+Add three optional fields to the existing `ModerationRecord` interface in `db.ts`:
+
+```ts
+export interface ModerationRecord {
+  // ... existing fields unchanged ...
+  reviewed: 0 | 1 | 2;        // 0=unreviewed, 1=approved, 2=rejected
+  reviewedBy: string | null;
+  reviewedAt: number | null;
+}
+```
+
+#### 13.3.3 Migration approach
+
+The migration is written as guarded `ALTER TABLE` statements executed in `SqliteDatabase._runMigrations()`. Each statement is wrapped in a try/catch that silently ignores `duplicate column name` errors (SQLite's idiomatic migration pattern already used in the codebase). This makes the migration **idempotent** — running on a fresh DB or an existing DB produces identical schema.
+
+---
+
+### 13.4 Persistence Guarantee
+
+**Daily punishment counter** (`punishments_today` / `punishments_reset_date` in `group_config`) is a *rate limiter*. Its daily reset via `IGroupConfigRepository.resetDailyPunishments` is retained as-is — it only zeroes the counter, never touches `moderation_log`.
+
+**Audit**: grep the codebase for any `DELETE FROM moderation_log` or `UPDATE moderation_log SET status = 'expired'` (the latter is `pending_moderation`, a separate table — not `moderation_log`). Confirm none exist and add a comment in `_runMigrations` noting that `moderation_log` rows must never be deleted.
+
+`pending_moderation.expireOlderThan()` — called in `router.ts` on a cron — targets the `pending_moderation` table only (the pre-approval queue for human-gated kicks), not `moderation_log`. This is correct and unchanged.
+
+---
+
+### 13.5 New Repository Methods
+
+Add to `IModerationRepository` interface in `db.ts`:
+
+```ts
+export interface ModerationReviewFilters {
+  groupId?: string;          // filter by group
+  reviewed?: 0 | 1 | 2;     // filter by review status; omit = all
+  severityMin?: number;      // inclusive lower bound on severity
+  severityMax?: number;      // inclusive upper bound on severity
+}
+
+export interface ModerationStats {
+  total: number;
+  unreviewed: number;
+  approved: number;
+  rejected: number;
+  byGroup: Record<string, { total: number; unreviewed: number; approved: number; rejected: number }>;
+}
+
+// Added to IModerationRepository:
+getForReview(
+  filters: ModerationReviewFilters,
+  page: number,            // 1-based
+  limit: number            // max 100
+): { records: ModerationRecord[]; total: number };
+
+markReviewed(
+  id: number,
+  verdict: 1 | 2,          // 1=approved, 2=rejected
+  reviewedBy: string,
+  reviewedAt: number        // unix seconds
+): void;
+
+getStats(): ModerationStats;
+```
+
+`getForReview` JOINs against `pending_moderation` on `msg_id` to pull in the proposed action when available, but the primary row is always from `moderation_log`. The appeal association is fetched via `appealed` and `reversed` fields already on `ModerationRecord`.
+
+---
+
+### 13.6 HTTP API
+
+All endpoints are added to `RatingPortalServer._handle()`. The constructor gains a new required parameter `moderation: IModerationRepository`.
+
+#### `GET /mod/list`
+
+Query params:
+- `group` — filter by group_id (optional)
+- `status` — `unreviewed` | `approved` | `rejected` | `all` (default `all`)
+- `severity` — single integer or range `3-5` (optional)
+- `page` — integer ≥ 1 (default 1)
+- `limit` — integer 1–100 (default 20)
+
+Response `200`:
+```json
+{
+  "records": [ /* ModerationRecord[] with reviewed fields */ ],
+  "page": 1,
+  "limit": 20,
+  "total": 143
+}
+```
+
+Errors: `400` for invalid params (bad severity format, limit out of range).
+
+#### `GET /mod/:id`
+
+Returns a single `ModerationRecord` by primary key id. Includes:
+- All fields from `moderation_log` (including new review columns)
+- `appeal` sub-object if `appealed != 0`: `{ appealed: 1|2, reversed: boolean }`
+
+Response `200`: `{ record: ModerationRecord }` | `404`: `{ error: "not found" }`.
+
+#### `POST /mod/:id/review`
+
+Body (JSON):
+```json
+{ "verdict": "approved" | "rejected", "note": "optional admin note" }
+```
+
+- Maps `"approved"` → `reviewed = 1`, `"rejected"` → `reviewed = 2`
+- Sets `reviewed_by` to `"admin"` (hardcoded for v1 — single-admin portal)
+- Sets `reviewed_at` to `Math.floor(Date.now() / 1000)`
+- Re-review is allowed: calling this on an already-reviewed record overwrites the verdict
+- Response `200`: `{ ok: true }` | `404`: `{ error: "not found" }` | `400`: `{ error: "..." }`
+
+#### `GET /mod/stats`
+
+Response `200`:
+```json
+{
+  "total": 200,
+  "unreviewed": 87,
+  "approved": 91,
+  "rejected": 22,
+  "byGroup": {
+    "123456789": { "total": 120, "unreviewed": 50, "approved": 55, "rejected": 15 }
+  }
+}
+```
+
+---
+
+### 13.7 Web UI
+
+**File**: `src/server/mod-review.html` — served via `readFileSync` at `GET /mod`.
+
+**Stack**: Vanilla HTML + inline `<style>` + inline `<script>`. No build step, no external CDN, no React. Must render in a modern browser (Chrome/Edge) without internet access.
+
+**Layout**:
+- Page title: "Moderation Review"
+- Filter bar (top): dropdowns for Group, Status, Severity range; text inputs for page/limit; "Apply" button
+- Stats bar (below filters): total / unreviewed / approved / rejected counts from `/mod/stats`
+- Table columns: ID | Timestamp | Group | User | Severity | Action | Reason | Reviewed | Actions
+- Each row: "Approve" and "Reject" buttons that POST to `/mod/:id/review` and refresh the table
+- Pagination: Prev / Next buttons; shows "Page N of M"
+- Appeal indicator: rows where `appealed != 0` show a small badge "Appeal"
+
+**Minimal JS**: fetch API, no libraries. State: current filters, current page. On load: fetch stats, fetch first page of records.
+
+---
+
+### 13.8 `RatingPortalServer` Constructor Change
+
+```ts
+// Before
+constructor(
+  private readonly repo: IBotReplyRepository,
+  private readonly groupId: string,
+  private readonly localStickers?: ILocalStickerRepository,
+)
+
+// After
+constructor(
+  private readonly repo: IBotReplyRepository,
+  private readonly groupId: string,
+  private readonly moderation: IModerationRepository,   // NEW — required
+  private readonly localStickers?: ILocalStickerRepository,
+)
+```
+
+The caller site in the bot bootstrap (likely `src/index.ts` or `src/core/bootstrap.ts`) must pass the `moderation` repository instance.
+
+---
+
+### 13.9 Edge Test Specification (SOUL RULE — all 15 mandatory)
+
+Tests live in `test/mod-review.test.ts` using Vitest + in-memory SQLite via the real `SqliteDatabase` class (no mocks for DB layer). HTTP routes tested via `node:http` `request` against a real `RatingPortalServer` started on a random free port.
+
+| ID | Description | How to Test |
+|----|-------------|-------------|
+| EC-1 | Moderation records persist across bot restarts (no cleanup on startup) | Insert records, create new `SqliteDatabase` instance against same file, assert rows still present |
+| EC-2 | Daily punishment counter resets but moderation rows survive | Call `resetDailyPunishments`, then query `moderation_log`, assert rows unchanged |
+| EC-3 | `GET /mod/list` returns paginated results | Insert 25 records, GET page 1 limit 10, assert `records.length === 10`, `total === 25` |
+| EC-4 | `GET /mod/list` filters by group, severity, status | Insert mixed records, filter by each dimension, assert only matching rows returned |
+| EC-5 | `POST /mod/:id/review` marks record as approved | POST `{ verdict: "approved" }`, GET `/mod/:id`, assert `reviewed === 1` |
+| EC-6 | `POST /mod/:id/review` marks record as rejected | POST `{ verdict: "rejected" }`, GET `/mod/:id`, assert `reviewed === 2` |
+| EC-7 | `POST /mod/:id/review` with invalid id returns 404 | POST to `/mod/99999/review`, assert status 404 |
+| EC-8 | `POST /mod/:id/review` on already-reviewed record overwrites verdict | First POST approved, then POST rejected, assert final `reviewed === 2` |
+| EC-9 | `GET /mod/stats` returns correct counts | Insert N reviewed/unreviewed records, assert stats totals match |
+| EC-10 | Migration adds columns to existing `moderation_log` idempotently | Run `_runMigrations` twice, assert no error and schema correct both times |
+| EC-11 | Appeal records visible alongside their moderation parent | Insert record with `appealed = 1`, GET `/mod/:id`, assert `appeal` sub-object present |
+| EC-12 | Web UI served at `GET /mod` returns HTML | GET `/mod`, assert `Content-Type: text/html`, body contains `<table` |
+| EC-13 | Pagination edge: page beyond available data returns empty list | Insert 5 records, GET page 2 limit 10, assert `records.length === 0` |
+| EC-14 | Filter by severity range (e.g. `severity=3-5`) | Insert severity 1, 3, 5 records, GET with `severity=3-5`, assert only sev 3 and 5 returned |
+| EC-15 | `reviewed_by` tracks which admin approved/rejected | POST review, GET record, assert `reviewedBy === "admin"` |
+
+**Coverage target**: ≥80% line coverage for `src/storage/db.ts` (new methods) and `src/server/rating-portal.ts` (new routes).
+
+---
+
+### 13.10 What Is Explicitly Out of Scope (v1)
+
+- No change to how `moderator.ts` creates actions (auto-act flow unchanged)
+- No pre-approval gate (review is post-hoc only)
+- No per-group access control on HTTP endpoints (portal is localhost-only)
+- No bulk approve/reject API
+- No Telegram / push notification when new unreviewed actions accumulate
+- No export endpoint (training pipeline reads DB directly)
+- No pagination on `GET /mod/stats` (aggregation only)
+- No multi-admin `reviewed_by` identity — v1 hardcodes `"admin"`
