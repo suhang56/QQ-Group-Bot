@@ -115,7 +115,7 @@ ${modText}`;
       ? readFileSync(permanentPath, 'utf8').slice(0, 3000)
       : '（无）';
 
-    const systemPrompt = `You are a tuning agent for a QQ group bot persona'd as a 邦批 (BanG Dream fan). Analyze the recent bot outputs and produce ONLY a structured system-prompt snippet that the bot will read directly on its next turn. Do NOT write prose commentary or analysis paragraphs — output ONLY the FIVE markdown sections below, in Chinese, with bullet points under each. Keep each bullet concise and actionable (≤20 chars preferred). If a section has nothing to add, write "（无）" as its only bullet.
+    const systemPrompt = `You are a tuning agent for a QQ group bot persona'd as a 邦批 (BanG Dream fan). Analyze the recent bot outputs and produce ONLY a structured system-prompt snippet that the bot will read directly on its next turn. Do NOT write prose commentary or analysis paragraphs — output ONLY the SIX markdown sections below, in Chinese, with bullet points under each. Keep each bullet concise and actionable (≤20 chars preferred). If a section has nothing to add, write "（无）" as its only bullet.
 
 Output format (exact headers required):
 ## 继续这样做
@@ -133,7 +133,12 @@ Output format (exact headers required):
 ## 永久记住的 (long-term)
 - <high-value lesson that should be remembered forever, not just the next hour>
 
+## 审核调优
+- <moderation tuning insight — which types of messages were false positives, which violations were missed, what patterns should be adjusted>
+
 The "永久记住的" section is special: only put entries here that represent STABLE, LONG-TERM lessons — persona calibration insights, canonical fandom corrections the user has taught, user preference patterns, or architectural understandings of the group. Do NOT repeat short-term tuning here. Do NOT add anything already present in the existing permanent memory below (skip duplicates). If nothing meets this bar, write "（无）".
+
+The "审核调优" section analyzes MODERATION performance: look at the recent moderation flags above and identify false positives (things flagged that shouldn't have been), false negatives (violations that were missed), and patterns that need adjustment. Focus on actionable rules like "不要把 X 类消息判为违规" or "注意 Y 类消息容易漏判". If nothing to add, write "（无）".
 
 Existing permanent memory (do not duplicate these):
 ${existingPermanent}`;

@@ -47,10 +47,10 @@ function makeClaude(payload: unknown): IClaudeClient {
 describe('OpportunisticHarvest — pending queue (Feature B)', () => {
   beforeEach(() => { vi.clearAllMocks(); });
 
-  it('inserts rows with status="pending"', async () => {
+  it('inserts low-confidence rows with status="pending"', async () => {
     const factRepo = makeFactRepo();
     const claude = makeClaude([
-      { topic: 'T', fact: '全新事实A长度够格的内容', sourceNickname: 'A', confidence: 0.9 },
+      { topic: 'T', fact: '全新事实A长度够格的内容', sourceNickname: 'A', confidence: 0.7 },
       { topic: 'T', fact: '全新事实B长度够格的内容', sourceNickname: 'B', confidence: 0.75 },
     ]);
     const harvest = new OpportunisticHarvest({
@@ -62,6 +62,22 @@ describe('OpportunisticHarvest — pending queue (Feature B)', () => {
     for (const row of factRepo.inserted) {
       expect(row.status).toBe('pending');
     }
+  });
+
+  it('auto-activates high-confidence rows (>= 0.85)', async () => {
+    const factRepo = makeFactRepo();
+    const claude = makeClaude([
+      { topic: 'T', fact: '高置信度直接激活的事实A', sourceNickname: 'A', confidence: 0.9 },
+      { topic: 'T', fact: '低置信度需要审核的事实B', sourceNickname: 'B', confidence: 0.5 },
+    ]);
+    const harvest = new OpportunisticHarvest({
+      messages: makeMsgRepo(makeMsgs(15)), learnedFacts: factRepo,
+      claude, activeGroups: ['g1'], logger: silentLogger, enabled: true,
+    });
+    await harvest._run();
+    expect(factRepo.inserted).toHaveLength(2);
+    expect(factRepo.inserted[0]!.status).toBe('active');
+    expect(factRepo.inserted[1]!.status).toBe('pending');
   });
 
   it('preserves LLM confidence unchanged (no 0.5 cap)', async () => {

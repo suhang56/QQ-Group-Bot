@@ -167,6 +167,17 @@ export class OpportunisticHarvest {
   }
 
   async _run(): Promise<void> {
+    // Expire pending facts older than 7 days
+    try {
+      const cutoff = Math.floor(this.now() / 1000) - 7 * 24 * 3600;
+      const expired = this.learnedFacts.expirePendingOlderThan(cutoff);
+      if (expired > 0) {
+        this.logger.info({ expired }, `expired ${expired} pending facts older than 7 days`);
+      }
+    } catch (err) {
+      this.logger.warn({ err }, 'pending fact expiry failed — continuing');
+    }
+
     for (const groupId of this.activeGroups) {
       try {
         await this._runGroup(groupId, false);
@@ -285,6 +296,8 @@ export class OpportunisticHarvest {
         ? Math.min(1, Math.max(0, item.confidence))
         : 0.7;
 
+      // High-confidence facts (>= 0.85) auto-activate — skip the pending queue
+      const status = confidence >= 0.85 ? 'active' : 'pending';
       this.learnedFacts.insert({
         groupId,
         topic,
@@ -294,12 +307,12 @@ export class OpportunisticHarvest {
         sourceMsgId: null,
         botReplyId: null,
         confidence,
-        status: 'pending',
+        status,
       });
       existing.push({
         id: 0, groupId, topic, fact: factText,
         sourceUserId: null, sourceUserNickname: null, sourceMsgId: null,
-        botReplyId: null, confidence, status: 'pending',
+        botReplyId: null, confidence, status,
         createdAt: 0, updatedAt: 0,
         embedding: null,
       });

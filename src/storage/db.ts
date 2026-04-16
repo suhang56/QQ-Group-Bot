@@ -199,6 +199,9 @@ export interface IModerationRepository {
   ): void;
 
   getStats(): ModerationStats;
+
+  /** Update the action field of a moderation_log record identified by msgId, only if action='none'. Returns true if a row was updated. */
+  updateAction(msgId: string, newAction: string): boolean;
 }
 
 export interface IGroupConfigRepository {
@@ -223,11 +226,15 @@ export interface ModRejection {
   reason: string;
   userNickname: string | null;
   createdAt: number;
+  userId: string | null;
+  severity: number | null;
+  contextSnippet: string | null;
 }
 
 export interface IModRejectionRepository {
-  insert(row: Omit<ModRejection, 'id'>): ModRejection;
+  insert(row: Omit<ModRejection, 'id'> & { userId?: string | null; severity?: number | null; contextSnippet?: string | null }): ModRejection;
   getRecent(groupId: string, limit: number): ModRejection[];
+  getRecentSince(groupId: string, sinceTimestamp: number, limit: number): ModRejection[];
 }
 
 export interface IAnnouncementRepository {
@@ -364,6 +371,8 @@ export interface ILearnedFactsRepository {
   ): Promise<{ fact: LearnedFact; cosine: number } | null>;
   listPending(groupId: string, limit: number, offset: number): LearnedFact[];
   countPending(groupId: string): number;
+  expirePendingOlderThan(cutoffTimestamp: number): number;
+  approveAllPending(groupId: string): number;
 }
 
 export type ProposedAction = 'warn' | 'delete' | 'mute_10m' | 'mute_1h' | 'kick';
@@ -886,6 +895,13 @@ class ModerationRepository implements IModerationRepository {
 
     return stats;
   }
+
+  updateAction(msgId: string, newAction: string): boolean {
+    const result = this.db.prepare(
+      "UPDATE moderation_log SET action = ? WHERE msg_id = ? AND action = 'none'"
+    ).run(newAction, msgId);
+    return result.changes > 0;
+  }
 }
 
 class GroupConfigRepository implements IGroupConfigRepository {
@@ -1003,24 +1019,51 @@ class GroupConfigRepository implements IGroupConfigRepository {
 class ModRejectionRepository implements IModRejectionRepository {
   constructor(private readonly db: DatabaseSync) {}
 
-  insert(row: Omit<ModRejection, 'id'>): ModRejection {
+  private _fromRow(r: {
+    id: number; group_id: string; content: string; reason: string;
+    user_nickname: string | null; created_at: number;
+    user_id: string | null; severity: number | null; context_snippet: string | null;
+  }): ModRejection {
+    return {
+      id: r.id, groupId: r.group_id, content: r.content, reason: r.reason,
+      userNickname: r.user_nickname, createdAt: r.created_at,
+      userId: r.user_id ?? null, severity: r.severity ?? null,
+      contextSnippet: r.context_snippet ?? null,
+    };
+  }
+
+  insert(row: Omit<ModRejection, 'id'> & { userId?: string | null; severity?: number | null; contextSnippet?: string | null }): ModRejection {
     const result = this.db.prepare(
-      'INSERT INTO mod_rejections (group_id, content, reason, user_nickname, created_at) VALUES (?, ?, ?, ?, ?)'
-    ).run(row.groupId, row.content, row.reason, row.userNickname, row.createdAt);
-    return { ...row, id: Number(result.lastInsertRowid) };
+      'INSERT INTO mod_rejections (group_id, content, reason, user_nickname, created_at, user_id, severity, context_snippet) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(row.groupId, row.content, row.reason, row.userNickname, row.createdAt,
+      row.userId ?? null, row.severity ?? null, row.contextSnippet ?? null);
+    return {
+      ...row, id: Number(result.lastInsertRowid),
+      userId: row.userId ?? null, severity: row.severity ?? null,
+      contextSnippet: row.contextSnippet ?? null,
+    };
   }
 
   getRecent(groupId: string, limit: number): ModRejection[] {
     const rows = this.db.prepare(
-      'SELECT id, group_id, content, reason, user_nickname, created_at FROM mod_rejections WHERE group_id = ? ORDER BY created_at DESC LIMIT ?'
+      'SELECT id, group_id, content, reason, user_nickname, created_at, user_id, severity, context_snippet FROM mod_rejections WHERE group_id = ? ORDER BY created_at DESC LIMIT ?'
     ).all(groupId, limit) as unknown as Array<{
       id: number; group_id: string; content: string; reason: string;
       user_nickname: string | null; created_at: number;
+      user_id: string | null; severity: number | null; context_snippet: string | null;
     }>;
-    return rows.map(r => ({
-      id: r.id, groupId: r.group_id, content: r.content, reason: r.reason,
-      userNickname: r.user_nickname, createdAt: r.created_at,
-    }));
+    return rows.map(r => this._fromRow(r));
+  }
+
+  getRecentSince(groupId: string, sinceTimestamp: number, limit: number): ModRejection[] {
+    const rows = this.db.prepare(
+      'SELECT id, group_id, content, reason, user_nickname, created_at, user_id, severity, context_snippet FROM mod_rejections WHERE group_id = ? AND created_at >= ? ORDER BY created_at DESC LIMIT ?'
+    ).all(groupId, sinceTimestamp, limit) as unknown as Array<{
+      id: number; group_id: string; content: string; reason: string;
+      user_nickname: string | null; created_at: number;
+      user_id: string | null; severity: number | null; context_snippet: string | null;
+    }>;
+    return rows.map(r => this._fromRow(r));
   }
 }
 
@@ -1538,6 +1581,22 @@ class LearnedFactsRepository implements ILearnedFactsRepository {
       `SELECT COUNT(*) as count FROM learned_facts WHERE group_id = ? AND status = 'pending'`
     ).get(groupId) as unknown as CountRow;
     return row.count;
+  }
+
+  expirePendingOlderThan(cutoffTimestamp: number): number {
+    const now = Math.floor(Date.now() / 1000);
+    const result = this.db.prepare(
+      `UPDATE learned_facts SET status = 'rejected', updated_at = ? WHERE status = 'pending' AND created_at < ?`
+    ).run(now, cutoffTimestamp) as { changes: number };
+    return result.changes;
+  }
+
+  approveAllPending(groupId: string): number {
+    const now = Math.floor(Date.now() / 1000);
+    const result = this.db.prepare(
+      `UPDATE learned_facts SET status = 'active', updated_at = ? WHERE group_id = ? AND status = 'pending'`
+    ).run(now, groupId) as { changes: number };
+    return result.changes;
   }
 }
 
@@ -2100,6 +2159,11 @@ export class Database {
       )
     `);
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_mod_rejections_group_ts ON mod_rejections(group_id, created_at DESC)`);
+
+    // mod_rejections — new columns for richer self-learning context
+    try { this._db.exec(`ALTER TABLE mod_rejections ADD COLUMN user_id TEXT`); } catch { /* already exists */ }
+    try { this._db.exec(`ALTER TABLE mod_rejections ADD COLUMN severity INTEGER`); } catch { /* already exists */ }
+    try { this._db.exec(`ALTER TABLE mod_rejections ADD COLUMN context_snippet TEXT`); } catch { /* already exists */ }
 
     // bandori_lives — daily-scraped BanG Dream! live event schedule.
     // CREATE TABLE IF NOT EXISTS handles both fresh installs and existing DBs idempotently.

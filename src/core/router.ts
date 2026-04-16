@@ -318,7 +318,7 @@ export class Router implements IRouter {
       // just on its own schedule. This halves p50 latency for chat replies.
       if (this.moderatorModule && config.autoMod && !msg.content.trim().startsWith('/')) {
         this.moderatorModule.assess(msg, config).then(verdict => {
-          if (verdict.violation && verdict.severity !== null && verdict.severity >= 1) {
+          if (verdict.violation && verdict.severity !== null && verdict.severity >= 3) {
             void this._queueModerationApproval(msg, verdict.severity, verdict.reason);
           }
         }).catch(err => this.logger.warn({ err, messageId: msg.messageId }, 'moderator assess failed'));
@@ -1272,16 +1272,35 @@ ${ctxLine}
 
       if (rejectMatch) {
         this.db.pendingModeration.markStatus(id, 'rejected', MOD_APPROVAL_ADMIN);
+        // Sync moderation_log.reviewed state so web UI reflects the DM decision
+        const modRecord = this.db.moderation.findByMsgId(row.msgId);
+        if (modRecord) {
+          this.db.moderation.markReviewed(modRecord.id, 2, MOD_APPROVAL_ADMIN, Math.floor(Date.now() / 1000));
+        }
         // Self-learning: record the (content, reason) as a false positive
         // example. Moderator will inject recent rejections into its prompt
         // so Qwen stops making the same wrong call.
         try {
+          // Build context snippet from recent messages around the violation
+          let contextSnippet: string | null = null;
+          try {
+            const contextMsgs = this.db.messages.getRecent(row.groupId, 5);
+            if (contextMsgs.length > 0) {
+              contextSnippet = [...contextMsgs].reverse()
+                .map(m => `[${m.nickname}]: ${m.content.slice(0, 80)}`)
+                .join('\n')
+                .slice(0, 500);
+            }
+          } catch { /* non-critical */ }
           this.db.modRejections.insert({
             groupId: row.groupId,
             content: row.content,
             reason: row.reason,
             userNickname: row.userNickname,
             createdAt: Math.floor(Date.now() / 1000),
+            userId: row.userId,
+            severity: row.severity,
+            contextSnippet,
           });
         } catch (err) {
           logger.warn({ err, id }, 'failed to insert mod rejection for self-learning');
@@ -1300,6 +1319,11 @@ ${ctxLine}
       }
       try {
         await this.moderatorModule.executePunishment(row, config);
+        // Sync moderation_log.reviewed state so web UI reflects the DM decision
+        const approvedModRecord = this.db.moderation.findByMsgId(row.msgId);
+        if (approvedModRecord) {
+          this.db.moderation.markReviewed(approvedModRecord.id, 1, MOD_APPROVAL_ADMIN, Math.floor(Date.now() / 1000));
+        }
         await reply(`已执行审核 #${id}：${row.proposedAction}（用户 ${row.userNickname ?? row.userId}）。`);
         logger.info({ id, groupId: row.groupId, userId: row.userId, action: row.proposedAction }, 'moderation approved + executed');
       } catch (err) {
@@ -1895,6 +1919,19 @@ ${ctxLine}
       }
       this.db.learnedFacts.markStatus(id, 'active');
       await this.adapter.send(msg.groupId, `已通过知识条目 #${id}，纳入参考。`);
+    });
+
+    this.commands.set('fact_approve_all', async (msg, _args, _config) => {
+      if (msg.userId !== MOD_APPROVAL_ADMIN) {
+        await this.adapter.send(msg.groupId, '没有权限。只有 bot 主人可以批量通过待审知识。');
+        return;
+      }
+      const count = this.db.learnedFacts.approveAllPending(msg.groupId);
+      if (count === 0) {
+        await this.adapter.send(msg.groupId, '本群没有待审知识条目。');
+      } else {
+        await this.adapter.send(msg.groupId, `已批量通过 ${count} 条待审知识，全部纳入参考。`);
+      }
     });
 
     this.commands.set('stickerfirst_on', async (msg, _args, config) => {

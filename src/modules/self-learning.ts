@@ -122,6 +122,16 @@ export class SelfLearningModule {
     '不确定','暗示','疑似','大概是','或许是','不明',
   ];
   private static readonly NEG_PATTERN = /(不是|不对|错了|搞错|没说对|胡说|瞎说|说啥呢)/;
+  /** Common 2-3 char Chinese words that should not trigger referent matching. */
+  private static readonly STOPWORDS = new Set([
+    '是的', '不是', '可以', '什么', '一个', '这个', '那个', '没有',
+    '知道', '已经', '因为', '所以', '但是', '还是', '如果', '就是',
+    '可能', '应该', '需要', '怎么', '不会', '不了', '是不', '有没',
+    '为什么', '这样', '那样', '这里', '那里', '大家', '自己',
+    '很多', '一些', '一下', '一起', '我们', '你们', '他们', '她们',
+    '真的', '其实', '当然', '虽然', '而且', '或者', '然后', '之后',
+    '现在', '以前', '以后', '觉得', '好的', '对的', '没事', '没问题',
+  ]);
   /** Top K newest facts that are pinned regardless of similarity score. */
   private static readonly PINNED_NEWEST_K = 5;
 
@@ -442,7 +452,11 @@ ${lines.join('\n')}`,
     if (!priorBotReply) return;
     if (!SelfLearningModule.NEG_PATTERN.test(content)) return;
     const tokens = priorBotReply.content.match(/[\u4e00-\u9fa5A-Za-z0-9]{2,}/g) ?? [];
-    const hasReferent = tokens.some(t => content.includes(t));
+    // Filter out stopwords, then require at least one substantive token (>= 4 chars)
+    const substantiveTokens = tokens.filter(
+      t => t.length >= 4 || (t.length >= 2 && !SelfLearningModule.STOPWORDS.has(t))
+    );
+    const hasReferent = substantiveTokens.some(t => t.length >= 4 && content.includes(t));
     if (!hasReferent) return;
 
     const injected = this.injectionMemory.get(groupId);

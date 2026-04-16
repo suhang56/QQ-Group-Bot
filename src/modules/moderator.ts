@@ -6,9 +6,12 @@ import type {
   GroupConfig, PendingModeration,
 } from '../storage/db.js';
 import type { ILearnerModule } from './learner.js';
+import type { IEmbeddingService } from '../storage/embeddings.js';
+import { cosineSimilarity } from '../storage/embeddings.js';
 import { BotErrorCode, ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
 import { VISION_MODEL, MODERATOR_MODEL } from '../config.js';
+import { readFileSync, existsSync } from 'node:fs';
 
 // Short banter words/patterns that are normal Chinese group chat — skip moderation entirely
 const BANTER_WHITELIST = new Set([
@@ -87,10 +90,37 @@ function parseSonnetResponse(text: string): { violation: boolean; severity: numb
 const IMAGE_MOD_CACHE_HOURS = 1; // 1h TTL so rule-set changes propagate quickly
 const IMAGE_MOD_RATE_LIMIT_PER_HOUR = Infinity; // cap removed per user request
 
+const REJECTION_MAX_CHARS = 2000;
+const REJECTION_TIME_WINDOW_SEC = 30 * 24 * 3600; // 30 days
+const TUNING_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+/** Build the rejection section for the moderator prompt, capped at REJECTION_MAX_CHARS. */
+export function buildRejectionSection(rejections: import('../storage/db.js').ModRejection[]): string {
+  if (rejections.length === 0) return '';
+  const lines: string[] = [];
+  let totalLen = 0;
+  const header = '【管理员已驳回的误判样本 — 以下内容不是违规，遇到类似内容请判定 violation:false】\n';
+  const footer = '\n\n注意：这些样本是**管理员亲自确认不算违规**的。如果当前消息在语义、用词、话题上与上面任何一条类似，应倾向于不判违规。';
+  totalLen += header.length + footer.length;
+
+  for (let i = 0; i < rejections.length; i++) {
+    const r = rejections[i]!;
+    const sevStr = r.severity !== null ? ` (sev:${r.severity})` : '';
+    const ctxStr = r.contextSnippet ? `\n   上下文: ${r.contextSnippet.slice(0, 100)}` : '';
+    const line = `${i + 1}. 内容: 「${r.content.slice(0, 80)}」${sevStr}\n   当时误判理由: ${r.reason.slice(0, 100)}${ctxStr}`;
+    if (totalLen + line.length + 1 > REJECTION_MAX_CHARS) break;
+    lines.push(line);
+    totalLen += line.length + 1;
+  }
+  if (lines.length === 0) return '';
+  return `\n\n${header}${lines.join('\n')}${footer}`;
+}
+
 export class ModeratorModule implements IModeratorModule {
   private readonly logger = createLogger('moderator');
   // per-group uncached image checks this hour: key=`${groupId}:${hourTs}`
   private readonly imageRateCounts = new Map<string, number>();
+  private tuningCache: { content: string; readAt: number } | null = null;
 
   constructor(
     private readonly claude: IClaudeClient,
@@ -102,7 +132,33 @@ export class ModeratorModule implements IModeratorModule {
     private readonly learner: ILearnerModule | null = null,
     private readonly imageModCache: IImageModCacheRepository | null = null,
     private readonly modRejections: IModRejectionRepository | null = null,
+    private readonly tuningPath: string | null = null,
+    private readonly embeddingService: IEmbeddingService | null = null,
   ) {}
+
+  /** Read the 审核调优 section from the tuning file, cached for 5 minutes. */
+  private _readTuningSection(): string {
+    if (!this.tuningPath) return '';
+    const now = Date.now();
+    if (this.tuningCache && (now - this.tuningCache.readAt) < TUNING_CACHE_TTL_MS) {
+      return this.tuningCache.content;
+    }
+    try {
+      if (!existsSync(this.tuningPath)) {
+        this.tuningCache = { content: '', readAt: now };
+        return '';
+      }
+      const raw = readFileSync(this.tuningPath, 'utf8');
+      const match = raw.match(/##\s*审核调优[^\n]*\n([\s\S]*?)(?=\n##\s|\n*$)/);
+      const section = match?.[1]?.trim() ?? '';
+      this.tuningCache = { content: section, readAt: now };
+      return section;
+    } catch {
+      this.logger.warn('failed to read tuning file — proceeding without tuning');
+      this.tuningCache = { content: '', readAt: now };
+      return '';
+    }
+  }
 
   async assess(msg: GroupMessage, config: GroupConfig): Promise<ModerationVerdict> {
     // Safety rail 1: skip admins/owners and whitelisted users
@@ -164,21 +220,50 @@ export class ModeratorModule implements IModeratorModule {
     // are content patterns the moderator previously flagged which the human
     // decided were NOT violations. Include them as strong negative examples
     // so the model stops making the same mistake.
+    // Uses 30-day window, semantic top-5 filtering if embedding available, 2000-char cap.
     let rejectionSection = '';
     if (this.modRejections) {
       try {
-        const recent = this.modRejections.getRecent(msg.groupId, 30);
-        if (recent.length > 0) {
-          const lines = recent
-            .slice(0, 30)
-            .map((r, i) => `${i + 1}. 内容: 「${r.content.slice(0, 80)}」\n   当时误判理由: ${r.reason.slice(0, 100)}`)
-            .join('\n');
-          rejectionSection = `\n\n【管理员已驳回的误判样本 — 以下内容不是违规，遇到类似内容请判定 violation:false】\n${lines}\n\n注意：这些样本是**管理员亲自确认不算违规**的。如果当前消息在语义、用词、话题上与上面任何一条类似，应倾向于不判违规。`;
+        const sinceTs = Math.floor(Date.now() / 1000) - REJECTION_TIME_WINDOW_SEC;
+        let candidates = this.modRejections.getRecentSince(msg.groupId, sinceTs, 30);
+
+        // Semantic filtering: if embedding service is available, rank by similarity to current message
+        if (candidates.length > 5 && this.embeddingService?.isReady) {
+          try {
+            const queryVec = await this.embeddingService.embed(trimmed);
+            const scored: Array<{ rejection: typeof candidates[0]; score: number }> = [];
+            for (const r of candidates) {
+              try {
+                const rVec = await this.embeddingService.embed(r.content);
+                scored.push({ rejection: r, score: cosineSimilarity(queryVec, rVec) });
+              } catch {
+                scored.push({ rejection: r, score: 0 });
+              }
+            }
+            scored.sort((a, b) => b.score - a.score);
+            candidates = scored.slice(0, 5).map(s => s.rejection);
+          } catch {
+            // Embedding failed — fall back to recency top-5
+            candidates = candidates.slice(0, 5);
+          }
+        } else {
+          // No embedding service — recency top-5
+          candidates = candidates.slice(0, 5);
+        }
+
+        if (candidates.length > 0) {
+          rejectionSection = buildRejectionSection(candidates);
         }
       } catch {
         this.logger.warn({ groupId: msg.groupId }, 'modRejections.getRecent failed — proceeding without self-learning');
       }
     }
+
+    // Self-reflection tuning: read the 审核调优 section from tuning file
+    const tuningSection = this._readTuningSection();
+    const tuningText = tuningSection
+      ? `\n\n【审核调优 — 来自自我反思系统的审核改进建议】\n${tuningSection}`
+      : '';
 
     // Build prompt — user content ONLY in user-role message (never system)
     const systemText = `你是一个群管理AI。请根据群规判断最后一条消息是否违规。
@@ -210,7 +295,7 @@ severity说明：1=轻微, 2=一般, 3=严重, 4=很严重, 5=极严重（踢出
   - 正确: "reason": "用户在尝试 prompt injection，让 bot 角色扮演"
   - 错误: "reason": "用户发了"我想和你对话"这种 prompt injection"
 - 任何时候 reason 内出现双引号 " 都视为格式错误
-- 输出 JSON 后不要加任何解释、reasoning、markdown 包装，只输出 JSON object 本身`;
+- 输出 JSON 后不要加任何解释、reasoning、markdown 包装，只输出 JSON object 本身${tuningText}`;
 
     const userText = `以下是最近的聊天记录（最后一条是需要判定的消息）：
 
@@ -261,7 +346,8 @@ ${offenseHistory}${ragSection}${rejectionSection}`;
       return verdict;
     }
 
-    // Confidence gate: low-confidence violations are logged only, no action
+    // Confidence gate: low-confidence violations are logged only, no action.
+    // Return violation=false so router never sees these as actionable violations.
     if (parsed.confidence < CONFIDENCE_THRESHOLD) {
       this.logger.info({ groupId: msg.groupId, userId: msg.userId, confidence: parsed.confidence, severity: parsed.severity }, 'mod low-confidence violation — log only');
       this.moderation.insert({
@@ -270,7 +356,7 @@ ${offenseHistory}${ragSection}${rejectionSection}`;
         reason: `[low-confidence ${parsed.confidence.toFixed(2)}] ${parsed.reason}`, appealed: 0, reversed: false,
         timestamp: msg.timestamp, originalContent: msg.content,
       });
-      return verdict;
+      return { ...verdict, violation: false };
     }
 
     // Severity gate: sev 1-2 → log only, no user-visible action
@@ -460,11 +546,7 @@ watchlist 命中 → category: "watchlist"，components_seen 列出命中片段
     if (severity === 3) {
       await this.adapter.send(msg.groupId,
         `@${msg.nickname} 你的消息因违反群规已被删除，请注意言行。\n原因：${reason}`);
-      this.moderation.insert({
-        msgId: msg.messageId, groupId: msg.groupId, userId: msg.userId,
-        violation: true, severity, action: 'warn', reason,
-        appealed: 0, reversed: false, timestamp: msg.timestamp, originalContent: msg.content,
-      });
+      this._recordPunishment(msg, severity, 'warn', reason);
       this.configs.incrementPunishments(msg.groupId);
       this.logger.info({ groupId: msg.groupId, userId: msg.userId, severity, action: 'warn', reason }, 'punishment executed');
       return;
@@ -475,11 +557,7 @@ watchlist 命中 → category: "watchlist"，components_seen 列出命中片段
       await this.adapter.ban(msg.groupId, msg.userId, 600);
       await this.adapter.send(msg.groupId,
         `@${msg.nickname} 因违规已禁言10分钟。\n原因：${reason}\n如认为有误，可在24小时内发送 /appeal 申诉。`);
-      this.moderation.insert({
-        msgId: msg.messageId, groupId: msg.groupId, userId: msg.userId,
-        violation: true, severity, action: 'ban', reason,
-        appealed: 0, reversed: false, timestamp: msg.timestamp, originalContent: msg.content,
-      });
+      this._recordPunishment(msg, severity, 'ban', reason);
       this.configs.incrementPunishments(msg.groupId);
       this.logger.info({ groupId: msg.groupId, userId: msg.userId, severity, action: 'ban', durationSeconds: 600, reason }, 'punishment executed');
       return;
@@ -495,11 +573,7 @@ watchlist 命中 → category: "watchlist"，components_seen 列出命中片段
       }
       await this.adapter.send(msg.groupId,
         `用户 ${msg.nickname}（${msg.userId}）因严重违规已被移出群聊。\n原因：${reason}`);
-      this.moderation.insert({
-        msgId: msg.messageId, groupId: msg.groupId, userId: msg.userId,
-        violation: true, severity: 5, action: 'kick', reason,
-        appealed: 0, reversed: false, timestamp: msg.timestamp, originalContent: msg.content,
-      });
+      this._recordPunishment(msg, 5, 'kick', reason);
       this.configs.incrementPunishments(msg.groupId);
       this.logger.info({ groupId: msg.groupId, userId: msg.userId, severity: 5, action: 'kick', reason }, 'punishment executed');
     } else {
@@ -507,13 +581,22 @@ watchlist 命中 → category: "watchlist"，components_seen 列出命中片段
       await this.adapter.ban(msg.groupId, msg.userId, 3600);
       await this.adapter.send(msg.groupId,
         `@${msg.nickname} 因严重违规已禁言1小时。\n原因：${reason}\n如认为有误，可在24小时内发送 /appeal 申诉。`);
-      this.moderation.insert({
-        msgId: msg.messageId, groupId: msg.groupId, userId: msg.userId,
-        violation: true, severity: 4, action: 'ban', reason,
-        appealed: 0, reversed: false, timestamp: msg.timestamp, originalContent: msg.content,
-      });
+      this._recordPunishment(msg, 4, 'ban', reason);
       this.configs.incrementPunishments(msg.groupId);
       this.logger.info({ groupId: msg.groupId, userId: msg.userId, severity: 4, action: 'ban', reason, note: 'opus-downgraded' }, 'punishment executed');
+    }
+  }
+
+  /** Update existing moderation_log record's action, or insert if no prior record exists. */
+  private _recordPunishment(msg: GroupMessage, severity: number, action: 'warn' | 'delete' | 'ban' | 'kick' | 'none', reason: string): void {
+    const updated = this.moderation.updateAction(msg.messageId, action);
+    if (!updated) {
+      // Safety net: no prior record with action='none' — insert a new one
+      this.moderation.insert({
+        msgId: msg.messageId, groupId: msg.groupId, userId: msg.userId,
+        violation: true, severity, action, reason,
+        appealed: 0, reversed: false, timestamp: msg.timestamp, originalContent: msg.content,
+      });
     }
   }
 

@@ -81,6 +81,10 @@ function makeModerationRepo(): IModerationRepository {
     findPendingAppeal: vi.fn().mockReturnValue(null),
     update: vi.fn(),
     countWarnsByUser: vi.fn().mockReturnValue(0),
+    getForReview: vi.fn().mockReturnValue({ records: [], total: 0 }),
+    markReviewed: vi.fn(),
+    getStats: vi.fn().mockReturnValue({ total: 0, unreviewed: 0, approved: 0, rejected: 0, byGroup: {} }),
+    updateAction: vi.fn().mockReturnValue(true),
   };
 }
 
@@ -285,7 +289,8 @@ describe('ModeratorModule.assess — punishment ladder', () => {
     expect(adapter.deleteMsg).toHaveBeenCalledWith('msg-1');
     expect(adapter.send).toHaveBeenCalledWith('g1', expect.stringContaining('已被删除'));
     expect(adapter.ban).not.toHaveBeenCalled();
-    expect(modRepo.insert).toHaveBeenCalledWith(expect.objectContaining({ action: 'warn' }));
+    // Bug 3 fix: executePunishment now updates existing record via updateAction instead of inserting a duplicate
+    expect(modRepo.updateAction).toHaveBeenCalledWith('msg-1', 'warn');
   });
 
   // executePunishment: sev 4 → mute 10 min
@@ -320,7 +325,8 @@ describe('ModeratorModule.assess — punishment ladder', () => {
     const mod = makeModule(claude, adapter, makeConfig(), { moderation: modRepo });
     await mod.executePunishment(makePending(5, 'kick'), makeConfig());
     expect(adapter.kick).toHaveBeenCalledWith('g1', 'u1');
-    expect(modRepo.insert).toHaveBeenCalledWith(expect.objectContaining({ action: 'kick' }));
+    // Bug 3 fix: executePunishment now updates existing record via updateAction instead of inserting a duplicate
+    expect(modRepo.updateAction).toHaveBeenCalledWith('msg-1', 'kick');
   });
 
   // Records are written to moderation_log even for no-violation
@@ -702,7 +708,9 @@ describe('ModeratorModule.assess — banter whitelist, confidence gate, context 
     const verdict = await mod.assess(makeMsg({ content: 'you are a terrible person with bad words' }), makeConfig());
     expect(adapter.ban).not.toHaveBeenCalled();
     expect(adapter.deleteMsg).not.toHaveBeenCalled();
-    expect(verdict.violation).toBe(true);
+    // Bug 2 fix: low-confidence verdicts now return violation=false to prevent router from queuing them
+    expect(verdict.violation).toBe(false);
+    // But the log record still marks the underlying violation=true for auditing
     expect(modRepo.insert).toHaveBeenCalledWith(expect.objectContaining({ action: 'none', violation: true }));
   });
 
