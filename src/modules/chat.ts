@@ -9,7 +9,7 @@ import { ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
 import { lurkerDefaults, chatHistoryDefaults, RUNTIME_CHAT_MODEL, CHAT_QWEN_MODEL, CHAT_QWEN_DISABLED, CHAT_DEEPSEEK_MODEL, DEEPSEEK_ENABLED } from '../config.js';
 import { parseFaces } from '../utils/qqface.js';
-import { sentinelCheck, postProcess, sanitize, applyPersonaFilters, isEcho, checkConfabulation, hasForbiddenContent, HARDENED_SYSTEM } from '../utils/sentinel.js';
+import { sentinelCheck, postProcess, sanitize, applyPersonaFilters, isEcho, checkConfabulation, hasForbiddenContent, HARDENED_SYSTEM, entityGuard, qaReportRegenHint } from '../utils/sentinel.js';
 import { buildStickerSection, getStickerPool, type LiveStickerEntry } from '../utils/stickers.js';
 import { MoodTracker, PROACTIVE_POOLS, type MoodDescription } from './mood.js';
 import type { ICharModule } from './char.js';
@@ -27,6 +27,7 @@ import { loadGroupJargon, formatJargonBlock } from './jargon-provider.js';
 import { makeEngagementDecision, type EngagementSignals } from './engagement-decision.js';
 import { scoreComprehension, type ComprehensionContext } from '../services/comprehension-scorer.js';
 import { ConversationStateTracker } from './conversation-state.js';
+import { pickVariant, buildVariantSystemPrompt, type VariantContext } from './prompt-variants.js';
 
 export interface IChatModule {
   generateReply(groupId: string, triggerMessage: GroupMessage, _recentMessages: GroupMessage[]): Promise<string | null>;
@@ -1419,6 +1420,31 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     const charModeActive = !!(this.db.groupConfig.get(groupId)?.activeCharacterId && this.charModule);
     const tuningBlock = charModeActive ? null : this._loadTuning();
 
+    // P3-2: Pick prompt variant based on conversation context
+    const convSnapshot = this.conversationState.getSnapshot(groupId);
+    const sensitiveEntityHit = /hhw|hello.*happy|声优|cv|中之人|键政|政治|黑粉|毒唯|引战/i.test(triggerMessage.content);
+    const activeJokeHit = convSnapshot.activeJokes.length > 0;
+    const variantCtx: VariantContext = {
+      activeJokeHit,
+      sensitiveEntityHit,
+      personaRoleCard: '', // role card is already in systemPrompt
+    };
+    const variant = pickVariant(variantCtx);
+    const variantBlock = buildVariantSystemPrompt(variantCtx).systemPrompt;
+    this.logger.debug({ groupId, variant, activeJokeHit, sensitiveEntityHit }, 'prompt variant selected');
+
+    // P3-3: <group-context> block with currentTopics + activeJokes for LLM
+    const groupContextParts: string[] = [];
+    if (convSnapshot.currentTopics.length > 0) {
+      groupContextParts.push(`当前话题: ${convSnapshot.currentTopics.map(t => t.word).join(', ')}`);
+    }
+    if (convSnapshot.activeJokes.length > 0) {
+      groupContextParts.push(`活跃梗: ${convSnapshot.activeJokes.map(j => `${j.term}(已重复${j.count}次)`).join(', ')}`);
+    }
+    const groupContextBlock = groupContextParts.length > 0
+      ? `<group-context>\n${groupContextParts.join('\n')}\n</group-context>`
+      : '';
+
     const pickedModel = this._pickChatModel(groupId, triggerMessage, factors);
     this.logger.debug(
       { groupId, pickedModel, trigger: triggerMessage.content.slice(0, 50) },
@@ -1426,16 +1452,15 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     );
 
     const chatRequest = (hardened = false) => this.claude.complete({
-      // Hardened-regen path always escalates to Sonnet for safety, regardless
-      // of the normal routing decision.
       model: hardened ? RUNTIME_CHAT_MODEL : pickedModel,
       maxTokens: 300,
-      // identity prompt is cached; mood section appended (cache:true required by type, API ignores dups)
       system: hardened
         ? [{ text: HARDENED_SYSTEM, cache: true }]
         : [
             { text: systemPrompt, cache: true },
             { text: STATIC_CHAT_DIRECTIVES, cache: true },
+            { text: variantBlock, cache: true },
+            ...(groupContextBlock ? [{ text: groupContextBlock, cache: true as const }] : []),
             ...(moodSection ? [{ text: moodSection, cache: true as const }] : []),
             ...(contextStickerSection ? [{ text: contextStickerSection, cache: true as const }] : []),
             ...(rotatedStickerSection ? [{ text: rotatedStickerSection, cache: true as const }] : []),
@@ -1460,7 +1485,30 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       // Use whitelist-aware mface filtering: keep mface codes whose key is
       // in the group's learned sticker pool (P0-1 fix for mface strip bug)
       const mfaceKeys = this.localStickerRepo?.getMfaceKeys(groupId) ?? null;
-      const processed = applyPersonaFilters(sanitize(text), mfaceKeys);
+      let processed = applyPersonaFilters(sanitize(text), mfaceKeys);
+
+      // P3-4a: Entity guard — replace disparagement with neutral fallback
+      const entityReplacement = entityGuard(processed);
+      if (entityReplacement !== null) {
+        this.logger.info({ groupId, original: processed, replacement: entityReplacement }, 'entity-guard replaced output');
+        processed = entityReplacement;
+      }
+
+      // P3-4b: QA-report detector — flag overly declarative output for regen
+      const qaHint = qaReportRegenHint(processed);
+      if (qaHint) {
+        this.logger.info({ groupId, original: processed }, 'qa-report-detector flagged — regenerating with casual hint');
+        try {
+          const regenResponse = await chatRequest(true);
+          const regenText = applyPersonaFilters(sanitize(regenResponse.text), mfaceKeys);
+          if (regenText && !qaReportRegenHint(regenText)) {
+            processed = regenText;
+          }
+        } catch {
+          // keep original if regen fails
+        }
+      }
+
       // Claude explicitly skips this trigger
       if (/^<skip>\s*$/i.test(processed)) {
         this.logger.debug({ groupId, trigger: triggerMessage.content }, 'Claude explicitly skipped');
