@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { hasForbiddenContent, stripEcho, postProcess, isEcho } from '../src/utils/sentinel.js';
+import { hasForbiddenContent, stripEcho, postProcess, sanitize, applyPersonaFilters, isEcho } from '../src/utils/sentinel.js';
 
 describe('hasForbiddenContent', () => {
   it('returns null for clean Chinese group reply', () => {
@@ -208,6 +208,69 @@ describe('postProcess', () => {
   it('unwraps line with inline <skip> leaving real content', () => {
     // "嗯 <skip> 走了" — strip <skip>, keep the rest
     expect(postProcess('嗯 <skip> 走了')).toBe('嗯  走了');
+  });
+});
+
+describe('sanitize', () => {
+  it('strips hallucinated CQ image with url but preserves local-file sticker', () => {
+    const hallu = '[CQ:image,file=abc.jpg,url=https://x]';
+    expect(sanitize(hallu)).toBe('');
+    const legit = '[CQ:image,file=file:///D:/stickers/abc.jpg]';
+    expect(sanitize(legit)).toBe(legit);
+  });
+
+  it('strips <CQ:...> angle-bracket hallucinations', () => {
+    expect(sanitize('<CQ:at,qq=123>')).toBe('');
+  });
+
+  it('strips [CQ:face,...] codes', () => {
+    expect(sanitize('[CQ:face,id=178] test')).toBe('test');
+  });
+
+  it('does NOT strip [CQ:mface,...] — that belongs to persona filters', () => {
+    const mface = '[CQ:mface,type=6,emoji_id=123,key=abc,summary=test]';
+    expect(sanitize(mface)).toBe(mface);
+  });
+
+  it('does NOT strip trailing Chinese period — that belongs to persona filters', () => {
+    expect(sanitize('hello。')).toBe('hello。');
+  });
+
+  it('strips <skip> lines', () => {
+    expect(sanitize('hi\n<skip>\nbye')).toBe('hi\nbye');
+  });
+});
+
+describe('applyPersonaFilters', () => {
+  it('strips all mface when allowedMfaceKeys is null', () => {
+    const mface = '[CQ:mface,type=6,emoji_id=123,key=abc,summary=test]';
+    expect(applyPersonaFilters(mface, null)).toBe('');
+  });
+
+  it('keeps mface whose key is in the whitelist', () => {
+    const mface = '[CQ:mface,type=6,emoji_id=123,key=abc,summary=test]';
+    expect(applyPersonaFilters(mface, new Set(['abc']))).toBe(mface);
+  });
+
+  it('strips mface whose key is NOT in the whitelist', () => {
+    const mface = '[CQ:mface,type=6,emoji_id=123,key=abc,summary=test]';
+    expect(applyPersonaFilters(mface, new Set(['xyz']))).toBe('');
+  });
+
+  it('mixed: keeps whitelisted, strips non-whitelisted', () => {
+    const keep = '[CQ:mface,type=6,emoji_id=1,key=good,summary=ok]';
+    const strip = '[CQ:mface,type=6,emoji_id=2,key=bad,summary=no]';
+    const result = applyPersonaFilters(`${keep} text ${strip}`, new Set(['good']));
+    expect(result).toBe(`${keep} text`);
+  });
+
+  it('strips trailing Chinese period', () => {
+    expect(applyPersonaFilters('hello。', null)).toBe('hello');
+  });
+
+  it('empty whitelist strips all mface', () => {
+    const mface = '[CQ:mface,type=6,emoji_id=123,key=abc,summary=test]';
+    expect(applyPersonaFilters(mface, new Set())).toBe('');
   });
 });
 
