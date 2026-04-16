@@ -8,7 +8,7 @@ import { createLogger } from '../utils/logger.js';
 import { defaultGroupConfig, chatHistoryDefaults, RUNTIME_CHAT_MODEL } from '../config.js';
 import { sentinelCheck, postProcess, HARDENED_SYSTEM } from '../utils/sentinel.js';
 import { buildStickerSection } from '../utils/stickers.js';
-import { extractKeywords } from './chat.js';
+import { extractKeywords } from '../utils/text-tokenize.js';
 
 export interface IMimicModule {
   generateMimic(
@@ -154,7 +154,7 @@ export function extractUserStickers(
 
   for (const m of messages) {
     // Check rawContent first (has full CQ codes), then content as fallback
-    const textToScan = m.rawContent || m.content;
+    const textToScan = m.rawContent ?? m.content;
     const matches = textToScan.matchAll(/\[CQ:(mface|image),[^\]]+\]/g);
     for (const match of matches) {
       const code = match[0];
@@ -181,7 +181,7 @@ export class MimicModule implements IMimicModule {
   private readonly stickerSectionCache = new Map<string, string>();
   /** Track last 3 sticker CQ codes used in mimic for rotation. */
   private readonly recentMimicStickers: string[] = [];
-  private static readonly STICKER_ROTATION_SIZE = 3;
+  private static readonly STICKER_ROTATION_SIZE = 10;
   private static readonly MIN_USER_STICKERS = 5;
 
   constructor(

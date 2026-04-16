@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { hasForbiddenContent, stripEcho, postProcess, isEcho } from '../src/utils/sentinel.js';
+import { hasForbiddenContent, stripEcho, postProcess, sanitize, applyPersonaFilters, isEcho } from '../src/utils/sentinel.js';
 
 describe('hasForbiddenContent', () => {
   it('returns null for clean Chinese group reply', () => {
@@ -211,18 +211,87 @@ describe('postProcess', () => {
   });
 });
 
+describe('sanitize', () => {
+  it('strips hallucinated CQ image with url but preserves local-file sticker', () => {
+    const hallu = '[CQ:image,file=abc.jpg,url=https://x]';
+    expect(sanitize(hallu)).toBe('');
+    const legit = '[CQ:image,file=file:///D:/stickers/abc.jpg]';
+    expect(sanitize(legit)).toBe(legit);
+  });
+
+  it('strips <CQ:...> angle-bracket hallucinations', () => {
+    expect(sanitize('<CQ:at,qq=123>')).toBe('');
+  });
+
+  it('strips [CQ:face,...] codes', () => {
+    expect(sanitize('[CQ:face,id=178] test')).toBe('test');
+  });
+
+  it('does NOT strip [CQ:mface,...] — that belongs to persona filters', () => {
+    const mface = '[CQ:mface,type=6,emoji_id=123,key=abc,summary=test]';
+    expect(sanitize(mface)).toBe(mface);
+  });
+
+  it('does NOT strip trailing Chinese period — that belongs to persona filters', () => {
+    expect(sanitize('hello。')).toBe('hello。');
+  });
+
+  it('strips <skip> lines', () => {
+    expect(sanitize('hi\n<skip>\nbye')).toBe('hi\nbye');
+  });
+});
+
+describe('applyPersonaFilters', () => {
+  it('strips all mface when allowedMfaceKeys is null', () => {
+    const mface = '[CQ:mface,type=6,emoji_id=123,key=abc,summary=test]';
+    expect(applyPersonaFilters(mface, null)).toBe('');
+  });
+
+  it('keeps mface whose key is in the whitelist', () => {
+    const mface = '[CQ:mface,type=6,emoji_id=123,key=abc,summary=test]';
+    expect(applyPersonaFilters(mface, new Set(['abc']))).toBe(mface);
+  });
+
+  it('strips mface whose key is NOT in the whitelist', () => {
+    const mface = '[CQ:mface,type=6,emoji_id=123,key=abc,summary=test]';
+    expect(applyPersonaFilters(mface, new Set(['xyz']))).toBe('');
+  });
+
+  it('mixed: keeps whitelisted, strips non-whitelisted', () => {
+    const keep = '[CQ:mface,type=6,emoji_id=1,key=good,summary=ok]';
+    const strip = '[CQ:mface,type=6,emoji_id=2,key=bad,summary=no]';
+    const result = applyPersonaFilters(`${keep} text ${strip}`, new Set(['good']));
+    expect(result).toBe(`${keep} text`);
+  });
+
+  it('strips trailing Chinese period', () => {
+    expect(applyPersonaFilters('hello。', null)).toBe('hello');
+  });
+
+  it('empty whitelist strips all mface', () => {
+    const mface = '[CQ:mface,type=6,emoji_id=123,key=abc,summary=test]';
+    expect(applyPersonaFilters(mface, new Set())).toBe('');
+  });
+});
+
 describe('isEcho', () => {
-  it('exact match → true', () => {
-    expect(isEcho('abc', 'abc')).toBe(true);
+  it('exact match with sufficient length → true', () => {
     expect(isEcho('瞧你糖的', '瞧你糖的')).toBe(true);
+    expect(isEcho('今天天气不错吧', '今天天气不错吧')).toBe(true);
+  });
+
+  it('very short reply (< 4 normalized chars) → false (short reply guard)', () => {
+    expect(isEcho('abc', 'abc')).toBe(false);
+    expect(isEcho('好', '好')).toBe(false);
+    expect(isEcho('嗯哦', '嗯哦')).toBe(false);
   });
 
   it('reply contains trigger with little extra content → true', () => {
     expect(isEcho('哈哈哈哈西瓜你好狠哈', '哈哈哈哈西瓜你好狠')).toBe(true);
   });
 
-  it('reply is substring of trigger → true', () => {
-    expect(isEcho('你好狠', '哈哈哈哈西瓜你好狠')).toBe(true);
+  it('reply is substring of trigger with enough length → true', () => {
+    expect(isEcho('西瓜你好狠', '哈哈哈哈西瓜你好狠')).toBe(true);
   });
 
   it('genuinely different reply → false', () => {

@@ -9,7 +9,7 @@ import { ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
 import { lurkerDefaults, chatHistoryDefaults, RUNTIME_CHAT_MODEL, CHAT_QWEN_MODEL, CHAT_QWEN_DISABLED, CHAT_DEEPSEEK_MODEL, DEEPSEEK_ENABLED } from '../config.js';
 import { parseFaces } from '../utils/qqface.js';
-import { sentinelCheck, postProcess, isEcho, checkConfabulation, hasForbiddenContent, HARDENED_SYSTEM } from '../utils/sentinel.js';
+import { sentinelCheck, postProcess, sanitize, applyPersonaFilters, isEcho, checkConfabulation, hasForbiddenContent, HARDENED_SYSTEM } from '../utils/sentinel.js';
 import { buildStickerSection, getStickerPool, type LiveStickerEntry } from '../utils/stickers.js';
 import { MoodTracker, PROACTIVE_POOLS, type MoodDescription } from './mood.js';
 import type { ICharModule } from './char.js';
@@ -20,6 +20,9 @@ import { cosineSimilarity } from '../storage/embeddings.js';
 import type { IStickerFirstModule } from './sticker-first.js';
 import { _hasBandoriLiveKeyword, _formatLiveBlock } from './bandori-live-scraper.js';
 import { buildAliasMap, extractEntities, buildLorePayload } from './lore-retrieval.js';
+import type { ILoreLoader } from './lore-loader.js';
+import type { IDeflectionEngine } from './deflection-engine.js';
+import { tokenizeLore as _tokenizeLore, extractTokens as _extractTokens, extractKeywords as _extractKeywords } from '../utils/text-tokenize.js';
 
 export interface IChatModule {
   generateReply(groupId: string, triggerMessage: GroupMessage, _recentMessages: GroupMessage[]): Promise<string | null>;
@@ -93,6 +96,8 @@ interface ChatOptions {
   forwardCache?: IForwardCacheRepository;
   stickerFirst?: IStickerFirstModule;
   bandoriLiveRepo?: IBandoriLiveRepository;
+  loreLoader?: ILoreLoader;
+  deflectionEngine?: IDeflectionEngine;
 }
 
 export interface ScoreFactors {
@@ -264,7 +269,7 @@ export const BANGDREAM_PERSONA = `# 你的身份
 # 态度
 - 有自己独立的想法和边界感，不是谁的工具人
 - 不想做就直接拒绝：「烦」「自己做」「关我屁事」「不想」「想屁吃」
-- 被调侃/挑衅时自然反怼，不说教
+- 被调侃/挑衅时自然反怼或接梗，不说教。接梗和反怼概率相当——群友玩梗时跟着玩（"啥意思哈哈哈"/"懂了懂了"/"这什么鬼"/"我也要"）比 dismiss 更自然
 - 不巴结任何人，也不讨好管理员
 - 对 Roselia/ykn 有强烈主见，别人贬低时争辩
 - 嘴碎但有脾气，不嘴软
@@ -304,7 +309,7 @@ context 有昵称 → 叫出昵称+"你又来装失忆"；不想答 → "问你�
 
 ## 集体称呼（多人聊同一话题时）
 
-最近 5 条有 3+ 不同昵称聊同一件事 → 用"你们"集体称呼（"看你们唐的"/"你们这群人聊得真起劲"/"你们都疯了吧"）。被 @/reply 时仍回单人。
+最近 5 条有 3+ 不同昵称聊同一件事 → 用"你们"集体称呼（"你们玩什么呢"/"突然好热闹"/"??我也要"）。被 @/reply 时仍回单人。
 
 ## 圈内底线（邦批硬红线）
 
@@ -388,52 +393,14 @@ export function pickDeflection(pool: string[]): string {
   return pool[Math.floor(Math.random() * pool.length)]!;
 }
 
-// Chinese stopwords that add no retrieval signal
-const STOPWORDS = new Set([
-  '我','你','他','她','它','我们','你们','他们','的','了','是','不','啥','什么',
-  '怎么','一个','这个','那个','就','也','都','在','有','和','吧','嗯','哦','哈',
-  '吗','呢','啊','呀','么','这','那','为','以','到','从','但','所以','因为',
-]);
-
 const QUESTION_ENDINGS = ['?', '？', '吗', '嘛', '呢', '不'];
 // Matches clarification / follow-up probes (user asking bot to explain itself)
 const CLARIFICATION_RE = /^(why|为啥|为什么|怎么|咋|真的[吗嘛]?|你说啥|啥意思|什么意思)[?？]?$/i;
 
-const TOPIC_STOPWORDS = new Set([
-  '的','了','是','吗','啊','呢','吧','哦','嗯','哈','哇','么','嘛',
-  '我','你','他','她','它','我们','你们','他们',
-  '在','有','和','就','也','都','不','没','很','太',
-  '什么','怎么','这','那','啥','谁',
-]);
-
-/**
- * Extract topic tokens from a message for engagement tracking.
- * English words → lowercase whole-word token; Chinese chars → sliding 2-grams.
- * CQ codes and stopwords are excluded.
- */
-export function extractTokens(content: string): Set<string> {
-  // Strip CQ codes
-  const clean = content.replace(/\[CQ:[^\]]*\]/g, ' ').trim();
-  const result = new Set<string>();
-  // Split on whitespace/punctuation into segments
-  const segments = clean.split(/[\s，。？！、…「」『』【】《》""''【】\u3000\uff0c\uff01\uff1f\uff1a\u300a\u300b\uff08\uff09]+/).filter(Boolean);
-  for (const seg of segments) {
-    if (/^[a-z0-9]+$/i.test(seg)) {
-      // ASCII word — keep as lowercase token
-      const w = seg.toLowerCase();
-      if (!TOPIC_STOPWORDS.has(w) && w.length > 1) result.add(w);
-    } else {
-      // Chinese/mixed — run 2-gram slide
-      for (let i = 0; i < seg.length - 1; i++) {
-        const gram = seg.slice(i, i + 2);
-        if (!TOPIC_STOPWORDS.has(gram[0]!) && !TOPIC_STOPWORDS.has(gram[1]!)) {
-          result.add(gram);
-        }
-      }
-    }
-  }
-  return result;
-}
+// Re-export text-tokenize utilities for backward compatibility
+export const extractTokens = _extractTokens;
+export const extractKeywords = _extractKeywords;
+export const tokenizeLore = _tokenizeLore;
 
 /** Count [CQ:face,id=N] usage across messages and return top-N face IDs. */
 export function extractTopFaces(messages: Array<{ content: string }>, topN: number): number[] {
@@ -449,32 +416,154 @@ export function extractTopFaces(messages: Array<{ content: string }>, topN: numb
     .map(([id]) => id);
 }
 
-/** Extract meaningful keywords from a message for corpus retrieval. */
-export function extractKeywords(text: string): string[] {
-  // Strip CQ codes first
-  const stripped = text.replace(/\[CQ:[^\]]+\]/g, ' ');
-  // Split on punctuation / whitespace; keep tokens ≥2 chars
-  const tokens = stripped.split(/[\s\p{P}！？。，、；：""''【】《》（）…—]+/u)
-    .map(t => t.trim())
-    .filter(t => t.length >= 2 && !STOPWORDS.has(t));
-  // Deduplicate and cap at 5
-  return [...new Set(tokens)].slice(0, 5);
-}
+// ── Skeleton-level near-dup detection (T2 tone-humanize) ────────────────
+// Extracts a sentence skeleton by replacing content words with a slot marker `_`,
+// keeping function/structure words (particles, pronouns, punctuation).
+// Two replies with the same skeleton but different content words are "template dups".
 
+const SKELETON_KEEP_WORDS = new Set([
+  // Pronouns
+  '你', '你们', '我', '我们', '他', '她', '它', '他们', '谁', '大家', '人家',
+  // Particles / auxiliary
+  '的', '了', '吗', '吧', '呢', '啊', '哦', '嘛', '呀', '哈', '嗯',
+  '在', '又', '都', '也', '就', '还', '才', '不', '没', '有', '是',
+  '这', '那', '什么', '怎么', '哪', '多', '几',
+  // Structural connectors
+  '和', '跟', '但', '而', '因为', '所以', '虽然', '如果',
+]);
+
+// Punctuation to preserve in skeleton
+const SKELETON_PUNCT_RE = /[？?！!，,。\.、…～~：:；;（）()\[\]【】「」''""]/;
 
 /**
- * Tokenize lore text into a Set of meaningful tokens (length ≥ 2).
- * Splits on whitespace/punctuation; includes CJK character runs individually.
+ * Extract sentence skeleton: content words → `_`, keep function words + punctuation.
+ * Exported for testing.
  */
-export function tokenizeLore(text: string): Set<string> {
-  const stripped = text.replace(/\[CQ:[^\]]+\]/g, ' ');
-  const tokens = new Set<string>();
-  // Split on whitespace and common punctuation
-  for (const chunk of stripped.split(/[\s\p{P}！？。，、；：""''【】《》（）…—\-_/\\|]+/u)) {
-    const t = chunk.trim();
-    if (t.length >= 2) tokens.add(t);
+export function extractSkeleton(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) return '';
+
+  const tokens: string[] = [];
+  let i = 0;
+  while (i < trimmed.length) {
+    // Check for punctuation
+    if (SKELETON_PUNCT_RE.test(trimmed[i]!)) {
+      tokens.push(trimmed[i]!);
+      i++;
+      continue;
+    }
+
+    // Try to match a multi-char keep word (greedy: try longest first)
+    let matched = false;
+    for (const w of SKELETON_KEEP_WORDS) {
+      if (w.length > 1 && trimmed.startsWith(w, i)) {
+        tokens.push(w);
+        i += w.length;
+        matched = true;
+        break;
+      }
+    }
+    if (matched) continue;
+
+    // Single-char keep word
+    if (SKELETON_KEEP_WORDS.has(trimmed[i]!)) {
+      tokens.push(trimmed[i]!);
+      i++;
+      continue;
+    }
+
+    // Content word character — replace with slot marker
+    // Collapse consecutive content chars into one `_`
+    if (tokens.length === 0 || tokens[tokens.length - 1] !== '_') {
+      tokens.push('_');
+    }
+    i++;
   }
-  return tokens;
+
+  return tokens.join('');
+}
+
+/**
+ * Skeleton Jaccard similarity: compare two skeletons as bigram sets.
+ * Returns 0..1.
+ */
+export function skeletonSimilarity(a: string, b: string): number {
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  const bigrams = (s: string): Set<string> => {
+    const out = new Set<string>();
+    if (s.length < 2) { if (s) out.add(s); return out; }
+    for (let i = 0; i < s.length - 1; i++) out.add(s.slice(i, i + 2));
+    return out;
+  };
+  const A = bigrams(a);
+  const B = bigrams(b);
+  if (A.size === 0 || B.size === 0) return 0;
+  let inter = 0;
+  for (const x of A) if (B.has(x)) inter++;
+  return inter / (A.size + B.size - inter);
+}
+
+// ── Mood signal detection for context injection (T1 tone-humanize) ──────
+// Lightweight heuristic: scan recent messages for playful/tense signals.
+// Returns a mood hint string for user-role context, or empty string.
+
+const PLAYFUL_TERMS = new Set([
+  '哈哈', '哈哈哈', '草', '嘿嘿', '笑死', '绷不住', '嘎嘎', '咕咕',
+  'xd', 'XD', 'hhh', '哈', '嘻嘻', '乐', '好笑', '哦哦哦', '啊啊啊',
+  '哈哈哈哈', '笑了', '绷', '太草了', '6', '666', '真的假的',
+  'www', 'ww', '呜呜', '嘤', '哭了', '呜呜呜', '救命',
+]);
+
+const TENSE_TERMS = new Set([
+  '滚', '操', '妈的', '傻逼', 'sb', '废物', '智障', '煞笔',
+  '吵架', '别骂', '骂人', '喷', '尼玛', '狗',
+]);
+
+/**
+ * Detect mood signal from recent messages.
+ * Returns 'playful' | 'tense' | null.
+ * Exported for testing.
+ */
+export function detectMoodSignal(
+  recentMessages: Array<{ content: string }>,
+  windowSize = 5,
+): 'playful' | 'tense' | null {
+  const window = recentMessages.slice(-windowSize);
+  if (window.length === 0) return null;
+
+  let playfulHits = 0;
+  let tenseHits = 0;
+
+  for (const msg of window) {
+    const text = msg.content.toLowerCase();
+    // Check each term as substring (handles "哈哈哈哈" matching "哈哈")
+    for (const term of PLAYFUL_TERMS) {
+      if (text.includes(term.toLowerCase())) { playfulHits++; break; }
+    }
+    for (const term of TENSE_TERMS) {
+      if (text.includes(term.toLowerCase())) { tenseHits++; break; }
+    }
+  }
+
+  // Threshold: >= 2 messages with signal
+  if (tenseHits >= 2) return 'tense';
+  if (playfulHits >= 2) return 'playful';
+  return null;
+}
+
+/**
+ * Build a mood hint for user-role context injection.
+ * Soft hint, not a tone override — respects feedback_dont_stack_persona_overrides.
+ */
+export function buildMoodHint(mood: 'playful' | 'tense' | null): string {
+  if (mood === 'playful') {
+    return '\n（当前群聊氛围：玩梗/开心，跟着玩比 dismiss 更自然）';
+  }
+  if (mood === 'tense') {
+    return '\n（当前群聊氛围：紧张/冲突，谨慎回应，别火上浇油）';
+  }
+  return '';
 }
 
 const MAX_OUTGOING_IDS = 50;
@@ -514,8 +603,7 @@ export class ChatModule implements IChatModule {
   private readonly loreOverviewCache = new Map<string, string | null>();
   // sticker section: groupId -> formatted section string (loaded async once)
   private readonly stickerSectionCache = new Map<string, string>();
-  // recent mface keys bot has sent per group: capped at 8, used for rotation cooldown
-  private readonly recentMfaceByGroup = new Map<string, string[]>();
+  // recentMfaceByGroup removed: tracking moved to StickerFirstModule (unified suppress owner)
   // outgoing message IDs per group (capped at MAX_OUTGOING_IDS)
   private readonly outgoingMsgIds = new Map<string, Set<number>>();
   // last proactive reply timestamp per group (for silence factor)
@@ -596,6 +684,8 @@ export class ChatModule implements IChatModule {
   private charModule: ICharModule | null = null;
   private readonly stickerFirst: IStickerFirstModule | null;
   private readonly bandoriLiveRepo: IBandoriLiveRepository | null;
+  private readonly loreLoader: ILoreLoader | null;
+  private readonly deflectionEngine: IDeflectionEngine | null;
   // per-group: whether the last generateReply call returned an evasive reply
   private readonly lastEvasiveReply = new Map<string, boolean>();
   // per-group: fact ids injected into the system prompt of the last generateReply.
@@ -657,6 +747,8 @@ export class ChatModule implements IChatModule {
     this.forwardCache = options.forwardCache ?? null;
     this.stickerFirst = options.stickerFirst ?? null;
     this.bandoriLiveRepo = options.bandoriLiveRepo ?? null;
+    this.loreLoader = options.loreLoader ?? null;
+    this.deflectionEngine = options.deflectionEngine ?? null;
 
     if (this.moodProactiveEnabled) {
       this.moodProactiveTimer = setInterval(
@@ -725,15 +817,14 @@ export class ChatModule implements IChatModule {
   private _recordOwnReply(groupId: string, reply: string): void {
     let arr = this.botRecentOutputs.get(groupId) ?? [];
     arr = [...arr, reply];
-    if (arr.length > 5) arr = arr.slice(-5);
+    const BOT_OUTPUT_WINDOW = 10;
+    if (arr.length > BOT_OUTPUT_WINDOW) arr = arr.slice(-BOT_OUTPUT_WINDOW);
     this.botRecentOutputs.set(groupId, arr);
 
-    // Track mface keys for rotation cooldown
+    // Track mface keys for rotation cooldown (delegated to StickerFirstModule)
     const mfaceKeys = [...reply.matchAll(/\[CQ:mface,[^\]]*\bemoji_id=([^,\]]+)/g)].map(m => m[1]!.trim());
-    if (mfaceKeys.length > 0) {
-      let recent = this.recentMfaceByGroup.get(groupId) ?? [];
-      recent = [...recent, ...mfaceKeys].slice(-8);
-      this.recentMfaceByGroup.set(groupId, recent);
+    if (mfaceKeys.length > 0 && this.stickerFirst) {
+      this.stickerFirst.recordMfaceOutput(groupId, mfaceKeys);
     }
   }
 
@@ -840,11 +931,15 @@ export class ChatModule implements IChatModule {
 
   /** Evict lore + identity caches for a group so next message re-reads the updated file. */
   invalidateLore(groupId: string): void {
-    this.loreCache.delete(groupId);
-    this.loreKeywordsCache.delete(groupId);
-    this.loreAliasIndex.delete(groupId);
-    this.loreChunkAliasMap.delete(groupId);
-    this.loreOverviewCache.delete(groupId);
+    if (this.loreLoader) {
+      this.loreLoader.invalidateLore(groupId);
+    } else {
+      this.loreCache.delete(groupId);
+      this.loreKeywordsCache.delete(groupId);
+      this.loreAliasIndex.delete(groupId);
+      this.loreChunkAliasMap.delete(groupId);
+      this.loreOverviewCache.delete(groupId);
+    }
     this.groupIdentityCache.delete(groupId);
     this.stickerSectionCache.delete(groupId);
     this.stickerRefreshCounter.set(groupId, 0);
@@ -1245,7 +1340,11 @@ export class ChatModule implements IChatModule {
       }
     }
 
-    const userContent = `${liveBlock}${replyContextBlock}${keywordSection}${wideSection}${mediumSection}${immediateSection}${avoidSection}以上语境里 [你(昵称)] 是你自己说过的，[别人昵称] 是群友说的。**不要把群友的话当成你自己说过的**。${atMentionDirective}${youAddressedDirective}
+    // T1 tone-humanize: detect mood signal from recent context for soft hint injection
+    const moodSignal = detectMoodSignal(immediateChron as Array<{ content: string }>);
+    const moodHint = buildMoodHint(moodSignal);
+
+    const userContent = `${liveBlock}${replyContextBlock}${keywordSection}${wideSection}${mediumSection}${immediateSection}${avoidSection}以上语境里 [你(昵称)] 是你自己说过的，[别人昵称] 是群友说的。**不要把群友的话当成你自己说过的**。${atMentionDirective}${youAddressedDirective}${moodHint}
 
 ← 要接的这条 — 只输出一个：${isAtTrigger ? '一条自然反应（不能是 <skip>）' : '<skip> 或 一条自然反应'}。${distinctSpeakers >= 3 ? `\n最近 ${distinctSpeakers} 个群友同时聊，可以用"你们"集体称呼。` : ''}
 ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMessage.content) ? '\n**注意**: 这条消息有人直接骂你。**绝对不要回"自言自语吗"/"在骂谁"** — 那是 bot tell。要么硬怼回去，要么 <skip>。' : ''}`;
@@ -1298,7 +1397,10 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
         { groupId, userId: triggerMessage.userId },
         async () => (await chatRequest(true)).text,
       );
-      const processed = postProcess(text);
+      // Use whitelist-aware mface filtering: keep mface codes whose key is
+      // in the group's learned sticker pool (P0-1 fix for mface strip bug)
+      const mfaceKeys = this.localStickerRepo?.getMfaceKeys(groupId) ?? null;
+      const processed = applyPersonaFilters(sanitize(text), mfaceKeys);
       // Claude explicitly skips this trigger
       if (/^<skip>\s*$/i.test(processed)) {
         this.logger.debug({ groupId, trigger: triggerMessage.content }, 'Claude explicitly skipped');
@@ -1309,8 +1411,9 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
         this.logger.debug({ groupId }, 'Claude opted out — dropping reply silently');
         return null;
       }
-      // Confabulation detector: warn if bot claims it already said something
-      checkConfabulation(processed, triggerMessage.content, { groupId });
+      // Confabulation detector: soft-drop if bot claims it already said something
+      const confabFallback = checkConfabulation(processed, triggerMessage.content, { groupId });
+      if (confabFallback !== null) return null;
       // Echo detector: drop replies that are essentially the trigger parroted back
       if (isEcho(processed, triggerMessage.content)) {
         this.logger.info({ groupId, reply: processed, trigger: triggerMessage.content }, 'Echo detected — dropping reply silently');
@@ -1322,10 +1425,35 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       // prompt rule. Hard skip if cosine on character-bigram sets > 0.7 against
       // the last 3 own replies.
       const recentOwn = this.botRecentOutputs.get(groupId) ?? [];
-      const nearDup = recentOwn.slice(-3).find(prev => this._bigramSim(prev, processed) > 0.7);
+      const NEAR_DUP_WINDOW = 8;
+      const nearDup = recentOwn.slice(-NEAR_DUP_WINDOW).find(prev => {
+        // Short replies: use exact/substring check instead of Jaccard
+        // (Jaccard on < 10 chars has too many false positives)
+        if (processed.length < 10) {
+          return prev === processed || prev.includes(processed) || processed.includes(prev);
+        }
+        return this._bigramSim(prev, processed) > 0.7;
+      });
       if (nearDup) {
         this.logger.info({ groupId, reply: processed, duplicateOf: nearDup }, 'Near-duplicate of recent own reply — dropping');
         return null;
+      }
+
+      // T2 tone-humanize: skeleton-level near-dup detection.
+      // Catches "你们又在 X 啊" / "你们又在 Y 啊" style repetition that
+      // slips past bigram Jaccard due to different content words.
+      const SKELETON_DUP_WINDOW = 5;
+      const SKELETON_DUP_THRESHOLD = 0.6;
+      const candidateSkeleton = extractSkeleton(processed);
+      if (candidateSkeleton.length >= 3) {
+        const skelDup = recentOwn.slice(-SKELETON_DUP_WINDOW).find(prev => {
+          const prevSkeleton = extractSkeleton(prev);
+          return prevSkeleton.length >= 3 && skeletonSimilarity(candidateSkeleton, prevSkeleton) > SKELETON_DUP_THRESHOLD;
+        });
+        if (skelDup) {
+          this.logger.info({ groupId, reply: processed, skeletonDupOf: skelDup, skeleton: candidateSkeleton }, 'Skeleton near-dup detected — dropping');
+          return null;
+        }
       }
 
       // ── STICKER-FIRST INTERCEPT ──────────────────────────────────────────
@@ -1695,7 +1823,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     const pool = getStickerPool(groupId);
     if (!pool || pool.length === 0) return '';
 
-    const recentKeys = new Set(this.recentMfaceByGroup.get(groupId) ?? []);
+    const recentKeys = this.stickerFirst?.getRecentMfaceKeys(groupId) ?? new Set<string>();
     // Extract emoji_id from each cqCode for cooldown comparison
     const filtered = pool.filter(s => {
       const m = s.cqCode.match(/\bemoji_id=([^,\]]+)/);
@@ -1926,6 +2054,11 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
 
   /** Pop one deflection from cache (refill async if low), fall back to static pool on empty. */
   private async _generateDeflection(category: DeflectCategory, triggerMsg: GroupMessage): Promise<string> {
+    if (this.deflectionEngine) {
+      return this.deflectionEngine.generateDeflection(category, { content: triggerMsg.content });
+    }
+
+    // Inline fallback
     const cache = this.deflectCache.get(category) ?? [];
 
     if (this.deflectCacheEnabled) {
@@ -2014,12 +2147,13 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
   }
 
   private _hasLoreKeyword(groupId: string, content: string): boolean {
-    // Ensure lore is loaded (triggers cache if needed)
+    if (this.loreLoader) return this.loreLoader.hasLoreKeyword(groupId, content);
+
+    // Inline fallback (no loreLoader injected)
     this._loadRelevantLore(groupId, content, []);
     const loreTokens = this.loreKeywordsCache.get(groupId);
     if (!loreTokens || loreTokens.size === 0) return false;
 
-    // Tokenize the trigger message and check for intersection
     const msgTokens = tokenizeLore(content);
     for (const token of msgTokens) {
       if (loreTokens.has(token)) return true;
@@ -2091,7 +2225,9 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
    * 4. 8000 char total cap
    */
   private _loadRelevantLore(groupId: string, triggerContent: string, immediateContext: { nickname: string; content: string }[]): string | null {
-    // Try per-member directory first
+    if (this.loreLoader) return this.loreLoader.loadRelevantLore(groupId, triggerContent, immediateContext);
+
+    // Inline fallback (no loreLoader injected)
     const aliasIndex = this._buildLoreAliasIndex(groupId);
     if (aliasIndex && aliasIndex.size > 0) {
       return this._loadRelevantLoreFromDir(groupId, triggerContent, immediateContext, aliasIndex);
@@ -2295,6 +2431,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
   }
 
   private _loadTuning(): string | null {
+    if (this.loreLoader) return this.loreLoader.loadTuning();
     if (!this.tuningPath) return null;
     const parts: string[] = [];
     // Short-term tuning (overwritten each cycle)
@@ -2476,7 +2613,9 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
 
     // Check if we have a cached base (without lore) that's still valid
     const cached = this.groupIdentityCache.get(groupId);
-    const hasPerMemberLore = this.loreAliasIndex.has(groupId) && (this.loreAliasIndex.get(groupId)?.size ?? 0) > 0;
+    const hasPerMemberLore = this.loreLoader
+      ? this.loreLoader.hasPerMemberLore(groupId)
+      : this.loreAliasIndex.has(groupId) && (this.loreAliasIndex.get(groupId)?.size ?? 0) > 0;
 
     // If per-member lore is active, we can't use the full cached result since
     // lore content varies per call. But we can still use cached base + fresh lore.

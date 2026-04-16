@@ -2,12 +2,20 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { StickerFirstModule, type IStickerFirstModule } from '../src/modules/sticker-first.js';
 import type { ILocalStickerRepository, LocalSticker } from '../src/storage/db.js';
 import type { IEmbeddingService } from '../src/storage/embeddings.js';
+import type { IStickerSampler, StickerCandidate } from '../src/services/sticker-sampler.js';
 import { initLogger } from '../src/utils/logger.js';
 import * as os from 'node:os';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 initLogger({ level: 'silent' });
+
+// Pass-through sampler that preserves original order (no randomness)
+const identitySampler: IStickerSampler = {
+  sample(candidates, limit) {
+    return candidates.slice(0, limit) as StickerCandidate[];
+  },
+};
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -34,9 +42,15 @@ function makeRepo(stickers: LocalSticker[] = []): ILocalStickerRepository {
   return {
     upsert: vi.fn(),
     getTopByGroup: vi.fn().mockReturnValue(stickers),
+    getAllCandidates: vi.fn().mockReturnValue(stickers),
     recordUsage: vi.fn(),
     setSummary: vi.fn(),
     listMissingSummary: vi.fn().mockReturnValue([]),
+    blockSticker: vi.fn().mockReturnValue(true),
+    unblockSticker: vi.fn().mockReturnValue(true),
+    getMfaceKeys: vi.fn().mockReturnValue(new Set<string>()),
+    getEmbeddingVec: vi.fn().mockReturnValue(null),
+    setEmbeddingVec: vi.fn(),
   };
 }
 
@@ -69,10 +83,10 @@ describe('EC-1: mode OFF → returns null immediately', () => {
   it('pickSticker returns null when stickerFirstEnabled=false', async () => {
     const repo = makeRepo([makeMatchingSticker()]);
     const embedder = makeEmbedder(true, () => sameVec());
-    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder);
+    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder, identitySampler);
     const result = await mod.pickSticker('g1', '开心啊', 0.25, false);
     expect(result).toBeNull();
-    expect(repo.getTopByGroup).not.toHaveBeenCalled();
+    expect(repo.getAllCandidates).not.toHaveBeenCalled();
   });
 });
 
@@ -82,7 +96,7 @@ describe('EC-2: empty sticker library → returns null', () => {
   it('pickSticker returns null when no stickers in group', async () => {
     const repo = makeRepo([]);
     const embedder = makeEmbedder(true, () => sameVec());
-    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder);
+    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder, identitySampler);
     const result = await mod.pickSticker('g1', '测试', 0.25, true);
     expect(result).toBeNull();
   });
@@ -99,7 +113,7 @@ describe('EC-3: all scores below threshold → returns null', () => {
     const embedder = makeEmbedder(true, () => {
       return callIdx++ === 0 ? [1, 0, 0, 0] : [-1, 0, 0, 0];
     });
-    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder);
+    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder, identitySampler);
     const result = await mod.pickSticker('g1', '开心', 0.25, true);
     expect(result).toBeNull();
   });
@@ -115,7 +129,7 @@ describe('EC-4: one sticker above threshold → returns its CQ code', () => {
     const repo = makeRepo([sticker]);
     // query and context both embed to same vec → cosine = 1.0
     const embedder = makeEmbedder(true, () => [1, 0, 0, 0]);
-    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder);
+    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder, identitySampler);
     const result = await mod.pickSticker('g1', '开心', 0.25, true);
     expect(result).not.toBeNull();
     expect(result!.cqCode).toBe('[CQ:image,file=ok]');
@@ -151,7 +165,7 @@ describe('EC-5: multiple stickers above threshold → top-1 wins', () => {
     ].map(v => { const n = Math.sqrt(v.reduce((s, x) => s + x * x, 0)); return v.map(x => x / n); });
     let idx = 0;
     const embedder = makeEmbedder(true, () => vecs[idx++]!);
-    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder);
+    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder, identitySampler);
     const result = await mod.pickSticker('g1', 'query', 0.20, true);
     expect(result?.cqCode).toBe('[CQ:A]');
     [pathA, pathB, pathC].forEach(p => fs.unlinkSync(p));
@@ -180,7 +194,7 @@ describe('EC-6: top suppressed, next-best above threshold', () => {
     ].map(v => { const n = Math.sqrt(v.reduce((s, x) => s + x * x, 0)); return v.map(x => x / n); });
     let idx = 0;
     const embedder = makeEmbedder(true, () => vecs[idx++]!);
-    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder);
+    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder, identitySampler);
 
     // Suppress the top sticker
     mod.suppressSticker('g1', 'top');
@@ -199,7 +213,7 @@ describe('EC-6b: all candidates suppressed → returns null', () => {
     const sticker = makeSticker({ key: 'suppressed', contextSamples: ['hi'] });
     const repo = makeRepo([sticker]);
     const embedder = makeEmbedder(true, () => [1, 0, 0, 0]);
-    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder);
+    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder, identitySampler);
     mod.suppressSticker('g1', 'suppressed');
     const result = await mod.pickSticker('g1', 'hi', 0.0, true);
     expect(result).toBeNull();
@@ -230,7 +244,7 @@ describe('EC-21: embedder not ready → returns null', () => {
     const sticker = makeSticker({ contextSamples: ['hi'] });
     const repo = makeRepo([sticker]);
     const embedder = makeEmbedder(false);
-    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder);
+    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder, identitySampler);
     const result = await mod.pickSticker('g1', 'hi', 0.25, true);
     expect(result).toBeNull();
     expect(embedder.embed).not.toHaveBeenCalled();
@@ -245,7 +259,7 @@ describe('EC-17: static system prompt invariant', () => {
     // Its pickSticker must only use embedder + repo
     const repo = makeRepo([makeSticker({ contextSamples: ['hi'] })]);
     const embedder = makeEmbedder(true, () => [1, 0, 0, 0]);
-    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder);
+    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder, identitySampler);
     // No claude client in constructor → any LLM call would throw at compile time
     const result = await mod.pickSticker('g1', 'hi', 0.0, true);
     // Just verifying no error thrown and it returns a value type
@@ -264,7 +278,7 @@ describe('EC-7: threshold 0.0 — accepts everything above zero cosine', () => {
     // cos(query, sample) = small positive
     let call = 0;
     const embedder = makeEmbedder(true, () => call++ === 0 ? [1, 0, 0, 0] : [0.01, 0, 0, 0.9999]);
-    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder);
+    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder, identitySampler);
     const result = await mod.pickSticker('g1', '哈哈哈', 0.0, true);
     // cosine should be > 0.0 so it wins
     expect(result).not.toBeNull();
@@ -278,7 +292,7 @@ describe('EC-8: threshold 1.0 — only a perfect match wins', () => {
     const repo = makeRepo([sticker]);
     let call = 0;
     const embedder = makeEmbedder(true, () => call++ === 0 ? [1, 0, 0, 0] : [0.99, 0.1, 0, 0]);
-    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder);
+    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder, identitySampler);
     const result = await mod.pickSticker('g1', '开心哈', 1.0, true);
     expect(result).toBeNull();
   });
@@ -289,7 +303,7 @@ describe('EC-8: threshold 1.0 — only a perfect match wins', () => {
     const sticker = makeSticker({ localPath, summary: '开心', contextSamples: ['哈哈哈哈哈'] });
     const repo = makeRepo([sticker]);
     const embedder = makeEmbedder(true, () => [1, 0, 0, 0]); // always same vec → cosine=1.0
-    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder);
+    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder, identitySampler);
     const result = await mod.pickSticker('g1', '开心哈哈', 1.0, true);
     expect(result).not.toBeNull();
     fs.unlinkSync(localPath);
@@ -302,7 +316,7 @@ describe('EC-20: null processedText → pickSticker never called', () => {
   it('module contract: pickSticker called with enabled=true can return null without throwing', async () => {
     const repo = makeRepo([]);
     const embedder = makeEmbedder(true);
-    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder);
+    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder, identitySampler);
     // When generateReply returns null, the caller does not call pickSticker
     // This test validates the module itself doesn't misbehave on empty library
     await expect(mod.pickSticker('g1', '', 0.5, true)).resolves.toBeNull();
@@ -316,7 +330,7 @@ describe('Sticker with null localPath is excluded from candidates', () => {
     const sticker = makeSticker({ localPath: null, contextSamples: ['hi'] });
     const repo = makeRepo([sticker]);
     const embedder = makeEmbedder(true, () => [1, 0, 0, 0]);
-    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder);
+    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder, identitySampler);
     const result = await mod.pickSticker('g1', 'hi', 0.0, true);
     expect(result).toBeNull();
   });
@@ -325,7 +339,7 @@ describe('Sticker with null localPath is excluded from candidates', () => {
     const sticker = makeSticker({ localPath: '/no/such/file.jpg', contextSamples: ['hi'] });
     const repo = makeRepo([sticker]);
     const embedder = makeEmbedder(true, () => [1, 0, 0, 0]);
-    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder);
+    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder, identitySampler);
     const result = await mod.pickSticker('g1', 'hi', 0.0, true);
     expect(result).toBeNull();
   });
@@ -338,7 +352,7 @@ describe('Sticker with <6 chars total scorable text is excluded', () => {
     const sticker = makeSticker({ summary: 'hi', contextSamples: [] }); // 2 chars, <6
     const repo = makeRepo([sticker]);
     const embedder = makeEmbedder(true, () => [1, 0, 0, 0]);
-    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder);
+    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder, identitySampler);
     const result = await mod.pickSticker('g1', 'test text here', 0.0, true);
     expect(result).toBeNull();
   });
@@ -347,7 +361,7 @@ describe('Sticker with <6 chars total scorable text is excluded', () => {
     const sticker = makeSticker({ summary: null, contextSamples: ['ab'] }); // 2 chars total
     const repo = makeRepo([sticker]);
     const embedder = makeEmbedder(true, () => [1, 0, 0, 0]);
-    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder);
+    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder, identitySampler);
     const result = await mod.pickSticker('g1', 'something', 0.0, true);
     expect(result).toBeNull();
   });
@@ -358,7 +372,7 @@ describe('Sticker with <6 chars total scorable text is excluded', () => {
     const sticker = makeSticker({ localPath, summary: 'abc', contextSamples: ['def'] }); // 6 chars
     const repo = makeRepo([sticker]);
     const embedder = makeEmbedder(true, () => [1, 0, 0, 0]);
-    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder);
+    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder, identitySampler);
     const result = await mod.pickSticker('g1', 'test', 0.0, true);
     expect(result).not.toBeNull();
     fs.unlinkSync(localPath);
@@ -374,7 +388,7 @@ describe('suppressSticker', () => {
     const sticker = makeSticker({ key: 'k1', localPath, contextSamples: ['hi there ok'] });
     const repo = makeRepo([sticker]);
     const embedder = makeEmbedder(true, () => [1, 0, 0, 0]);
-    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder);
+    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder, identitySampler);
     mod.suppressSticker('g1', 'k1');
     const result = await mod.pickSticker('g1', 'hi', 0.0, true);
     expect(result).toBeNull();
@@ -387,7 +401,7 @@ describe('suppressSticker', () => {
     const sticker = makeSticker({ key: 'k1', localPath, contextSamples: ['hi there ok'] });
     const repoG2 = makeRepo([sticker]);
     const embedder = makeEmbedder(true, () => [1, 0, 0, 0]);
-    const mod: IStickerFirstModule = new StickerFirstModule(repoG2, embedder);
+    const mod: IStickerFirstModule = new StickerFirstModule(repoG2, embedder, identitySampler);
     mod.suppressSticker('g1', 'k1');
     // Group g2 is NOT suppressed
     const result = await mod.pickSticker('g2', 'hi', 0.0, true);
@@ -410,7 +424,7 @@ describe('Scoring: concatenated context string (not per-sample max)', () => {
     const repo = makeRepo([sticker]);
     const calls: string[] = [];
     const embedder = makeEmbedder(true, (text) => { calls.push(text); return [1, 0, 0, 0]; });
-    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder);
+    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder, identitySampler);
     await mod.pickSticker('g1', 'test query', 0.0, true);
     // First call = query text, second call = concatenated sticker text
     expect(calls.length).toBe(2);
@@ -484,7 +498,7 @@ describe('StickerChoice shape', () => {
     const sticker = makeSticker({ localPath, cqCode: '[CQ:X]', contextSamples: ['hi there ok'] });
     const repo = makeRepo([sticker]);
     const embedder = makeEmbedder(true, () => [1, 0, 0, 0]);
-    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder);
+    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder, identitySampler);
     const result = await mod.pickSticker('g1', 'hi', 0.0, true);
     expect(result).not.toBeNull();
     expect(typeof result!.key).toBe('string');
@@ -502,7 +516,7 @@ describe('Embed query failure falls through to null', () => {
     const sticker = makeSticker({ contextSamples: ['哈哈哈哈哈'] });
     const repo = makeRepo([sticker]);
     const embedder = makeEmbedder(true, () => { throw new Error('embed network error'); });
-    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder);
+    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder, identitySampler);
     const result = await mod.pickSticker('g1', '测试', 0.0, true);
     expect(result).toBeNull();
   });
@@ -519,7 +533,7 @@ describe('Embed sticker failure skips that sticker', () => {
       if (callIdx++ === 0) return [1, 0, 0, 0]; // query succeeds
       throw new Error('sticker embed failure');  // sticker embed fails
     });
-    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder);
+    const mod: IStickerFirstModule = new StickerFirstModule(repo, embedder, identitySampler);
     const result = await mod.pickSticker('g1', '测试', 0.0, true);
     expect(result).toBeNull(); // sticker skipped, no candidates left
     fs.unlinkSync(localPath);

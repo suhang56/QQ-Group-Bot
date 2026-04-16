@@ -23,6 +23,9 @@ import { AnnouncementSyncModule } from './modules/announcement-sync.js';
 import { NameImagesModule } from './modules/name-images.js';
 import { PokeModule } from './modules/poke.js';
 import { LoreUpdater } from './modules/lore-updater.js';
+import { LoreLoader } from './modules/lore-loader.js';
+import { DeflectionEngine } from './modules/deflection-engine.js';
+import { chatHistoryDefaults } from './config.js';
 import { SelfLearningModule } from './modules/self-learning.js';
 import { runFactEmbeddingBackfill, BACKFILL_INTERVAL_MS } from './modules/fact-embedding-backfill.js';
 import { VisionService } from './modules/vision.js';
@@ -41,6 +44,10 @@ import { AffinityModule } from './modules/affinity.js';
 import { JargonMiner } from './modules/jargon-miner.js';
 import { RatingPortalServer } from './server/rating-portal.js';
 import { TuningGenerator } from './server/tuning-generator.js';
+
+// ============================================================
+// PHASE 1: Infrastructure (logger, env, PID lock, database)
+// ============================================================
 
 // 1. Bootstrap logger
 const logLevel = process.env['LOG_LEVEL'] ?? 'info';
@@ -89,6 +96,10 @@ process.on('exit', () => { try { fs.unlinkSync(pidPath); } catch { /* ignore */ 
 const dbPath = process.env['DB_PATH'] ?? 'data/bot.db';
 const db = new Database(dbPath);
 logger.info({ dbPath }, 'Database opened');
+
+// ============================================================
+// PHASE 2: Services (LLM providers, embeddings, adapters)
+// ============================================================
 
 // 4. Instantiate services (bootstrap order per architecture §5.2)
 const botUserId = process.env['BOT_QQ_ID'] ?? '';
@@ -173,6 +184,10 @@ void embedder.waitReady().then(() => {
 });
 router.setSelfLearning(selfLearning);
 
+// ============================================================
+// PHASE 3: Modules (chat, mimic, moderation, stickers, etc.)
+// ============================================================
+
 // Tuning path is group-specific; falls back to data/tuning.md if no active group
 const tuningGroupId = process.env['ACTIVE_GROUPS']?.split(',')[0]?.trim();
 const tuningPath = tuningGroupId
@@ -181,6 +196,8 @@ const tuningPath = tuningGroupId
 
 const vision = new VisionService(claude, adapter, db.imageDescriptions);
 const stickerFirst = new StickerFirstModule(db.localStickers, embedder);
+const loreLoader = new LoreLoader(chatHistoryDefaults.loreDirPath, chatHistoryDefaults.loreSizeCapBytes, tuningPath);
+const deflectionEngine = new DeflectionEngine(claude, { cacheEnabled: true });
 
 const bandoriEnabled = process.env['BANDORI_SCRAPE_ENABLED'] !== 'false';
 const bandoriScraper = new BandoriLiveScraper(db.bandoriLives, {
@@ -188,6 +205,7 @@ const bandoriScraper = new BandoriLiveScraper(db.bandoriLives, {
   intervalMs: parseInt(process.env['BANDORI_SCRAPE_INTERVAL_MS'] ?? '86400000', 10),
 });
 bandoriScraper.start();
+deflectionEngine.start();
 
 const chat = new ChatModule(claude, db, {
   botUserId, deflectCacheEnabled: true, visionService: vision,
@@ -196,8 +214,11 @@ const chat = new ChatModule(claude, db, {
   forwardCache: db.forwardCache,
   stickerFirst,
   bandoriLiveRepo: bandoriEnabled ? db.bandoriLives : undefined,
+  loreLoader,
+  deflectionEngine,
 });
 router.setChat(chat);
+router.setStickerFirst(stickerFirst);
 router.setVisionService(vision);
 
 const charDataDir = path.join(process.cwd(), 'data', 'characters');
@@ -221,7 +242,7 @@ chat.setPicNameProvider(nameImages);
 const loreUpdater = new LoreUpdater(claude, db.messages, chat);
 router.setLoreUpdater(loreUpdater);
 
-const stickerCapture = new StickerCaptureService(db.localStickers, adapter, { claude });
+const stickerCapture = new StickerCaptureService(db.localStickers, adapter, { claude, embedder });
 router.setStickerCapture(stickerCapture);
 stickerCapture.startBackfillLoop(ACTIVE_GROUPS);
 
@@ -407,6 +428,8 @@ const shutdown = async () => {
   chat.destroy();
   if (factBackfillTimer) clearInterval(factBackfillTimer);
   stickerCapture.stopBackfillLoop();
+  bandoriScraper.stop();
+  deflectionEngine.stop();
   router.dispose();
   ratingPortal?.stop();
   await adapter.disconnect();

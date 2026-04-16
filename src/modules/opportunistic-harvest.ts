@@ -146,6 +146,7 @@ export class OpportunisticHarvest {
       () => this._run().catch(err => this.logger.error({ err }, 'harvest failed')),
       60_000,
     );
+    this.firstTimer.unref?.();
     this.timer = setInterval(
       () => this._run().catch(err => this.logger.error({ err }, 'harvest failed')),
       this.intervalMs,
@@ -156,6 +157,7 @@ export class OpportunisticHarvest {
       () => this._runDeep().catch(err => this.logger.error({ err }, 'deep harvest failed')),
       30 * 60_000,
     );
+    this.deepFirstTimer.unref?.();
     this.deepTimer = setInterval(
       () => this._runDeep().catch(err => this.logger.error({ err }, 'deep harvest failed')),
       this.deepIntervalMs,

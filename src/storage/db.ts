@@ -373,6 +373,8 @@ export interface ILearnedFactsRepository {
   countPending(groupId: string): number;
   expirePendingOlderThan(cutoffTimestamp: number): number;
   approveAllPending(groupId: string): number;
+  /** Record a backfill attempt failure. After 3 failures, marks as 'failed'. Returns true if marked failed. */
+  recordEmbeddingFailure(id: number): boolean;
 }
 
 export type ProposedAction = 'warn' | 'delete' | 'mute_10m' | 'mute_1h' | 'kick';
@@ -437,6 +439,16 @@ export interface ILocalStickerRepository {
   blockSticker(groupId: string, key: string): boolean;
   /** Unblock a previously blocked sticker. */
   unblockSticker(groupId: string, key: string): boolean;
+  /** Return the set of mface keys known for this group (unblocked only). */
+  getMfaceKeys(groupId: string): Set<string>;
+  /** Return all unblocked stickers for this group (no sorting, no limit). For Thompson sampling. */
+  getAllCandidates(groupId: string): LocalSticker[];
+  /** Count unblocked stickers for a group (for status display). */
+  countByGroup(groupId: string): number;
+  /** Get the cached embedding vector for a sticker. Returns null if not cached. */
+  getEmbeddingVec(groupId: string, key: string): number[] | null;
+  /** Store an embedding vector for a sticker as a BLOB. */
+  setEmbeddingVec(groupId: string, key: string, vec: number[]): void;
 }
 
 // ---- Expression pattern + user style types ----
@@ -1522,7 +1534,7 @@ class LearnedFactsRepository implements ILearnedFactsRepository {
 
   listActiveWithEmbeddings(groupId: string): LearnedFact[] {
     const rows = this.db.prepare(
-      `SELECT * FROM learned_facts WHERE group_id = ? AND status = 'active' AND embedding_vec IS NOT NULL ORDER BY created_at DESC, id DESC`
+      `SELECT * FROM learned_facts WHERE group_id = ? AND status = 'active' AND embedding_vec IS NOT NULL AND confidence >= 0.6 ORDER BY created_at DESC, id DESC LIMIT 500`
     ).all(groupId) as unknown as LearnedFactRow[];
     return rows.map(learnedFactFromRow);
   }
@@ -1536,7 +1548,7 @@ class LearnedFactsRepository implements ILearnedFactsRepository {
 
   listAllNullEmbeddingActive(limit: number): LearnedFact[] {
     const rows = this.db.prepare(
-      `SELECT * FROM learned_facts WHERE status = 'active' AND embedding_vec IS NULL ORDER BY id LIMIT ?`
+      `SELECT * FROM learned_facts WHERE status = 'active' AND embedding_vec IS NULL AND COALESCE(embedding_status, 'pending') != 'failed' ORDER BY id LIMIT ?`
     ).all(limit) as unknown as LearnedFactRow[];
     return rows.map(learnedFactFromRow);
   }
@@ -1631,6 +1643,29 @@ class LearnedFactsRepository implements ILearnedFactsRepository {
     ).run(now, groupId) as { changes: number };
     return result.changes;
   }
+
+  recordEmbeddingFailure(id: number): boolean {
+    const now = Math.floor(Date.now() / 1000);
+    // Check current attempt count via last_attempt_at as a proxy.
+    // We count failures by looking at how many times embedding_status was set.
+    // Simpler: use a counter approach by reading the current embedding_status.
+    const row = this.db.prepare(
+      'SELECT embedding_status FROM learned_facts WHERE id = ?'
+    ).get(id) as { embedding_status: string | null } | undefined;
+    const current = row?.embedding_status ?? 'pending';
+    const failCount = current.startsWith('fail_') ? parseInt(current.slice(5), 10) : 0;
+    const newCount = failCount + 1;
+    if (newCount >= 3) {
+      this.db.prepare(
+        'UPDATE learned_facts SET embedding_status = ?, last_attempt_at = ? WHERE id = ?'
+      ).run('failed', now, id);
+      return true;
+    }
+    this.db.prepare(
+      'UPDATE learned_facts SET embedding_status = ?, last_attempt_at = ? WHERE id = ?'
+    ).run(`fail_${newCount}`, now, id);
+    return false;
+  }
 }
 
 class LocalStickerRepository implements ILocalStickerRepository {
@@ -1708,6 +1743,54 @@ class LocalStickerRepository implements ILocalStickerRepository {
     this.db.prepare(
       `UPDATE local_stickers SET ${col} = ${col} + 1 WHERE group_id = ? AND key = ?`
     ).run(groupId, key);
+  }
+
+  getMfaceKeys(groupId: string): Set<string> {
+    const rows = this.db.prepare(
+      `SELECT key FROM local_stickers WHERE group_id = ? AND type = 'mface' AND COALESCE(blocked, 0) = 0`
+    ).all(groupId) as Array<{ key: string }>;
+    return new Set(rows.map(r => r.key));
+  }
+
+  getAllCandidates(groupId: string): LocalSticker[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM local_stickers WHERE group_id = ? AND COALESCE(blocked, 0) = 0`
+    ).all(groupId) as unknown as Array<{
+      id: number; group_id: string; key: string; type: string;
+      local_path: string | null; cq_code: string; summary: string | null;
+      context_samples: string; count: number; first_seen: number; last_seen: number;
+      usage_positive: number; usage_negative: number;
+    }>;
+    return rows.map(r => ({
+      id: r.id, groupId: r.group_id, key: r.key,
+      type: r.type as LocalSticker['type'],
+      localPath: r.local_path, cqCode: r.cq_code, summary: r.summary,
+      contextSamples: (() => { try { return JSON.parse(r.context_samples) as string[]; } catch { return []; } })(),
+      count: r.count, firstSeen: r.first_seen, lastSeen: r.last_seen,
+      usagePositive: r.usage_positive, usageNegative: r.usage_negative,
+    }));
+  }
+
+  countByGroup(groupId: string): number {
+    const row = this.db.prepare(
+      `SELECT COUNT(*) as cnt FROM local_stickers WHERE group_id = ? AND COALESCE(blocked, 0) = 0`
+    ).get(groupId) as { cnt: number };
+    return row.cnt;
+  }
+
+  getEmbeddingVec(groupId: string, key: string): number[] | null {
+    const row = this.db.prepare(
+      'SELECT embedding_vec FROM local_stickers WHERE group_id = ? AND key = ?'
+    ).get(groupId, key) as { embedding_vec: ArrayBuffer | null } | undefined;
+    if (!row?.embedding_vec) return null;
+    return Array.from(new Float32Array(row.embedding_vec));
+  }
+
+  setEmbeddingVec(groupId: string, key: string, vec: number[]): void {
+    const buf = new Float32Array(vec).buffer;
+    this.db.prepare(
+      'UPDATE local_stickers SET embedding_vec = ? WHERE group_id = ? AND key = ?'
+    ).run(new Uint8Array(buf), groupId, key);
   }
 
   setSummary(groupId: string, key: string, summary: string): void {
@@ -2241,6 +2324,11 @@ export class Database {
     // learned_facts.embedding_vec — added for semantic retrieval. Idempotent
     // ALTER for existing DBs created before this column existed.
     try { this._db.exec(`ALTER TABLE learned_facts ADD COLUMN embedding_vec BLOB`); } catch { /* already exists */ }
+    // embedding_status: 'pending' | 'done' | 'failed' | 'skipped' — for backfill tracking
+    try { this._db.exec(`ALTER TABLE learned_facts ADD COLUMN embedding_status TEXT DEFAULT 'pending'`); } catch { /* already exists */ }
+    try { this._db.exec(`ALTER TABLE learned_facts ADD COLUMN last_attempt_at INTEGER`); } catch { /* already exists */ }
+    // Partial index for backfill queries on learned_facts with null embeddings
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_learned_facts_null_embedding ON learned_facts(id) WHERE status = 'active' AND embedding_vec IS NULL`);
 
     // pending_moderation table — Batch D human-in-loop approval flow.
     this._db.exec(`
@@ -2304,6 +2392,9 @@ export class Database {
 
     // local_stickers.blocked — banned stickers are excluded from top queries.
     try { this._db.exec(`ALTER TABLE local_stickers ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0`); } catch { /* already exists */ }
+
+    // local_stickers.embedding_vec — cached embedding for sticker-first semantic match.
+    try { this._db.exec(`ALTER TABLE local_stickers ADD COLUMN embedding_vec BLOB`); } catch { /* already exists */ }
 
     // forward_cache — pre-expanded 合并转发 content, keyed by forward_id, TTL 24h.
     this._db.exec(`
@@ -2458,5 +2549,42 @@ export class Database {
         PRIMARY KEY (group_id, user_id)
       )
     `);
+
+    // Archive tables for old messages/bot_replies (P1-3: pruning strategy).
+    this._db.exec(`
+      CREATE TABLE IF NOT EXISTS messages_archive (
+        id INTEGER PRIMARY KEY, group_id TEXT NOT NULL, user_id TEXT NOT NULL,
+        nickname TEXT NOT NULL DEFAULT '', content TEXT NOT NULL, raw_content TEXT,
+        timestamp INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, source_message_id TEXT
+      )
+    `);
+    this._db.exec(`
+      CREATE TABLE IF NOT EXISTS bot_replies_archive (
+        id INTEGER PRIMARY KEY, group_id TEXT NOT NULL, trigger_msg_id TEXT,
+        trigger_user_nickname TEXT, trigger_content TEXT NOT NULL,
+        bot_reply TEXT NOT NULL, module TEXT NOT NULL, sent_at INTEGER NOT NULL,
+        rating INTEGER, rating_comment TEXT, rated_at INTEGER
+      )
+    `);
+  }
+
+  /**
+   * Archive messages and bot_replies older than cutoffSec.
+   * Moves rows into *_archive tables, then deletes from originals.
+   */
+  archiveOlderThan(cutoffSec: number): { messages: number; botReplies: number } {
+    let msgCount = 0;
+    let replyCount = 0;
+    try {
+      this._db.exec(`INSERT OR IGNORE INTO messages_archive SELECT * FROM messages WHERE timestamp < ${cutoffSec}`);
+      const msgResult = this._db.prepare(`DELETE FROM messages WHERE timestamp < ?`).run(cutoffSec) as { changes: number };
+      msgCount = msgResult.changes;
+    } catch { /* non-fatal */ }
+    try {
+      this._db.exec(`INSERT OR IGNORE INTO bot_replies_archive SELECT * FROM bot_replies WHERE sent_at < ${cutoffSec}`);
+      const replyResult = this._db.prepare(`DELETE FROM bot_replies WHERE sent_at < ?`).run(cutoffSec) as { changes: number };
+      replyCount = replyResult.changes;
+    } catch { /* non-fatal */ }
+    return { messages: msgCount, botReplies: replyCount };
   }
 }

@@ -27,13 +27,19 @@ function normalise(vec: Float32Array): number[] {
   return Array.from(vec, v => v / norm);
 }
 
+const DEFAULT_LRU_CAP = 2000;
+
 export class EmbeddingService implements IEmbeddingService {
   private _ready = false;
   private _disabled = false;
   private _model: ((text: string, opts: object) => Promise<{ data: Float32Array }>) | null = null;
   private readonly _loadPromise: Promise<void>;
+  // LRU cache: text -> embedding vector. Uses Map insertion order for LRU eviction.
+  private readonly _cache = new Map<string, number[]>();
+  private readonly _lruCap: number;
 
-  constructor(modelName = 'Xenova/all-MiniLM-L6-v2') {
+  constructor(modelName = 'Xenova/all-MiniLM-L6-v2', lruCap = DEFAULT_LRU_CAP) {
+    this._lruCap = lruCap;
     this._loadPromise = this._load(modelName);
   }
 
@@ -44,12 +50,37 @@ export class EmbeddingService implements IEmbeddingService {
   }
 
   async embed(text: string): Promise<number[]> {
+    // LRU cache hit: move to end (most recently used)
+    const cached = this._cache.get(text);
+    if (cached) {
+      this._cache.delete(text);
+      this._cache.set(text, cached);
+      return cached;
+    }
+
     await this._loadPromise;
     if (this._disabled || !this._model) {
       throw new Error('EmbeddingService disabled — model failed to load');
     }
     const output = await this._model(text, { pooling: 'mean', normalize: false });
-    return normalise(output.data);
+    const vec = normalise(output.data);
+
+    // Evict oldest if over capacity
+    if (this._cache.size >= this._lruCap) {
+      const oldest = this._cache.keys().next().value;
+      if (oldest !== undefined) this._cache.delete(oldest);
+    }
+    this._cache.set(text, vec);
+    return vec;
+  }
+
+  /** Pre-populate cache from stored embeddings (e.g. BLOB from DB). */
+  preload(text: string, vec: number[]): void {
+    if (this._cache.size >= this._lruCap) {
+      const oldest = this._cache.keys().next().value;
+      if (oldest !== undefined) this._cache.delete(oldest);
+    }
+    this._cache.set(text, vec);
   }
 
   private async _load(modelName: string): Promise<void> {

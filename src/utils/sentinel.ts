@@ -148,33 +148,34 @@ const LEAKED_CONTEXT_PREFIX_RE = /^\s*\[[^\]\n]{1,40}\]\s*[:：]\s*/;
 // (handled above) and anything with angle brackets inside a longer sentence.
 const ANGLE_WRAP_RE = /^\s*<([^<>\/\n]{1,80})>\s*$/;
 
-export function postProcess(text: string): string {
+/**
+ * Safety-only filter: strip hallucinated URLs, angle-bracket CQ codes,
+ * degenerate patterns, leaked context markers, and QQ built-in face codes.
+ * Does NOT touch mface or persona-level rules.
+ */
+export function sanitize(text: string): string {
   return text
     .replace(/\[CQ:face,[^\]]*\]/g, '')    // strip [CQ:face,id=N] — user banned QQ built-in faces
-    .replace(/\[CQ:mface,[^\]]*\]/g, '')   // strip [CQ:mface,...] — user banned QQ market stickers
     // Strip [CQ:image,...] that contains url=... — the model hallucinates
     // image segments by copying from context (which has real url= params).
     // Legit learned-sticker replies use file=file:/// local paths and never
     // contain url=, so this filter is safe.
     .replace(/\[CQ:image,[^\]]*url=[^\]]*\]/gi, '')
     // Strip ANY angle-bracketed <CQ:...> — this is always hallucination; no
-    // legitimate path ever emits CQ codes in angle brackets. The sub_type=1
-    // url=https://... pattern the model invents when it "wants to send an
-    // image" hits this filter.
+    // legitimate path ever emits CQ codes in angle brackets.
     .replace(/<CQ:[^>\n]*>/gi, '')
     .split('\n')
     // Drop whole-line <skip> first (including punct-padded "..<skip>" /
     // "<skip>..") so we don't leave a ".." remnant after inline strip.
     .filter(line => !SKIP_LINE_RE.test(line))
-    // Then strip any remaining inline <skip> — e.g. "嗯 <skip> 走了" keeps
-    // the real content with the token removed.
+    // Then strip any remaining inline <skip>
     .map(line => line.replace(/<\s*skip\s*>/gi, ''))
     // Degenerate angle-bracket wrap: unwrap or drop
     .map(l => {
       const m = ANGLE_WRAP_RE.exec(l);
       return m ? m[1]! : l;
     })
-    // Strip leaked context-marker prefixes like "[你]: " / "[你(小号)]: " / "[Alice]:"
+    // Strip leaked context-marker prefixes like "[你]: " / "[你(小号)]: "
     .map(l => l.replace(LEAKED_CONTEXT_PREFIX_RE, ''))
     .map(l => {
       // Strip orphan trailing brackets that survived CQ stripping (e.g. from
@@ -186,20 +187,66 @@ export function postProcess(text: string): string {
     })
     .filter(l => l.length > 0)
     .join('\n')
+    .trim();
+}
+
+/**
+ * Persona-level filters: strip mface codes not in the allowed whitelist,
+ * and remove trailing Chinese period.
+ *
+ * @param text - sanitized text (output of sanitize())
+ * @param allowedMfaceKeys - set of mface keys allowed for this group (null = strip all mface)
+ */
+export function applyPersonaFilters(
+  text: string,
+  allowedMfaceKeys: ReadonlySet<string> | null,
+): string {
+  let result = text;
+
+  if (allowedMfaceKeys === null) {
+    // No whitelist available: strip all mface (legacy behavior)
+    result = result.replace(/\[CQ:mface,[^\]]*\]/g, '');
+  } else {
+    // Keep mface codes whose key is in the whitelist, strip the rest
+    result = result.replace(/\[CQ:mface,[^\]]*\]/g, (match) => {
+      const keyMatch = /key=([^,\]]+)/.exec(match);
+      if (keyMatch && allowedMfaceKeys.has(keyMatch[1]!)) return match;
+      return '';
+    });
+  }
+
+  // Strip trailing Chinese period and clean up empty lines from mface removal
+  return result
+    .split('\n')
+    .map(l => l.trim())
+    .filter(l => l.length > 0)
+    .join('\n')
     .replace(/[\s。]*。[\s。]*$/, '')
     .trim();
+}
+
+/**
+ * Post-process a generated reply (backward-compatible thin wrapper).
+ * Calls sanitize() then applyPersonaFilters() with null whitelist (strip all mface).
+ */
+export function postProcess(text: string): string {
+  return applyPersonaFilters(sanitize(text), null);
 }
 
 const CONFABULATION_RE = /我刚说过了|我早就说了|我都说过了|这不是我刚说的|我不是说过了吗|两个意思我都说过/;
 
 /**
- * Detect and warn on confabulation patterns — bot claiming it explained something it didn't.
- * Logs at warn level for tracking; does NOT drop (may be legit in rare cases).
+ * Detect confabulation patterns — bot claiming it explained something it didn't.
+ * Returns a short fallback reply if confabulation is detected, null otherwise.
+ * Soft-drop: replace the confabulated reply with a safe fallback instead of
+ * sending the hallucinated "I already said" claim.
  */
-export function checkConfabulation(reply: string, trigger: string, context: Record<string, unknown>): void {
+export function checkConfabulation(reply: string, trigger: string, context: Record<string, unknown>): string | null {
   if (CONFABULATION_RE.test(reply)) {
-    logger.warn({ ...context, trigger, reply }, 'confabulation pattern detected');
+    logger.info({ ...context, trigger, reply }, 'confabulation soft-drop — replacing with fallback');
+    return '...';
   }
+  return null;
 }
 
 /**
@@ -237,6 +284,9 @@ export function isEcho(reply: string, trigger: string): boolean {
   const t = _normForEcho(trigger);
   const r = _normForEcho(reply);
   if (!t || !r) return false;
+  // Very short replies (< 4 normalized chars) are likely valid short
+  // responses ("好""嗯""哈") not echoes. Skip echo detection.
+  if (r.length < 4) return false;
   if (r === t) return true;
   if (r.includes(t) && r.length < t.length * 1.5) return true;
   if (t.includes(r) && t.length > r.length) return true;

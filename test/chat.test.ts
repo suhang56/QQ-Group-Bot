@@ -5,6 +5,7 @@ import type { IClaudeClient, ClaudeResponse } from '../src/ai/claude.js';
 import type { GroupMessage } from '../src/adapter/napcat.js';
 import { Database } from '../src/storage/db.js';
 import { ClaudeApiError } from '../src/utils/errors.js';
+import type { IEmbeddingService } from '../src/storage/embeddings.js';
 import { initLogger } from '../src/utils/logger.js';
 
 initLogger({ level: 'silent' });
@@ -2026,21 +2027,21 @@ describe('ChatModule — self-repetition avoidance', () => {
     expect(prompt).toContain('bot reply');
   });
 
-  it('botRecentOutputs caps at 5 entries', async () => {
+  it('botRecentOutputs caps at 10 entries', async () => {
     const chat = makeChat();
-    // Simulate 6 replies by calling with unique content each time
-    for (let i = 0; i < 6; i++) {
+    // Simulate 11 replies by calling with unique content each time
+    for (let i = 0; i < 11; i++) {
       claude.mockResolvedValueOnce({ text: `reply${i}`, inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 });
       db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: `msg${i}`, timestamp: Math.floor(Date.now() / 1000) + i, deleted: false });
       await chat.generateReply('g1', makeMsg({ content: `msg${i}` }), []);
     }
     claude.mockClear();
-    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'trigger', timestamp: Math.floor(Date.now() / 1000) + 10, deleted: false });
+    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'trigger', timestamp: Math.floor(Date.now() / 1000) + 20, deleted: false });
     await chat.generateReply('g1', makeMsg({ content: 'trigger' }), []);
     const prompt = (claude.mock.calls[0]![0] as { messages: Array<{ content: string }> }).messages[0]!.content as string;
-    // reply0 (oldest) should be evicted; reply1-reply5 remain
+    // reply0 (oldest) should be evicted; reply1-reply10 remain
     expect(prompt).not.toContain('reply0');
-    expect(prompt).toContain('reply5');
+    expect(prompt).toContain('reply10');
   });
 
   it('botRecentOutputs is isolated per group', async () => {
@@ -2125,21 +2126,24 @@ describe('ChatModule — echo detection and face stripping', () => {
     expect(result).toContain('哈哈');
   });
 
-  it('drops reply when Claude echoes a short trigger verbatim (regression: 草/666)', async () => {
-    for (const shortTrigger of ['草', '666', '哈']) {
-      const claude = vi.fn().mockResolvedValue({
-        text: shortTrigger, inputTokens: 10, outputTokens: 5,
-        cacheReadTokens: 0, cacheWriteTokens: 0,
-      } satisfies ClaudeResponse);
-      const chat = new ChatModule(
-        { complete: claude } as unknown as IClaudeClient,
-        db,
-        { botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999, moodProactiveEnabled: false, deflectCacheEnabled: false },
-      );
-      db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: shortTrigger, timestamp: Math.floor(Date.now() / 1000), deleted: false });
-      const result = await chat.generateReply('g1', makeMsg({ content: shortTrigger }), []);
-      expect(result, `short trigger "${shortTrigger}" echo should be dropped`).toBeNull();
-    }
+  it('allows short trigger echoes through (< 4 char guard prevents false kills)', async () => {
+    // Short replies like "草" echoing trigger "草" are now allowed through:
+    // isEcho guards r.length < 4 to prevent false positive drops on valid
+    // short responses like "嗯"/"好"/"草" that happen to match the trigger.
+    // We test with "草" only (single iteration to avoid DB state contamination).
+    const shortTrigger = '草';
+    const claude = vi.fn().mockResolvedValue({
+      text: shortTrigger, inputTokens: 10, outputTokens: 5,
+      cacheReadTokens: 0, cacheWriteTokens: 0,
+    } satisfies ClaudeResponse);
+    const chat = new ChatModule(
+      { complete: claude } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999, moodProactiveEnabled: false, deflectCacheEnabled: false },
+    );
+    db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: shortTrigger, timestamp: Math.floor(Date.now() / 1000), deleted: false });
+    const result = await chat.generateReply('g1', makeMsg({ content: shortTrigger }), []);
+    expect(result, `short trigger "${shortTrigger}" should pass through`).toBe(shortTrigger);
   });
 
   it('passes through a non-echo reply even for short triggers', async () => {
@@ -2188,7 +2192,7 @@ describe('ChatModule — confabulation guard', () => {
     });
   });
 
-  it('confabulation pattern in reply triggers warn log', async () => {
+  it('confabulation pattern in reply triggers soft-drop (returns null)', async () => {
     const { checkConfabulation } = await import('../src/utils/sentinel.js');
     const db = new Database(':memory:');
     const claude = vi.fn().mockResolvedValue({
@@ -2201,9 +2205,9 @@ describe('ChatModule — confabulation guard', () => {
       { botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999, moodProactiveEnabled: false, deflectCacheEnabled: false },
     );
     db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: '你说过什么', timestamp: Math.floor(Date.now() / 1000), deleted: false });
-    // Should still return the reply (confabulation logs but doesn't drop)
+    // Confabulation is now soft-dropped (returns null instead of the confabulated reply)
     const result = await chat.generateReply('g1', makeMsg({ content: '你说过什么' }), []);
-    expect(result).toBe('我都说过了有啥区别');
+    expect(result).toBeNull();
     // Verify checkConfabulation detects the pattern
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     checkConfabulation('我都说过了有啥区别', '你说过什么', { groupId: 'g1' });
@@ -3021,38 +3025,48 @@ describe('ChatModule — mface rotation', () => {
     expect(section).toBe('');
   });
 
-  it('recentMfaceByGroup: _recordOwnReply extracts mface emoji_ids', () => {
+  it('mface tracking: _recordOwnReply delegates to stickerFirst.recordMfaceOutput', () => {
+    const mockStickerFirst = {
+      pickSticker: vi.fn(),
+      suppressSticker: vi.fn(),
+      recordMfaceOutput: vi.fn(),
+      getRecentMfaceKeys: vi.fn().mockReturnValue(new Set<string>()),
+    };
     const chat = new ChatModule(
       { complete: vi.fn() } as unknown as IClaudeClient,
       db,
-      { botUserId: BOT_ID },
+      { botUserId: BOT_ID, stickerFirst: mockStickerFirst },
     );
     const reply = '来了 [CQ:mface,emoji_id=abc123,emoji_package_id=100,key=k1,summary=[笑]]';
     (chat as unknown as { _recordOwnReply: (g: string, r: string) => void })._recordOwnReply('g1', reply);
 
-    const recentMap = (chat as unknown as { recentMfaceByGroup: Map<string, string[]> }).recentMfaceByGroup;
-    expect(recentMap.get('g1')).toContain('abc123');
+    expect(mockStickerFirst.recordMfaceOutput).toHaveBeenCalledWith('g1', ['abc123']);
   });
 
-  it('recentMfaceByGroup: capped at 8 after many replies', () => {
-    const chat = new ChatModule(
-      { complete: vi.fn() } as unknown as IClaudeClient,
-      db,
-      { botUserId: BOT_ID },
-    );
-    const record = (chat as unknown as { _recordOwnReply: (g: string, r: string) => void })._recordOwnReply.bind(chat);
+  it('mface tracking: StickerFirstModule caps at 8 after many calls', async () => {
+    const { StickerFirstModule } = await import('../src/modules/sticker-first.js');
+    const mockRepo = {
+      upsert: vi.fn(), getTopByGroup: vi.fn().mockReturnValue([]),
+      getAllCandidates: vi.fn().mockReturnValue([]),
+      recordUsage: vi.fn(), setSummary: vi.fn(),
+      listMissingSummary: vi.fn().mockReturnValue([]),
+      blockSticker: vi.fn(), unblockSticker: vi.fn(),
+      getMfaceKeys: vi.fn().mockReturnValue(new Set()),
+    };
+    const mockEmbedder = { isReady: false, embed: vi.fn(), waitReady: vi.fn() };
+    const sf = new StickerFirstModule(mockRepo, mockEmbedder as unknown as IEmbeddingService);
     for (let i = 0; i < 12; i++) {
-      record('g1', `[CQ:mface,emoji_id=id${i},emoji_package_id=100,key=k${i},summary=[面]]`);
+      sf.recordMfaceOutput('g1', [`id${i}`]);
     }
-    const recent = (chat as unknown as { recentMfaceByGroup: Map<string, string[]> }).recentMfaceByGroup.get('g1') ?? [];
-    expect(recent.length).toBe(8);
-    // Should have the last 8 keys
-    expect(recent).toContain('id11');
-    expect(recent).not.toContain('id0');
-    expect(recent).not.toContain('id3');
+    const recent = sf.getRecentMfaceKeys('g1');
+    // 12 individual calls of 1 key each -> capped at 8 most recent
+    expect(recent.size).toBe(8);
+    expect(recent.has('id11')).toBe(true);
+    expect(recent.has('id0')).toBe(false);
+    expect(recent.has('id3')).toBe(false);
   });
 
-  it('_buildRotatedStickerSection excludes recently-used mfaces', async () => {
+  it('_buildRotatedStickerSection excludes recently-used mfaces via stickerFirst', async () => {
     // Build a pool with 3 stickers using the sticker module
     const { buildStickerSection } = await import('../src/utils/stickers.js');
     const fs = await import('node:fs');
@@ -3072,11 +3086,14 @@ describe('ChatModule — mface rotation', () => {
     const claude = { complete: vi.fn().mockResolvedValue({ text: '标', inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 }) } as unknown as IClaudeClient;
     await buildStickerSection(groupId, tmpDir, 10, claude);
 
-    const chat = new ChatModule(claude, db, { botUserId: BOT_ID });
-    // Mark x1 and x2 as recently used
-    const record = (chat as unknown as { _recordOwnReply: (g: string, r: string) => void })._recordOwnReply.bind(chat);
-    record(groupId, '[CQ:mface,emoji_id=x1,emoji_package_id=100,key=k0,summary=[面0]]');
-    record(groupId, '[CQ:mface,emoji_id=x2,emoji_package_id=100,key=k1,summary=[面1]]');
+    // Mock stickerFirst that reports x1,x2 as recently used
+    const mockStickerFirst = {
+      pickSticker: vi.fn(),
+      suppressSticker: vi.fn(),
+      recordMfaceOutput: vi.fn(),
+      getRecentMfaceKeys: vi.fn().mockReturnValue(new Set(['x1', 'x2'])),
+    };
+    const chat = new ChatModule(claude, db, { botUserId: BOT_ID, stickerFirst: mockStickerFirst });
 
     const section = (chat as unknown as { _buildRotatedStickerSection: (g: string) => string })._buildRotatedStickerSection(groupId);
 
@@ -3094,7 +3111,7 @@ describe('ChatModule — collective addressing (你们)', () => {
   it('BANGDREAM_PERSONA contains 集体称呼 section', () => {
     expect(BANGDREAM_PERSONA).toContain('集体称呼');
     expect(BANGDREAM_PERSONA).toContain('你们');
-    expect(BANGDREAM_PERSONA).toContain('看你们唐的');
+    expect(BANGDREAM_PERSONA).toContain('你们玩什么呢');
   });
 
   it('userContent tail contains collective-addressing reminder', async () => {

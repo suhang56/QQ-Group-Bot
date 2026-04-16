@@ -10,7 +10,15 @@ function makeRepo(): ILocalStickerRepository {
   return {
     upsert: vi.fn().mockReturnValue('inserted'),
     getTopByGroup: vi.fn().mockReturnValue([]),
+    getAllCandidates: vi.fn().mockReturnValue([]),
     recordUsage: vi.fn(),
+    setSummary: vi.fn(),
+    listMissingSummary: vi.fn().mockReturnValue([]),
+    blockSticker: vi.fn().mockReturnValue(true),
+    unblockSticker: vi.fn().mockReturnValue(true),
+    getMfaceKeys: vi.fn().mockReturnValue(new Set<string>()),
+    getEmbeddingVec: vi.fn().mockReturnValue(null),
+    setEmbeddingVec: vi.fn(),
   };
 }
 

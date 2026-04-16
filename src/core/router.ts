@@ -13,7 +13,8 @@ import type { IdCardGuard } from '../modules/id-guard.js';
 import type { SequenceGuard } from '../modules/sequence-guard.js';
 import type { VisionService } from '../modules/vision.js';
 import type { ICharModule } from '../modules/char.js';
-import { extractTokens } from '../modules/chat.js';
+import type { IStickerFirstModule } from '../modules/sticker-first.js';
+import { extractTokens } from '../utils/text-tokenize.js';
 import { BotErrorCode } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
 import { defaultGroupConfig } from '../config.js';
@@ -112,6 +113,7 @@ export class Router implements IRouter {
   private sequenceGuard: SequenceGuard | null = null;
   private visionService: VisionService | null = null;
   private charModule: ICharModule | null = null;
+  private stickerFirstModule: IStickerFirstModule | null = null;
   private pokeModule: IPokeModule | null = null;
   private forwardPurgeInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -164,6 +166,10 @@ export class Router implements IRouter {
 
   setChat(chat: IChatModule): void {
     this.chatModule = chat;
+  }
+
+  setStickerFirst(stickerFirst: IStickerFirstModule): void {
+    this.stickerFirstModule = stickerFirst;
   }
 
   setMimic(mimic: MimicModule): void {
@@ -587,6 +593,32 @@ export class Router implements IRouter {
         if (isAtMention) {
           await this._enqueueAtMention(msg, config);
         } else {
+          // Sticker-first intercept: try matching a sticker before invoking the
+          // full ChatModule (saves one Claude API call when a sticker matches)
+          if (this.stickerFirstModule && config.stickerFirstEnabled) {
+            try {
+              const stickerChoice = await this.stickerFirstModule.pickSticker(
+                msg.groupId, msg.content, config.stickerFirstThreshold, true,
+              );
+              if (stickerChoice) {
+                this.stickerFirstModule.suppressSticker(msg.groupId, stickerChoice.key);
+                this.logger.debug({
+                  groupId: msg.groupId, key: stickerChoice.key, score: stickerChoice.score,
+                }, 'sticker-first intercept hit at router level');
+                await this._sendReply(msg.groupId, stickerChoice.cqCode, undefined, {
+                  module: 'sticker-first',
+                  triggerMsgId: msg.messageId,
+                  triggerUserId: msg.userId,
+                  triggerUserNickname: msg.nickname,
+                  triggerContent: msg.content,
+                });
+                return;
+              }
+            } catch (err) {
+              this.logger.warn({ err, groupId: msg.groupId }, 'sticker-first router intercept failed — falling through to chat');
+            }
+          }
+
           const reply = await this.chatModule.generateReply(msg.groupId, msg, recentMsgs);
           if (reply) {
             const wasEvasive = this.chatModule.getEvasiveFlagForLastReply(msg.groupId);
@@ -1993,8 +2025,7 @@ ${ctxLine}
 
     this.commands.set('stickerfirst_status', async (msg, _args, config) => {
       if (msg.role !== 'admin' && msg.role !== 'owner') return;
-      const stickers = this.db.localStickers.getTopByGroup(msg.groupId, 9999);
-      const count = stickers.length;
+      const count = this.db.localStickers.countByGroup(msg.groupId);
       const onOff = config.stickerFirstEnabled ? 'ON' : 'OFF';
       // Last sticker sent time: not tracked at router level, report 暂无
       await this.adapter.send(msg.groupId,

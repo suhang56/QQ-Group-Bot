@@ -1,6 +1,6 @@
 import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
-import { tokenizeLore } from './chat.js';
+import { tokenizeLore } from '../utils/text-tokenize.js';
 import { createLogger } from '../utils/logger.js';
 
 const logger = createLogger('lore-retrieval');
