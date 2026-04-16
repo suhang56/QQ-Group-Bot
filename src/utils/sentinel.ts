@@ -280,6 +280,9 @@ export function isEcho(reply: string, trigger: string): boolean {
   const t = _normForEcho(trigger);
   const r = _normForEcho(reply);
   if (!t || !r) return false;
+  // Very short replies (< 4 normalized chars) are likely valid short
+  // responses ("好""嗯""哈") not echoes. Skip echo detection.
+  if (r.length < 4) return false;
   if (r === t) return true;
   if (r.includes(t) && r.length < t.length * 1.5) return true;
   if (t.includes(r) && t.length > r.length) return true;

@@ -275,17 +275,23 @@ describe('applyPersonaFilters', () => {
 });
 
 describe('isEcho', () => {
-  it('exact match → true', () => {
-    expect(isEcho('abc', 'abc')).toBe(true);
+  it('exact match with sufficient length → true', () => {
     expect(isEcho('瞧你糖的', '瞧你糖的')).toBe(true);
+    expect(isEcho('今天天气不错吧', '今天天气不错吧')).toBe(true);
+  });
+
+  it('very short reply (< 4 normalized chars) → false (short reply guard)', () => {
+    expect(isEcho('abc', 'abc')).toBe(false);
+    expect(isEcho('好', '好')).toBe(false);
+    expect(isEcho('嗯哦', '嗯哦')).toBe(false);
   });
 
   it('reply contains trigger with little extra content → true', () => {
     expect(isEcho('哈哈哈哈西瓜你好狠哈', '哈哈哈哈西瓜你好狠')).toBe(true);
   });
 
-  it('reply is substring of trigger → true', () => {
-    expect(isEcho('你好狠', '哈哈哈哈西瓜你好狠')).toBe(true);
+  it('reply is substring of trigger with enough length → true', () => {
+    expect(isEcho('西瓜你好狠', '哈哈哈哈西瓜你好狠')).toBe(true);
   });
 
   it('genuinely different reply → false', () => {

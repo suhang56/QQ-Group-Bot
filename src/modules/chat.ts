@@ -1269,7 +1269,15 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       // prompt rule. Hard skip if cosine on character-bigram sets > 0.7 against
       // the last 3 own replies.
       const recentOwn = this.botRecentOutputs.get(groupId) ?? [];
-      const nearDup = recentOwn.slice(-3).find(prev => this._bigramSim(prev, processed) > 0.7);
+      const NEAR_DUP_WINDOW = 8;
+      const nearDup = recentOwn.slice(-NEAR_DUP_WINDOW).find(prev => {
+        // Short replies: use exact/substring check instead of Jaccard
+        // (Jaccard on < 10 chars has too many false positives)
+        if (processed.length < 10) {
+          return prev === processed || prev.includes(processed) || processed.includes(prev);
+        }
+        return this._bigramSim(prev, processed) > 0.7;
+      });
       if (nearDup) {
         this.logger.info({ groupId, reply: processed, duplicateOf: nearDup }, 'Near-duplicate of recent own reply — dropping');
         return null;
