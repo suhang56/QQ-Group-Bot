@@ -203,6 +203,19 @@ describe('Database fresh init', () => {
     }
   });
 
+  it('jargon_candidates has promoted column on fresh DB', () => {
+    const db = new Database(':memory:');
+    try {
+      const cols = db.rawDb
+        .prepare("PRAGMA table_info(jargon_candidates)")
+        .all() as Array<{ name: string }>;
+      const colNames = cols.map(c => c.name);
+      expect(colNames).toContain('promoted');
+    } finally {
+      db.close();
+    }
+  });
+
   it('group_config has all config columns on fresh DB', () => {
     const db = new Database(':memory:');
     try {

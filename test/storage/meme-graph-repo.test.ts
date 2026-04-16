@@ -184,6 +184,26 @@ describe('MemeGraphRepository', () => {
     expect(list[0]!.embedding).not.toBeNull();
   });
 
+  it('findByVariant matches canonical substring', () => {
+    db.memeGraph.insert({ groupId: 'g1', canonical: 'mmhyw', meaning: 'test', variants: ['mmhyw', 'hyw'] });
+    db.memeGraph.insert({ groupId: 'g1', canonical: 'unrelated', meaning: 'other' });
+
+    const results = db.memeGraph.findByVariant('g1', 'hyw');
+    expect(results.length).toBe(1);
+    expect(results[0]!.canonical).toBe('mmhyw');
+  });
+
+  it('findByVariant matches inside variants JSON', () => {
+    db.memeGraph.insert({ groupId: 'g1', canonical: 'main-form', meaning: 'test', variants: ['alt1', 'ohnmmhyw'] });
+    const results = db.memeGraph.findByVariant('g1', 'ohnmmhyw');
+    expect(results.length).toBe(1);
+  });
+
+  it('findByVariant returns empty for no match', () => {
+    db.memeGraph.insert({ groupId: 'g1', canonical: 'something', meaning: 'x' });
+    expect(db.memeGraph.findByVariant('g1', 'nonexistent')).toEqual([]);
+  });
+
   it('fromRow deserializes JSON variants correctly for empty array', () => {
     const id = db.memeGraph.insert({ groupId: 'g1', canonical: 'empty-var', meaning: 'x' });
     const meme = db.memeGraph.get(id)!;

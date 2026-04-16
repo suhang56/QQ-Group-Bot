@@ -310,6 +310,7 @@ CREATE TABLE IF NOT EXISTS jargon_candidates (
   last_inference_count  INTEGER NOT NULL DEFAULT 0,
   meaning               TEXT,
   is_jargon             INTEGER NOT NULL DEFAULT 0,
+  promoted              INTEGER NOT NULL DEFAULT 0,
   created_at            INTEGER NOT NULL,
   updated_at            INTEGER NOT NULL,
   PRIMARY KEY (group_id, content)

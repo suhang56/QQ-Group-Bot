@@ -503,6 +503,7 @@ export interface IMemeGraphRepository {
   updateEmbedding(id: number, embedding: number[]): void;
   listActive(groupId: string, limit: number): MemeGraph[];
   listActiveWithEmbeddings(groupId: string): MemeGraph[];
+  findByVariant(groupId: string, term: string): MemeGraph[];
   findSimilarActive(groupId: string, queryEmbedding: number[], threshold: number, limit: number): MemeGraph[];
   incrementTotalCount(id: number, delta: number): void;
   listNullEmbedding(groupId: string, limit: number): MemeGraph[];
@@ -2277,6 +2278,14 @@ class MemeGraphRepository implements IMemeGraphRepository {
     return rows.map(memeGraphFromRow);
   }
 
+  findByVariant(groupId: string, term: string): MemeGraph[] {
+    // Search canonical and variants JSON for substring match
+    const rows = this.db.prepare(
+      `SELECT * FROM meme_graph WHERE group_id = ? AND (canonical LIKE ? OR variants LIKE ?)`
+    ).all(groupId, `%${term}%`, `%${term}%`) as unknown as MemeGraphRow[];
+    return rows.map(memeGraphFromRow);
+  }
+
   findSimilarActive(groupId: string, queryEmbedding: number[], threshold: number, limit: number): MemeGraph[] {
     const candidates = this.listActiveWithEmbeddings(groupId);
     const scored: Array<{ meme: MemeGraph; cosine: number }> = [];
@@ -2831,6 +2840,11 @@ export class Database {
       )
     `);
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_jargon_group_count ON jargon_candidates(group_id, count DESC)`);
+
+    // jargon_candidates.promoted — tracks whether a candidate has been promoted
+    // to meme_graph. 0=unpromoted, 1=promoted. Existing is_jargon=2 was the old
+    // "promoted to learned_facts" marker and remains backward compatible.
+    try { this._db.exec(`ALTER TABLE jargon_candidates ADD COLUMN promoted INTEGER NOT NULL DEFAULT 0`); } catch { /* already exists */ }
 
     // interaction_stats + social_relations — relationship tracker (H2).
     this._db.exec(`
