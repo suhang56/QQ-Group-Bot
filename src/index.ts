@@ -185,13 +185,7 @@ void embedder.waitReady().then(() => {
 router.setSelfLearning(selfLearning);
 
 // memes-v1 P4: wire meme graph repo into self-learning and chat
-// db.memeGraph is added by P0; conditional access for merge-order safety
-const memeGraphRepo = (db as unknown as Record<string, unknown>)['memeGraph'] as
-  import('./modules/self-learning.js').IMemeGraphRepo | undefined;
-if (memeGraphRepo) {
-  selfLearning.setMemeGraphRepo(memeGraphRepo);
-  logger.info('meme graph repo wired into self-learning');
-}
+selfLearning.setMemeGraphRepo(db.memeGraph);
 
 // ============================================================
 // PHASE 3: Modules (chat, mimic, moderation, stickers, etc.)
@@ -238,10 +232,7 @@ router.setStickerFirst(stickerFirst);
 router.setVisionService(vision);
 
 // memes-v1 P4: wire meme graph repo into chat's conversation state tracker
-if (memeGraphRepo) {
-  chat.setMemeGraphRepo(memeGraphRepo);
-  logger.info('meme graph repo wired into chat conversation state');
-}
+chat.setMemeGraphRepo(db.memeGraph);
 
 const charDataDir = path.join(process.cwd(), 'data', 'characters');
 const charModule = new CharModule(charDataDir);

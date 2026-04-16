@@ -6,36 +6,15 @@ import { cosineSimilarity } from '../storage/embeddings.js';
 import { createLogger } from '../utils/logger.js';
 import { extractJson } from '../utils/json-extract.js';
 import { LEARN_MODEL, RESEARCH_MODEL, FACTS_RAG_DISABLED, MEMES_V1_DISABLED } from '../config.js';
+import type { IMemeGraphRepository, MemeGraph } from '../storage/db.js';
 
 /** Cosine similarity floor — facts below this are dropped unless pinned.
  * MiniLM-L6-v2 is noisier on Chinese text so we set a slightly higher
  * threshold than English RAG defaults. Tune here without touching logic. */
 export const FACT_SIMILARITY_FLOOR = 0.30;
 
-/** Meme graph entry shape consumed by P4 injection. Matches MemeGraphRepo
- * output from P0. Defined here to decouple P4 from P0 merge order. */
-export interface MemeGraphEntry {
-  readonly id: number;
-  readonly groupId: string;
-  readonly canonical: string;
-  readonly variants: readonly string[];
-  readonly meaning: string;
-  readonly originEvent: string | null;
-  readonly status: 'active' | 'demoted' | 'manual_edit';
-  readonly confidence: number;
-  readonly embeddingVec: number[] | null;
-}
-
-/** Minimal meme graph repo interface needed by P4 injection paths. */
-export interface IMemeGraphRepo {
-  findSimilarActive(
-    groupId: string,
-    embedding: number[],
-    threshold: number,
-    limit: number,
-  ): MemeGraphEntry[];
-  listActive(groupId: string): MemeGraphEntry[];
-}
+/** Re-export P0 types for downstream modules that import from self-learning. */
+export type { IMemeGraphRepository, MemeGraph } from '../storage/db.js';
 
 /**
  * Configuration for {@link SelfLearningModule}.
@@ -178,7 +157,7 @@ export class SelfLearningModule {
   private readonly researchMaxPerDayGlobal: number;
   private readonly researchEnabled: boolean;
   private readonly _embeddingService: IEmbeddingService | null;
-  private _memeGraphRepo: IMemeGraphRepo | null = null;
+  private _memeGraphRepo: IMemeGraphRepository | null = null;
 
   private readonly correctionStamps: Map<string, number[]> = new Map();
   private readonly harvestStamps: Map<string, number[]> = new Map();
@@ -207,7 +186,7 @@ export class SelfLearningModule {
   }
 
   /** Inject meme graph repo after construction (follows setEmbeddingService pattern). */
-  setMemeGraphRepo(repo: IMemeGraphRepo | null): void {
+  setMemeGraphRepo(repo: IMemeGraphRepository | null): void {
     this._memeGraphRepo = repo;
   }
 
@@ -453,7 +432,8 @@ export class SelfLearningModule {
     if (!triggerEmbedding) return null;
 
     const entries = this._memeGraphRepo.findSimilarActive(groupId, triggerEmbedding, 0.3, 3);
-    const active = entries.filter(e => e.status !== 'demoted');
+    // findSimilarActive already filters active, but double-check
+    const active = entries.filter(e => e.status === 'active');
     if (active.length === 0) return null;
 
     const lines = active.map(e => {

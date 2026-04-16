@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { Database } from '../../src/storage/db.js';
-import { SelfLearningModule, type IMemeGraphRepo, type MemeGraphEntry } from '../../src/modules/self-learning.js';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { Database, type IMemeGraphRepository, type MemeGraph } from '../../src/storage/db.js';
+import { SelfLearningModule } from '../../src/modules/self-learning.js';
 import type { IClaudeClient, ClaudeRequest, ClaudeResponse } from '../../src/ai/claude.js';
 import type { IEmbeddingService } from '../../src/storage/embeddings.js';
 import { initLogger } from '../../src/utils/logger.js';
@@ -36,54 +36,52 @@ function fakeEmbedder(): IEmbeddingService {
   };
 }
 
-function makeMemeGraphRepo(entries: MemeGraphEntry[]): IMemeGraphRepo {
+function makeMemeGraphRepo(entries: MemeGraph[]): IMemeGraphRepository {
   return {
-    findSimilarActive(groupId: string, embedding: number[], threshold: number, limit: number): MemeGraphEntry[] {
-      // Simple mock: return entries matching groupId, ignoring embedding similarity
+    findSimilarActive(groupId: string, _embedding: number[], _threshold: number, limit: number): MemeGraph[] {
       return entries
         .filter(e => e.groupId === groupId && e.status === 'active')
         .slice(0, limit);
     },
-    listActive(groupId: string): MemeGraphEntry[] {
-      return entries.filter(e => e.groupId === groupId && e.status === 'active');
+    listActive(groupId: string, limit: number): MemeGraph[] {
+      return entries.filter(e => e.groupId === groupId && e.status === 'active').slice(0, limit);
     },
-  };
+  } as unknown as IMemeGraphRepository;
 }
 
-const MEME_HYW: MemeGraphEntry = {
-  id: 1,
-  groupId: 'g1',
-  canonical: '何意味',
+const now = Math.floor(Date.now() / 1000);
+
+const MEME_HYW: MemeGraph = {
+  id: 1, groupId: 'g1', canonical: '何意味',
   variants: ['hyw', 'mmhyw', 'ohnmmhyw'],
   meaning: '表示困惑或不解',
   originEvent: 'dangzhili 发了一张图',
-  status: 'active',
-  confidence: 0.6,
-  embeddingVec: [1, 0, 0, 0],
+  originMsgId: null, originUserId: null, originTs: null,
+  firstSeenCount: null, totalCount: 5, confidence: 0.6,
+  status: 'active', embedding: [1, 0, 0, 0],
+  createdAt: now, updatedAt: now,
 };
 
-const MEME_ZHIXIE: MemeGraphEntry = {
-  id: 2,
-  groupId: 'g1',
-  canonical: '智械危机',
+const MEME_ZHIXIE: MemeGraph = {
+  id: 2, groupId: 'g1', canonical: '智械危机',
   variants: ['智械危机', '我草智械危机'],
   meaning: 'bot 说了太像人的话',
   originEvent: null,
-  status: 'active',
-  confidence: 0.5,
-  embeddingVec: [0, 1, 0, 0],
+  originMsgId: null, originUserId: null, originTs: null,
+  firstSeenCount: null, totalCount: 3, confidence: 0.5,
+  status: 'active', embedding: [0, 1, 0, 0],
+  createdAt: now, updatedAt: now,
 };
 
-const MEME_DEMOTED: MemeGraphEntry = {
-  id: 3,
-  groupId: 'g1',
-  canonical: '过气梗',
+const MEME_DEMOTED: MemeGraph = {
+  id: 3, groupId: 'g1', canonical: '过气梗',
   variants: ['过气'],
   meaning: '不再使用的梗',
   originEvent: null,
-  status: 'demoted',
-  confidence: 0.3,
-  embeddingVec: [0, 0, 0, 1],
+  originMsgId: null, originUserId: null, originTs: null,
+  firstSeenCount: null, totalCount: 1, confidence: 0.3,
+  status: 'demoted', embedding: [0, 0, 0, 1],
+  createdAt: now, updatedAt: now,
 };
 
 describe('SelfLearningModule meme_graph injection', () => {
@@ -196,7 +194,7 @@ describe('SelfLearningModule meme_graph injection', () => {
   });
 
   it('limits variant display to first 3', async () => {
-    const manyVariants: MemeGraphEntry = {
+    const manyVariants: MemeGraph = {
       ...MEME_HYW,
       variants: ['v1', 'v2', 'v3', 'v4', 'v5'],
     };

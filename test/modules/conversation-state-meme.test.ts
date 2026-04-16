@@ -1,43 +1,41 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { ConversationStateTracker } from '../../src/modules/conversation-state.js';
-import type { IMemeGraphRepo, MemeGraphEntry } from '../../src/modules/self-learning.js';
+import type { IMemeGraphRepository, MemeGraph } from '../../src/storage/db.js';
 import { initLogger } from '../../src/utils/logger.js';
 
 initLogger({ level: 'silent' });
 
-function makeMemeGraphRepo(entries: MemeGraphEntry[]): IMemeGraphRepo {
+function makeMemeGraphRepo(entries: MemeGraph[]): IMemeGraphRepository {
   return {
-    findSimilarActive(groupId: string, _emb: number[], _threshold: number, limit: number): MemeGraphEntry[] {
+    findSimilarActive(groupId: string, _emb: number[], _threshold: number, limit: number): MemeGraph[] {
       return entries.filter(e => e.groupId === groupId && e.status === 'active').slice(0, limit);
     },
-    listActive(groupId: string): MemeGraphEntry[] {
-      return entries.filter(e => e.groupId === groupId && e.status === 'active');
+    listActive(groupId: string, limit: number): MemeGraph[] {
+      return entries.filter(e => e.groupId === groupId && e.status === 'active').slice(0, limit);
     },
-  };
+  } as unknown as IMemeGraphRepository;
 }
 
-const MEME_HYW: MemeGraphEntry = {
-  id: 1,
-  groupId: 'g1',
-  canonical: '何意味',
+const ts = Math.floor(Date.now() / 1000);
+
+const MEME_HYW: MemeGraph = {
+  id: 1, groupId: 'g1', canonical: '何意味',
   variants: ['hyw', 'mmhyw', 'ohnmmhyw'],
   meaning: '表示困惑或不解',
-  originEvent: null,
-  status: 'active',
-  confidence: 0.6,
-  embeddingVec: null,
+  originEvent: null, originMsgId: null, originUserId: null, originTs: null,
+  firstSeenCount: null, totalCount: 5, confidence: 0.6,
+  status: 'active', embedding: null,
+  createdAt: ts, updatedAt: ts,
 };
 
-const MEME_ZHIXIE: MemeGraphEntry = {
-  id: 2,
-  groupId: 'g1',
-  canonical: '智械危机',
+const MEME_ZHIXIE: MemeGraph = {
+  id: 2, groupId: 'g1', canonical: '智械危机',
   variants: ['智械危机', '我草智械危机'],
   meaning: 'bot 说了太像人的话',
-  originEvent: null,
-  status: 'active',
-  confidence: 0.5,
-  embeddingVec: null,
+  originEvent: null, originMsgId: null, originUserId: null, originTs: null,
+  firstSeenCount: null, totalCount: 3, confidence: 0.5,
+  status: 'active', embedding: null,
+  createdAt: ts, updatedAt: ts,
 };
 
 describe('ConversationStateTracker meme_graph matching', () => {
@@ -141,7 +139,7 @@ describe('ConversationStateTracker meme_graph matching', () => {
   });
 
   it('does not match memes from different groups', () => {
-    const otherGroupMeme: MemeGraphEntry = { ...MEME_HYW, groupId: 'g2' };
+    const otherGroupMeme: MemeGraph = { ...MEME_HYW, groupId: 'g2' };
     tracker.setMemeGraphRepo(makeMemeGraphRepo([otherGroupMeme]));
     tracker.tick('g1', 'hyw', 'u1', now);
 

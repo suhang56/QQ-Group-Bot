@@ -8,7 +8,7 @@
 
 import { createLogger } from '../utils/logger.js';
 import { MEMES_V1_DISABLED } from '../config.js';
-import type { IMemeGraphRepo } from './self-learning.js';
+import type { IMemeGraphRepository } from '../storage/db.js';
 
 const logger = createLogger('conversation-state');
 
@@ -72,7 +72,7 @@ interface GroupState {
 export class ConversationStateTracker {
   private readonly states = new Map<string, GroupState>();
   private pruneTimer: ReturnType<typeof setInterval> | null = null;
-  private _memeGraphRepo: IMemeGraphRepo | null = null;
+  private _memeGraphRepo: IMemeGraphRepository | null = null;
 
   constructor() {
     // Periodic cleanup of stale groups
@@ -81,7 +81,7 @@ export class ConversationStateTracker {
   }
 
   /** Inject meme graph repo after construction (follows setEmbeddingService pattern). */
-  setMemeGraphRepo(repo: IMemeGraphRepo | null): void {
+  setMemeGraphRepo(repo: IMemeGraphRepository | null): void {
     this._memeGraphRepo = repo;
   }
 
@@ -284,7 +284,7 @@ export class ConversationStateTracker {
     // Rebuild memeJokeFreq from remaining messages
     const newMemeJokeFreq = new Map<string, { meaning: string; count: number; firstSeen: number }>();
     if (this._memeGraphRepo && !MEMES_V1_DISABLED()) {
-      const allMemes = this._memeGraphRepo.listActive(groupId);
+      const allMemes = this._memeGraphRepo.listActive(groupId, 50);
       for (const msg of newMessages) {
         const contentLower = msg.content.toLowerCase();
         for (const entry of allMemes) {
@@ -330,7 +330,7 @@ export class ConversationStateTracker {
     if (MEMES_V1_DISABLED()) return;
     if (!this._memeGraphRepo) return;
 
-    const entries = this._memeGraphRepo.listActive(groupId);
+    const entries = this._memeGraphRepo.listActive(groupId, 50);
     if (entries.length === 0) return;
 
     const contentLower = content.toLowerCase();

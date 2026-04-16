@@ -4,7 +4,8 @@ import path from 'node:path';
 import type { IClaudeClient } from '../ai/claude.js';
 import type { GroupMessage } from '../adapter/napcat.js';
 import type { Database } from '../storage/db.js';
-import type { SelfLearningModule, IMemeGraphRepo } from './self-learning.js';
+import type { SelfLearningModule } from './self-learning.js';
+import type { IMemeGraphRepository } from '../storage/db.js';
 import { ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
 import { lurkerDefaults, chatHistoryDefaults, RUNTIME_CHAT_MODEL, CHAT_QWEN_MODEL, CHAT_QWEN_DISABLED, CHAT_DEEPSEEK_MODEL, DEEPSEEK_ENABLED } from '../config.js';
@@ -948,7 +949,7 @@ export class ChatModule implements IChatModule {
   }
 
   /** Inject meme graph repo into internal conversation state tracker. */
-  setMemeGraphRepo(repo: IMemeGraphRepo | null): void {
+  setMemeGraphRepo(repo: IMemeGraphRepository | null): void {
     this.conversationState.setMemeGraphRepo(repo);
   }
 
