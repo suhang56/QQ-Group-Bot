@@ -50,6 +50,8 @@ export interface ModerationReviewFilters {
   reviewed?: 0 | 1 | 2;
   severityMin?: number;
   severityMax?: number;
+  /** 'punished' = exclude action=none (default), 'all' = include everything, 'none' = only action=none */
+  actionFilter?: 'punished' | 'all' | 'none';
 }
 
 export interface ModerationStats {
@@ -786,10 +788,13 @@ class ModerationRepository implements IModerationRepository {
     // NOTE: OFFSET-based pagination is acceptable for v1 manual review use-case.
     // At very large row counts (tens of thousands) this will slow; migrate to
     // cursor-based pagination (WHERE id < cursor) in a future iteration.
-    // Default: exclude action='none' (no punishment — 99% of records).
-    // Only show records where the moderator actually took action (warn/ban/kick/delete).
-    const clauses: string[] = ["action != 'none'"];
+    const clauses: string[] = [];
     const params: (string | number)[] = [];
+
+    // Action filter: default 'punished' excludes action=none.
+    const af = filters.actionFilter ?? 'punished';
+    if (af === 'punished') clauses.push("action != 'none'");
+    else if (af === 'none') clauses.push("action = 'none'");
 
     if (filters.groupId !== undefined) {
       clauses.push('group_id = ?');

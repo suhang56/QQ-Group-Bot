@@ -144,12 +144,20 @@ export class RatingPortalServer {
         statusRaw === 'rejected' ? 2 :
         undefined;
 
+      // action filter: 'punished' (default) | 'all' | 'none'
+      const actionRaw = url.searchParams.get('action') ?? 'punished';
+      const validActions = ['punished', 'all', 'none'];
+      const actionFilter = validActions.includes(actionRaw)
+        ? (actionRaw as 'punished' | 'all' | 'none')
+        : 'punished';
+
       const { records, total } = this.moderation.getForReview(
         {
           groupId: url.searchParams.get('group') ?? undefined,
           reviewed: reviewedFilter,
           severityMin,
           severityMax,
+          actionFilter,
         },
         pageRaw,
         limitRaw,
@@ -171,15 +179,25 @@ export class RatingPortalServer {
       if (record.appealed !== 0) {
         body['appeal'] = { appealed: record.appealed, reversed: record.reversed };
       }
-      // Fetch the original message + surrounding context
-      const origMsg = this.messages.findBySourceId(record.msgId);
+      // Fetch the original message + surrounding context.
+      // moderation_log.msg_id is a short NapCat ID; messages.source_message_id
+      // is a long NapCat ID — they don't match. Fall back to timestamp+userId
+      // proximity search within a ±10s window.
+      const modTs = record.timestamp;
+      const recent = this.messages.getRecent(record.groupId, 200);
+      const origMsg = recent.find(m =>
+        m.userId === record.userId && Math.abs(m.timestamp - modTs) <= 10
+      );
       if (origMsg) {
         body['originalMessage'] = { content: origMsg.content, nickname: origMsg.nickname, userId: origMsg.userId, timestamp: origMsg.timestamp };
-        // Nearby messages: 3 before + 3 after for context
-        const nearby = this.messages.getRecent(record.groupId, 50)
-          .filter(m => Math.abs(m.timestamp - origMsg.timestamp) <= 120) // within 2 min
-          .slice(0, 7)
-          .map(m => ({ nickname: m.nickname, content: m.content, timestamp: m.timestamp, userId: m.userId }));
+      }
+      // Nearby messages: within 2 min of moderation timestamp
+      const nearby = recent
+        .filter(m => Math.abs(m.timestamp - modTs) <= 120)
+        .slice(0, 10)
+        .sort((a, b) => a.timestamp - b.timestamp)
+        .map(m => ({ nickname: m.nickname, content: m.content, timestamp: m.timestamp, userId: m.userId }));
+      if (nearby.length > 0) {
         body['contextMessages'] = nearby;
       }
       json(res, 200, body);

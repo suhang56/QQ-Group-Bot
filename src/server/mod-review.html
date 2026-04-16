@@ -346,10 +346,17 @@
     <label><input type="checkbox" name="sev" value="5"> 5</label>
   </div>
   <div class="status-radios">
+    <label>审核:</label>
     <label><input type="radio" name="status" value="all" checked> 全部</label>
     <label><input type="radio" name="status" value="unreviewed"> 待审核</label>
     <label><input type="radio" name="status" value="approved"> 已批准</label>
     <label><input type="radio" name="status" value="rejected"> 已拒绝</label>
+  </div>
+  <div class="status-radios">
+    <label>动作:</label>
+    <label><input type="radio" name="action" value="punished" checked> 仅处罚</label>
+    <label><input type="radio" name="action" value="all"> 全部消息</label>
+    <label><input type="radio" name="action" value="none"> 仅无处罚</label>
   </div>
   <div>
     <label for="filter-time">时间范围</label>
@@ -507,6 +514,7 @@ function readFilters() {
   state.filters.status = document.querySelector('input[name="status"]:checked').value;
   state.filters.severity = Array.from(document.querySelectorAll('input[name="sev"]:checked')).map(el => el.value);
   state.filters.timeRange = document.getElementById('filter-time').value;
+  state.filters.action = document.querySelector('input[name="action"]:checked')?.value ?? 'punished';
 }
 
 function buildQuery() {
@@ -520,6 +528,9 @@ function buildQuery() {
   } else if (state.filters.severity.length > 1) {
     const sorted = state.filters.severity.map(Number).sort((a, b) => a - b);
     params.set('severity', `${sorted[0]}-${sorted[sorted.length - 1]}`);
+  }
+  if (state.filters.action && state.filters.action !== 'punished') {
+    params.set('action', state.filters.action);
   }
   // timeRange is front-end only hint (API doesn't support it yet); skip for v1
   return '/mod/list?' + params.toString();
