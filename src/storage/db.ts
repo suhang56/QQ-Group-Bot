@@ -519,6 +519,12 @@ export interface IMemeGraphRepo {
   findByCanonical(groupId: string, canonical: string): MemeGraphEntry | null;
   findByVariant(groupId: string, term: string): MemeGraphEntry[];
   listActive(groupId: string, limit: number): MemeGraphEntry[];
+  findSimilarActive(
+    groupId: string,
+    queryEmbedding: number[],
+    threshold: number,
+    limit: number,
+  ): MemeGraphEntry[];
   listActiveWithEmbeddings(groupId: string): MemeGraphEntry[];
   listNullEmbedding(groupId: string, limit: number): MemeGraphEntry[];
   findById(id: number): MemeGraphEntry | null;

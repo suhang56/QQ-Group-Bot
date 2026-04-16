@@ -43,6 +43,7 @@ import { RelationshipTracker } from './modules/relationship-tracker.js';
 import { AffinityModule } from './modules/affinity.js';
 import { JargonMiner } from './modules/jargon-miner.js';
 import { PhraseMiner } from './modules/phrase-miner.js';
+import { MemeClusterer } from './modules/meme-clusterer.js';
 import { RatingPortalServer } from './server/rating-portal.js';
 import { TuningGenerator } from './server/tuning-generator.js';
 
@@ -331,6 +332,12 @@ const phraseMiner = memesDisabled ? null : new PhraseMiner({
   phraseCandidates: db.phraseCandidates,
   activeGroups: ACTIVE_GROUPS,
 });
+const memeClusterer = memesDisabled ? null : new MemeClusterer({
+  db: db.rawDb,
+  memeGraph: db.memeGraph,
+  phraseCandidates: db.phraseCandidates,
+  claude,
+});
 
 const harvest = new OpportunisticHarvest({
   messages: db.messages,
@@ -346,6 +353,11 @@ const harvest = new OpportunisticHarvest({
     }
     if (phraseMiner) {
       void phraseMiner.runAll().catch((err) => logger.error({ err }, 'phrase-miner failed'));
+    }
+    if (memeClusterer) {
+      for (const g of groups) {
+        void memeClusterer.clusterAll(g).catch((err) => logger.error({ err, groupId: g }, 'meme-clusterer failed'));
+      }
     }
   },
 });

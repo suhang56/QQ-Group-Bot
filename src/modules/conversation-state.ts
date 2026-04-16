@@ -284,7 +284,7 @@ export class ConversationStateTracker {
     // Rebuild memeJokeFreq from remaining messages
     const newMemeJokeFreq = new Map<string, { meaning: string; count: number; firstSeen: number }>();
     if (this._memeGraphRepo && !MEMES_V1_DISABLED()) {
-      const allMemes = this._memeGraphRepo.listActive(groupId);
+      const allMemes = this._memeGraphRepo.listActive(groupId, 500);
       for (const msg of newMessages) {
         const contentLower = msg.content.toLowerCase();
         for (const entry of allMemes) {
@@ -330,7 +330,7 @@ export class ConversationStateTracker {
     if (MEMES_V1_DISABLED()) return;
     if (!this._memeGraphRepo) return;
 
-    const entries = this._memeGraphRepo.listActive(groupId);
+    const entries = this._memeGraphRepo.listActive(groupId, 500);
     if (entries.length === 0) return;
 
     const contentLower = content.toLowerCase();
