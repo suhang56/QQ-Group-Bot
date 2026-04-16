@@ -23,6 +23,8 @@ import { AnnouncementSyncModule } from './modules/announcement-sync.js';
 import { NameImagesModule } from './modules/name-images.js';
 import { PokeModule } from './modules/poke.js';
 import { LoreUpdater } from './modules/lore-updater.js';
+import { LoreLoader } from './modules/lore-loader.js';
+import { chatHistoryDefaults } from './config.js';
 import { SelfLearningModule } from './modules/self-learning.js';
 import { runFactEmbeddingBackfill, BACKFILL_INTERVAL_MS } from './modules/fact-embedding-backfill.js';
 import { VisionService } from './modules/vision.js';
@@ -181,6 +183,7 @@ const tuningPath = tuningGroupId
 
 const vision = new VisionService(claude, adapter, db.imageDescriptions);
 const stickerFirst = new StickerFirstModule(db.localStickers, embedder);
+const loreLoader = new LoreLoader(chatHistoryDefaults.loreDirPath, chatHistoryDefaults.loreSizeCapBytes, tuningPath);
 
 const bandoriEnabled = process.env['BANDORI_SCRAPE_ENABLED'] !== 'false';
 const bandoriScraper = new BandoriLiveScraper(db.bandoriLives, {
@@ -196,6 +199,7 @@ const chat = new ChatModule(claude, db, {
   forwardCache: db.forwardCache,
   stickerFirst,
   bandoriLiveRepo: bandoriEnabled ? db.bandoriLives : undefined,
+  loreLoader,
 });
 router.setChat(chat);
 router.setVisionService(vision);

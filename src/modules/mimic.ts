@@ -8,7 +8,7 @@ import { createLogger } from '../utils/logger.js';
 import { defaultGroupConfig, chatHistoryDefaults, RUNTIME_CHAT_MODEL } from '../config.js';
 import { sentinelCheck, postProcess, HARDENED_SYSTEM } from '../utils/sentinel.js';
 import { buildStickerSection } from '../utils/stickers.js';
-import { extractKeywords } from './chat.js';
+import { extractKeywords } from '../utils/text-tokenize.js';
 
 export interface IMimicModule {
   generateMimic(

@@ -20,6 +20,8 @@ import { cosineSimilarity } from '../storage/embeddings.js';
 import type { IStickerFirstModule } from './sticker-first.js';
 import { _hasBandoriLiveKeyword, _formatLiveBlock } from './bandori-live-scraper.js';
 import { buildAliasMap, extractEntities, buildLorePayload } from './lore-retrieval.js';
+import type { ILoreLoader } from './lore-loader.js';
+import { tokenizeLore as _tokenizeLore, extractTokens as _extractTokens, extractKeywords as _extractKeywords } from '../utils/text-tokenize.js';
 
 export interface IChatModule {
   generateReply(groupId: string, triggerMessage: GroupMessage, _recentMessages: GroupMessage[]): Promise<string | null>;
@@ -93,6 +95,7 @@ interface ChatOptions {
   forwardCache?: IForwardCacheRepository;
   stickerFirst?: IStickerFirstModule;
   bandoriLiveRepo?: IBandoriLiveRepository;
+  loreLoader?: ILoreLoader;
 }
 
 export interface ScoreFactors {
@@ -388,52 +391,14 @@ export function pickDeflection(pool: string[]): string {
   return pool[Math.floor(Math.random() * pool.length)]!;
 }
 
-// Chinese stopwords that add no retrieval signal
-const STOPWORDS = new Set([
-  '我','你','他','她','它','我们','你们','他们','的','了','是','不','啥','什么',
-  '怎么','一个','这个','那个','就','也','都','在','有','和','吧','嗯','哦','哈',
-  '吗','呢','啊','呀','么','这','那','为','以','到','从','但','所以','因为',
-]);
-
 const QUESTION_ENDINGS = ['?', '？', '吗', '嘛', '呢', '不'];
 // Matches clarification / follow-up probes (user asking bot to explain itself)
 const CLARIFICATION_RE = /^(why|为啥|为什么|怎么|咋|真的[吗嘛]?|你说啥|啥意思|什么意思)[?？]?$/i;
 
-const TOPIC_STOPWORDS = new Set([
-  '的','了','是','吗','啊','呢','吧','哦','嗯','哈','哇','么','嘛',
-  '我','你','他','她','它','我们','你们','他们',
-  '在','有','和','就','也','都','不','没','很','太',
-  '什么','怎么','这','那','啥','谁',
-]);
-
-/**
- * Extract topic tokens from a message for engagement tracking.
- * English words → lowercase whole-word token; Chinese chars → sliding 2-grams.
- * CQ codes and stopwords are excluded.
- */
-export function extractTokens(content: string): Set<string> {
-  // Strip CQ codes
-  const clean = content.replace(/\[CQ:[^\]]*\]/g, ' ').trim();
-  const result = new Set<string>();
-  // Split on whitespace/punctuation into segments
-  const segments = clean.split(/[\s，。？！、…「」『』【】《》""''【】\u3000\uff0c\uff01\uff1f\uff1a\u300a\u300b\uff08\uff09]+/).filter(Boolean);
-  for (const seg of segments) {
-    if (/^[a-z0-9]+$/i.test(seg)) {
-      // ASCII word — keep as lowercase token
-      const w = seg.toLowerCase();
-      if (!TOPIC_STOPWORDS.has(w) && w.length > 1) result.add(w);
-    } else {
-      // Chinese/mixed — run 2-gram slide
-      for (let i = 0; i < seg.length - 1; i++) {
-        const gram = seg.slice(i, i + 2);
-        if (!TOPIC_STOPWORDS.has(gram[0]!) && !TOPIC_STOPWORDS.has(gram[1]!)) {
-          result.add(gram);
-        }
-      }
-    }
-  }
-  return result;
-}
+// Re-export text-tokenize utilities for backward compatibility
+export const extractTokens = _extractTokens;
+export const extractKeywords = _extractKeywords;
+export const tokenizeLore = _tokenizeLore;
 
 /** Count [CQ:face,id=N] usage across messages and return top-N face IDs. */
 export function extractTopFaces(messages: Array<{ content: string }>, topN: number): number[] {
@@ -447,34 +412,6 @@ export function extractTopFaces(messages: Array<{ content: string }>, topN: numb
     .sort((a, b) => b[1] - a[1])
     .slice(0, topN)
     .map(([id]) => id);
-}
-
-/** Extract meaningful keywords from a message for corpus retrieval. */
-export function extractKeywords(text: string): string[] {
-  // Strip CQ codes first
-  const stripped = text.replace(/\[CQ:[^\]]+\]/g, ' ');
-  // Split on punctuation / whitespace; keep tokens ≥2 chars
-  const tokens = stripped.split(/[\s\p{P}！？。，、；：""''【】《》（）…—]+/u)
-    .map(t => t.trim())
-    .filter(t => t.length >= 2 && !STOPWORDS.has(t));
-  // Deduplicate and cap at 5
-  return [...new Set(tokens)].slice(0, 5);
-}
-
-
-/**
- * Tokenize lore text into a Set of meaningful tokens (length ≥ 2).
- * Splits on whitespace/punctuation; includes CJK character runs individually.
- */
-export function tokenizeLore(text: string): Set<string> {
-  const stripped = text.replace(/\[CQ:[^\]]+\]/g, ' ');
-  const tokens = new Set<string>();
-  // Split on whitespace and common punctuation
-  for (const chunk of stripped.split(/[\s\p{P}！？。，、；：""''【】《》（）…—\-_/\\|]+/u)) {
-    const t = chunk.trim();
-    if (t.length >= 2) tokens.add(t);
-  }
-  return tokens;
 }
 
 const MAX_OUTGOING_IDS = 50;
@@ -595,6 +532,7 @@ export class ChatModule implements IChatModule {
   private charModule: ICharModule | null = null;
   private readonly stickerFirst: IStickerFirstModule | null;
   private readonly bandoriLiveRepo: IBandoriLiveRepository | null;
+  private readonly loreLoader: ILoreLoader | null;
   // per-group: whether the last generateReply call returned an evasive reply
   private readonly lastEvasiveReply = new Map<string, boolean>();
   // per-group: fact ids injected into the system prompt of the last generateReply.
@@ -656,6 +594,7 @@ export class ChatModule implements IChatModule {
     this.forwardCache = options.forwardCache ?? null;
     this.stickerFirst = options.stickerFirst ?? null;
     this.bandoriLiveRepo = options.bandoriLiveRepo ?? null;
+    this.loreLoader = options.loreLoader ?? null;
 
     if (this.moodProactiveEnabled) {
       this.moodProactiveTimer = setInterval(
@@ -837,11 +776,15 @@ export class ChatModule implements IChatModule {
 
   /** Evict lore + identity caches for a group so next message re-reads the updated file. */
   invalidateLore(groupId: string): void {
-    this.loreCache.delete(groupId);
-    this.loreKeywordsCache.delete(groupId);
-    this.loreAliasIndex.delete(groupId);
-    this.loreChunkAliasMap.delete(groupId);
-    this.loreOverviewCache.delete(groupId);
+    if (this.loreLoader) {
+      this.loreLoader.invalidateLore(groupId);
+    } else {
+      this.loreCache.delete(groupId);
+      this.loreKeywordsCache.delete(groupId);
+      this.loreAliasIndex.delete(groupId);
+      this.loreChunkAliasMap.delete(groupId);
+      this.loreOverviewCache.delete(groupId);
+    }
     this.groupIdentityCache.delete(groupId);
     this.stickerSectionCache.delete(groupId);
     this.stickerRefreshCounter.set(groupId, 0);
@@ -2014,12 +1957,13 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
   }
 
   private _hasLoreKeyword(groupId: string, content: string): boolean {
-    // Ensure lore is loaded (triggers cache if needed)
+    if (this.loreLoader) return this.loreLoader.hasLoreKeyword(groupId, content);
+
+    // Inline fallback (no loreLoader injected)
     this._loadRelevantLore(groupId, content, []);
     const loreTokens = this.loreKeywordsCache.get(groupId);
     if (!loreTokens || loreTokens.size === 0) return false;
 
-    // Tokenize the trigger message and check for intersection
     const msgTokens = tokenizeLore(content);
     for (const token of msgTokens) {
       if (loreTokens.has(token)) return true;
@@ -2091,7 +2035,9 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
    * 4. 8000 char total cap
    */
   private _loadRelevantLore(groupId: string, triggerContent: string, immediateContext: { nickname: string; content: string }[]): string | null {
-    // Try per-member directory first
+    if (this.loreLoader) return this.loreLoader.loadRelevantLore(groupId, triggerContent, immediateContext);
+
+    // Inline fallback (no loreLoader injected)
     const aliasIndex = this._buildLoreAliasIndex(groupId);
     if (aliasIndex && aliasIndex.size > 0) {
       return this._loadRelevantLoreFromDir(groupId, triggerContent, immediateContext, aliasIndex);
@@ -2295,6 +2241,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
   }
 
   private _loadTuning(): string | null {
+    if (this.loreLoader) return this.loreLoader.loadTuning();
     if (!this.tuningPath) return null;
     const parts: string[] = [];
     // Short-term tuning (overwritten each cycle)
@@ -2476,7 +2423,9 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
 
     // Check if we have a cached base (without lore) that's still valid
     const cached = this.groupIdentityCache.get(groupId);
-    const hasPerMemberLore = this.loreAliasIndex.has(groupId) && (this.loreAliasIndex.get(groupId)?.size ?? 0) > 0;
+    const hasPerMemberLore = this.loreLoader
+      ? this.loreLoader.hasPerMemberLore(groupId)
+      : this.loreAliasIndex.has(groupId) && (this.loreAliasIndex.get(groupId)?.size ?? 0) > 0;
 
     // If per-member lore is active, we can't use the full cached result since
     // lore content varies per call. But we can still use cached base + fresh lore.

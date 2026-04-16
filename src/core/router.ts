@@ -13,7 +13,7 @@ import type { IdCardGuard } from '../modules/id-guard.js';
 import type { SequenceGuard } from '../modules/sequence-guard.js';
 import type { VisionService } from '../modules/vision.js';
 import type { ICharModule } from '../modules/char.js';
-import { extractTokens } from '../modules/chat.js';
+import { extractTokens } from '../utils/text-tokenize.js';
 import { BotErrorCode } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
 import { defaultGroupConfig } from '../config.js';
