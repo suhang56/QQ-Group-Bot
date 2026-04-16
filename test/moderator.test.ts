@@ -642,27 +642,27 @@ describe('ModeratorModule — learner RAG integration', () => {
   });
 });
 
-describe('extractJson', () => {
-  it('strips ```json fence', () => {
-    expect(extractJson('```json\n{"violation":false}\n```')).toBe('{"violation":false}');
+describe('extractJson (now delegates to shared utils/json-extract)', () => {
+  it('parses JSON from ```json fence', () => {
+    expect(extractJson('```json\n{"violation":false}\n```')).toEqual({ violation: false });
   });
 
-  it('strips ``` fence without language tag', () => {
-    expect(extractJson('```\n{"violation":false}\n```')).toBe('{"violation":false}');
+  it('parses JSON from ``` fence without language tag', () => {
+    expect(extractJson('```\n{"violation":false}\n```')).toEqual({ violation: false });
   });
 
-  it('extracts JSON from surrounding prose', () => {
-    expect(extractJson('Here is the result:\n{"violation":true}\nDone.')).toBe('{"violation":true}');
+  it('extracts and parses JSON from surrounding prose', () => {
+    expect(extractJson('Here is the result:\n{"violation":true}\nDone.')).toEqual({ violation: true });
   });
 
-  it('passes through clean JSON unchanged', () => {
+  it('parses clean JSON directly', () => {
     const raw = '{"violation":true,"severity":3,"reason":"test","confidence":0.9}';
-    expect(extractJson(raw)).toBe(raw);
+    expect(extractJson(raw)).toEqual({ violation: true, severity: 3, reason: 'test', confidence: 0.9 });
   });
 
-  it('full round-trip: fenced → parse → valid object', () => {
+  it('full round-trip: fenced → parsed object', () => {
     const fenced = '```json\n{"violation":false,"severity":null,"reason":"ok","confidence":0.1}\n```';
-    const obj = JSON.parse(extractJson(fenced)) as { violation: boolean };
+    const obj = extractJson(fenced) as { violation: boolean };
     expect(obj.violation).toBe(false);
   });
 });

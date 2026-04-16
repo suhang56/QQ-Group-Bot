@@ -8,6 +8,7 @@ import type {
 import type { ILearnerModule } from './learner.js';
 import type { IEmbeddingService } from '../storage/embeddings.js';
 import { cosineSimilarity } from '../storage/embeddings.js';
+import { extractJson as extractJsonShared } from '../utils/json-extract.js';
 import { BotErrorCode, ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
 import { VISION_MODEL, MODERATOR_MODEL } from '../config.js';
@@ -61,18 +62,12 @@ function isCQOnly(content: string): boolean {
   return /^\s*(\[CQ:[^\]]+\]\s*)+\s*$/.test(content);
 }
 
-export function extractJson(raw: string): string {
-  const fenced = raw.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
-  if (fenced && fenced[1]) return fenced[1].trim();
-  const jsonStart = raw.indexOf('{');
-  const jsonEnd = raw.lastIndexOf('}');
-  if (jsonStart !== -1 && jsonEnd > jsonStart) return raw.slice(jsonStart, jsonEnd + 1);
-  return raw.trim();
-}
+// extractJson removed: use shared utils/json-extract.ts instead
+export { extractJsonShared as extractJson };
 
 function parseSonnetResponse(text: string): { violation: boolean; severity: number | null; reason: string; confidence: number } | null {
   try {
-    const json = JSON.parse(extractJson(text)) as unknown;
+    const json = extractJsonShared(text) as unknown;
     if (typeof json !== 'object' || json === null) return null;
     const j = json as Record<string, unknown>;
     if (typeof j['violation'] !== 'boolean') return null;
@@ -483,7 +478,7 @@ watchlist 命中 → category: "watchlist"，components_seen 列出命中片段
     interface ImageVerdictJson { violation: boolean; severity: number | null; reason: string; category?: string | null; components_seen?: string[]; rule_id?: number | null }
     let parsed: ImageVerdictJson | null = null;
     try {
-      parsed = JSON.parse(extractJson(raw).trim()) as ImageVerdictJson;
+      parsed = extractJsonShared<ImageVerdictJson>(raw);
     } catch {
       this.logger.warn({ groupId: target.groupId, raw: raw.slice(0, 200) }, 'assessImage JSON parse failed — fail-safe');
     }
