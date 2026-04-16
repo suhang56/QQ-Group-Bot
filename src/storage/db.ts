@@ -373,6 +373,8 @@ export interface ILearnedFactsRepository {
   countPending(groupId: string): number;
   expirePendingOlderThan(cutoffTimestamp: number): number;
   approveAllPending(groupId: string): number;
+  /** Record a backfill attempt failure. After 3 failures, marks as 'failed'. Returns true if marked failed. */
+  recordEmbeddingFailure(id: number): boolean;
 }
 
 export type ProposedAction = 'warn' | 'delete' | 'mute_10m' | 'mute_1h' | 'kick';
@@ -1532,7 +1534,7 @@ class LearnedFactsRepository implements ILearnedFactsRepository {
 
   listActiveWithEmbeddings(groupId: string): LearnedFact[] {
     const rows = this.db.prepare(
-      `SELECT * FROM learned_facts WHERE group_id = ? AND status = 'active' AND embedding_vec IS NOT NULL ORDER BY created_at DESC, id DESC`
+      `SELECT * FROM learned_facts WHERE group_id = ? AND status = 'active' AND embedding_vec IS NOT NULL AND confidence >= 0.6 ORDER BY created_at DESC, id DESC LIMIT 500`
     ).all(groupId) as unknown as LearnedFactRow[];
     return rows.map(learnedFactFromRow);
   }
@@ -1546,7 +1548,7 @@ class LearnedFactsRepository implements ILearnedFactsRepository {
 
   listAllNullEmbeddingActive(limit: number): LearnedFact[] {
     const rows = this.db.prepare(
-      `SELECT * FROM learned_facts WHERE status = 'active' AND embedding_vec IS NULL ORDER BY id LIMIT ?`
+      `SELECT * FROM learned_facts WHERE status = 'active' AND embedding_vec IS NULL AND COALESCE(embedding_status, 'pending') != 'failed' ORDER BY id LIMIT ?`
     ).all(limit) as unknown as LearnedFactRow[];
     return rows.map(learnedFactFromRow);
   }
@@ -1640,6 +1642,29 @@ class LearnedFactsRepository implements ILearnedFactsRepository {
       `UPDATE learned_facts SET status = 'active', updated_at = ? WHERE group_id = ? AND status = 'pending'`
     ).run(now, groupId) as { changes: number };
     return result.changes;
+  }
+
+  recordEmbeddingFailure(id: number): boolean {
+    const now = Math.floor(Date.now() / 1000);
+    // Check current attempt count via last_attempt_at as a proxy.
+    // We count failures by looking at how many times embedding_status was set.
+    // Simpler: use a counter approach by reading the current embedding_status.
+    const row = this.db.prepare(
+      'SELECT embedding_status FROM learned_facts WHERE id = ?'
+    ).get(id) as { embedding_status: string | null } | undefined;
+    const current = row?.embedding_status ?? 'pending';
+    const failCount = current.startsWith('fail_') ? parseInt(current.slice(5), 10) : 0;
+    const newCount = failCount + 1;
+    if (newCount >= 3) {
+      this.db.prepare(
+        'UPDATE learned_facts SET embedding_status = ?, last_attempt_at = ? WHERE id = ?'
+      ).run('failed', now, id);
+      return true;
+    }
+    this.db.prepare(
+      'UPDATE learned_facts SET embedding_status = ?, last_attempt_at = ? WHERE id = ?'
+    ).run(`fail_${newCount}`, now, id);
+    return false;
   }
 }
 
@@ -2299,6 +2324,11 @@ export class Database {
     // learned_facts.embedding_vec — added for semantic retrieval. Idempotent
     // ALTER for existing DBs created before this column existed.
     try { this._db.exec(`ALTER TABLE learned_facts ADD COLUMN embedding_vec BLOB`); } catch { /* already exists */ }
+    // embedding_status: 'pending' | 'done' | 'failed' | 'skipped' — for backfill tracking
+    try { this._db.exec(`ALTER TABLE learned_facts ADD COLUMN embedding_status TEXT DEFAULT 'pending'`); } catch { /* already exists */ }
+    try { this._db.exec(`ALTER TABLE learned_facts ADD COLUMN last_attempt_at INTEGER`); } catch { /* already exists */ }
+    // Partial index for backfill queries on learned_facts with null embeddings
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_learned_facts_null_embedding ON learned_facts(id) WHERE status = 'active' AND embedding_vec IS NULL`);
 
     // pending_moderation table — Batch D human-in-loop approval flow.
     this._db.exec(`

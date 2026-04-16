@@ -191,6 +191,8 @@ CREATE INDEX IF NOT EXISTS idx_learned_facts_group_active
   ON learned_facts(group_id, status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_learned_facts_group_pending
   ON learned_facts(group_id, status) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_learned_facts_null_embedding
+  ON learned_facts(id) WHERE status = 'active' AND embedding_vec IS NULL;
 
 -- bot_replies.was_evasive: 1 when bot emitted an evasive reply (e.g. "忘了" / "考我呢").
 -- Existing DBs are migrated via runtime ALTER TABLE in db.ts._runMigrations.

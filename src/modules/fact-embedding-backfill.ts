@@ -50,7 +50,8 @@ export async function runFactEmbeddingBackfill(
       } catch (err) {
         failed++;
         skip.add(fact.id);
-        logger.warn({ err, factId: fact.id }, 'fact embedding backfill: row failed');
+        const markedFailed = db.learnedFacts.recordEmbeddingFailure(fact.id);
+        logger.warn({ err, factId: fact.id, permanentlyFailed: markedFailed }, 'fact embedding backfill: row failed');
       }
     }
     await sleep(SLEEP_MS);
