@@ -534,3 +534,110 @@ export function hasCoreferenceSelfReference(
 
   return false;
 }
+
+// --- Outsider Commentator Tone Detector (Case 6) ---
+// Detects bot output that uses "你们都X啊" / "你们在X什么" framing,
+// which sounds like a commentator summarizing the group from outside
+// rather than a participant.
+
+/**
+ * Check if bot output uses outsider/commentator framing.
+ * Catches patterns like:
+ *   - "你们在笑什么" / "你们在X什么"
+ *   - "你们都回国了啊" / "你们都X了啊"
+ *   - "你们都这么X啊"
+ * Returns true if outsider tone detected.
+ */
+export function isOutsiderCommentatorTone(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed || trimmed.length > 30) return false;
+
+  // "你们在X什么" pattern
+  if (/^你们在.+什么/.test(trimmed)) return true;
+
+  // "你们都X啊/呢/吗" pattern
+  if (/^你们都.+[啊呢吗]?$/.test(trimmed)) return true;
+
+  // "你们怎么都X" pattern
+  if (/^你们怎么都/.test(trimmed)) return true;
+
+  return false;
+}
+
+/**
+ * Regen hint for outsider commentator tone.
+ */
+export function outsiderToneRegenHint(text: string): string | null {
+  if (isOutsiderCommentatorTone(text)) {
+    return '不要用旁观者视角概括群里行为, 用第一人称或参与者视角, 像"我也X"/"我觉得X"/直接发表情';
+  }
+  return null;
+}
+
+// --- Insult Echo Detector (Case 8) ---
+// Detects when bot output is a short agreement/echo phrase following
+// a recent message containing insults toward a group member.
+
+const INSULT_KEYWORDS = [
+  '傻', '蠢', '少智', '智障', '脑残', '弱智', '废物', '白痴', '笨',
+  '辣鸡', '垃圾', 'sb', '煞笔', '逗我笑', '搞笑',
+];
+
+const ECHO_AGREEMENT_PATTERNS = [
+  /^不然呢[?？]?$/,
+  /^确实[。.!！]?$/,
+  /^对[。.!！]?$/,
+  /^就是[。.!！]?$/,
+  /^\+1$/,
+  /^没错[。.!！]?$/,
+  /^可不是[嘛么吗]?[。.!！]?$/,
+  /^真的[。.!！]?$/,
+  /^哈哈哈?[。.!！]?$/,
+  /^笑死[。.!！]?$/,
+];
+
+/**
+ * Detect if the bot is echoing/agreeing with an insult in recent messages.
+ *
+ * @param output - The bot's generated reply
+ * @param recentHumanMessages - Last N non-bot messages (content strings)
+ * @returns true if insult-echo risk detected
+ */
+export function detectInsultEchoRisk(
+  output: string,
+  recentHumanMessages: readonly string[],
+): boolean {
+  const trimmed = output.trim();
+  if (!trimmed || trimmed.length > 10) return false;
+
+  // Check if output is a short agreement/echo
+  const isEchoPhrase = ECHO_AGREEMENT_PATTERNS.some(re => re.test(trimmed));
+  if (!isEchoPhrase) return false;
+
+  // Check if any recent message contains insult keywords
+  for (const msg of recentHumanMessages) {
+    const lower = msg.toLowerCase();
+    if (INSULT_KEYWORDS.some(kw => lower.includes(kw))) {
+      logger.info(
+        { output: trimmed, insultMsg: msg.slice(0, 50) },
+        'insult-echo-detector: bot agreeing with insult detected',
+      );
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Regen hint for insult-echo detection.
+ */
+export function insultEchoRegenHint(
+  output: string,
+  recentHumanMessages: readonly string[],
+): string | null {
+  if (detectInsultEchoRisk(output, recentHumanMessages)) {
+    return '不要附和或赞同针对群友的贬低/骂人, skip 或转移话题';
+  }
+  return null;
+}
