@@ -416,6 +416,94 @@ export function extractTopFaces(messages: Array<{ content: string }>, topN: numb
     .map(([id]) => id);
 }
 
+// ── Skeleton-level near-dup detection (T2 tone-humanize) ────────────────
+// Extracts a sentence skeleton by replacing content words with a slot marker `_`,
+// keeping function/structure words (particles, pronouns, punctuation).
+// Two replies with the same skeleton but different content words are "template dups".
+
+const SKELETON_KEEP_WORDS = new Set([
+  // Pronouns
+  '你', '你们', '我', '我们', '他', '她', '它', '他们', '谁', '大家', '人家',
+  // Particles / auxiliary
+  '的', '了', '吗', '吧', '呢', '啊', '哦', '嘛', '呀', '哈', '嗯',
+  '在', '又', '都', '也', '就', '还', '才', '不', '没', '有', '是',
+  '这', '那', '什么', '怎么', '哪', '多', '几',
+  // Structural connectors
+  '和', '跟', '但', '而', '因为', '所以', '虽然', '如果',
+]);
+
+// Punctuation to preserve in skeleton
+const SKELETON_PUNCT_RE = /[？?！!，,。\.、…～~：:；;（）()\[\]【】「」''""]/;
+
+/**
+ * Extract sentence skeleton: content words → `_`, keep function words + punctuation.
+ * Exported for testing.
+ */
+export function extractSkeleton(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) return '';
+
+  const tokens: string[] = [];
+  let i = 0;
+  while (i < trimmed.length) {
+    // Check for punctuation
+    if (SKELETON_PUNCT_RE.test(trimmed[i]!)) {
+      tokens.push(trimmed[i]!);
+      i++;
+      continue;
+    }
+
+    // Try to match a multi-char keep word (greedy: try longest first)
+    let matched = false;
+    for (const w of SKELETON_KEEP_WORDS) {
+      if (w.length > 1 && trimmed.startsWith(w, i)) {
+        tokens.push(w);
+        i += w.length;
+        matched = true;
+        break;
+      }
+    }
+    if (matched) continue;
+
+    // Single-char keep word
+    if (SKELETON_KEEP_WORDS.has(trimmed[i]!)) {
+      tokens.push(trimmed[i]!);
+      i++;
+      continue;
+    }
+
+    // Content word character — replace with slot marker
+    // Collapse consecutive content chars into one `_`
+    if (tokens.length === 0 || tokens[tokens.length - 1] !== '_') {
+      tokens.push('_');
+    }
+    i++;
+  }
+
+  return tokens.join('');
+}
+
+/**
+ * Skeleton Jaccard similarity: compare two skeletons as bigram sets.
+ * Returns 0..1.
+ */
+export function skeletonSimilarity(a: string, b: string): number {
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  const bigrams = (s: string): Set<string> => {
+    const out = new Set<string>();
+    if (s.length < 2) { if (s) out.add(s); return out; }
+    for (let i = 0; i < s.length - 1; i++) out.add(s.slice(i, i + 2));
+    return out;
+  };
+  const A = bigrams(a);
+  const B = bigrams(b);
+  if (A.size === 0 || B.size === 0) return 0;
+  let inter = 0;
+  for (const x of A) if (B.has(x)) inter++;
+  return inter / (A.size + B.size - inter);
+}
+
 // ── Mood signal detection for context injection (T1 tone-humanize) ──────
 // Lightweight heuristic: scan recent messages for playful/tense signals.
 // Returns a mood hint string for user-role context, or empty string.
@@ -1349,6 +1437,23 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       if (nearDup) {
         this.logger.info({ groupId, reply: processed, duplicateOf: nearDup }, 'Near-duplicate of recent own reply — dropping');
         return null;
+      }
+
+      // T2 tone-humanize: skeleton-level near-dup detection.
+      // Catches "你们又在 X 啊" / "你们又在 Y 啊" style repetition that
+      // slips past bigram Jaccard due to different content words.
+      const SKELETON_DUP_WINDOW = 5;
+      const SKELETON_DUP_THRESHOLD = 0.6;
+      const candidateSkeleton = extractSkeleton(processed);
+      if (candidateSkeleton.length >= 3) {
+        const skelDup = recentOwn.slice(-SKELETON_DUP_WINDOW).find(prev => {
+          const prevSkeleton = extractSkeleton(prev);
+          return prevSkeleton.length >= 3 && skeletonSimilarity(candidateSkeleton, prevSkeleton) > SKELETON_DUP_THRESHOLD;
+        });
+        if (skelDup) {
+          this.logger.info({ groupId, reply: processed, skeletonDupOf: skelDup, skeleton: candidateSkeleton }, 'Skeleton near-dup detected — dropping');
+          return null;
+        }
       }
 
       // ── STICKER-FIRST INTERCEPT ──────────────────────────────────────────

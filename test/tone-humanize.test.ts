@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { BANGDREAM_PERSONA, detectMoodSignal, buildMoodHint } from '../src/modules/chat.js';
+import { BANGDREAM_PERSONA, detectMoodSignal, buildMoodHint, extractSkeleton, skeletonSimilarity } from '../src/modules/chat.js';
 
 // ── T0: Persona 词池/例子改写验证 ─────────────────────────────────────────
 
@@ -126,5 +126,97 @@ describe('T1 — buildMoodHint', () => {
   it('hint 不包含 <skip> 控制 token', () => {
     expect(buildMoodHint('playful')).not.toContain('<skip>');
     expect(buildMoodHint('tense')).not.toContain('<skip>');
+  });
+});
+
+// ── T2: 骨架级近重复检测验证 ──────────────────────────────────────────────
+
+describe('T2 — extractSkeleton', () => {
+  it('保留虚词和标点，内容词替换为 _', () => {
+    const skel = extractSkeleton('你们又在咕咕嘎嘎了？');
+    // 你们 + 又 + 在 should be kept; 咕咕嘎嘎 → _; 了 kept; ？ kept
+    expect(skel).toContain('你们');
+    expect(skel).toContain('又');
+    expect(skel).toContain('在');
+    expect(skel).toContain('了');
+    expect(skel).toContain('？');
+    expect(skel).toContain('_');
+  });
+
+  it('两条相同骨架不同内容词生成高相似度骨架', () => {
+    const skel1 = extractSkeleton('你们又在咕咕嘎嘎了');
+    const skel2 = extractSkeleton('你们又在搞什么东西了');
+    // Both have the pattern: 你们又在_了
+    // Similarity should be very high
+    expect(skeletonSimilarity(skel1, skel2)).toBeGreaterThan(0.6);
+  });
+
+  it('完全不同骨架生成不同结果', () => {
+    const skel1 = extractSkeleton('你们又在咕咕嘎嘎了？');
+    const skel2 = extractSkeleton('今天天气真好啊');
+    expect(skel1).not.toBe(skel2);
+  });
+
+  it('空字符串返回空', () => {
+    expect(extractSkeleton('')).toBe('');
+    expect(extractSkeleton('  ')).toBe('');
+  });
+
+  it('纯虚词句子不含 _ 槽位', () => {
+    const skel = extractSkeleton('你也是吗？');
+    expect(skel).not.toContain('_');
+    expect(skel).toContain('你');
+    expect(skel).toContain('也');
+    expect(skel).toContain('是');
+  });
+
+  it('保留中文标点', () => {
+    const skel = extractSkeleton('烦不烦啊！');
+    expect(skel).toContain('不');
+    expect(skel).toContain('啊');
+    expect(skel).toContain('！');
+  });
+});
+
+describe('T2 — skeletonSimilarity', () => {
+  it('相同骨架返回 1.0', () => {
+    const skel = extractSkeleton('你们又在咕咕嘎嘎了？');
+    expect(skeletonSimilarity(skel, skel)).toBe(1);
+  });
+
+  it('同骨架不同词的两条回复相似度高 (>0.6，超过检测阈值)', () => {
+    const a = extractSkeleton('你们又在咕咕嘎嘎了？');
+    const b = extractSkeleton('你们又在说什么黑话了？');
+    expect(skeletonSimilarity(a, b)).toBeGreaterThan(0.6);
+  });
+
+  it('完全不同骨架相似度低 (<0.5)', () => {
+    const a = extractSkeleton('你们又在咕咕嘎嘎了？');
+    const b = extractSkeleton('好的我知道了');
+    expect(skeletonSimilarity(a, b)).toBeLessThan(0.5);
+  });
+
+  it('空字符串返回 0', () => {
+    expect(skeletonSimilarity('', '你们')).toBe(0);
+    expect(skeletonSimilarity('你们', '')).toBe(0);
+  });
+
+  it('核心用例：「你们又在 X 了」连发第二条被 flag', () => {
+    // These two replies have different content words but same structural pattern
+    const reply1 = '你们又在咕咕嘎嘎了';
+    const reply2 = '你们又在搞什么东西了';
+    const skel1 = extractSkeleton(reply1);
+    const skel2 = extractSkeleton(reply2);
+    // Skeleton similarity should exceed the 0.6 threshold
+    expect(skeletonSimilarity(skel1, skel2)).toBeGreaterThan(0.6);
+  });
+
+  it('不同长度的句子（一短一长）相似度低', () => {
+    const short = '你们又在咕咕嘎嘎了';
+    const long = '你们又在咕咕嘎嘎了？烦不烦啊今天又是这样';
+    const skelShort = extractSkeleton(short);
+    const skelLong = extractSkeleton(long);
+    // Short vs long with extra clauses — should NOT be flagged as dup
+    expect(skeletonSimilarity(skelShort, skelLong)).toBeLessThan(0.7);
   });
 });

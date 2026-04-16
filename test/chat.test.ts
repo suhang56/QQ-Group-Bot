@@ -3111,7 +3111,7 @@ describe('ChatModule — collective addressing (你们)', () => {
   it('BANGDREAM_PERSONA contains 集体称呼 section', () => {
     expect(BANGDREAM_PERSONA).toContain('集体称呼');
     expect(BANGDREAM_PERSONA).toContain('你们');
-    expect(BANGDREAM_PERSONA).toContain('看你们唐的');
+    expect(BANGDREAM_PERSONA).toContain('你们玩什么呢');
   });
 
   it('userContent tail contains collective-addressing reminder', async () => {
