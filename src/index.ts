@@ -21,6 +21,7 @@ import { ModeratorModule } from './modules/moderator.js';
 import { LearnerModule } from './modules/learner.js';
 import { AnnouncementSyncModule } from './modules/announcement-sync.js';
 import { NameImagesModule } from './modules/name-images.js';
+import { PokeModule } from './modules/poke.js';
 import { LoreUpdater } from './modules/lore-updater.js';
 import { SelfLearningModule } from './modules/self-learning.js';
 import { runFactEmbeddingBackfill, BACKFILL_INTERVAL_MS } from './modules/fact-embedding-backfill.js';
@@ -216,6 +217,8 @@ router.setStickerCapture(stickerCapture);
 stickerCapture.startBackfillLoop(ACTIVE_GROUPS);
 
 const welcome = new WelcomeModule({ welcomeLog: db.welcomeLog, claude, adapter, botUserId });
+const poke = new PokeModule({ adapter, botUserId });
+router.setPoke(poke);
 
 const idGuard = new IdCardGuard({
   adapter,
@@ -285,6 +288,11 @@ adapter.on('notice.group_increase', (groupId, userId) => {
   void welcome.handleJoin(groupId, userId).catch(err => logger.error({ err, groupId, userId }, 'welcome failed'));
 });
 
+adapter.on('notice.group_poke', (notice) => {
+  if (ACTIVE_GROUPS.length > 0 && !ACTIVE_GROUPS.includes(notice.groupId)) return;
+  void router.dispatchPoke(notice);
+});
+
 // 6. Connect
 try {
   await adapter.connect();
@@ -308,7 +316,7 @@ const ratingPortGroup = ACTIVE_GROUPS[0] ?? '';
 let ratingPortal: RatingPortalServer | null = null;
 if (ratingPortGroup) {
   const ratingPort = parseInt(process.env['RATING_PORT'] ?? '4000', 10);
-  ratingPortal = new RatingPortalServer(db.botReplies, ratingPortGroup, db.moderation, db.localStickers);
+  ratingPortal = new RatingPortalServer(db.botReplies, ratingPortGroup, db.moderation, db.messages, db.localStickers);
   ratingPortal.start(ratingPort);
 
   // Generate tuning report on SIGUSR1

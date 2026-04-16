@@ -805,6 +805,39 @@ function renderDetail(detailRow, td, data) {
     grid.appendChild(v);
   }
 
+  // Original message content + context messages from the API
+  const orig = data.originalMessage;
+  if (orig) {
+    const origBox = document.createElement('div');
+    origBox.className = 'detail-reason-box';
+    origBox.style.borderLeftColor = '#dc2626';
+    origBox.textContent = orig.content;
+    const origLabel = document.createElement('div');
+    origLabel.style.cssText = 'font-size:11px;color:var(--text-dim);margin-bottom:2px;';
+    origLabel.textContent = `${orig.nickname} (${orig.userId})`;
+    const origWrap = document.createElement('div');
+    origWrap.appendChild(origLabel);
+    origWrap.appendChild(origBox);
+    addRow('原始消息', origWrap);
+  }
+
+  // Nearby context messages
+  const ctx = data.contextMessages;
+  if (ctx && ctx.length > 0) {
+    const ctxBox = document.createElement('div');
+    ctxBox.style.cssText = 'font-size:12px;line-height:1.6;max-height:200px;overflow-y:auto;';
+    for (const m of ctx) {
+      const line = document.createElement('div');
+      const time = new Date(m.timestamp * 1000);
+      const hhmm = `${String(time.getHours()).padStart(2,'0')}:${String(time.getMinutes()).padStart(2,'0')}`;
+      const isTarget = orig && m.userId === orig.userId && m.timestamp === orig.timestamp;
+      line.style.cssText = isTarget ? 'font-weight:bold;color:#dc2626;' : '';
+      line.textContent = `[${hhmm}] ${m.nickname}: ${m.content}`;
+      ctxBox.appendChild(line);
+    }
+    addRow('附近消息', ctxBox);
+  }
+
   addRow('消息 ID', rec.msgId ?? '—');
   addRow('处罚时间', fmtTimestamp(rec.timestamp, true));
   addRow('群组', rec.groupId ?? '—');

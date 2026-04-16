@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import type { IBotReplyRepository, ILocalStickerRepository, IModerationRepository } from '../storage/db.js';
+import type { IBotReplyRepository, ILocalStickerRepository, IModerationRepository, IMessageRepository } from '../storage/db.js';
 import { createLogger } from '../utils/logger.js';
 
 const logger = createLogger('rating-portal');
@@ -62,6 +62,7 @@ export class RatingPortalServer {
     private readonly repo: IBotReplyRepository,
     private readonly groupId: string,
     private readonly moderation: IModerationRepository,
+    private readonly messages: IMessageRepository,
     private readonly localStickers?: ILocalStickerRepository,
   ) {}
 
@@ -169,6 +170,17 @@ export class RatingPortalServer {
       const body: Record<string, unknown> = { record };
       if (record.appealed !== 0) {
         body['appeal'] = { appealed: record.appealed, reversed: record.reversed };
+      }
+      // Fetch the original message + surrounding context
+      const origMsg = this.messages.findBySourceId(record.msgId);
+      if (origMsg) {
+        body['originalMessage'] = { content: origMsg.content, nickname: origMsg.nickname, userId: origMsg.userId, timestamp: origMsg.timestamp };
+        // Nearby messages: 3 before + 3 after for context
+        const nearby = this.messages.getRecent(record.groupId, 50)
+          .filter(m => Math.abs(m.timestamp - origMsg.timestamp) <= 120) // within 2 min
+          .slice(0, 7)
+          .map(m => ({ nickname: m.nickname, content: m.content, timestamp: m.timestamp, userId: m.userId }));
+        body['contextMessages'] = nearby;
       }
       json(res, 200, body);
       return;

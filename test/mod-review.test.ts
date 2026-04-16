@@ -99,7 +99,7 @@ async function makePortal(): Promise<PortalFixture> {
   const port = await getFreePort();
   const host = '127.0.0.1';
   // RatingPortalServer needs IBotReplyRepository — pass db.botReplies (empty, in-mem)
-  const server = new RatingPortalServer(db.botReplies, 'g1', db.moderation, db.localStickers);
+  const server = new RatingPortalServer(db.botReplies, 'g1', db.moderation, db.messages, db.localStickers);
   server.start(port, host);
 
   const get = (path: string) => httpReq({ method: 'GET', host, port, path });
