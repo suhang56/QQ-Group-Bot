@@ -42,6 +42,7 @@ import { StyleLearner } from './modules/style-learner.js';
 import { RelationshipTracker } from './modules/relationship-tracker.js';
 import { AffinityModule } from './modules/affinity.js';
 import { JargonMiner } from './modules/jargon-miner.js';
+import { PhraseMiner } from './modules/phrase-miner.js';
 import { RatingPortalServer } from './server/rating-portal.js';
 import { TuningGenerator } from './server/tuning-generator.js';
 
@@ -308,6 +309,14 @@ const jargonMiner = new JargonMiner({
   activeGroups: ACTIVE_GROUPS,
 });
 
+const memesDisabled = process.env['MEMES_V1_DISABLED'] === '1';
+const phraseMiner = memesDisabled ? null : new PhraseMiner({
+  db: db.rawDb,
+  messages: db.messages,
+  claude,
+  activeGroups: ACTIVE_GROUPS,
+});
+
 const harvest = new OpportunisticHarvest({
   messages: db.messages,
   learnedFacts: db.learnedFacts,
@@ -319,6 +328,9 @@ const harvest = new OpportunisticHarvest({
     for (const g of groups) {
       try { expressionLearner.scan(g); } catch { /* logged internally */ }
       void jargonMiner.run(g).catch(err => logger.warn({ err, groupId: g }, 'jargon miner cycle failed'));
+    }
+    if (phraseMiner) {
+      void phraseMiner.runAll().catch((err) => logger.error({ err }, 'phrase-miner failed'));
     }
   },
 });
