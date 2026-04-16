@@ -248,3 +248,47 @@ CREATE TABLE IF NOT EXISTS bandori_lives (
 );
 CREATE INDEX IF NOT EXISTS idx_bandori_lives_start_date ON bandori_lives(start_date);
 CREATE INDEX IF NOT EXISTS idx_bandori_lives_last_seen  ON bandori_lives(last_seen_at);
+
+-- jargon_candidates: auto-detected group-specific jargon candidates.
+-- Mined by JargonMiner from message frequency analysis + LLM inference.
+CREATE TABLE IF NOT EXISTS jargon_candidates (
+  group_id              TEXT    NOT NULL,
+  content               TEXT    NOT NULL,
+  count                 INTEGER NOT NULL DEFAULT 1,
+  contexts              TEXT    NOT NULL DEFAULT '[]',
+  last_inference_count  INTEGER NOT NULL DEFAULT 0,
+  meaning               TEXT,
+  is_jargon             INTEGER NOT NULL DEFAULT 0,
+  created_at            INTEGER NOT NULL,
+  updated_at            INTEGER NOT NULL,
+  PRIMARY KEY (group_id, content)
+);
+CREATE INDEX IF NOT EXISTS idx_jargon_group_count ON jargon_candidates(group_id, count DESC);
+
+-- interaction_stats: hourly-updated pairwise interaction counts for relationship tracking.
+CREATE TABLE IF NOT EXISTS interaction_stats (
+  group_id       TEXT    NOT NULL,
+  from_user      TEXT    NOT NULL,
+  to_user        TEXT    NOT NULL,
+  reply_count    INTEGER NOT NULL DEFAULT 0,
+  mention_count  INTEGER NOT NULL DEFAULT 0,
+  name_ref_count INTEGER NOT NULL DEFAULT 0,
+  last_updated   INTEGER NOT NULL,
+  PRIMARY KEY (group_id, from_user, to_user)
+);
+
+CREATE INDEX IF NOT EXISTS idx_interaction_stats_group ON interaction_stats(group_id, last_updated DESC);
+
+-- social_relations: daily LLM-inferred relationship types between group members.
+CREATE TABLE IF NOT EXISTS social_relations (
+  group_id      TEXT    NOT NULL,
+  from_user     TEXT    NOT NULL,
+  to_user       TEXT    NOT NULL,
+  relation_type TEXT    NOT NULL,
+  strength      REAL    NOT NULL DEFAULT 0.5,
+  evidence      TEXT,
+  updated_at    INTEGER NOT NULL,
+  PRIMARY KEY (group_id, from_user, to_user)
+);
+
+CREATE INDEX IF NOT EXISTS idx_social_relations_group ON social_relations(group_id, strength DESC);

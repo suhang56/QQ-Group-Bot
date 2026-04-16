@@ -30,13 +30,16 @@ export const VISION_MODEL = (process.env['VISION_MODEL'] ?? 'gemini-2.5-flash') 
 export const MODERATOR_MODEL = process.env['MODERATOR_MODEL'] ?? 'qwen3:8b';
 
 /** Self-reflection loop (hourly tuning.md generator). */
-export const REFLECTION_MODEL = process.env['REFLECTION_MODEL'] ?? 'qwen3:8b';
+export const REFLECTION_MODEL = process.env['REFLECTION_MODEL'] ?? 'gemini-2.5-flash';
 
 /** Opportunistic harvest + unknown-term resolver (every 15min + daily deep). */
 export const HARVEST_MODEL = process.env['HARVEST_MODEL'] ?? 'qwen3:8b';
 
 /** Alias miner (every 2h — group member nickname discovery). */
 export const ALIAS_MODEL = process.env['ALIAS_MODEL'] ?? 'qwen3:8b';
+
+/** Jargon miner (piggybacks on harvest cycle — group-specific slang detection). */
+export const JARGON_MODEL = process.env['JARGON_MODEL'] ?? 'qwen3:8b';
 
 /** Lore updater (threshold-triggered, outputs full markdown doc). */
 export const LORE_MODEL = process.env['LORE_MODEL'] ?? 'qwen3:8b';
@@ -94,9 +97,9 @@ export const lurkerDefaults = {
 export const chatHistoryDefaults = {
   chatRecentCount: 20,
   chatKeywordMatchCount: 15,
-  chatContextWide: 50,
-  chatContextMedium: 20,
-  chatContextImmediate: 10,
+  chatContextWide: 30,
+  chatContextMedium: 15,
+  chatContextImmediate: 8,
   groupIdentityCacheTtlMs: 3_600_000, // 1 hour
   loreDirPath: 'data/lore',
   loreSizeCapBytes: 512 * 1024, // 512 KB hard cap before truncation warning

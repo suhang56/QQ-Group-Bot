@@ -52,16 +52,15 @@ export class GeminiClient implements IClaudeClient {
     }
 
     try {
-      // Disable Gemini 2.5 Flash's default thinking — thinking tokens
-      // count against max_tokens, so with max_tokens=300 the reasoning
-      // budget leaves almost nothing for actual content. Chat path wants
-      // short direct replies, not reasoning. `reasoning_effort: "none"`
-      // is the OpenAI-compat parameter Google honors for this.
+      // Enable light thinking for Gemini 2.5 Flash — reasoning_effort:'low'
+      // gives better instruction-following for role-play prompts while keeping
+      // thinking tokens small. +100 to max_tokens accommodates the thinking
+      // budget so actual content output isn't starved.
       const resp = await this.client.chat.completions.create({
         model: req.model,
         messages,
-        max_tokens: req.maxTokens,
-        reasoning_effort: 'none',
+        max_tokens: req.maxTokens + 100,
+        reasoning_effort: 'low',
       });
 
       const text = resp.choices[0]?.message?.content ?? '';
@@ -125,8 +124,9 @@ export class GeminiClient implements IClaudeClient {
           },
         ],
         max_tokens: maxTokens,
-        // Same thinking-disable as text chat — keep vision response short and
-        // avoid reasoning-token budget exhaustion.
+        // Vision keeps reasoning_effort:'none' (unlike text chat which uses 'low')
+        // — vision responses are descriptive, not role-play, so thinking adds
+        // no value and would eat into the short max_tokens budget.
         reasoning_effort: 'none',
       });
 

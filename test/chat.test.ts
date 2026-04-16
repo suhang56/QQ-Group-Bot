@@ -1930,7 +1930,7 @@ describe('ChatModule — tiered 50/20/10 context scope', () => {
     // The immediate-context line must carry exactly one "← 要接的这条" tag
     // (prompt body may reference the marker in its directive text — filter those out).
     const immediateBlock = prompt.split('# 当前 thread 语境')[1] ?? '';
-    const directiveCut = immediateBlock.split('# 🎯 唯一目标')[0] ?? immediateBlock;
+    const directiveCut = immediateBlock.split('← 要接的这条 —')[0] ?? immediateBlock;
     const arrowCount = (directiveCut.match(/← 要接的这条/g) ?? []).length;
     expect(arrowCount).toBe(1);
   });
@@ -1947,7 +1947,6 @@ describe('ChatModule — tiered 50/20/10 context scope', () => {
     insertN(3);
     await makeChat().generateReply('g1', makeMsg(), []);
     const prompt = getPrompt();
-    expect(prompt).toContain('# 🎯 唯一目标');
     expect(prompt).toContain('← 要接的这条');
     expect(prompt).toContain('只输出一个：<skip> 或 一条自然反应');
   });
@@ -2169,7 +2168,7 @@ describe('ChatModule — confabulation guard', () => {
     expect(BANGDREAM_PERSONA).toContain('我都说过了');
   });
 
-  it('user-content tail contains anti-confabulation warning', () => {
+  it('system prompt contains anti-confabulation warning via STATIC_CHAT_DIRECTIVES', () => {
     const db = new Database(':memory:');
     const claude = vi.fn().mockResolvedValue({
       text: '好', inputTokens: 10, outputTokens: 5,
@@ -2182,10 +2181,10 @@ describe('ChatModule — confabulation guard', () => {
     );
     db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'hi', timestamp: Math.floor(Date.now() / 1000), deleted: false });
     return chat.generateReply('g1', makeMsg({ content: 'hi' }), []).then(() => {
-      const call = claude.mock.calls[0]![0] as { messages: Array<{ content: string }> };
-      const userContent = call.messages.find(m => m.content.includes('绝对禁止'))?.content ?? '';
-      expect(userContent).toContain('不要假装说过你实际没说过的话');
-      expect(userContent).toContain('绝对禁止');
+      const call = claude.mock.calls[0]![0] as { system: Array<{ text: string }>, messages: Array<{ content: string }> };
+      const systemText = call.system.map(s => s.text).join(' ');
+      expect(systemText).toContain('不要假装说过你实际没说过的话');
+      expect(systemText).toContain('绝对禁止');
     });
   });
 

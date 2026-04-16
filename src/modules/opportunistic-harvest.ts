@@ -45,6 +45,8 @@ export interface OpportunisticHarvestOptions {
   enabled?: boolean;
   /** Injected for testing */
   now?: () => number;
+  /** Called after each regular harvest cycle with the active group IDs. */
+  onCycleComplete?: (activeGroups: string[]) => void;
 }
 
 function buildPrompt(chronoMsgs: Array<{ nickname: string; content: string }>, maxFacts: number, deep: boolean): string {
@@ -110,6 +112,7 @@ export class OpportunisticHarvest {
   private readonly deepWindowMessages: number;
   private readonly enabled: boolean;
   private readonly now: () => number;
+  private readonly onCycleComplete: ((activeGroups: string[]) => void) | undefined;
 
   private timer: ReturnType<typeof setInterval> | null = null;
   private firstTimer: ReturnType<typeof setTimeout> | null = null;
@@ -133,6 +136,7 @@ export class OpportunisticHarvest {
     this.deepWindowMessages = opts.deepWindowMessages ?? 1000;
     this.enabled = opts.enabled ?? true;
     this.now = opts.now ?? (() => Date.now());
+    this.onCycleComplete = opts.onCycleComplete;
   }
 
   start(): void {
@@ -191,6 +195,13 @@ export class OpportunisticHarvest {
           this.logger.error({ err, groupId }, 'unknown-term resolver failed');
         }
       }
+    }
+
+    // Piggyback: notify listeners (e.g. expression learner) after each cycle
+    try {
+      this.onCycleComplete?.(this.activeGroups);
+    } catch (err) {
+      this.logger.warn({ err }, 'onCycleComplete callback failed');
     }
   }
 

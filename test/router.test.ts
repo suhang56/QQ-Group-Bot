@@ -298,9 +298,13 @@ describe('Router — mimic commands', () => {
     }
     await router.dispatch(makeMsg({ content: '/mimic_on @u-target', role: 'admin' }));
     vi.mocked(adapter.send).mockClear();
+    // F3: mimic_on now has 30% random chance for non-direct messages.
+    // Stub Math.random to return 0 (always triggers, since 0 < 0.3).
+    vi.spyOn(Math, 'random').mockReturnValue(0);
     await router.dispatch(makeMsg({ content: 'just a regular chat message', userId: 'u-other' }));
     // Reply is raw mimicked text — no prefix, but a reply was sent
     expect(adapter.send).toHaveBeenCalled();
+    vi.mocked(Math.random).mockRestore();
   });
 
   // CQ:at mention parsing — the real QQ bug: user sent /mimic_on @nickname but

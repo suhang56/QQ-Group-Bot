@@ -46,6 +46,7 @@ function makeFactors(overrides: Partial<ScoreFactors> = {}): ScoreFactors {
     metaIdentityProbe: 0,
     adminBoost: 0,
     stickerRequest: 0,
+    hasImage: 0,
     ...overrides,
   };
 }

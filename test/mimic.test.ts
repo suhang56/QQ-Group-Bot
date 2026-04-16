@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { MimicModule } from '../src/modules/mimic.js';
+import { MimicModule, filterFewShot, extractSectionByNickname, extractUserStickers } from '../src/modules/mimic.js';
 import type { IClaudeClient, ClaudeRequest, ClaudeResponse } from '../src/ai/claude.js';
 import type { IMessageRepository, IGroupConfigRepository, GroupConfig } from '../src/storage/db.js';
 import type { Message } from '../src/storage/db.js';
@@ -321,5 +321,181 @@ describe('MimicModule — /mimic_on / /mimic_off', () => {
     const result = await mod.generateMimic('g1', 'nonexistent', '测试话题', []);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.errorCode).toBe(BotErrorCode.USER_NOT_FOUND);
+  });
+});
+
+// ---- F1: Few-shot sample filtering ----
+
+describe('filterFewShot', () => {
+  function msg(content: string, id = 1): Message {
+    return { id, groupId: 'g1', userId: 'u1', nickname: 'Alice', content, rawContent: content, timestamp: 1000, deleted: false };
+  }
+
+  it('removes pure CQ code messages', () => {
+    const msgs = [
+      msg('[CQ:image,file=abc.jpg]'),
+      msg('[CQ:mface,id=123] [CQ:image,file=xyz.jpg]'),
+      msg('hello world'),
+    ];
+    const result = filterFewShot(msgs, null);
+    expect(result).toHaveLength(1);
+    expect(result[0]!.content).toBe('hello world');
+  });
+
+  it('removes messages shorter than 3 chars after stripping CQ', () => {
+    const msgs = [
+      msg('嗯'),
+      msg('ok'),
+      msg('[CQ:face,id=1]ab'),
+      msg('这是一条正常的消息'),
+    ];
+    const result = filterFewShot(msgs, null);
+    expect(result).toHaveLength(1);
+    expect(result[0]!.content).toBe('这是一条正常的消息');
+  });
+
+  it('removes command messages starting with /', () => {
+    const msgs = [
+      msg('/mimic @Alice'),
+      msg('/help'),
+      msg('正常消息'),
+    ];
+    const result = filterFewShot(msgs, null);
+    expect(result).toHaveLength(1);
+    expect(result[0]!.content).toBe('正常消息');
+  });
+
+  it('caps at 30 messages by default', () => {
+    const msgs = Array.from({ length: 50 }, (_, i) => msg(`message number ${i}`, i));
+    const result = filterFewShot(msgs, null);
+    expect(result).toHaveLength(30);
+  });
+
+  it('prefers topic-relevant messages when topic is provided', () => {
+    const msgs = [
+      msg('今天吃了拉面很好吃'),
+      msg('邦多利 Roselia 新曲好听'),
+      msg('吃饭了没有呢'),
+      msg('明天去看 邦多利 演唱会'),
+      msg('Roselia 新歌太强了'),
+    ];
+    // Topic keywords: ["邦多利", "Roselia"]
+    const result = filterFewShot(msgs, '邦多利 Roselia', 3);
+    const contents = result.map(m => m.content);
+    // Messages with keyword overlap should be ranked first
+    expect(contents).toContain('邦多利 Roselia 新曲好听');
+    expect(contents).toContain('明天去看 邦多利 演唱会');
+  });
+
+  it('returns empty array for all-filtered input', () => {
+    const msgs = [
+      msg('[CQ:image,file=a.jpg]'),
+      msg('/help'),
+      msg('嗯'),
+    ];
+    const result = filterFewShot(msgs, null);
+    expect(result).toHaveLength(0);
+  });
+
+  it('handles empty input', () => {
+    expect(filterFewShot([], null)).toHaveLength(0);
+    expect(filterFewShot([], '天气')).toHaveLength(0);
+  });
+
+  it('passes through messages with mixed CQ and text if text >= 3 chars', () => {
+    const msgs = [
+      msg('[CQ:face,id=1]这是正常消息'),
+      msg('[CQ:image,file=a.jpg]嗯'),
+    ];
+    const result = filterFewShot(msgs, null);
+    expect(result).toHaveLength(1);
+    expect(result[0]!.content).toContain('这是正常消息');
+  });
+});
+
+// ---- F2: Lore section extraction ----
+
+describe('extractSectionByNickname', () => {
+  const loreText = `# 群志
+
+## 常驻群友
+
+### 西瓜（群主）
+西瓜是群主，很厉害。
+
+### 園田美遊（美游/ytmy）
+美游是毒舌但热心的人。
+
+### kisa（JT/唐约书亚）
+kisa 是发癫担当。`;
+
+  it('finds section by exact nickname in header', () => {
+    const result = extractSectionByNickname(loreText, '西瓜');
+    expect(result).toContain('西瓜是群主');
+    expect(result).not.toContain('美游');
+  });
+
+  it('finds section by alias in parentheses', () => {
+    const result = extractSectionByNickname(loreText, 'ytmy');
+    expect(result).toContain('美游是毒舌');
+  });
+
+  it('returns null when nickname not found', () => {
+    const result = extractSectionByNickname(loreText, '不存在的人');
+    expect(result).toBeNull();
+  });
+
+  it('returns null for empty lore text', () => {
+    const result = extractSectionByNickname('', '西瓜');
+    expect(result).toBeNull();
+  });
+
+  it('handles lore with no ### headers', () => {
+    const result = extractSectionByNickname('just some text without headers', '西瓜');
+    expect(result).toBeNull();
+  });
+});
+
+// ---- F4: User sticker extraction ----
+
+describe('extractUserStickers', () => {
+  function msg(rawContent: string): Message {
+    return { id: 1, groupId: 'g1', userId: 'u1', nickname: 'Alice', content: '', rawContent, timestamp: 1000, deleted: false };
+  }
+
+  it('extracts mface and image CQ codes from rawContent', () => {
+    const msgs = [
+      msg('hello [CQ:mface,id=123,package_id=456] world'),
+      msg('[CQ:image,file=abc.jpg,sub_type=1]'),
+    ];
+    const result = extractUserStickers(msgs, []);
+    expect(result).toHaveLength(2);
+    expect(result[0]).toContain('CQ:mface');
+    expect(result[1]).toContain('CQ:image');
+  });
+
+  it('deduplicates identical sticker codes', () => {
+    const code = '[CQ:mface,id=123,package_id=456]';
+    const msgs = [msg(code), msg(code)];
+    const result = extractUserStickers(msgs, []);
+    expect(result).toHaveLength(1);
+  });
+
+  it('excludes recently used stickers (rotation)', () => {
+    const code1 = '[CQ:mface,id=1,package_id=1]';
+    const code2 = '[CQ:mface,id=2,package_id=2]';
+    const msgs = [msg(code1), msg(code2)];
+    const result = extractUserStickers(msgs, [code1]);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toBe(code2);
+  });
+
+  it('returns empty array for messages without stickers', () => {
+    const msgs = [msg('hello'), msg('world')];
+    expect(extractUserStickers(msgs, [])).toHaveLength(0);
+  });
+
+  it('handles empty message list', () => {
+    expect(extractUserStickers([], [])).toHaveLength(0);
   });
 });

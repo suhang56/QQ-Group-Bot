@@ -439,6 +439,39 @@ export interface ILocalStickerRepository {
   unblockSticker(groupId: string, key: string): boolean;
 }
 
+// ---- Expression pattern + user style types ----
+
+export interface ExpressionPattern {
+  groupId: string;
+  situation: string;
+  expression: string;
+  weight: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface IExpressionPatternRepository {
+  upsert(groupId: string, situation: string, expression: string): void;
+  listAll(groupId: string): ExpressionPattern[];
+  getTopN(groupId: string, limit: number): ExpressionPattern[];
+  updateWeight(groupId: string, situation: string, expression: string, weight: number): void;
+  delete(groupId: string, situation: string, expression: string): void;
+}
+
+export interface StyleJsonData {
+  catchphrases: string[];
+  punctuationStyle: string;
+  sentencePattern: string;
+  emotionalSignatures: Record<string, string>;
+  topicAffinity: string[];
+}
+
+export interface IUserStyleRepository {
+  upsert(groupId: string, userId: string, nickname: string, styleJson: StyleJsonData): void;
+  get(groupId: string, userId: string): StyleJsonData | null;
+  listAll(groupId: string): Array<{ userId: string; nickname: string; style: StyleJsonData; updatedAt: number }>;
+}
+
 // ---- Raw row types from SQLite ----
 
 interface MessageRow {
@@ -1907,6 +1940,126 @@ export class BandoriLiveRepository implements IBandoriLiveRepository {
   }
 }
 
+// ---- Expression pattern repository ----
+
+interface ExpressionPatternRow {
+  group_id: string;
+  situation: string;
+  expression: string;
+  weight: number;
+  created_at: number;
+  updated_at: number;
+}
+
+function expressionFromRow(r: ExpressionPatternRow): ExpressionPattern {
+  return {
+    groupId: r.group_id,
+    situation: r.situation,
+    expression: r.expression,
+    weight: r.weight,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
+}
+
+class ExpressionPatternRepository implements IExpressionPatternRepository {
+  constructor(private readonly db: DatabaseSync) {}
+
+  upsert(groupId: string, situation: string, expression: string): void {
+    const now = Date.now();
+    const existing = this.db.prepare(
+      'SELECT weight FROM expression_patterns WHERE group_id = ? AND situation = ? AND expression = ?'
+    ).get(groupId, situation, expression) as { weight: number } | undefined;
+
+    if (existing) {
+      this.db.prepare(
+        'UPDATE expression_patterns SET weight = ?, updated_at = ? WHERE group_id = ? AND situation = ? AND expression = ?'
+      ).run(existing.weight + 1, now, groupId, situation, expression);
+    } else {
+      this.db.prepare(
+        'INSERT INTO expression_patterns (group_id, situation, expression, weight, created_at, updated_at) VALUES (?, ?, ?, 1.0, ?, ?)'
+      ).run(groupId, situation, expression, now, now);
+    }
+  }
+
+  listAll(groupId: string): ExpressionPattern[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM expression_patterns WHERE group_id = ? ORDER BY weight DESC'
+    ).all(groupId) as unknown as ExpressionPatternRow[];
+    return rows.map(expressionFromRow);
+  }
+
+  getTopN(groupId: string, limit: number): ExpressionPattern[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM expression_patterns WHERE group_id = ? ORDER BY weight DESC LIMIT ?'
+    ).all(groupId, limit) as unknown as ExpressionPatternRow[];
+    return rows.map(expressionFromRow);
+  }
+
+  updateWeight(groupId: string, situation: string, expression: string, weight: number): void {
+    this.db.prepare(
+      'UPDATE expression_patterns SET weight = ?, updated_at = ? WHERE group_id = ? AND situation = ? AND expression = ?'
+    ).run(weight, Date.now(), groupId, situation, expression);
+  }
+
+  delete(groupId: string, situation: string, expression: string): void {
+    this.db.prepare(
+      'DELETE FROM expression_patterns WHERE group_id = ? AND situation = ? AND expression = ?'
+    ).run(groupId, situation, expression);
+  }
+}
+
+// ---- User style repository ----
+
+class UserStyleRepository implements IUserStyleRepository {
+  constructor(private readonly db: DatabaseSync) {}
+
+  upsert(groupId: string, userId: string, nickname: string, styleJson: StyleJsonData): void {
+    const now = Date.now();
+    const json = JSON.stringify(styleJson);
+    const existing = this.db.prepare(
+      'SELECT 1 FROM user_styles WHERE group_id = ? AND user_id = ?'
+    ).get(groupId, userId);
+
+    if (existing) {
+      this.db.prepare(
+        'UPDATE user_styles SET nickname = ?, style_json = ?, updated_at = ? WHERE group_id = ? AND user_id = ?'
+      ).run(nickname, json, now, groupId, userId);
+    } else {
+      this.db.prepare(
+        'INSERT INTO user_styles (group_id, user_id, nickname, style_json, updated_at) VALUES (?, ?, ?, ?, ?)'
+      ).run(groupId, userId, nickname, json, now);
+    }
+  }
+
+  get(groupId: string, userId: string): StyleJsonData | null {
+    const row = this.db.prepare(
+      'SELECT style_json FROM user_styles WHERE group_id = ? AND user_id = ?'
+    ).get(groupId, userId) as { style_json: string } | undefined;
+    if (!row) return null;
+    try {
+      return JSON.parse(row.style_json) as StyleJsonData;
+    } catch {
+      return null;
+    }
+  }
+
+  listAll(groupId: string): Array<{ userId: string; nickname: string; style: StyleJsonData; updatedAt: number }> {
+    const rows = this.db.prepare(
+      'SELECT user_id, nickname, style_json, updated_at FROM user_styles WHERE group_id = ? ORDER BY updated_at DESC'
+    ).all(groupId) as unknown as Array<{ user_id: string; nickname: string; style_json: string; updated_at: number }>;
+
+    const result: Array<{ userId: string; nickname: string; style: StyleJsonData; updatedAt: number }> = [];
+    for (const r of rows) {
+      try {
+        const style = JSON.parse(r.style_json) as StyleJsonData;
+        result.push({ userId: r.user_id, nickname: r.nickname, style, updatedAt: r.updated_at });
+      } catch { /* skip malformed */ }
+    }
+    return result;
+  }
+}
+
 // ---- Main Database class ----
 
 export class Database {
@@ -1928,6 +2081,8 @@ export class Database {
   readonly welcomeLog: IWelcomeLogRepository;
   readonly modRejections: IModRejectionRepository;
   readonly bandoriLives: IBandoriLiveRepository;
+  readonly expressionPatterns: IExpressionPatternRepository;
+  readonly userStyles: IUserStyleRepository;
 
   private readonly _db: DatabaseSync;
 
@@ -1955,6 +2110,8 @@ export class Database {
     this.welcomeLog = new WelcomeLogRepository(this._db);
     this.modRejections = new ModRejectionRepository(this._db);
     this.bandoriLives = new BandoriLiveRepository(this._db);
+    this.expressionPatterns = new ExpressionPatternRepository(this._db);
+    this.userStyles = new UserStyleRepository(this._db);
   }
 
   /** Execute arbitrary SQL — intended for bulk-import scripts and migrations only. */
@@ -2199,5 +2356,92 @@ export class Database {
     // panel doesn't need to do a flaky timestamp-based lookup.
     try { this._db.exec(`ALTER TABLE moderation_log ADD COLUMN original_content TEXT`); } catch { /* already exists */ }
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_mod_log_reviewed ON moderation_log(reviewed, group_id, timestamp DESC)`);
+
+    // user_affinity — per-group per-user affinity (好感度) tracking.
+    this._db.exec(`
+      CREATE TABLE IF NOT EXISTS user_affinity (
+        group_id         TEXT    NOT NULL,
+        user_id          TEXT    NOT NULL,
+        score            INTEGER NOT NULL DEFAULT 30,
+        last_interaction INTEGER NOT NULL,
+        updated_at       INTEGER NOT NULL,
+        PRIMARY KEY (group_id, user_id)
+      )
+    `);
+
+    // jargon_candidates — existing DBs that already ran schema.sql get
+    // the CREATE TABLE IF NOT EXISTS from there. This migration block
+    // covers the edge case where schema.sql was cached before this table
+    // was added. The CREATE TABLE + CREATE INDEX are idempotent.
+    this._db.exec(`
+      CREATE TABLE IF NOT EXISTS jargon_candidates (
+        group_id              TEXT    NOT NULL,
+        content               TEXT    NOT NULL,
+        count                 INTEGER NOT NULL DEFAULT 1,
+        contexts              TEXT    NOT NULL DEFAULT '[]',
+        last_inference_count  INTEGER NOT NULL DEFAULT 0,
+        meaning               TEXT,
+        is_jargon             INTEGER NOT NULL DEFAULT 0,
+        created_at            INTEGER NOT NULL,
+        updated_at            INTEGER NOT NULL,
+        PRIMARY KEY (group_id, content)
+      )
+    `);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_jargon_group_count ON jargon_candidates(group_id, count DESC)`);
+
+    // interaction_stats + social_relations — relationship tracker (H2).
+    this._db.exec(`
+      CREATE TABLE IF NOT EXISTS interaction_stats (
+        group_id       TEXT    NOT NULL,
+        from_user      TEXT    NOT NULL,
+        to_user        TEXT    NOT NULL,
+        reply_count    INTEGER NOT NULL DEFAULT 0,
+        mention_count  INTEGER NOT NULL DEFAULT 0,
+        name_ref_count INTEGER NOT NULL DEFAULT 0,
+        last_updated   INTEGER NOT NULL,
+        PRIMARY KEY (group_id, from_user, to_user)
+      )
+    `);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_interaction_stats_group ON interaction_stats(group_id, last_updated DESC)`);
+
+    this._db.exec(`
+      CREATE TABLE IF NOT EXISTS social_relations (
+        group_id      TEXT    NOT NULL,
+        from_user     TEXT    NOT NULL,
+        to_user       TEXT    NOT NULL,
+        relation_type TEXT    NOT NULL,
+        strength      REAL    NOT NULL DEFAULT 0.5,
+        evidence      TEXT,
+        updated_at    INTEGER NOT NULL,
+        PRIMARY KEY (group_id, from_user, to_user)
+      )
+    `);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_social_relations_group ON social_relations(group_id, strength DESC)`);
+
+    // expression_patterns — bot reply style learning (H1 layer 1).
+    this._db.exec(`
+      CREATE TABLE IF NOT EXISTS expression_patterns (
+        group_id    TEXT    NOT NULL,
+        situation   TEXT    NOT NULL,
+        expression  TEXT    NOT NULL,
+        weight      REAL    NOT NULL DEFAULT 1.0,
+        created_at  INTEGER NOT NULL,
+        updated_at  INTEGER NOT NULL,
+        PRIMARY KEY (group_id, situation, expression)
+      )
+    `);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_expression_patterns_group_weight ON expression_patterns(group_id, weight DESC)`);
+
+    // user_styles — per-user speaking style profiles (H1 layer 2).
+    this._db.exec(`
+      CREATE TABLE IF NOT EXISTS user_styles (
+        group_id    TEXT    NOT NULL,
+        user_id     TEXT    NOT NULL,
+        nickname    TEXT    NOT NULL,
+        style_json  TEXT    NOT NULL,
+        updated_at  INTEGER NOT NULL,
+        PRIMARY KEY (group_id, user_id)
+      )
+    `);
   }
 }

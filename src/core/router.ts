@@ -544,6 +544,21 @@ export class Router implements IRouter {
       if (this.mimicModule) {
         const activeUserId = this.mimicModule.getActiveMimicUser(msg.groupId);
         if (activeUserId) {
+          // F3: Lurker scoring for mimic_on — don't reply to every message
+          const isAtMention = this.botUserId
+            && msg.rawContent.includes(`[CQ:at,qq=${this.botUserId}]`);
+          const isReplyToBot = this.botUserId
+            && msg.rawContent.includes('[CQ:reply,')
+            && recentMsgs.some(m => m.userId === this.botUserId);
+
+          // Direct triggers always fire; otherwise 30% random chance
+          const shouldTrigger = isAtMention || isReplyToBot || Math.random() < 0.3;
+
+          if (!shouldTrigger) {
+            this.logger.debug({ groupId: msg.groupId }, 'mimic lurker: skipping (random roll)');
+            return;
+          }
+
           const result = await this.mimicModule.generateMimic(msg.groupId, activeUserId, msg.content, recentMsgs);
           if (result.ok) {
             await this._sendReply(msg.groupId, result.text, undefined, {
@@ -558,8 +573,6 @@ export class Router implements IRouter {
           // Mimic failed (empty trigger, insufficient history, API error, etc).
           // For @-mentions: fall through to chatModule so the bot isn't dead.
           // For non-@: silently skip (preserves mimic-only mode).
-          const isAtMention = this.botUserId
-            && msg.rawContent.includes(`[CQ:at,qq=${this.botUserId}]`);
           if (!isAtMention) return;
           this.logger.debug({ groupId: msg.groupId, errorCode: result.ok ? null : (result as { errorCode?: string }).errorCode },
             'mimic failed on @-mention — falling through to chat');

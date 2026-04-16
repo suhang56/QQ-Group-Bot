@@ -34,6 +34,8 @@ import { SelfReflectionLoop } from './modules/self-reflection.js';
 import { BandoriLiveScraper } from './modules/bandori-live-scraper.js';
 import { OpportunisticHarvest } from './modules/opportunistic-harvest.js';
 import { AliasMiner } from './modules/alias-miner.js';
+import { ExpressionLearner } from './modules/expression-learner.js';
+import { StyleLearner } from './modules/style-learner.js';
 import { RatingPortalServer } from './server/rating-portal.js';
 import { TuningGenerator } from './server/tuning-generator.js';
 
@@ -168,7 +170,11 @@ void embedder.waitReady().then(() => {
 });
 router.setSelfLearning(selfLearning);
 
-const tuningPath = path.join(process.cwd(), 'data', 'tuning.md');
+// Tuning path is group-specific; falls back to data/tuning.md if no active group
+const tuningGroupId = process.env['ACTIVE_GROUPS']?.split(',')[0]?.trim();
+const tuningPath = tuningGroupId
+  ? path.join(process.cwd(), 'data', 'groups', tuningGroupId, 'tuning.md')
+  : path.join(process.cwd(), 'data', 'tuning.md');
 
 const vision = new VisionService(claude, adapter, db.imageDescriptions);
 const stickerFirst = new StickerFirstModule(db.localStickers, embedder);
@@ -239,6 +245,19 @@ const sequenceGuard = new SequenceGuard({
 });
 router.setSequenceGuard(sequenceGuard);
 
+const expressionLearner = new ExpressionLearner({
+  messages: db.messages,
+  expressionPatterns: db.expressionPatterns,
+  botUserId,
+});
+
+const styleLearner = new StyleLearner({
+  messages: db.messages,
+  userStyles: db.userStyles,
+  claude,
+  activeGroups: ACTIVE_GROUPS,
+});
+
 const harvest = new OpportunisticHarvest({
   messages: db.messages,
   learnedFacts: db.learnedFacts,
@@ -246,6 +265,11 @@ const harvest = new OpportunisticHarvest({
   activeGroups: ACTIVE_GROUPS,
   selfLearning,
   enabled: process.env['OPPORTUNISTIC_HARVEST_ENABLED'] !== '0',
+  onCycleComplete: (groups) => {
+    for (const g of groups) {
+      try { expressionLearner.scan(g); } catch { /* logged internally */ }
+    }
+  },
 });
 
 const aliasMiner = new AliasMiner({
@@ -310,6 +334,15 @@ try {
   selfReflection?.start();
   harvest.start();
   aliasMiner.start();
+  styleLearner.start();
+
+  // Daily expression pattern decay
+  const expressionDecayTimer = setInterval(() => {
+    for (const g of ACTIVE_GROUPS) {
+      try { expressionLearner.applyDecay(g); } catch (err) { logger.warn({ err, groupId: g }, 'expression decay failed'); }
+    }
+  }, 24 * 60 * 60_000);
+  expressionDecayTimer.unref?.();
 } catch (err) {
   logger.fatal({ err }, 'Failed to connect to NapCat — check NAPCAT_WS_URL and NapCat status');
   process.exit(1);
@@ -336,6 +369,7 @@ const shutdown = async () => {
   selfReflection?.dispose();
   harvest.dispose();
   aliasMiner.dispose();
+  styleLearner.dispose();
   chat.destroy();
   if (factBackfillTimer) clearInterval(factBackfillTimer);
   stickerCapture.stopBackfillLoop();
