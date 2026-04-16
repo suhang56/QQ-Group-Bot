@@ -204,60 +204,94 @@ describe('Case 2: 打艺 (QA-reflex / parse exposure)', () => {
 });
 
 // ====================================================================
-// Case 3: 群友贴 mhww 图 + "mhww"; 西瓜 @另一群友 "你回国了？"
-//         Bot (未被叫) 插话: "我刚不是在说西瓜吗"
+// Case 3: 群友 NEU第一rui厨 贴 mhww 团子图 + "mhww";
+//         用户 西瓜 对 NEU第一rui厨 说 "你回国了？" + sticker
+//         Bot 未被叫, 未被 @, 自己闯入 → "我刚不是在说西瓜吗"
 //
-// Primary failure: engagement-decision let unaddressed message through
-// Secondary: coreference guard should catch "在说{speakerNick}"
+// IMPORTANT: "@6月东京来人" in the screenshot is 西瓜's QQ ROLE TAG,
+// NOT an @-mention of the bot. Bot has ZERO engagement signals here.
+//
+// TWO-LAYER DEFENSE:
+// Layer 1 (PRIMARY): engagement-decision must return skip for this
+//   peer-to-peer dialog with no bot signal. If this works, the bad
+//   output is never generated.
+// Layer 2 (FALLBACK): coreference-guard catches "在说{nick}" patterns
+//   in case engagement-decision ever lets such a message through.
 // ====================================================================
-describe('Case 3: coreference "我刚不是在说西瓜吗" (unaddressed + coref)', () => {
-  it('unaddressed message with no @ → engagement-decision skips', () => {
-    // The trigger message is 西瓜 talking to another group member, NOT the bot
+describe('Case 3: peer-to-peer intrusion + coreference (unaddressed, no @)', () => {
+  // ── Layer 1: engagement-decision (PRIMARY defense) ──
+
+  it('LAYER 1: peer-to-peer dialog, zero bot signals → engagement skips', () => {
+    // Exact scenario: two humans talking (NEU第一rui厨 posts mhww,
+    // 西瓜 replies "你回国了？"). Bot has NO @-mention, NO reply-to-bot,
+    // and participationScore is below threshold. Bot MUST NOT speak.
     const decision = makeEngagementDecision(
       signals({
-        isMention: false,
-        isReplyToBot: false,
-        participationScore: 0.3,
+        isMention: false,        // "@6月东京来人" is a role tag, NOT @bot
+        isReplyToBot: false,     // 西瓜 is replying to NEU第一rui厨, not bot
+        participationScore: 0.3, // below threshold
         minScore: 0.5,
-        comprehensionScore: 0.7,
+        comprehensionScore: 0.7, // bot "understands" the message, but should not speak
       }),
     );
     expect(decision.shouldReply).toBe(false);
     expect(decision.strength).toBe('skip');
   });
 
-  it('coreference-guard catches "我刚不是在说西瓜吗"', () => {
+  it('LAYER 1: even high comprehension cannot override no-signal skip', () => {
+    // Bot perfectly understands "你回国了？" but has no reason to reply
+    const decision = makeEngagementDecision(
+      signals({
+        isMention: false,
+        isReplyToBot: false,
+        participationScore: 0.3,
+        minScore: 0.5,
+        comprehensionScore: 1.0, // perfect comprehension
+      }),
+    );
+    expect(decision.shouldReply).toBe(false);
+    expect(decision.strength).toBe('skip');
+  });
+
+  it('LAYER 1: conversation-state shows two humans, bot not a participant', () => {
+    const tracker = new ConversationStateTracker();
+    // NEU第一rui厨 posts mhww image + text
+    tracker.tick(GROUP_ID, 'mhww', 'neu_rui_user', NOW_SEC);
+    // 西瓜 replies to NEU第一rui厨
+    tracker.tick(GROUP_ID, '你回国了？', 'xigua_user', NOW_SEC + 5);
+
+    const snap = tracker.getSnapshot(GROUP_ID);
+    // Two human participants, bot is NOT among them
+    expect(snap.participantCount).toBe(2);
+  });
+
+  // ── Layer 2: coreference-guard (FALLBACK defense) ──
+
+  it('LAYER 2 FALLBACK: coreference-guard catches "我刚不是在说西瓜吗"', () => {
     expect(hasCoreferenceSelfReference(
       '我刚不是在说西瓜吗',
       ['西瓜'],
     )).toBe(true);
   });
 
-  it('coreference-guard catches "在说{any participant nickname}"', () => {
+  it('LAYER 2 FALLBACK: catches "在说{any participant nickname}"', () => {
     const participants = ['西瓜', 'NEU第一rui厨'];
     expect(hasCoreferenceSelfReference('在说西瓜', participants)).toBe(true);
     expect(hasCoreferenceSelfReference('不是在说NEU第一rui厨吗', participants)).toBe(true);
   });
 
-  it('coreference-guard does NOT flag addressing the speaker directly', () => {
+  it('LAYER 2 FALLBACK: does NOT flag addressing the speaker directly', () => {
     // "西瓜你好" is addressing, not coreference
     expect(hasCoreferenceSelfReference('西瓜你好啊', ['西瓜'])).toBe(false);
     // "问西瓜" is referencing, not self-referencing "在说"
     expect(hasCoreferenceSelfReference('问一下西瓜', ['西瓜'])).toBe(false);
   });
 
-  it('QA-report detector flags "我刚不是在说西瓜吗" self-referential pattern', () => {
+  it('LAYER 2 FALLBACK: QA-report detector also catches self-referential pattern', () => {
     expect(isQaReportTone('我刚不是在说西瓜吗?')).toBe(true);
   });
 
-  it('conversation-state participants track who is active', () => {
-    const tracker = new ConversationStateTracker();
-    tracker.tick(GROUP_ID, 'mhww', 'neu_rui', NOW_SEC);
-    tracker.tick(GROUP_ID, '你回国了？', 'xigua_user', NOW_SEC + 5);
-
-    const snap = tracker.getSnapshot(GROUP_ID);
-    expect(snap.participantCount).toBe(2);
-  });
+  // ── P4-2 hard regression guards ──
 
   it('P4-2 regression: bot output must NOT start with "我刚"', () => {
     const badOutputs = [
