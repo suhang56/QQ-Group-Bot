@@ -19,6 +19,7 @@ import type { ILocalStickerRepository, IImageDescriptionRepository, IForwardCach
 import { cosineSimilarity } from '../storage/embeddings.js';
 import type { IStickerFirstModule } from './sticker-first.js';
 import { _hasBandoriLiveKeyword, _formatLiveBlock } from './bandori-live-scraper.js';
+import { buildAliasMap, extractEntities, buildLorePayload } from './lore-retrieval.js';
 
 export interface IChatModule {
   generateReply(groupId: string, triggerMessage: GroupMessage, _recentMessages: GroupMessage[]): Promise<string | null>;
@@ -507,6 +508,8 @@ export class ChatModule implements IChatModule {
   private readonly loreKeywordsCache = new Map<string, Set<string>>();
   // per-group lore alias index: alias -> filePath (built on first access per group)
   private readonly loreAliasIndex = new Map<string, Map<string, string>>();
+  // entity-filtered lore: parsed chunks.jsonl alias map per group (alias -> chunkIndex[])
+  private readonly loreChunkAliasMap = new Map<string, Map<string, number[]>>();
   // per-group lore overview cache: groupId -> overview text
   private readonly loreOverviewCache = new Map<string, string | null>();
   // sticker section: groupId -> formatted section string (loaded async once)
@@ -840,6 +843,7 @@ export class ChatModule implements IChatModule {
     this.loreCache.delete(groupId);
     this.loreKeywordsCache.delete(groupId);
     this.loreAliasIndex.delete(groupId);
+    this.loreChunkAliasMap.delete(groupId);
     this.loreOverviewCache.delete(groupId);
     this.groupIdentityCache.delete(groupId);
     this.stickerSectionCache.delete(groupId);
@@ -2093,8 +2097,50 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       return this._loadRelevantLoreFromDir(groupId, triggerContent, immediateContext, aliasIndex);
     }
 
-    // Fallback: monolithic single-file loading
+    // Try entity-filtered path (monolithic + chunks.jsonl)
+    const filtered = this._loadLoreEntityFiltered(groupId, triggerContent, immediateContext);
+    if (filtered !== undefined) return filtered;
+
+    // Fallback: monolithic single-file loading (no chunks.jsonl available)
     return this._loadLoreFallback(groupId);
+  }
+
+  /**
+   * Entity-filtered lore injection via chunks.jsonl alias matching.
+   * Returns the filtered payload, or undefined if chunks.jsonl does not exist
+   * (signaling the caller to fall through to the raw fallback).
+   */
+  private _loadLoreEntityFiltered(
+    groupId: string,
+    triggerContent: string,
+    immediateContext: { nickname: string; content: string }[],
+  ): string | null | undefined {
+    const chunksPath = path.join(this.loreDirPath, `${groupId}.md.chunks.jsonl`);
+    if (!existsSync(chunksPath)) return undefined;
+
+    // Build/cache alias map (lazy, invalidated with invalidateLore)
+    if (!this.loreChunkAliasMap.has(groupId)) {
+      this.loreChunkAliasMap.set(groupId, buildAliasMap(chunksPath));
+    }
+    const chunkAliasMap = this.loreChunkAliasMap.get(groupId)!;
+
+    // Ensure loreKeywordsCache is populated from the FULL file (for loreKw scoring)
+    if (!this.loreKeywordsCache.has(groupId)) {
+      const lorePath = path.join(this.loreDirPath, `${groupId}.md`);
+      try {
+        const fullContent = readFileSync(lorePath, 'utf8');
+        this.loreKeywordsCache.set(groupId, tokenizeLore(fullContent));
+      } catch {
+        this.loreKeywordsCache.set(groupId, new Set());
+      }
+    }
+
+    // Extract entities from query + context (last 5 context messages)
+    const contextSlice = immediateContext.slice(-5);
+    const matchedChunks = extractEntities(triggerContent, contextSlice, chunkAliasMap);
+
+    // Build payload (identity core + matched chunks)
+    return buildLorePayload(groupId, matchedChunks, this.loreDirPath);
   }
 
   private _loadRelevantLoreFromDir(
