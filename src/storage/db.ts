@@ -439,6 +439,8 @@ export interface ILocalStickerRepository {
   unblockSticker(groupId: string, key: string): boolean;
   /** Return the set of mface keys known for this group (unblocked only). */
   getMfaceKeys(groupId: string): Set<string>;
+  /** Return all unblocked stickers for this group (no sorting, no limit). For Thompson sampling. */
+  getAllCandidates(groupId: string): LocalSticker[];
 }
 
 // ---- Expression pattern + user style types ----
@@ -1717,6 +1719,25 @@ class LocalStickerRepository implements ILocalStickerRepository {
       `SELECT key FROM local_stickers WHERE group_id = ? AND type = 'mface' AND COALESCE(blocked, 0) = 0`
     ).all(groupId) as Array<{ key: string }>;
     return new Set(rows.map(r => r.key));
+  }
+
+  getAllCandidates(groupId: string): LocalSticker[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM local_stickers WHERE group_id = ? AND COALESCE(blocked, 0) = 0`
+    ).all(groupId) as unknown as Array<{
+      id: number; group_id: string; key: string; type: string;
+      local_path: string | null; cq_code: string; summary: string | null;
+      context_samples: string; count: number; first_seen: number; last_seen: number;
+      usage_positive: number; usage_negative: number;
+    }>;
+    return rows.map(r => ({
+      id: r.id, groupId: r.group_id, key: r.key,
+      type: r.type as LocalSticker['type'],
+      localPath: r.local_path, cqCode: r.cq_code, summary: r.summary,
+      contextSamples: (() => { try { return JSON.parse(r.context_samples) as string[]; } catch { return []; } })(),
+      count: r.count, firstSeen: r.first_seen, lastSeen: r.last_seen,
+      usagePositive: r.usage_positive, usageNegative: r.usage_negative,
+    }));
   }
 
   setSummary(groupId: string, key: string, summary: string): void {
