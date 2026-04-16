@@ -52,15 +52,15 @@ export class GeminiClient implements IClaudeClient {
     }
 
     try {
-      // Enable light thinking for Gemini 2.5 Flash — reasoning_effort:'low'
-      // gives better instruction-following for role-play prompts while keeping
-      // thinking tokens small. +100 to max_tokens accommodates the thinking
-      // budget so actual content output isn't starved.
+      // Disable Gemini 2.5 Flash thinking — reasoning_effort:'low' caused
+      // premature EOS (output truncated mid-sentence). With the prompt now
+      // optimized to ~15k tokens (down from 45k), Flash performs adequately
+      // without thinking. Keep max_tokens as-is.
       const resp = await this.client.chat.completions.create({
         model: req.model,
         messages,
-        max_tokens: req.maxTokens + 100,
-        reasoning_effort: 'low',
+        max_tokens: req.maxTokens,
+        reasoning_effort: 'none',
       });
 
       const text = resp.choices[0]?.message?.content ?? '';

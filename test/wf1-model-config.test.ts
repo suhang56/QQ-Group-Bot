@@ -20,7 +20,7 @@ vi.mock('openai', () => ({
 describe('GeminiClient reasoning_effort and max_tokens', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it('sends reasoning_effort:"low" instead of "none"', async () => {
+  it('sends reasoning_effort:"none" (thinking disabled)', async () => {
     mockCreate.mockResolvedValueOnce({
       choices: [{ message: { content: 'ok' } }],
       usage: { prompt_tokens: 5, completion_tokens: 2 },
@@ -36,10 +36,10 @@ describe('GeminiClient reasoning_effort and max_tokens', () => {
     });
 
     const call = mockCreate.mock.calls[0]![0] as Record<string, unknown>;
-    expect(call.reasoning_effort).toBe('low');
+    expect(call.reasoning_effort).toBe('none');
   });
 
-  it('adds 100 to max_tokens for thinking budget', async () => {
+  it('passes max_tokens through without addition', async () => {
     mockCreate.mockResolvedValueOnce({
       choices: [{ message: { content: 'ok' } }],
       usage: { prompt_tokens: 5, completion_tokens: 2 },
@@ -55,10 +55,10 @@ describe('GeminiClient reasoning_effort and max_tokens', () => {
     });
 
     const call = mockCreate.mock.calls[0]![0] as Record<string, unknown>;
-    expect(call.max_tokens).toBe(400);
+    expect(call.max_tokens).toBe(300);
   });
 
-  it('max_tokens=0 results in 100', async () => {
+  it('max_tokens=0 results in 0', async () => {
     mockCreate.mockResolvedValueOnce({
       choices: [{ message: { content: 'ok' } }],
       usage: { prompt_tokens: 1, completion_tokens: 1 },
@@ -74,7 +74,7 @@ describe('GeminiClient reasoning_effort and max_tokens', () => {
     });
 
     const call = mockCreate.mock.calls[0]![0] as Record<string, unknown>;
-    expect(call.max_tokens).toBe(100);
+    expect(call.max_tokens).toBe(0);
   });
 
   it('vision paths still use reasoning_effort:"none"', async () => {

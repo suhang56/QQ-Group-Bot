@@ -53,8 +53,8 @@ describe('GeminiClient', () => {
       max_tokens: number;
     };
     expect(call.model).toBe('gemini-2.0-flash-exp');
-    expect(call.max_tokens).toBe(150); // req.maxTokens(50) + 100 thinking budget
-    expect((call as Record<string, unknown>).reasoning_effort).toBe('low');
+    expect(call.max_tokens).toBe(50); // req.maxTokens passed through (no thinking budget)
+    expect((call as Record<string, unknown>).reasoning_effort).toBe('none');
     expect(call.messages).toEqual([
       { role: 'system', content: 'be short' },
       { role: 'user', content: 'hi' },
