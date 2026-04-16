@@ -72,6 +72,16 @@ export class MimicModule implements IMimicModule {
       return { ok: false, errorCode: BotErrorCode.USER_NOT_FOUND };
     }
 
+    // Empty trigger (pure sticker / @-only / CQ-only message) → no text to
+    // respond to. Generating "what would nickname say looking at history"
+    // is open-ended and hallucinates random topics from the few-shot pool
+    // (e.g. "冈田梦以的儿子是谁" because target user once asked it). Skip.
+    const cleanTopic = topic?.trim() ?? '';
+    if (!cleanTopic || cleanTopic.length < 2) {
+      this.logger.debug({ groupId, targetUserId, topicLen: cleanTopic.length }, 'mimic skipped: empty/trivial trigger');
+      return { ok: false, errorCode: BotErrorCode.INSUFFICIENT_HISTORY };
+    }
+
     const historyCount = userMsgs.length;
     const nickname = userMsgs[0]!.nickname;
     const fewShot = userMsgs
@@ -86,11 +96,8 @@ export class MimicModule implements IMimicModule {
       .map(m => `${m.nickname}: ${m.content}`)
       .join('\n');
 
-    const triggerLine = topic
-      ? `群里刚才有人说："${topic}"，${nickname}会怎么接一句？直接写出那句话。`
-      : (recentContext
-        ? `${nickname}看到最近这些消息会说什么？直接写出那句话。\n最近群聊：\n${recentContext}`
-        : `${nickname}现在会随口说什么？直接写出那句话。`);
+    const recentBlock = recentContext ? `\n\n最近群聊上下文（参考但不要原样复读）:\n${recentContext}` : '';
+    const triggerLine = `群里刚才有人说了这句话:\n「${cleanTopic}」\n\n${nickname}会怎么**对这句话本身**做反应？直接输出那一句话，只输出一句。${recentBlock}\n\n**严格要求**:\n- 你的回复必须是对"「${cleanTopic}」"这句话的直接反应（接话/吐槽/附和/反驳/装傻/短反应都可以）\n- **绝对不要**从 ${nickname} 的历史发言里随便挑一句无关的话当回复\n- **绝对不要**突然抛出一个和"「${cleanTopic}」"语义无关的新话题或问题\n- 如果你真的不知道怎么接这句话，输出 "..."\n- 不要自称 bot / AI / 机器人`;
 
     // Warm-up sticker section (async, non-blocking)
     if (!this.stickerSectionCache.has(groupId)) {

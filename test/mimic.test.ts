@@ -97,7 +97,7 @@ describe('MimicModule.generateMimic', () => {
     const msgs = [makeMsg({ content: 'msg1' }), makeMsg({ content: 'msg2' })];
     vi.mocked(messages.getByUser).mockReturnValue(msgs);
     const mod = makeModule(claude, messages, configs);
-    const result = await mod.generateMimic('g1', 'u1', null, []);
+    const result = await mod.generateMimic('g1', 'u1', '测试话题', []);
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.historyCount).toBe(2);
@@ -123,7 +123,7 @@ describe('MimicModule.generateMimic', () => {
     vi.mocked(messages.getByUser).mockReturnValue(msgs);
     vi.mocked(claude.complete).mockRejectedValue(new ClaudeApiError(new Error('overloaded')));
     const mod = makeModule(claude, messages, configs);
-    const result = await mod.generateMimic('g1', 'u1', null, []);
+    const result = await mod.generateMimic('g1', 'u1', '测试话题', []);
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.errorCode).toBe(BotErrorCode.CLAUDE_API_ERROR);
@@ -170,7 +170,7 @@ describe('MimicModule.generateMimic', () => {
     ];
     vi.mocked(messages.getByUser).mockReturnValue(msgs);
     const mod = makeModule(claude, messages, configs);
-    await mod.generateMimic('g1', 'u1', null, []);
+    await mod.generateMimic('g1', 'u1', '测试话题', []);
     const call = vi.mocked(claude.complete).mock.calls[0]![0] as ClaudeRequest;
     const systemText = call.system.map(b => b.text).join('');
     const userText = call.messages.map(m => m.content).join('');
@@ -183,7 +183,7 @@ describe('MimicModule.generateMimic', () => {
     const msgs = Array.from({ length: 10 }, (_, i) => makeMsg({ id: i + 1, content: `msg${i}` }));
     vi.mocked(messages.getByUser).mockReturnValue(msgs);
     const mod = makeModule(claude, messages, configs);
-    await mod.generateMimic('g1', 'u1', null, []);
+    await mod.generateMimic('g1', 'u1', '测试话题', []);
     const call = vi.mocked(claude.complete).mock.calls[0]![0] as ClaudeRequest;
     const systemText = call.system.map(b => b.text).join('');
     expect(systemText).toContain('你就是群友');
@@ -197,7 +197,7 @@ describe('MimicModule.generateMimic', () => {
     const msgs = Array.from({ length: 10 }, (_, i) => makeMsg({ id: i + 1, content: `msg${i}` }));
     vi.mocked(messages.getByUser).mockReturnValue(msgs);
     const mod = makeModule(claude, messages, configs);
-    await mod.generateMimic('g1', 'u1', null, []);
+    await mod.generateMimic('g1', 'u1', '测试话题', []);
     const call = vi.mocked(claude.complete).mock.calls[0]![0] as ClaudeRequest;
     const userText = call.messages[0]!.content;
     expect(userText).toContain('第三方观察');
@@ -217,7 +217,7 @@ describe('MimicModule.generateMimic', () => {
       return { text, inputTokens: 100, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0 };
     });
     const mod = makeModule(claude, messages, configs);
-    const result = await mod.generateMimic('g1', 'u1', null, []);
+    const result = await mod.generateMimic('g1', 'u1', '测试话题', []);
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.text).toBe('不行了笑死我了');
@@ -236,7 +236,7 @@ describe('MimicModule.generateMimic', () => {
       inputTokens: 100, outputTokens: 10, cacheReadTokens: 0, cacheWriteTokens: 0,
     });
     const mod = makeModule(claude, messages, configs);
-    const result = await mod.generateMimic('g1', 'u1', null, []);
+    const result = await mod.generateMimic('g1', 'u1', '测试话题', []);
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.text).toBe('...');
@@ -310,7 +310,7 @@ describe('MimicModule — /mimic_on / /mimic_off', () => {
     const msgs = Array.from({ length: 10 }, (_, i) => makeMsg({ id: i + 1, userId: 'admin-1', content: `msg${i}` }));
     vi.mocked(messages.getByUser).mockReturnValue(msgs);
     const mod = makeModule(claude, messages, configs);
-    const result = await mod.generateMimic('g1', 'admin-1', null, []);
+    const result = await mod.generateMimic('g1', 'admin-1', '测试话题', []);
     expect(result.ok).toBe(true);
   });
 
@@ -318,7 +318,7 @@ describe('MimicModule — /mimic_on / /mimic_off', () => {
   it('generateMimic with unknown userId returns E002', async () => {
     vi.mocked(messages.getByUser).mockReturnValue([]);
     const mod = makeModule(claude, messages, configs);
-    const result = await mod.generateMimic('g1', 'nonexistent', null, []);
+    const result = await mod.generateMimic('g1', 'nonexistent', '测试话题', []);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.errorCode).toBe(BotErrorCode.USER_NOT_FOUND);
   });
