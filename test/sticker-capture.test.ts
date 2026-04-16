@@ -17,6 +17,8 @@ function makeRepo(): ILocalStickerRepository {
     blockSticker: vi.fn().mockReturnValue(true),
     unblockSticker: vi.fn().mockReturnValue(true),
     getMfaceKeys: vi.fn().mockReturnValue(new Set<string>()),
+    getEmbeddingVec: vi.fn().mockReturnValue(null),
+    setEmbeddingVec: vi.fn(),
   };
 }
 

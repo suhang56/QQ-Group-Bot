@@ -115,16 +115,21 @@ export class StickerFirstModule implements IStickerFirstModule {
       return null;
     }
 
-    // Score all candidates by embedding similarity
+    // Score all candidates by embedding similarity.
+    // Try cached embedding from DB first, fall back to live computation.
     const scored: Array<{ key: string; cqCode: string; score: number }> = [];
     for (const sticker of candidates) {
-      const scorableText = [sticker.summary, ...sticker.contextSamples].filter(Boolean).join(' ');
-      let stickerVec: number[];
-      try {
-        stickerVec = await this.embedder.embed(scorableText);
-      } catch (err) {
-        logger.warn({ err, groupId, key: sticker.key }, 'sticker-first: embed sticker failed');
-        continue;
+      let stickerVec: number[] | null = this.repo.getEmbeddingVec(sticker.groupId, sticker.key);
+      if (!stickerVec) {
+        const scorableText = [sticker.summary, ...sticker.contextSamples].filter(Boolean).join(' ');
+        try {
+          stickerVec = await this.embedder.embed(scorableText);
+          // Cache the computed embedding for future use
+          this.repo.setEmbeddingVec(sticker.groupId, sticker.key, stickerVec);
+        } catch (err) {
+          logger.warn({ err, groupId, key: sticker.key }, 'sticker-first: embed sticker failed');
+          continue;
+        }
       }
       const score = cosineSimilarity(queryVec, stickerVec);
       scored.push({ key: sticker.key, cqCode: sticker.cqCode, score });

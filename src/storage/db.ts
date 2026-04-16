@@ -441,6 +441,10 @@ export interface ILocalStickerRepository {
   getMfaceKeys(groupId: string): Set<string>;
   /** Return all unblocked stickers for this group (no sorting, no limit). For Thompson sampling. */
   getAllCandidates(groupId: string): LocalSticker[];
+  /** Get the cached embedding vector for a sticker. Returns null if not cached. */
+  getEmbeddingVec(groupId: string, key: string): number[] | null;
+  /** Store an embedding vector for a sticker as a BLOB. */
+  setEmbeddingVec(groupId: string, key: string, vec: number[]): void;
 }
 
 // ---- Expression pattern + user style types ----
@@ -1740,6 +1744,21 @@ class LocalStickerRepository implements ILocalStickerRepository {
     }));
   }
 
+  getEmbeddingVec(groupId: string, key: string): number[] | null {
+    const row = this.db.prepare(
+      'SELECT embedding_vec FROM local_stickers WHERE group_id = ? AND key = ?'
+    ).get(groupId, key) as { embedding_vec: ArrayBuffer | null } | undefined;
+    if (!row?.embedding_vec) return null;
+    return Array.from(new Float32Array(row.embedding_vec));
+  }
+
+  setEmbeddingVec(groupId: string, key: string, vec: number[]): void {
+    const buf = new Float32Array(vec).buffer;
+    this.db.prepare(
+      'UPDATE local_stickers SET embedding_vec = ? WHERE group_id = ? AND key = ?'
+    ).run(new Uint8Array(buf), groupId, key);
+  }
+
   setSummary(groupId: string, key: string, summary: string): void {
     this.db.prepare(
       'UPDATE local_stickers SET summary = ? WHERE group_id = ? AND key = ?'
@@ -2334,6 +2353,9 @@ export class Database {
 
     // local_stickers.blocked — banned stickers are excluded from top queries.
     try { this._db.exec(`ALTER TABLE local_stickers ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0`); } catch { /* already exists */ }
+
+    // local_stickers.embedding_vec — cached embedding for sticker-first semantic match.
+    try { this._db.exec(`ALTER TABLE local_stickers ADD COLUMN embedding_vec BLOB`); } catch { /* already exists */ }
 
     // forward_cache — pre-expanded 合并转发 content, keyed by forward_id, TTL 24h.
     this._db.exec(`

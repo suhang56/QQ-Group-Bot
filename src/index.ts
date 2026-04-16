@@ -221,7 +221,7 @@ chat.setPicNameProvider(nameImages);
 const loreUpdater = new LoreUpdater(claude, db.messages, chat);
 router.setLoreUpdater(loreUpdater);
 
-const stickerCapture = new StickerCaptureService(db.localStickers, adapter, { claude });
+const stickerCapture = new StickerCaptureService(db.localStickers, adapter, { claude, embedder });
 router.setStickerCapture(stickerCapture);
 stickerCapture.startBackfillLoop(ACTIVE_GROUPS);
 

@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import type { INapCatAdapter } from '../adapter/napcat.js';
 import type { ILocalStickerRepository } from '../storage/db.js';
 import type { IClaudeClient } from '../ai/claude.js';
+import type { IEmbeddingService } from '../storage/embeddings.js';
 import { VISION_MODEL } from '../config.js';
 import { createLogger } from '../utils/logger.js';
 
@@ -16,6 +17,7 @@ export interface StickerCaptureOptions {
   claude?: IClaudeClient;
   backfillIntervalMs?: number;
   backfillBatchSize?: number;
+  embedder?: IEmbeddingService;
 }
 
 export class StickerCaptureService {
@@ -23,6 +25,7 @@ export class StickerCaptureService {
   private readonly maxContextSamples: number;
   private readonly downloadRateLimitMs: number;
   private readonly claude: IClaudeClient | null;
+  private readonly embedder: IEmbeddingService | null;
   private readonly backfillIntervalMs: number;
   private readonly backfillBatchSize: number;
   // groupId → last download timestamp
@@ -39,6 +42,7 @@ export class StickerCaptureService {
     this.maxContextSamples = options.maxContextSamples ?? 3;
     this.downloadRateLimitMs = options.downloadRateLimitMs ?? 10_000;
     this.claude = options.claude ?? null;
+    this.embedder = options.embedder ?? null;
     this.backfillIntervalMs = options.backfillIntervalMs ?? 5 * 60_000;
     this.backfillBatchSize = options.backfillBatchSize ?? 5;
   }
@@ -74,6 +78,8 @@ export class StickerCaptureService {
           if (summary) {
             this.repo.setSummary(groupId, s.key, summary);
             logger.debug({ groupId, key: s.key, summary }, 'sticker summary saved');
+            // Pre-compute and cache embedding for sticker-first semantic match
+            await this._computeAndStoreEmbedding(groupId, s.key, summary, s.contextSamples);
           }
         } catch (err) {
           logger.warn({ err, key: s.key }, 'sticker summary generation failed');
@@ -93,6 +99,24 @@ export class StickerCaptureService {
     } catch (err) {
       logger.warn({ err }, 'vision call for sticker summary failed');
       return null;
+    }
+  }
+
+  private async _computeAndStoreEmbedding(
+    groupId: string,
+    key: string,
+    summary: string,
+    contextSamples: string[],
+  ): Promise<void> {
+    if (!this.embedder?.isReady) return;
+    try {
+      const scorableText = [summary, ...contextSamples].filter(Boolean).join(' ');
+      if (scorableText.length < 6) return;
+      const vec = await this.embedder.embed(scorableText);
+      this.repo.setEmbeddingVec(groupId, key, vec);
+      logger.debug({ groupId, key }, 'sticker embedding cached');
+    } catch (err) {
+      logger.warn({ err, groupId, key }, 'sticker embedding computation failed');
     }
   }
 
