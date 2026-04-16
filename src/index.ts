@@ -206,6 +206,7 @@ const chat = new ChatModule(claude, db, {
   deflectionEngine,
 });
 router.setChat(chat);
+router.setStickerFirst(stickerFirst);
 router.setVisionService(vision);
 
 const charDataDir = path.join(process.cwd(), 'data', 'characters');
