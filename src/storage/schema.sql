@@ -302,6 +302,7 @@ CREATE INDEX IF NOT EXISTS idx_bandori_lives_last_seen  ON bandori_lives(last_se
 
 -- jargon_candidates: auto-detected group-specific jargon candidates.
 -- Mined by JargonMiner from message frequency analysis + LLM inference.
+-- promoted column (memes-v1): 0=active, 1=promoted to meme_graph, 2=promoted to learned_facts.
 CREATE TABLE IF NOT EXISTS jargon_candidates (
   group_id              TEXT    NOT NULL,
   content               TEXT    NOT NULL,
@@ -310,11 +311,59 @@ CREATE TABLE IF NOT EXISTS jargon_candidates (
   last_inference_count  INTEGER NOT NULL DEFAULT 0,
   meaning               TEXT,
   is_jargon             INTEGER NOT NULL DEFAULT 0,
+  promoted              INTEGER NOT NULL DEFAULT 0,
   created_at            INTEGER NOT NULL,
   updated_at            INTEGER NOT NULL,
   PRIMARY KEY (group_id, content)
 );
 CREATE INDEX IF NOT EXISTS idx_jargon_group_count ON jargon_candidates(group_id, count DESC);
+
+-- phrase_candidates: multi-word (2-5 gram) jargon candidates mined via sliding window.
+-- Similar structure to jargon_candidates but tracks gram length separately.
+-- Mined by PhraseMiner; promoted to meme_graph by MemeClusterer.
+CREATE TABLE IF NOT EXISTS phrase_candidates (
+  group_id              TEXT    NOT NULL,
+  content               TEXT    NOT NULL,
+  gram_len              INTEGER NOT NULL,         -- 2-5 grams
+  count                 INTEGER NOT NULL DEFAULT 1,
+  contexts              TEXT    NOT NULL DEFAULT '[]',
+  last_inference_count  INTEGER NOT NULL DEFAULT 0,
+  meaning               TEXT,
+  is_jargon             INTEGER NOT NULL DEFAULT 0,
+  promoted              INTEGER NOT NULL DEFAULT 0,
+  created_at            INTEGER NOT NULL,
+  updated_at            INTEGER NOT NULL,
+  PRIMARY KEY (group_id, content, gram_len)
+);
+CREATE INDEX IF NOT EXISTS idx_phrase_group_count ON phrase_candidates(group_id, count DESC);
+CREATE INDEX IF NOT EXISTS idx_phrase_unpromoted ON phrase_candidates(group_id, is_jargon, promoted) WHERE is_jargon = 1 AND promoted = 0;
+
+-- meme_graph: clustered meme entries after inference + variant aggregation.
+-- Canonical form + variants list + optional origin event trace.
+-- admin PATCH /memes/:id sets status='manual_edit' to freeze canonical + meaning;
+-- clusterer respects this and doesn't overwrite those fields.
+CREATE TABLE IF NOT EXISTS meme_graph (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id           TEXT    NOT NULL,
+  canonical          TEXT    NOT NULL,
+  variants           TEXT    NOT NULL DEFAULT '[]',      -- JSON array of variant strings
+  meaning            TEXT    NOT NULL,
+  origin_event       TEXT,                               -- LLM-inferred context trigger
+  origin_msg_id      TEXT,
+  origin_user_id     TEXT,
+  origin_ts          INTEGER,
+  first_seen_count   INTEGER NOT NULL DEFAULT 1,         -- count at discovery
+  total_count        INTEGER NOT NULL DEFAULT 1,         -- cumulative, always mutable
+  confidence         REAL    NOT NULL DEFAULT 0.5,       -- 0.3-1.0
+  status             TEXT    NOT NULL DEFAULT 'active',  -- 'active' | 'demoted' | 'manual_edit'
+  embedding_vec      BLOB,                               -- NULL until backfilled
+  created_at         INTEGER NOT NULL,
+  updated_at         INTEGER NOT NULL,
+  UNIQUE(group_id, canonical)
+);
+CREATE INDEX IF NOT EXISTS idx_meme_group_active ON meme_graph(group_id, status) WHERE status IN ('active', 'manual_edit');
+CREATE INDEX IF NOT EXISTS idx_meme_group_updated ON meme_graph(group_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_meme_null_embedding ON meme_graph(id) WHERE embedding_vec IS NULL;
 
 -- image_mod_cache: cached image moderation verdicts, keyed by sha256 file_key, TTL 7 days.
 CREATE TABLE IF NOT EXISTS image_mod_cache (
