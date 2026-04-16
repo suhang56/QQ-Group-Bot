@@ -502,8 +502,16 @@ export class Router implements IRouter {
               triggerUserNickname: msg.nickname,
               triggerContent: msg.content,
             });
+            return;
           }
-          return;
+          // Mimic failed (empty trigger, insufficient history, API error, etc).
+          // For @-mentions: fall through to chatModule so the bot isn't dead.
+          // For non-@: silently skip (preserves mimic-only mode).
+          const isAtMention = this.botUserId
+            && msg.rawContent.includes(`[CQ:at,qq=${this.botUserId}]`);
+          if (!isAtMention) return;
+          this.logger.debug({ groupId: msg.groupId, errorCode: result.ok ? null : (result as { errorCode?: string }).errorCode },
+            'mimic failed on @-mention — falling through to chat');
         }
       }
 
