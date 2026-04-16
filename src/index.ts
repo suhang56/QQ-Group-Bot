@@ -36,6 +36,9 @@ import { OpportunisticHarvest } from './modules/opportunistic-harvest.js';
 import { AliasMiner } from './modules/alias-miner.js';
 import { ExpressionLearner } from './modules/expression-learner.js';
 import { StyleLearner } from './modules/style-learner.js';
+import { RelationshipTracker } from './modules/relationship-tracker.js';
+import { AffinityModule } from './modules/affinity.js';
+import { JargonMiner } from './modules/jargon-miner.js';
 import { RatingPortalServer } from './server/rating-portal.js';
 import { TuningGenerator } from './server/tuning-generator.js';
 
@@ -258,6 +261,25 @@ const styleLearner = new StyleLearner({
   activeGroups: ACTIVE_GROUPS,
 });
 
+const relationshipTracker = new RelationshipTracker({
+  messages: db.messages,
+  users: db.users,
+  claude,
+  activeGroups: ACTIVE_GROUPS,
+  dbExec: (sql: string, ...params: unknown[]) => (db.rawDb.prepare(sql) as unknown as { run(...a: unknown[]): void }).run(...params),
+  dbQuery: <T>(sql: string, ...params: unknown[]) => (db.rawDb.prepare(sql) as unknown as { all(...a: unknown[]): T[] }).all(...params),
+});
+
+const affinity = new AffinityModule(db.rawDb);
+
+const jargonMiner = new JargonMiner({
+  db: db.rawDb,
+  messages: db.messages,
+  learnedFacts: db.learnedFacts,
+  claude,
+  activeGroups: ACTIVE_GROUPS,
+});
+
 const harvest = new OpportunisticHarvest({
   messages: db.messages,
   learnedFacts: db.learnedFacts,
@@ -268,6 +290,7 @@ const harvest = new OpportunisticHarvest({
   onCycleComplete: (groups) => {
     for (const g of groups) {
       try { expressionLearner.scan(g); } catch { /* logged internally */ }
+      void jargonMiner.run(g).catch(err => logger.warn({ err, groupId: g }, 'jargon miner cycle failed'));
     }
   },
 });
@@ -335,6 +358,16 @@ try {
   harvest.start();
   aliasMiner.start();
   styleLearner.start();
+  relationshipTracker.start();
+
+  // Daily affinity decay
+  const affinityDecayTimer = setInterval(() => {
+    try { affinity.dailyDecay(); } catch (err) { logger.warn({ err }, 'affinity decay failed'); }
+  }, 24 * 60 * 60_000);
+  affinityDecayTimer.unref?.();
+
+  // Jargon mining piggybacks on harvest cycle — run after each harvest
+  // (already wired via onCycleComplete for expression learner; add jargon here)
 
   // Daily expression pattern decay
   const expressionDecayTimer = setInterval(() => {
@@ -370,6 +403,7 @@ const shutdown = async () => {
   harvest.dispose();
   aliasMiner.dispose();
   styleLearner.dispose();
+  relationshipTracker.dispose();
   chat.destroy();
   if (factBackfillTimer) clearInterval(factBackfillTimer);
   stickerCapture.stopBackfillLoop();

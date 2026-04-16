@@ -2086,6 +2086,9 @@ export class Database {
 
   private readonly _db: DatabaseSync;
 
+  /** Expose raw DatabaseSync for modules that need direct SQL access (e.g. AffinityModule, JargonMiner). */
+  get rawDb(): DatabaseSync { return this._db; }
+
   constructor(dbPath: string) {
     this._db = new DatabaseSync(dbPath);
     this._db.exec('PRAGMA journal_mode = WAL;');
