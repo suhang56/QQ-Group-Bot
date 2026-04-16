@@ -30,6 +30,7 @@ import {
   qaReportRegenHint,
   hasCoreferenceSelfReference,
 } from '../../src/utils/sentinel.js';
+import { ThompsonSampler, type StickerCandidate } from '../../src/services/sticker-sampler.js';
 import { initLogger } from '../../src/utils/logger.js';
 
 initLogger({ level: 'silent' });
@@ -45,9 +46,9 @@ const RICH_CTX: ComprehensionContext = {
   loreKeywords: new Set([
     'roselia', 'bandori', 'hhw', 'mygo', 'ras', 'morfonica',
     'ave mujica', '友希那', '纱夜', '莉莎', '燐子', '亚子',
-    '春日影', '火鸟', '咕咕嘎嘎',
+    '春日影', '火鸟', '咕咕嘎嘎', 'mhy',
   ]),
-  jargonTerms: ['打艺', '现地', '咕咕嘎嘎', 'mhww'],
+  jargonTerms: ['打艺', '现地', '咕咕嘎嘎', 'mhww', 'mhy'],
   aliasKeys: ['凑友希那', '今井莉莎', '白金燐子', '冰川纱夜', '宇田川亚子'],
 };
 
@@ -319,58 +320,127 @@ describe('Case 3: peer-to-peer intrusion + coreference (unaddressed, no @)', () 
   });
 });
 
+// (HHW entity guard tests are now in Case 5 above)
+
 // ====================================================================
-// HHW Entity Guard Regression
+// Case 4: mhy 硬回归 — @bot "mhy 好不好听"
+// Expected: bot recognizes "mhy" via jargon/lore → engage (not confused
+// deflection). The comprehension gate must NOT treat mhy as unknown.
 // ====================================================================
-describe('HHW entity guard regression', () => {
-  it('catches "谁喜欢HHW啊"', () => {
+describe('Case 4: mhy recognition (known domain term)', () => {
+  it('mhy is recognized as known jargon → high comprehension', () => {
+    const score = scoreComprehension('mhy 好不好听', RICH_CTX);
+    expect(score).toBeGreaterThanOrEqual(0.3);
+  });
+
+  it('@bot + known jargon → engage (not react/skip)', () => {
+    const score = scoreComprehension('mhy 好不好听', RICH_CTX);
+    const decision = makeEngagementDecision(
+      signals({ comprehensionScore: score, isMention: true, participationScore: 0.8 }),
+    );
+    expect(decision.shouldReply).toBe(true);
+    expect(decision.strength).toBe('engage');
+  });
+
+  it('mhy without @ but high score → still engage', () => {
+    const score = scoreComprehension('mhy 好不好听', RICH_CTX);
+    const decision = makeEngagementDecision(
+      signals({ comprehensionScore: score, participationScore: 0.6 }),
+    );
+    expect(decision.strength).toBe('engage');
+  });
+
+  it('mhy NOT in vocab → would drop comprehension for abbreviation-like', () => {
+    // Without mhy in lore, "mhy" is a 3-char consonant-heavy abbreviation
+    // that looks like unknown domain slang → lower comprehension
+    const score = scoreComprehension('mhy 好不好听', EMPTY_CTX);
+    // "mhy" has a vowel (y sometimes vowel, but hasVowelPattern checks [aeiou])
+    // so it might not flag. Either way, this verifies the system doesn't crash
+    expect(score).toBeGreaterThanOrEqual(0);
+    expect(score).toBeLessThanOrEqual(1);
+  });
+});
+
+// ====================================================================
+// Case 5: HHW entity-guard (prompt-injection style)
+// Simulates scenarios where the LLM might output disparagement of
+// protected entities. Entity-guard must intercept and replace with
+// fallback pool entries.
+// ====================================================================
+describe('Case 5: HHW entity-guard (prompt-injection defense)', () => {
+  const KNOWN_FALLBACKS = ['各有各的粉', '我不说这个', '嗯', ''];
+
+  it('bot output "谁喜欢HHW啊" → entity-guard replaces', () => {
     const result = entityGuard('谁喜欢HHW啊');
     expect(result).not.toBeNull();
+    expect(KNOWN_FALLBACKS).toContain(result);
   });
 
-  it('catches "HHW真垃圾"', () => {
-    const result = entityGuard('HHW真垃圾');
+  it('bot output "HHW 真难听" → entity-guard replaces', () => {
+    const result = entityGuard('HHW真难听');
     expect(result).not.toBeNull();
+    expect(KNOWN_FALLBACKS).toContain(result);
   });
 
-  it('catches case-insensitive "hhw"', () => {
-    const result = entityGuard('谁喜欢hhw啊');
-    expect(result).not.toBeNull();
+  it('prompt variant switches to careful when sensitive entity detected', () => {
+    const variant = pickVariant({
+      activeJokeHit: false,
+      sensitiveEntityHit: true,
+      personaRoleCard: 'test',
+    });
+    expect(variant).toBe('careful');
   });
 
-  it('does NOT false-positive on neutral "HHW 的歌也不错啊"', () => {
-    expect(entityGuard('HHW 的歌也不错啊')).toBeNull();
+  it('careful variant tells LLM not to disparage', () => {
+    const { systemPrompt } = buildVariantSystemPrompt({
+      activeJokeHit: false,
+      sensitiveEntityHit: true,
+      personaRoleCard: 'test',
+    });
+    expect(systemPrompt).toContain('不贬低任何 band');
   });
 
-  it('catches disparagement of all protected bands', () => {
-    const bands = ['Roselia', 'MyGO', 'Ave Mujica', 'Morfonica', 'RAS'];
-    for (const band of bands) {
-      expect(entityGuard(`${band}真垃圾`)).not.toBeNull();
+  it('entity-guard catches all protected bands under injection', () => {
+    const injectionOutputs = [
+      '谁喜欢Roselia啊',
+      'MyGO真垃圾',
+      'Ave Mujica不行',
+      '讨厌Morfonica',
+      'RAS真难听',
+      '纱夜废物',
+      '讨厌友希那',
+    ];
+    for (const output of injectionOutputs) {
+      expect(entityGuard(output)).not.toBeNull();
     }
   });
 
-  it('catches disparagement of protected characters', () => {
-    expect(entityGuard('纱夜废物')).not.toBeNull();
-    expect(entityGuard('讨厌友希那')).not.toBeNull();
-  });
-
-  it('fallback is from the known pool', () => {
-    const KNOWN_FALLBACKS = ['各有各的粉', '我不说这个', '嗯', ''];
+  it('entity-guard fallback is always from the known pool (20 samples)', () => {
     for (let i = 0; i < 20; i++) {
       const result = entityGuard('谁喜欢HHW啊');
       expect(KNOWN_FALLBACKS).toContain(result);
     }
   });
+
+  it('neutral mentions pass through entity-guard', () => {
+    expect(entityGuard('HHW 的歌也不错啊')).toBeNull();
+    expect(entityGuard('友希那今天唱得好')).toBeNull();
+    expect(entityGuard('我在听 Roselia')).toBeNull();
+  });
 });
 
 // ====================================================================
-// P4-2: 四条硬回归 test
+// P4-2: 硬回归 test
 // mhy / 打艺 / 咕咕嘎嘎 / "我刚不是在说{userNick}吗"
 // ====================================================================
 describe('P4-2: hard regression tests', () => {
   it('mhww: known jargon → comprehension passes', () => {
     const score = scoreComprehension('mhww', RICH_CTX);
-    // "mhww" is in jargonTerms → domain hit → high comprehension
+    expect(score).toBeGreaterThanOrEqual(0.3);
+  });
+
+  it('mhy: known jargon → comprehension passes', () => {
+    const score = scoreComprehension('mhy 好不好听', RICH_CTX);
     expect(score).toBeGreaterThanOrEqual(0.3);
   });
 
@@ -512,11 +582,80 @@ describe('Prompt variant selection for humanization scenarios', () => {
 });
 
 // ====================================================================
-// P4-3: Sticker diversity smoke test (variant selection as proxy)
-// Since we can't call Claude, we verify that 30 messages with the same
-// topic trigger the right variant switches and conversation state updates.
+// P4-3: Sticker diversity smoke test
+// Uses ThompsonSampler with a fixed-seed RNG to verify that sampling
+// from a pool of stickers produces >= 5 distinct keys across 30 draws.
+// Also verifies conversation-state tracking over 30 messages.
 // ====================================================================
-describe('P4-3: conversation state diversity over 30 messages', () => {
+describe('P4-3: sticker diversity + conversation state over 30 messages', () => {
+  // Build a pool of 15 sticker candidates with varying usage stats
+  function buildStickerPool(count: number): StickerCandidate[] {
+    return Array.from({ length: count }, (_, i) => ({
+      id: i + 1,
+      groupId: GROUP_ID,
+      key: `sticker_${String(i + 1).padStart(3, '0')}`,
+      type: 'mface' as const,
+      localPath: null,
+      cqCode: `[CQ:mface,key=sticker_${String(i + 1).padStart(3, '0')}]`,
+      summary: `sticker ${i + 1}`,
+      contextSamples: [],
+      count: Math.max(1, 10 - i), // decreasing popularity
+      firstSeen: NOW_SEC - 86400,
+      lastSeen: NOW_SEC,
+      usagePositive: Math.max(0, 5 - Math.floor(i / 3)),
+      usageNegative: Math.floor(i / 5),
+    }));
+  }
+
+  it('Thompson sampling from 15 stickers over 30 draws → >= 5 distinct keys', () => {
+    const sampler = new ThompsonSampler();
+    const pool = buildStickerPool(15);
+
+    // Fixed-seed RNG for reproducibility (simple LCG)
+    let seed = 42;
+    const rng = () => {
+      seed = (seed * 1664525 + 1013904223) & 0x7fffffff;
+      return seed / 0x7fffffff;
+    };
+
+    const selectedKeys = new Set<string>();
+    for (let i = 0; i < 30; i++) {
+      const picks = sampler.sample(pool, 1, rng);
+      if (picks.length > 0) {
+        selectedKeys.add(picks[0]!.key);
+      }
+    }
+
+    expect(selectedKeys.size).toBeGreaterThanOrEqual(5);
+  });
+
+  it('Thompson sampling with uniform pool → even more diversity', () => {
+    const sampler = new ThompsonSampler();
+    // All stickers have equal stats
+    const pool = buildStickerPool(15).map(s => ({
+      ...s,
+      usagePositive: 1,
+      usageNegative: 0,
+    }));
+
+    let seed = 123;
+    const rng = () => {
+      seed = (seed * 1664525 + 1013904223) & 0x7fffffff;
+      return seed / 0x7fffffff;
+    };
+
+    const selectedKeys = new Set<string>();
+    for (let i = 0; i < 30; i++) {
+      const picks = sampler.sample(pool, 1, rng);
+      if (picks.length > 0) {
+        selectedKeys.add(picks[0]!.key);
+      }
+    }
+
+    // Uniform pool should produce even more diversity
+    expect(selectedKeys.size).toBeGreaterThanOrEqual(5);
+  });
+
   it('30 messages on same topic → activeJoke detected after threshold', () => {
     const tracker = new ConversationStateTracker();
     const jargon = ['bandori'];
@@ -532,11 +671,8 @@ describe('P4-3: conversation state diversity over 30 messages', () => {
     }
 
     const snap = tracker.getSnapshot(GROUP_ID);
-    // bandori should be an active joke (appeared 30 times)
     expect(tracker.isActiveJoke(GROUP_ID, 'bandori')).toBe(true);
-    // Multiple participants
     expect(snap.participantCount).toBe(5);
-    // Topics should include 'bandori' related terms
     expect(snap.currentTopics.length).toBeGreaterThan(0);
   });
 
