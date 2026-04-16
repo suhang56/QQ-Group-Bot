@@ -1,10 +1,14 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import type { IBotReplyRepository, ILocalStickerRepository, IModerationRepository, IMessageRepository } from '../storage/db.js';
+import type { IBotReplyRepository, ILocalStickerRepository, IModerationRepository, IMessageRepository, IMemeGraphRepo } from '../storage/db.js';
 import { createLogger } from '../utils/logger.js';
 
 const logger = createLogger('rating-portal');
+
+function esc(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
 
 function json(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
@@ -57,6 +61,7 @@ function parseSeverityParam(raw: string): { min: number; max: number } | null {
 
 export class RatingPortalServer {
   private readonly server = createServer((req, res) => void this._handle(req, res));
+  private memeGraphRepo: IMemeGraphRepo | null = null;
 
   constructor(
     private readonly repo: IBotReplyRepository,
@@ -65,6 +70,10 @@ export class RatingPortalServer {
     private readonly messages: IMessageRepository,
     private readonly localStickers?: ILocalStickerRepository,
   ) {}
+
+  setMemeGraphRepo(repo: IMemeGraphRepo): void {
+    this.memeGraphRepo = repo;
+  }
 
   start(port = 4000, host = '127.0.0.1'): void {
     this.server.listen(port, host, () => {
@@ -280,6 +289,145 @@ export class RatingPortalServer {
           else if (negative) this.localStickers.recordUsage(this.groupId, key, false);
         }
       }
+      json(res, 200, { ok: true });
+      return;
+    }
+
+    // --- Meme graph routes (memes-v1 P5) ---
+
+    // GET /memes/:groupId — list meme_graph entries as HTML table
+    if (req.method === 'GET' && /^\/memes\/([^/]+)$/.test(pathname)) {
+      if (!this.memeGraphRepo) {
+        json(res, 503, { error: 'memeGraphRepo not available' });
+        return;
+      }
+      const groupId = decodeURIComponent(pathname.split('/')[2]!);
+      const memes = this.memeGraphRepo.listActive(groupId, 200);
+
+      const rows = memes.map(m => {
+        const variants = m.variants.slice(0, 5).join(', ');
+        const origin = m.originEvent ? esc(m.originEvent.slice(0, 80)) : '';
+        const ts = new Date(m.updatedAt * 1000).toLocaleString('zh-CN');
+        return `<tr>
+          <td>${m.id}</td>
+          <td>${esc(m.canonical)}</td>
+          <td>${esc(variants)}</td>
+          <td>${esc(m.meaning)}</td>
+          <td title="${esc(m.originEvent ?? '')}">${origin}</td>
+          <td>${m.totalCount}</td>
+          <td>${m.confidence.toFixed(2)}</td>
+          <td>${esc(m.status)}</td>
+          <td>${ts}</td>
+          <td>
+            <button onclick="editMeme(${m.id})">Edit</button>
+            <button onclick="demoteMeme(${m.id})">Demote</button>
+          </td>
+        </tr>`;
+      }).join('\n');
+
+      const html = `<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Meme Graph - ${esc(groupId)}</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f0f0f; color: #e0e0e0; padding: 24px; }
+h1 { font-size: 18px; font-weight: 600; color: #fff; margin-bottom: 16px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { padding: 8px 10px; border: 1px solid #333; text-align: left; }
+th { background: #1a1a1a; color: #aaa; text-transform: uppercase; font-size: 11px; letter-spacing: 0.05em; }
+tr:hover { background: #1a1a1a; }
+button { background: #1e1e1e; border: 1px solid #444; color: #e0e0e0; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; margin: 0 2px; }
+button:hover { background: #2a2a2a; }
+.empty { text-align: center; padding: 60px; color: #555; }
+.stat { font-size: 13px; color: #888; margin-bottom: 12px; }
+</style>
+</head>
+<body>
+<h1>Meme Graph: ${esc(groupId)}</h1>
+<div class="stat">${memes.length} active memes</div>
+${memes.length === 0 ? '<div class="empty">No memes found.</div>' : `<table>
+<thead><tr>
+  <th>ID</th><th>Canonical</th><th>Variants</th><th>Meaning</th>
+  <th>Origin</th><th>Count</th><th>Confidence</th><th>Status</th>
+  <th>Updated</th><th>Actions</th>
+</tr></thead>
+<tbody>${rows}</tbody>
+</table>`}
+<script>
+async function editMeme(id) {
+  const canonical = prompt('New canonical (leave blank to skip):');
+  const variants = prompt('New variants (comma-separated, leave blank to skip):');
+  const meaning = prompt('New meaning (leave blank to skip):');
+  const body = {};
+  if (canonical) body.canonical = canonical;
+  if (variants) body.variants = variants.split(',').map(v => v.trim()).filter(Boolean);
+  if (meaning) body.meaning = meaning;
+  if (Object.keys(body).length === 0) return;
+  const res = await fetch('/memes/' + id, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (res.ok) location.reload();
+  else alert('Error: ' + (await res.text()));
+}
+async function demoteMeme(id) {
+  if (!confirm('Demote this meme?')) return;
+  const res = await fetch('/memes/' + id + '/demote', { method: 'POST' });
+  if (res.ok) location.reload();
+  else alert('Error: ' + (await res.text()));
+}
+</script>
+</body>
+</html>`;
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(html);
+      return;
+    }
+
+    // PATCH /memes/:id — partial update canonical/variants/meaning + set status='manual_edit'
+    if (req.method === 'PATCH' && /^\/memes\/(\d+)$/.test(pathname)) {
+      if (!this.memeGraphRepo) {
+        json(res, 503, { error: 'memeGraphRepo not available' });
+        return;
+      }
+      const id = parseInt(pathname.split('/')[2]!, 10);
+      const existing = this.memeGraphRepo.findById(id);
+      if (!existing) {
+        json(res, 404, { error: 'meme not found' });
+        return;
+      }
+      let body: { canonical?: string; variants?: string[]; meaning?: string };
+      try {
+        body = JSON.parse(await readBody(req)) as { canonical?: string; variants?: string[]; meaning?: string };
+      } catch {
+        json(res, 400, { error: 'invalid json' });
+        return;
+      }
+      this.memeGraphRepo.adminEdit(id, body);
+      const updated = this.memeGraphRepo.findById(id);
+      logger.info({ id, changes: Object.keys(body) }, 'meme manually edited');
+      json(res, 200, updated);
+      return;
+    }
+
+    // POST /memes/:id/demote — set status='demoted'
+    if (req.method === 'POST' && /^\/memes\/(\d+)\/demote$/.test(pathname)) {
+      if (!this.memeGraphRepo) {
+        json(res, 503, { error: 'memeGraphRepo not available' });
+        return;
+      }
+      const id = parseInt(pathname.split('/')[2]!, 10);
+      const existing = this.memeGraphRepo.findById(id);
+      if (!existing) {
+        json(res, 404, { error: 'meme not found' });
+        return;
+      }
+      this.memeGraphRepo.update(id, { status: 'demoted' });
+      logger.info({ id }, 'meme demoted');
       json(res, 200, { ok: true });
       return;
     }

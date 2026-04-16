@@ -427,6 +427,7 @@ let ratingPortal: RatingPortalServer | null = null;
 if (ratingPortGroup) {
   const ratingPort = parseInt(process.env['RATING_PORT'] ?? '4000', 10);
   ratingPortal = new RatingPortalServer(db.botReplies, ratingPortGroup, db.moderation, db.messages, db.localStickers);
+  ratingPortal.setMemeGraphRepo(db.memeGraph);
   ratingPortal.start(ratingPort);
 
   // Generate tuning report on SIGUSR1
