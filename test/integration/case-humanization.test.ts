@@ -29,6 +29,10 @@ import {
   isQaReportTone,
   qaReportRegenHint,
   hasCoreferenceSelfReference,
+  isOutsiderCommentatorTone,
+  outsiderToneRegenHint,
+  detectInsultEchoRisk,
+  insultEchoRegenHint,
 } from '../../src/utils/sentinel.js';
 import { ThompsonSampler, type StickerCandidate } from '../../src/services/sticker-sampler.js';
 import { initLogger } from '../../src/utils/logger.js';
@@ -196,8 +200,9 @@ describe('Case 2: 打艺 (QA-reflex / parse exposure)', () => {
 
   it('engagement decision with adequate comprehension allows normal reply', () => {
     const score = scoreComprehension('原来打艺这么有用', RICH_CTX);
+    // Non-direct effective threshold is 1.5x minScore (0.75), need high score
     const decision = makeEngagementDecision(
-      signals({ comprehensionScore: score, participationScore: 0.6 }),
+      signals({ comprehensionScore: score, participationScore: 0.8 }),
     );
     // Should engage, not skip or react
     expect(decision.strength).toBe('engage');
@@ -344,8 +349,9 @@ describe('Case 4: mhy recognition (known domain term)', () => {
 
   it('mhy without @ but high score → still engage', () => {
     const score = scoreComprehension('mhy 好不好听', RICH_CTX);
+    // Non-direct effective threshold is 1.5x minScore (0.75), need score >= 0.75
     const decision = makeEngagementDecision(
-      signals({ comprehensionScore: score, participationScore: 0.6 }),
+      signals({ comprehensionScore: score, participationScore: 0.8 }),
     );
     expect(decision.strength).toBe('engage');
   });
@@ -466,6 +472,208 @@ describe('P4-2: hard regression tests', () => {
   it('"我刚不是在说{nick}吗" → qa-report detector also catches', () => {
     expect(isQaReportTone('我刚不是在说西瓜吗?')).toBe(true);
     expect(isQaReportTone('我刚不是在说常山吗？')).toBe(true);
+  });
+});
+
+// ====================================================================
+// Case 6: outsider voice "你们 + 都 + 动词 + 啊"
+// Bot uses commentator framing instead of participant voice.
+// ====================================================================
+describe('Case 6: outsider commentator voice', () => {
+  it('detects "你们在笑什么" as outsider tone', () => {
+    expect(isOutsiderCommentatorTone('你们在笑什么')).toBe(true);
+  });
+
+  it('detects "你们都回国了啊" as outsider tone', () => {
+    expect(isOutsiderCommentatorTone('你们都回国了啊')).toBe(true);
+  });
+
+  it('detects "你们都这么怕热怕湿啊" as outsider tone', () => {
+    expect(isOutsiderCommentatorTone('你们都这么怕热怕湿啊')).toBe(true);
+  });
+
+  it('detects "你们怎么都在聊天气" as outsider tone', () => {
+    expect(isOutsiderCommentatorTone('你们怎么都在聊天气')).toBe(true);
+  });
+
+  it('does NOT flag first-person participant voice', () => {
+    expect(isOutsiderCommentatorTone('我也怕热')).toBe(false);
+    expect(isOutsiderCommentatorTone('我觉得还好')).toBe(false);
+    expect(isOutsiderCommentatorTone('笑死')).toBe(false);
+    expect(isOutsiderCommentatorTone('草')).toBe(false);
+  });
+
+  it('does NOT flag long messages (> 30 chars)', () => {
+    const long = '你们都' + '很'.repeat(30) + '啊';
+    expect(isOutsiderCommentatorTone(long)).toBe(false);
+  });
+
+  it('outsiderToneRegenHint returns hint when flagged', () => {
+    const hint = outsiderToneRegenHint('你们在笑什么');
+    expect(hint).not.toBeNull();
+    expect(hint).toContain('旁观者');
+  });
+
+  it('outsiderToneRegenHint returns null for clean output', () => {
+    expect(outsiderToneRegenHint('我也觉得好笑')).toBeNull();
+  });
+
+  it('all prompt variants include outsider-voice prohibition rule', () => {
+    for (const v of [
+      { activeJokeHit: false, sensitiveEntityHit: false },
+      { activeJokeHit: true, sensitiveEntityHit: false },
+      { activeJokeHit: false, sensitiveEntityHit: true },
+    ]) {
+      const { systemPrompt } = buildVariantSystemPrompt({
+        ...v,
+        personaRoleCard: 'test',
+      });
+      expect(systemPrompt).toContain('你们都');
+      expect(systemPrompt).toContain('旁观者');
+    }
+  });
+});
+
+// ====================================================================
+// Case 7: non-@ peer-chat intrusion threshold tightened
+// Bot should stay silent in peer-to-peer conversations without signals.
+// ====================================================================
+describe('Case 7: peer-chat intrusion threshold (tightened)', () => {
+  it('non-direct score at old threshold (0.5) now skips (effective threshold 0.75)', () => {
+    const d = makeEngagementDecision(
+      signals({
+        isMention: false,
+        isReplyToBot: false,
+        participationScore: 0.5,
+        minScore: 0.5,
+        comprehensionScore: 0.7,
+      }),
+    );
+    expect(d.shouldReply).toBe(false);
+    expect(d.strength).toBe('skip');
+  });
+
+  it('non-direct score at 0.7 still skips (below 0.75 effective)', () => {
+    const d = makeEngagementDecision(
+      signals({
+        isMention: false,
+        isReplyToBot: false,
+        participationScore: 0.7,
+        minScore: 0.5,
+        comprehensionScore: 0.7,
+      }),
+    );
+    expect(d.shouldReply).toBe(false);
+  });
+
+  it('non-direct score at 0.8 engages (above 0.75 effective)', () => {
+    const d = makeEngagementDecision(
+      signals({
+        isMention: false,
+        isReplyToBot: false,
+        participationScore: 0.8,
+        minScore: 0.5,
+        comprehensionScore: 0.7,
+      }),
+    );
+    expect(d.shouldReply).toBe(true);
+    expect(d.strength).toBe('engage');
+  });
+
+  it('direct mention bypasses tightened threshold', () => {
+    const d = makeEngagementDecision(
+      signals({
+        isMention: true,
+        participationScore: 0.3,
+        minScore: 0.5,
+        comprehensionScore: 0.7,
+      }),
+    );
+    expect(d.shouldReply).toBe(true);
+    expect(d.strength).toBe('engage');
+  });
+
+  it('reply-to-bot bypasses tightened threshold', () => {
+    const d = makeEngagementDecision(
+      signals({
+        isReplyToBot: true,
+        participationScore: 0.3,
+        minScore: 0.5,
+        comprehensionScore: 0.7,
+      }),
+    );
+    expect(d.shouldReply).toBe(true);
+    expect(d.strength).toBe('engage');
+  });
+});
+
+// ====================================================================
+// Case 8: insult-echo — bot agrees with insult targeting groupmate
+// ====================================================================
+describe('Case 8: insult-echo detection', () => {
+  it('detects "不然呢" after insult message', () => {
+    expect(detectInsultEchoRisk('不然呢', ['诸葛少智你是不是傻'])).toBe(true);
+  });
+
+  it('detects "确实" after insult message', () => {
+    expect(detectInsultEchoRisk('确实', ['这个人真蠢'])).toBe(true);
+  });
+
+  it('detects "对" after insult with "智障"', () => {
+    expect(detectInsultEchoRisk('对', ['智障吧你'])).toBe(true);
+  });
+
+  it('detects "+1" after insult', () => {
+    expect(detectInsultEchoRisk('+1', ['脑残啊'])).toBe(true);
+  });
+
+  it('detects "笑死" after insult with "逗我笑"', () => {
+    expect(detectInsultEchoRisk('笑死', ['你别逗我笑了'])).toBe(true);
+  });
+
+  it('does NOT flag "不然呢" without recent insults', () => {
+    expect(detectInsultEchoRisk('不然呢', ['今天天气不错', '去哪吃饭'])).toBe(false);
+  });
+
+  it('does NOT flag long output (> 10 chars)', () => {
+    expect(detectInsultEchoRisk('这个说法确实有道理', ['你真傻'])).toBe(false);
+  });
+
+  it('does NOT flag non-agreement phrases', () => {
+    expect(detectInsultEchoRisk('我不同意', ['你真蠢'])).toBe(false);
+  });
+
+  it('checks multiple recent messages for insults', () => {
+    expect(detectInsultEchoRisk('确实', [
+      '今天天气好',
+      '你们看那个sb了吗',
+      '哈哈哈',
+    ])).toBe(true);
+  });
+
+  it('insultEchoRegenHint returns hint when flagged', () => {
+    const hint = insultEchoRegenHint('不然呢', ['这人是废物']);
+    expect(hint).not.toBeNull();
+    expect(hint).toContain('附和');
+  });
+
+  it('insultEchoRegenHint returns null when clean', () => {
+    expect(insultEchoRegenHint('不然呢', ['今天天气好'])).toBeNull();
+  });
+
+  it('all prompt variants include insult-echo prohibition', () => {
+    for (const v of [
+      { activeJokeHit: false, sensitiveEntityHit: false },
+      { activeJokeHit: true, sensitiveEntityHit: false },
+      { activeJokeHit: false, sensitiveEntityHit: true },
+    ]) {
+      const { systemPrompt } = buildVariantSystemPrompt({
+        ...v,
+        personaRoleCard: 'test',
+      });
+      expect(systemPrompt).toContain('贬低');
+      expect(systemPrompt).toContain('附和');
+    }
   });
 });
 
