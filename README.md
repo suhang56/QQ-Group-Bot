@@ -1,210 +1,320 @@
+<div align="center">
+
 # QQ Group Bot
 
-A group-chat bot for QQ that behaves like a real group member instead of an assistant. Built in TypeScript on NapCat (OneBot v11) with a router that dispatches to a dozen modules: conversational chat, user-mimicry, character role-play, sticker reactions, live-schedule knowledge injection, and a content-moderation pipeline with appeal flow.
+**A QQ group-chat bot that behaves like a real group member, not an assistant.**
 
-Not an "AI assistant in a group". The design goal is that group members can't tell it apart from a lurker who occasionally speaks up. Everything from participation scoring to sticker picking to persona-dropping is tuned against that.
+*QQ 群聊机器人 — 像真人群友一样聊天，不是 AI 助手。*
 
-## What it does
+[![Node.js](https://img.shields.io/badge/Node.js-22.5+-339933?logo=node.js&logoColor=white)](https://nodejs.org)
+[![TypeScript](https://img.shields.io/badge/TypeScript-Strict-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
+[![Tests](https://img.shields.io/badge/Tests-1615_passing-brightgreen)](test/)
+[![License](https://img.shields.io/badge/License-Personal-lightgrey)]()
 
-### Chat — conversational lurker
+</div>
 
-Default reply behavior, not a command. The bot scores every incoming message against a weighted participation model (@-mentions, questions, silence bonuses, lore keyword hits, topic continuity, burst penalties, implicit `你`-addressed probes) and only speaks when the score clears a threshold. Backed by Claude Sonnet 4.6 by default, with Qwen3 / DeepSeek / Gemini as alternatives via `ModelRouter`. Context is tiered into wide / medium / immediate windows, and the bot's own messages are marked `[你(nickname)]:` so the LLM doesn't confuse them with group members.
+---
 
-Output is passed through a sentinel layer that strips assistant-speak, AI self-disclosure, hallucinated CQ codes, `<skip>` leaks, and near-duplicates of the bot's recent replies. A per-user tease counter flips the bot into "annoyed" mode when someone @-spams it.
+## Overview | 概述
 
-### /char — BanG Dream character role-play
+Built on NapCat (OneBot v11) with TypeScript. The bot scores every message with a weighted participation model and only speaks when it has something worth saying. It learns group slang, tracks relationships between members, adapts its tone per user, and builds a living knowledge base from group conversations.
 
-`/char_on` activates a canonical-character persona (default `ykn` = 凑友希那, Roselia vocalist). Reads a per-character JSON profile from `data/characters/` plus a shared `aliases.json`. The persona is composed at runtime with bot-identity grounding, 圈内底线 (no attacks on rival bands/seiyuu), 诚实底线 (no fabricated canon), and a reply-style menu. Additional characters can be distilled from the moegirl lore pages via `scripts/distill-character.ts`.
+基于 NapCat (OneBot v11) + TypeScript 构建。Bot 通过加权参与度模型评估每条消息，只在有话想说时才开口。它能学习群内黑话、追踪群友关系、根据不同用户调整语气、并从群聊中持续构建知识库。
 
-`/char set <alias>`, `/char_off`, `/char_status`. Mutually exclusive with `/mimic_on`.
+---
 
-### /mimic — user-style mimicry
+## Features | 功能
 
-`/mimic @user` picks a real group member and generates replies in their speech style using few-shot sampling from their last 50 messages. Prompt is constrained to "respond to THIS exact trigger" to prevent unconditioned topic drift. Empty triggers (sticker-only messages) are refused to avoid hallucinating random phrases from the target's history.
+### Core Chat | 核心聊天
 
-`/mimic_on` / `/mimic_off` / `/mimic_status`.
+| | |
+|---|---|
+| **Participation Scoring** | Weighted model: @-mentions, questions, silence bonus, lore keywords, topic continuity, burst penalty. Only speaks above threshold. |
+| **Multi-Model Routing** | Claude Sonnet / Gemini Flash / Qwen3 / DeepSeek via `ModelRouter`. Sensitive topics auto-escalate to stronger models. |
+| **Tiered Context** | Wide (30) / Medium (15) / Immediate (8) message windows. Bot's own messages marked `[你(nickname)]:` to prevent self-confusion. |
+| **Sentinel Pipeline** | Strips assistant-speak, AI self-disclosure, hallucinated CQ codes, `<skip>` leaks, near-duplicate replies, and confabulation. |
+| **参与度打分** | 加权模型：@提及、提问、沉默奖励、lore关键词、话题连续性、刷屏惩罚。只有超过阈值才说话。 |
+| **多模型路由** | 通过 `ModelRouter` 支持 Claude Sonnet / Gemini Flash / Qwen3 / DeepSeek。敏感话题自动升级到更强模型。 |
 
-### /stickerfirst — sticker-first replies
+### Self-Learning | 自我学习
 
-`/stickerfirst_on` makes the bot score its intended reply text against the local sticker library via embeddings; if the top match clears `/stickerfirst_threshold`, the sticker goes out *instead of* the text. Factual queries bypass the substitution automatically — if bandori-live knowledge was injected for the turn, text wins. Repeat suppression keeps the bot from sending the same sticker twice within a window.
+| Module | What it does |
+|--------|-------------|
+| **Expression Learner** | Captures "user said X → bot replied Y" patterns. Zero API cost, pure rule extraction with time decay. |
+| **Style Learner** | LLM distills each member's speech style (catchphrases, punctuation, tone) every 4 hours. |
+| **Relationship Tracker** | Detects who's close, who's beefing, who's a couple. Hourly stats, daily LLM inference. 8 relationship types. |
+| **Affinity System** | Per-user affinity score (0-100). Frequent chatters get warmer responses; strangers get cooler ones. 7-day decay. |
+| **Jargon Miner** | Three-step detection: candidate extraction → threshold LLM inference → context vs. no-context comparison. Auto-discovers group-specific slang. |
+| **Opportunistic Harvest** | Background fact extractor. Pulls fandom trivia, member info, group culture from normal chat. |
+| **Self-Reflection** | Hourly review of bot's own replies. Generates short-term tuning + long-term permanent memory. |
 
-### bandori-live — live-schedule knowledge base
+| 模块 | 功能 |
+|------|------|
+| **表达学习器** | 捕获"群友说X → bot回Y"的模式对。零API成本，纯规则提取+时间衰减。 |
+| **风格学习器** | 每4小时用LLM提炼每个群友的说话风格（口头禅、标点、语气）。 |
+| **关系追踪器** | 自动检测谁和谁关系好、谁在互怼、谁是CP。每小时统计，每天LLM推断。8种关系类型。 |
+| **好感度系统** | 每人好感度0-100。经常聊的更亲近，不熟的更冷淡。7天衰减。 |
+| **黑话挖掘器** | 三步检测：候选提取→阈值LLM推断→有/无上下文对比。自动发现群内梗。 |
 
-Daily scraper pulls https://bang-dream.com/events/ into a SQLite table (`bandori_lives`) via `node-html-parser` against the real BEM selectors. Supports Japanese date formats including range shorthand (`2026年8月29日(土)・30日(日)`). When a user message mentions live/公演/活动/band-name keywords (or shortforms like `ppp`/`ras`/`mygo`), matching events are injected as reference data into the chat context.
+### Persona & Role-Play | 人设与角色扮演
 
-No user-facing command — always on, gated by the `BANDORI_SCRAPE_ENABLED` env var. Entity-aware retrieval filters by mentioned band instead of returning the 3 soonest events globally.
+| Feature | Description |
+|---------|-------------|
+| **Character Mode** | `/char_on` activates a BanG Dream character persona (default: 凑友希那). Per-character JSON profiles with grounding rules. |
+| **Mimic Mode** | `/mimic_on @user` makes the bot talk like a specific group member. Few-shot filtered, lore-injected, 30% lurker rate. |
+| **Sticker-First** | `/stickerfirst_on` — bot picks a matching sticker from its library instead of typing. Factual queries bypass. |
+| **角色模式** | `/char_on` 激活邦多利角色人设（默认：凑友希那）。 |
+| **模仿模式** | `/mimic_on @群友` 让bot模仿指定群友说话。过滤few-shot、注入lore、30%概率回复。 |
 
-### Moderator — automated punishment with appeals
+### Knowledge | 知识系统
 
-`ModeratorModule` runs every non-command group message through a local text moderator (Qwen3 by default) and an image vision moderator (Gemini Flash) to classify severity 1–5. Sev 1–2 auto-deletes with a warning, sev 3 ban 10m, sev 4 ban 1h, sev 5 gets a second-pass Opus 4.6 check before kick. Hard safety rails: admin/owner whitelist, configurable daily cap, Claude-error fail-safe (no action on API failure), and `/appeal` within a 24h window that gets another LLM review.
+| Feature | Description |
+|---------|-------------|
+| **Per-Member Lore** | Group knowledge split into per-member files with alias frontmatter. On-demand loading by nickname matching (8000 char cap). |
+| **Bandori Live Schedule** | Daily scraper from bang-dream.com. Band-aware retrieval — "ras 最近有啥live" returns actual RAS events. |
+| **Learned Facts RAG** | Corrections ("不是X是Y") get embedded and reused. Semantic retrieval with cosine floor + pinned newest. |
+| **分群友Lore** | 群知识按群友拆分为独立文件，按昵称按需加载（8000字上限）。 |
+| **邦多利Live日程** | 每日从bang-dream.com抓取。按乐队智能检索。 |
 
-### Learner — self-learning RAG
+### Moderation | 审核系统
 
-`/rule_add` lets admins add group rules in natural language. They're embedded locally via `Xenova/all-MiniLM-L6-v2` and retrieved at moderation time via cosine top-K. Facts the bot learned from group corrections are stored in `learned_facts` with confidence scoring and re-used in future prompts. `/rule_false_positive` flags rules that keep over-triggering.
+| Feature | Description |
+|---------|-------------|
+| **Auto-Moderation** | Every message scored by LLM (Qwen3). Sev 3+: admin DM approval → delete/warn/mute/kick. |
+| **Admin Approval Flow** | Violations queued in `pending_moderation`. Admin `/approve` or `/reject` via DM within 10 min. |
+| **Self-Learning Rejections** | Rejected violations feed back as negative examples. 30-day window, semantic top-5 injection. |
+| **Web Review Panel** | `http://localhost:4000/mod` — review stats, filter by severity/action/status. |
+| **Appeal System** | `/appeal` within 24h. LLM re-review + Opus double-check for sev 5 kicks. |
 
-### Other modules
+### Other Modules | 其他模块
 
-- **vision** — image/mface sticker description cache via Gemini 2.5 Flash, used for context enrichment and moderation
-- **name-images** — `/set_name <name>` starts an admin collection mode; subsequent images get tagged to that name and posted back when someone later mentions the name in chat
-- **self-reflection** — hourly loop that has the LLM review its own recent replies and writes a short tuning file that feeds into the next persona pass
-- **self-learning** — correction-driven RAG: when someone tells the bot "that's wrong, it's actually X", a learned fact is extracted, embedded, and reused
-- **lore-updater** — distills group chat history into a per-group lore file that gets injected as background context in chat prompts
-- **alias-miner** — mines romaji/kanji/hanzi variants of recurring names from group history
-- **opportunistic-harvest** — background extractor that pulls high-confidence facts out of normal chat
-- **sticker-capture** — auto-builds a local sticker library from messages seen in active groups
-- **welcome** — new-member greeting composition
-- **id-guard** — detects obvious ID-card / personal-info leaks in image uploads
-- **sequence-guard** — detects cross-message 接龙 relay exploits (recitation-based persona breaks)
+- **Vision** — Gemini 2.5 Flash image descriptions for context enrichment + image moderation
+- **Name-Images** — `/add <name>` collects photos tagged to a person, recalled on mention
+- **Welcome** — Personalized new-member greetings
+- **ID Guard** — Detects personal-info leaks in image uploads
+- **Sequence Guard** — Blocks 接龙 relay exploits that try to break persona
+- **Poke** — Responds to QQ poke notices with personality
+- **Alias Miner** — Discovers nickname variants from chat history
+- **Sticker Capture** — Auto-builds local sticker library from group messages
 
-## Architecture
+---
 
-### Module layers
+## Architecture | 架构
 
 ```
-src/adapter/   NapCat WebSocket client (OneBot v11), image fetch
-src/core/      Router, rate limiter
-src/ai/        Claude / Ollama / Gemini / DeepSeek clients + ModelRouter
-src/storage/   SQLite (node:sqlite), repositories, embeddings
-src/modules/   Feature modules (each independent, testable in isolation)
-src/utils/     Logger, sentinel, error codes, stickers helper
+src/
+├── adapter/          NapCat WebSocket client (OneBot v11)
+├── core/             Router + rate limiter
+├── ai/               Claude / Ollama / Gemini / DeepSeek + ModelRouter
+│   └── providers/    Per-provider client implementations
+├── storage/          SQLite (node:sqlite), repositories, embeddings
+├── modules/          Feature modules (each independent, testable)
+│   ├── chat.ts           Core chat with participation scoring
+│   ├── moderator.ts      Auto-moderation pipeline
+│   ├── mimic.ts          User-style mimicry
+│   ├── char.ts           Character role-play
+│   ├── self-learning.ts  Correction-driven fact learning
+│   ├── expression-learner.ts   Situation→expression pattern pairs
+│   ├── style-learner.ts        Per-user speech style distillation
+│   ├── relationship-tracker.ts Social graph detection
+│   ├── affinity.ts             Per-user affinity scoring
+│   ├── jargon-miner.ts         Group slang auto-detection
+│   └── ...             15+ more modules
+├── server/           Rating portal + tuning generator
+└── utils/            Logger, sentinel, CQ code helpers
+
+data/
+├── groups/{id}/lore/    Per-member lore files with alias frontmatter
+├── knowledge/           External knowledge (moegirl, nga)
+├── characters/          Character persona profiles
+├── logs/                JSON logs (pino)
+└── stickers-local/      Auto-captured sticker library
 ```
 
-Hard invariants (enforced by code review + tests):
+### Hard Invariants | 硬性约束
 
-1. **One-way dependency**: `adapter → core → modules → ai/storage`. No reverse imports.
-2. **System prompts are static**. User content is always placed in user-role messages, never interpolated into system blocks. Prompt-injection defense.
+1. **One-way dependency**: `adapter → core → modules → ai/storage`. No reverse.
+2. **System prompts are static**. User content always in user-role messages (prompt-injection defense).
 3. **`node:sqlite` types stay in `src/storage/`**. No leak to modules.
-4. **`defaultGroupConfig()`** in `src/config.ts` is the single source of truth for GroupConfig defaults.
-5. **Schema changes require migrations**. `schema.sql` alone silently skips existing DBs — every column addition needs an `ALTER TABLE` in `applyMigrations()`.
-6. **Every background timer calls `timer.unref?.()`**. Blocks process exit otherwise.
+4. **Schema changes require migrations**. Every column addition needs `ALTER TABLE` in `_runMigrations()`.
+5. **Every background timer calls `.unref()`**. Prevents blocking process exit.
 
-### Tech stack
+---
 
-- **Node.js 22.5+** (for built-in `node:sqlite` — no native compile)
-- **TypeScript** (strict), **ESM**
-- **Vitest** for tests (1364 tests, ~82% line / 82% branch coverage, mandatory edge tests per feature)
-- **pino** for JSON logging
-- **@anthropic-ai/claude-agent-sdk** for Claude (reads Claude Code CLI credentials, no API key required)
-- **@xenova/transformers** for local embeddings (MiniLM-L6-v2, lazy-loaded)
-- **node-html-parser** for the bandori-live scraper (no jsdom, no cheerio)
-- **NapCat** as the QQ protocol adapter (OneBot v11 WebSocket)
-- **cross-env** handles `--experimental-sqlite` flag automatically in all npm scripts (Node 22.x compatibility)
+## Tech Stack | 技术栈
 
-## Setup
+| Component | Technology |
+|-----------|-----------|
+| Runtime | Node.js 22.5+ (built-in `node:sqlite`) |
+| Language | TypeScript (strict), ESM |
+| QQ Protocol | NapCat (OneBot v11 WebSocket) |
+| LLM | Claude Sonnet 4.6 / Gemini 2.5 Flash / Qwen3 8B / DeepSeek |
+| Embeddings | Xenova/all-MiniLM-L6-v2 (local, lazy-loaded) |
+| Database | SQLite (node:sqlite, WAL mode) |
+| Testing | Vitest (1615 tests, 70 test files) |
+| Logging | pino (JSON, file transport) |
+| Vision | Gemini 2.5 Flash (OpenAI-compat endpoint) |
 
-### Requirements
+---
+
+## Setup | 部署
+
+### Requirements | 前置条件
 
 - Node.js 22.5+ (or 24.x)
-- NapCat running locally with OneBot v11 WebSocket enabled
-- Claude Code CLI logged in (`claude` command — provides credentials for `@anthropic-ai/claude-agent-sdk`)
-- Optionally: Ollama for local text moderation, Google AI Studio key for Gemini vision, DeepSeek key for cheap chat
+- NapCat running with OneBot v11 WebSocket enabled
+- At least one LLM provider (Gemini API key recommended for free tier)
 
-### Install
+### Install | 安装
 
 ```bash
+git clone https://github.com/suhang56/QQ-Group-Bot.git
+cd QQ-Group-Bot
 npm install
 cp .env.example .env
-# edit .env with your NapCat URL, bot QQ ID, active groups
+# Edit .env — see table below
 ```
 
-### Environment
+### Environment Variables | 环境变量
 
-| Var | Default | Purpose |
-|---|---|---|
-| `NAPCAT_WS_URL` | — | NapCat WebSocket URL (e.g. `ws://localhost:3001`) |
-| `NAPCAT_ACCESS_TOKEN` | — | NapCat access token if configured |
-| `BOT_QQ_ID` | — | Bot's QQ account number (required for @-mention detection) |
-| `ACTIVE_GROUPS` | — | Comma-separated group IDs the bot participates in |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NAPCAT_WS_URL` | *required* | NapCat WebSocket URL (`ws://localhost:3001`) |
+| `NAPCAT_ACCESS_TOKEN` | — | NapCat auth token |
+| `BOT_QQ_ID` | *required* | Bot's QQ number |
+| `ACTIVE_GROUPS` | *required* | Comma-separated group IDs |
+| `GEMINI_API_KEY` | — | Google AI Studio key (free tier: 1500 RPD) |
+| `CHAT_MODEL` | `claude-sonnet-4-6` | Primary chat model |
+| `CHAT_QWEN_MODEL` | `qwen3:8b` | Lurker-path model |
+| `VISION_MODEL` | `gemini-2.5-flash` | Image description model |
+| `MODERATOR_MODEL` | `qwen3:8b` | Text moderation model |
+| `MOD_APPROVAL_ADMIN` | — | Admin QQ ID for moderation DMs |
 | `DB_PATH` | `data/bot.db` | SQLite database path |
-| `LOG_LEVEL` | `info` | `trace/debug/info/warn/error/fatal` |
-| `CHAT_MODEL` | `claude-sonnet-4-6` | Chat model ID |
-| `VISION_MODEL` | `gemini-2.5-flash` | Image description model (gemini or claude) |
-| `MODERATOR_MODEL` | `qwen3:8b` | Text moderation model (high-volume) |
-| `OLLAMA_ENABLED` | `0` | Set to `1` to register Ollama provider |
-| `GEMINI_ENABLED` | `0` | Set to `1` to register Gemini provider |
-| `DEEPSEEK_API_KEY` | — | Set to register DeepSeek provider |
-| `BANDORI_SCRAPE_ENABLED` | `true` | Daily bang-dream.com scraper |
-| `BANDORI_SCRAPE_INTERVAL_MS` | `86400000` | Scrape interval |
-| `NAME_IMAGES_DIR` | `data/name-images` | Name-image library path |
+| `LOG_LEVEL` | `info` | Log level |
 
-### Run
+### Run | 运行
 
 ```bash
-npm run dev            # tsx src/index.ts (hot TypeScript, --experimental-sqlite auto-set via cross-env)
-npm run build          # compile to dist/
-npm start              # production (cross-env NODE_OPTIONS=--experimental-sqlite node dist/index.js)
-npm run typecheck      # tsc --noEmit
+npm run dev       # Development (tsx, hot reload)
+npm run build     # Compile to dist/
+npm start         # Production
+npm test          # Run all 1615 tests
 ```
 
-### Test
+---
+
+## Commands | 命令
+
+### Chat & Persona | 聊天与人设
+
+| Command | Description | 说明 |
+|---------|-------------|------|
+| `/help` | Show all commands | 显示所有命令 |
+| `/mimic @user [topic]` | One-shot mimicry | 单次模仿 |
+| `/mimic_on @user` | Persistent mimic mode | 持续模仿模式 |
+| `/mimic_off` | Stop mimic | 关闭模仿 |
+| `/char_on` | Activate character mode | 激活角色模式 |
+| `/char set <alias>` | Switch character | 切换角色 |
+| `/char_off` | Deactivate character | 关闭角色 |
+| `/stickerfirst_on` | Sticker-first replies | 表情包优先 |
+| `/stickerfirst_off` | Text-first replies | 文字优先 |
+
+### Moderation | 管理 (Admin only)
+
+| Command | Description | 说明 |
+|---------|-------------|------|
+| `/rules` | List active rules | 查看群规 |
+| `/rule_add <text>` | Add moderation rule | 添加群规 |
+| `/appeal` | Challenge punishment | 申诉处罚 |
+| `/approve <id>` | Approve pending moderation (DM) | 批准审核 |
+| `/reject <id>` | Reject pending moderation (DM) | 驳回审核 |
+
+### Knowledge | 知识管理 (Admin only)
+
+| Command | Description | 说明 |
+|---------|-------------|------|
+| `/facts_pending` | View pending learned facts | 查看待审知识 |
+| `/fact_approve <id>` | Approve a fact | 通过知识条目 |
+| `/fact_approve_all` | Approve all pending | 批量通过 |
+| `/fact_reject <id>` | Reject a fact | 拒绝知识条目 |
+| `/add <name>` | Start image collection for a person | 开始收集图片 |
+| `/add_stop` | Stop image collection | 停止收集 |
+
+---
+
+## How It Works | 工作原理
+
+### Reply Pipeline | 回复流程
+
+```
+Message received
+    │
+    ├─ Participation scoring (weighted factors → skip or continue)
+    │
+    ├─ Adversarial pattern check (identity probe / task request / memory inject)
+    │   └─ Match → deflection from cache (no LLM call)
+    │
+    ├─ Context assembly (tiered history + lore + facts + stickers + tuning)
+    │
+    ├─ LLM call (model picked by _pickChatModel routing rules)
+    │
+    ├─ Post-processing pipeline:
+    │   ├─ postProcess (strip CQ leaks, context markers)
+    │   ├─ sentinelCheck (forbidden content → hardened regen)
+    │   ├─ echo detection (drop if parrot)
+    │   ├─ self-dedup (drop if near-dup of recent reply)
+    │   └─ sticker-first intercept (swap text for sticker if match)
+    │
+    └─ Send to group
+```
+
+### Learning Loop | 学习循环
+
+```
+Every 15 min:
+    Opportunistic Harvest → extract facts from recent chat
+    Expression Learner   → capture situation→expression pairs
+    Jargon Miner         → detect new group slang
+
+Every 1 hour:
+    Self-Reflection      → review own replies, write tuning.md
+    Relationship Tracker → update interaction stats
+
+Every 4 hours:
+    Style Learner        → distill per-user speech patterns
+
+Every 24 hours:
+    Relationship Tracker → infer relationship types (LLM)
+    Affinity Decay       → reduce inactive users' affinity
+    Bandori Live Scraper → refresh concert schedule
+```
+
+---
+
+## Development | 开发
+
+### Adding a Module | 添加模块
+
+1. Create `src/modules/your-module.ts` with a narrow interface
+2. Add DB migration in `src/storage/db.ts` (idempotent `ALTER TABLE`)
+3. Wire in `src/index.ts` with lifecycle (start/dispose)
+4. Register commands in `src/core/router.ts` if user-facing
+5. Write tests in `test/your-module.test.ts` (edge cases mandatory)
+6. Timer? Call `.unref()`. Always.
+
+### Testing | 测试
 
 ```bash
-npm test                  # full suite with coverage (vitest)
-npm run test:watch        # watch mode
+npm test                    # Full suite (1615 tests, ~9s)
+npx vitest run test/X.ts    # Single file
+npx vitest --watch          # Watch mode
+npx tsc --noEmit            # Type check
 ```
 
-## Commands
+---
 
-All commands are prefixed with `/` and restricted to admin/owner unless noted.
-
-| Command | Purpose |
-|---|---|
-| `/help` | Show command reference |
-| `/stats` | Bot message counts + last-active per group |
-| `/rules` | List active moderation rules |
-| `/rule_add <rule>` | Add a rule (indexed for RAG retrieval) |
-| `/rule_false_positive <rule-id>` | Flag a noisy rule |
-| `/appeal <reason>` | Challenge a moderation action within 24h |
-| `/mimic @user` | Generate one reply in @user's style |
-| `/mimic_on` | Persistent mimic mode |
-| `/mimic_off` | Stop mimic mode |
-| `/char` / `/char_on` | Activate character mode (default ykn) |
-| `/char set <alias>` | Switch character |
-| `/char_off` | Stop character mode |
-| `/char_status` | Show current character state |
-| `/stickerfirst_on` | Enable sticker-first reply mode |
-| `/stickerfirst_off` | Disable sticker-first mode |
-| `/stickerfirst_threshold <0-1>` | Set similarity threshold |
-| `/stickerfirst_status` | Show sticker-first state |
-| `/set_name <name>` | Start collecting images for `<name>` |
-| `/stop_name` | Stop collecting |
-
-## Development notes
-
-### Prompt-injection defense
-
-User content never enters system prompts. Any string derived from a group message is concatenated into the user-role message only. Regression tests in `test/chat.test.ts`, `test/char.test.ts`, `test/mimic.test.ts` explicitly assert `systemText` does not contain injection payloads.
-
-### Context grounding
-
-The chat module stamps `[你(nickname)]:` on messages authored by the bot itself and `[peer-nickname]:` on everyone else. The prompt explicitly tells the LLM to attribute speakers correctly and never claim to have said things that aren't in marked history. Char/mimic modes carry this grounding over via `composePersonaPrompt` / `triggerLine`.
-
-### Layer ordering
-
-Reply generation goes through several layers; the order matters:
-
-```
-trigger → participation score → (skip or continue)
-         → LLM call
-         → postProcess (strip CQ leaks, <skip>, context markers)
-         → sentinelCheck (regenerate on forbidden content, fallback to "...")
-         → echo detection (drop if trigger echo)
-         → self-dedup (drop if near-dup of recent own reply)
-         → sticker-first intercept (skipped when factual injection present)
-         → _recordOwnReply + send
-```
-
-Each layer has its own gate. Adding a new layer means deciding where it sits and which prior layers its decision overrides.
-
-### Adding a new feature module
-
-1. Drop a new `src/modules/X.ts` implementing a narrow interface
-2. Wire it in `src/index.ts` after dependencies are built
-3. Register any router commands in `src/core/router.ts`
-4. Add DB migration + schema.sql entry if stateful
-5. Write tests in `test/X.test.ts` with mandatory edge cases
-6. Update this README's command table if the feature adds user-facing commands
-
-## License
+## License | 许可
 
 Personal project. No license granted.
+
+个人项目，未授予许可。
