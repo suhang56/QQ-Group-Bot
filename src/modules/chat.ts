@@ -175,6 +175,20 @@ export const TASK_DEFLECTIONS = [
   '自己背', '我又不是AI', '烦死了', '你恩师是谁啊', '哈哈谁背这个', '你做梦', '无语', '不接', '想多了',
 ];
 
+// Encoded sexual harassment — internet slang / transliterations that bypass
+// naive keyword lists. When matched, bot deflects with CURSE_DEFLECTIONS
+// (same as tease-counter overflow) and increments the tease counter.
+// - jjcn / jj插 = 鸡鸡插你 (penis+fuck, internet encoded)
+// - 雷普 / レイプ = rape (katakana transliteration in Chinese internet)
+// - 约炮 = hookup request
+// - 你是gg还是mm = gender-probing harassment (gg=哥哥 mm=妹妹)
+export const SEXUAL_HARASSMENT =
+  /jjcn|jj[插操干cn]|鸡[巴鸡]|雷普|レイプ|\brape\b|约炮|你是gg还是mm/i;
+
+export const SEXUAL_HARASSMENT_DEFLECTIONS = [
+  '?', '滚', '无聊', '神经病', '你有病吧', '恶心', '别碰我', '闭嘴',
+];
+
 // Matches memory-injection / persona-override exploit attempts.
 // Note: intentionally loose — false positives ("记得带伞") are acceptable because
 // deflecting a casual reminder with "啥啊" is harmless, and preventing real
@@ -1111,10 +1125,12 @@ export class ChatModule implements IChatModule {
     const isProbe = IDENTITY_PROBE.test(triggerMessage.content);
     const isTask  = !isProbe && TASK_REQUEST.test(triggerMessage.content);
     const isInject = !isProbe && !isTask && MEMORY_INJECT.test(triggerMessage.content);
+    const isHarass = !isProbe && !isTask && !isInject && SEXUAL_HARASSMENT.test(triggerMessage.content);
 
-    if (isProbe || isTask || isInject) {
+    if (isProbe || isTask || isInject || isHarass) {
       const isCurse = this._teaseIncrement(groupId, triggerMessage.userId, now);
       if (isCurse) return this._generateDeflection('curse', triggerMessage);
+      if (isHarass) return this._generateDeflection('curse', triggerMessage); // harassment → always curse-tier
       if (isProbe) return this._generateDeflection('identity', triggerMessage);
       if (isTask) {
         // Distinguish recite-style exploits from generic task requests
