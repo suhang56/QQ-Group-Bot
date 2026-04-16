@@ -95,13 +95,17 @@ export function makeEngagementDecision(signals: EngagementSignals): EngagementDe
   }
 
   // Gate 6: normal participation scoring
-  if (isDirect || signals.participationScore >= signals.minScore) {
+  // Case 7 tuning: for non-direct (no @, no reply-to-bot) messages,
+  // apply a stricter threshold (1.5x minScore) so bot stays silent > 80%
+  // of the time in peer-to-peer chat without engagement signals.
+  const effectiveMinScore = isDirect ? signals.minScore : signals.minScore * 1.5;
+  if (isDirect || signals.participationScore >= effectiveMinScore) {
     return {
       shouldReply: true,
       strength: 'engage',
       reason: isDirect
         ? 'direct trigger (mention/reply)'
-        : `score ${signals.participationScore.toFixed(3)} >= ${signals.minScore}`,
+        : `score ${signals.participationScore.toFixed(3)} >= ${effectiveMinScore.toFixed(3)}`,
     };
   }
 
@@ -109,6 +113,6 @@ export function makeEngagementDecision(signals: EngagementSignals): EngagementDe
   return {
     shouldReply: false,
     strength: 'skip',
-    reason: `score ${signals.participationScore.toFixed(3)} < ${signals.minScore}`,
+    reason: `score ${signals.participationScore.toFixed(3)} < ${effectiveMinScore.toFixed(3)}`,
   };
 }
