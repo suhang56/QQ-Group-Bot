@@ -2549,5 +2549,42 @@ export class Database {
         PRIMARY KEY (group_id, user_id)
       )
     `);
+
+    // Archive tables for old messages/bot_replies (P1-3: pruning strategy).
+    this._db.exec(`
+      CREATE TABLE IF NOT EXISTS messages_archive (
+        id INTEGER PRIMARY KEY, group_id TEXT NOT NULL, user_id TEXT NOT NULL,
+        nickname TEXT NOT NULL DEFAULT '', content TEXT NOT NULL, raw_content TEXT,
+        timestamp INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, source_message_id TEXT
+      )
+    `);
+    this._db.exec(`
+      CREATE TABLE IF NOT EXISTS bot_replies_archive (
+        id INTEGER PRIMARY KEY, group_id TEXT NOT NULL, trigger_msg_id TEXT,
+        trigger_user_nickname TEXT, trigger_content TEXT NOT NULL,
+        bot_reply TEXT NOT NULL, module TEXT NOT NULL, sent_at INTEGER NOT NULL,
+        rating INTEGER, rating_comment TEXT, rated_at INTEGER
+      )
+    `);
+  }
+
+  /**
+   * Archive messages and bot_replies older than cutoffSec.
+   * Moves rows into *_archive tables, then deletes from originals.
+   */
+  archiveOlderThan(cutoffSec: number): { messages: number; botReplies: number } {
+    let msgCount = 0;
+    let replyCount = 0;
+    try {
+      this._db.exec(`INSERT OR IGNORE INTO messages_archive SELECT * FROM messages WHERE timestamp < ${cutoffSec}`);
+      const msgResult = this._db.prepare(`DELETE FROM messages WHERE timestamp < ?`).run(cutoffSec) as { changes: number };
+      msgCount = msgResult.changes;
+    } catch { /* non-fatal */ }
+    try {
+      this._db.exec(`INSERT OR IGNORE INTO bot_replies_archive SELECT * FROM bot_replies WHERE sent_at < ${cutoffSec}`);
+      const replyResult = this._db.prepare(`DELETE FROM bot_replies WHERE sent_at < ?`).run(cutoffSec) as { changes: number };
+      replyCount = replyResult.changes;
+    } catch { /* non-fatal */ }
+    return { messages: msgCount, botReplies: replyCount };
   }
 }

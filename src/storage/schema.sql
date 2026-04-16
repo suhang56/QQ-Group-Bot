@@ -194,6 +194,33 @@ CREATE INDEX IF NOT EXISTS idx_learned_facts_group_pending
 CREATE INDEX IF NOT EXISTS idx_learned_facts_null_embedding
   ON learned_facts(id) WHERE status = 'active' AND embedding_vec IS NULL;
 
+-- Archive tables for messages and bot_replies (3+ months old data)
+CREATE TABLE IF NOT EXISTS messages_archive (
+  id                INTEGER PRIMARY KEY,
+  group_id          TEXT    NOT NULL,
+  user_id           TEXT    NOT NULL,
+  nickname          TEXT    NOT NULL DEFAULT '',
+  content           TEXT    NOT NULL,
+  raw_content       TEXT,
+  timestamp         INTEGER NOT NULL,
+  deleted           INTEGER NOT NULL DEFAULT 0,
+  source_message_id TEXT
+);
+
+CREATE TABLE IF NOT EXISTS bot_replies_archive (
+  id                   INTEGER PRIMARY KEY,
+  group_id             TEXT    NOT NULL,
+  trigger_msg_id       TEXT,
+  trigger_user_nickname TEXT,
+  trigger_content      TEXT    NOT NULL,
+  bot_reply            TEXT    NOT NULL,
+  module               TEXT    NOT NULL,
+  sent_at              INTEGER NOT NULL,
+  rating               INTEGER,
+  rating_comment       TEXT,
+  rated_at             INTEGER
+);
+
 -- bot_replies.was_evasive: 1 when bot emitted an evasive reply (e.g. "忘了" / "考我呢").
 -- Existing DBs are migrated via runtime ALTER TABLE in db.ts._runMigrations.
 

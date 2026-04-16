@@ -268,7 +268,7 @@ export class RatingPortalServer {
         return;
       }
       // Fetch the reply before updating so we can read botReply for sticker feedback
-      const existing = this.repo.getRecent(this.groupId, 500).find(r => r.id === id);
+      const existing = this.repo.getById(id);
       this.repo.rate(id, rating, body.comment ?? null, Math.floor(Date.now() / 1000));
       // Feedback loop: update sticker usage scores if reply contained stickers
       if (existing && this.localStickers) {
