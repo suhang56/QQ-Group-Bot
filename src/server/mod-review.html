@@ -648,7 +648,9 @@ function renderTable(records) {
     // Action buttons
     const tdOps = document.createElement('td');
     tdOps.className = 'col-ops';
-    tdOps.addEventListener('click', e => e.stopPropagation()); // don't trigger accordion
+    // NOTE: do NOT stopPropagation here — it kills button click delegation.
+    // The tbody handler (line 681) checks data-action before falling through
+    // to toggleDetail, so buttons and accordion coexist without interference.
 
     const btnApprove = document.createElement('button');
     btnApprove.className = 'btn-approve';
