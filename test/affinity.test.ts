@@ -249,21 +249,21 @@ describe('AffinityModule', () => {
     it('returns friendly hint when score > 70', () => {
       seedAffinity(db, 'g1', 'u1', 71, Date.now());
       expect(mod.formatAffinityHint('g1', 'u1', '西瓜')).toBe(
-        '（西瓜 是你比较熟的群友，可以亲近一点）',
+        '（西瓜 是你比较熟的群友）',
       );
     });
 
     it('returns cold hint when score < 30', () => {
       seedAffinity(db, 'g1', 'u1', 29, Date.now());
       expect(mod.formatAffinityHint('g1', 'u1', 'kisa')).toBe(
-        '（kisa 你不太熟，可以冷淡一点）',
+        '（kisa 你不太熟）',
       );
     });
 
     it('returns cold hint for score 20 (< 30 threshold)', () => {
       seedAffinity(db, 'g1', 'u1', 20, Date.now());
       expect(mod.formatAffinityHint('g1', 'u1', 'test')).toBe(
-        '（test 你不太熟，可以冷淡一点）',
+        '（test 你不太熟）',
       );
     });
 
@@ -285,7 +285,7 @@ describe('AffinityModule', () => {
     it('returns cold hint for score 0', () => {
       seedAffinity(db, 'g1', 'u1', 0, Date.now());
       expect(mod.formatAffinityHint('g1', 'u1', 'test')).toBe(
-        '（test 你不太熟，可以冷淡一点）',
+        '（test 你不太熟）',
       );
     });
 
@@ -296,14 +296,14 @@ describe('AffinityModule', () => {
     it('handles nickname with special characters', () => {
       seedAffinity(db, 'g1', 'u1', 80, Date.now());
       expect(mod.formatAffinityHint('g1', 'u1', '❤️飞鸟❤️')).toBe(
-        '（❤️飞鸟❤️ 是你比较熟的群友，可以亲近一点）',
+        '（❤️飞鸟❤️ 是你比较熟的群友）',
       );
     });
 
     it('handles empty nickname string', () => {
       seedAffinity(db, 'g1', 'u1', 80, Date.now());
       expect(mod.formatAffinityHint('g1', 'u1', '')).toBe(
-        '（ 是你比较熟的群友，可以亲近一点）',
+        '（ 是你比较熟的群友）',
       );
     });
   });

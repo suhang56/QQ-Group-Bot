@@ -91,8 +91,8 @@ export class AffinityModule {
 
   formatAffinityHint(groupId: string, userId: string, nickname: string): string | null {
     const score = this.getScore(groupId, userId);
-    if (score > 70) return `（${nickname} 是你比较熟的群友，可以亲近一点）`;
-    if (score < 30) return `（${nickname} 你不太熟，可以冷淡一点）`;
+    if (score > 70) return `（${nickname} 是你比较熟的群友）`;
+    if (score < 30) return `（${nickname} 你不太熟）`;
     return null;
   }
 }

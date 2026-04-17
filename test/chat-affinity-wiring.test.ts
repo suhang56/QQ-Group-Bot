@@ -277,7 +277,7 @@ describe('ChatModule — M6.2b affinity wiring', () => {
   describe('consumer: formatAffinityHint injection into user role', () => {
     it('injects affinity hint into userContent when non-null on direct trigger', async () => {
       const affinity = makeAffinity({
-        formatAffinityHint: vi.fn().mockReturnValue('（Alice 是你比较熟的群友，可以亲近一点）'),
+        formatAffinityHint: vi.fn().mockReturnValue('（Alice 是你比较熟的群友）'),
       });
       const chat = makeChat(claude, db);
       chat.setAffinitySource(affinity);
