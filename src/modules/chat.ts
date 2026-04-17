@@ -52,6 +52,18 @@ export interface IAffinitySource {
 export interface IRelationshipPromptSource {
   getRelevantRelations(groupId: string, userIds: string[]): SocialRelation[];
   formatRelationsForPrompt(relations: SocialRelation[], nicknameMap: Map<string, string>): string;
+  getBotUserRelation(groupId: string, botUserId: string, userId: string): SocialRelation | null;
+}
+
+// M6.5: facts-only addressing hint. State the relationship; let persona layer
+// infer tone. Hardcoded behavior prescriptions risk persona override
+// (ref: feedback_dont_stack_persona_overrides).
+const ADDRESSING_SKIP_TYPES = new Set(['普通群友']);
+
+export function formatAddressingHint(rel: SocialRelation, nickname: string): string | null {
+  if (rel.strength < 0.3) return null;
+  if (ADDRESSING_SKIP_TYPES.has(rel.relationType)) return null;
+  return `你和 ${nickname} 是【${rel.relationType}】`;
 }
 
 export interface IChatModule {
@@ -1690,7 +1702,20 @@ export class ChatModule implements IChatModule {
       return `\n〔context 注释：${hint}〕`;
     })();
 
-    const userContent = `${liveBlock}${replyContextBlock}${keywordSection}${wideSection}${mediumSection}${immediateSection}${avoidSection}以上语境里 [你(昵称)] 是你自己说过的，[别人昵称] 是群友说的。**不要把群友的话当成你自己说过的**。${atMentionDirective}${youAddressedDirective}${moodHint}${convStateLine}${styleLine}${affinityLine}
+    // M6.5: per-user addressing hint — tone cue derived from bot↔user social
+    // relation (user→bot edge as bilateral proxy). Same gate as style/affinity:
+    // direct trigger only, skip bot-self, skip weak/generic relations.
+    const addressingLine = (() => {
+      if (!this.relationshipSource || !isDirectTrigger) return '';
+      if (triggerMessage.userId === this.botUserId) return '';
+      const rel = this.relationshipSource.getBotUserRelation(groupId, this.botUserId, triggerMessage.userId);
+      if (!rel) return '';
+      const hint = formatAddressingHint(rel, triggerMessage.nickname);
+      if (!hint) return '';
+      return `\n〔context 注释：${hint}〕`;
+    })();
+
+    const userContent = `${liveBlock}${replyContextBlock}${keywordSection}${wideSection}${mediumSection}${immediateSection}${avoidSection}以上语境里 [你(昵称)] 是你自己说过的，[别人昵称] 是群友说的。**不要把群友的话当成你自己说过的**。${atMentionDirective}${youAddressedDirective}${moodHint}${convStateLine}${styleLine}${affinityLine}${addressingLine}
 
 ← 要接的这条 — 只输出一个：${isAtTrigger ? '一条自然反应（不能是 <skip>）' : '<skip> 或 一条自然反应'}。${distinctSpeakers >= 3 ? `\n最近 ${distinctSpeakers} 个群友同时聊，可以用"你们"集体称呼。` : ''}
 ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMessage.content) ? '\n**注意**: 这条消息有人直接骂你。**绝对不要回"自言自语吗"/"在骂谁"** — 那是 bot tell。要么硬怼回去，要么 <skip>。' : ''}`;

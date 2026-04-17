@@ -403,6 +403,34 @@ strength 范围 0.0-1.0，越高越强。`;
     }));
   }
 
+  /**
+   * M6.5: Pull the user→bot edge as proxy for bilateral bot↔user relationship.
+   * _inferPair only classifies user→bot direction (bot never speaks first),
+   * so we read from_user=userId, to_user=botUserId; symmetry of the 8
+   * relationType categories lets this serve as addressing-tone cue for bot→user.
+   */
+  getBotUserRelation(groupId: string, botUserId: string, userId: string): SocialRelation | null {
+    if (botUserId === userId) return null;
+    const rows = this.dbQuery<{
+      group_id: string; from_user: string; to_user: string;
+      relation_type: string; strength: number; evidence: string | null; updated_at: number;
+    }>(
+      `SELECT * FROM social_relations WHERE group_id = ? AND from_user = ? AND to_user = ?`,
+      groupId, userId, botUserId,
+    );
+    const r = rows[0];
+    if (!r) return null;
+    return {
+      groupId: r.group_id,
+      fromUser: r.from_user,
+      toUser: r.to_user,
+      relationType: r.relation_type,
+      strength: r.strength,
+      evidence: r.evidence,
+      updatedAt: r.updated_at,
+    };
+  }
+
   formatRelationsForPrompt(relations: SocialRelation[], nicknameMap: Map<string, string>): string {
     if (relations.length === 0) return '';
 
