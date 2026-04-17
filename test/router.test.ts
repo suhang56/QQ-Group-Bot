@@ -87,9 +87,11 @@ describe('Router', () => {
   });
 
   it('rate-limits a user who exceeds command limit', async () => {
-    // exhaust user rate limit
+    // exhaust user rate limit for the specific command bucket (/help → 'help').
+    // UR-C #3: each command name gets its own bucket (keyed userId:command);
+    // seed the same bucket the router will check.
     for (let i = 0; i < 10; i++) {
-      rl.checkUser('u1', 'any');
+      rl.checkUser('u1', 'help');
     }
     const sendSpy = vi.spyOn(adapter, 'send');
     // next dispatch should get rate limited

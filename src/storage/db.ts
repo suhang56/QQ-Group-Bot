@@ -1997,10 +1997,13 @@ class LocalStickerRepository implements ILocalStickerRepository {
   }
 
   recordUsage(groupId: string, key: string, positive: boolean): void {
-    const col = positive ? 'usage_positive' : 'usage_negative';
-    this.db.prepare(
-      `UPDATE local_stickers SET ${col} = ${col} + 1 WHERE group_id = ? AND key = ?`
-    ).run(groupId, key);
+    // Two pre-built prepared statements keyed on `positive` — avoids the
+    // string-interpolated-column pattern that tempts callers to think SQL
+    // injection via `col` is ever okay.
+    const sql = positive
+      ? 'UPDATE local_stickers SET usage_positive = usage_positive + 1 WHERE group_id = ? AND key = ?'
+      : 'UPDATE local_stickers SET usage_negative = usage_negative + 1 WHERE group_id = ? AND key = ?';
+    this.db.prepare(sql).run(groupId, key);
   }
 
   getMfaceKeys(groupId: string): Set<string> {

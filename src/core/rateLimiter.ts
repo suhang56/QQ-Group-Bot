@@ -8,10 +8,18 @@ interface LimitConfig {
   windowMs: number;
 }
 
+// Per-user command buckets. Each command gets its own bucket so callers that
+// pass a command name not listed here no longer silently collapse into the
+// shared 'default' bucket — unknown commands keep the default numeric limits
+// but are keyed independently by `userId:${command}`.
 const COMMAND_LIMITS: Record<string, LimitConfig> = {
-  mimic:   { max: 3,  windowMs: 60_000 },
-  rules:   { max: 5,  windowMs: 60_000 },
-  default: { max: 10, windowMs: 60_000 },
+  mimic:       { max: 3,  windowMs: 60_000 },
+  rules:       { max: 2,  windowMs: 60_000 },
+  bot_status:  { max: 1,  windowMs: 5_000 },
+  cross_group: { max: 1,  windowMs: 5_000 },
+  persona:     { max: 5,  windowMs: 60_000 },
+  admin_mod:   { max: 30, windowMs: 60_000 },
+  default:     { max: 10, windowMs: 60_000 },
 };
 
 const GROUP_LIMITS: Record<string, LimitConfig> = {
@@ -48,8 +56,7 @@ export class RateLimiter {
 
   checkUser(userId: string, command: string): boolean {
     const cfg = getConfig(COMMAND_LIMITS, command);
-    const key = `${userId}:${command === 'mimic' || command === 'rules' ? command : 'default'}`;
-    return check(this.userBuckets, key, cfg, true);
+    return check(this.userBuckets, `${userId}:${command}`, cfg, true);
   }
 
   checkGroup(groupId: string, action: string): boolean {
@@ -60,8 +67,7 @@ export class RateLimiter {
 
   cooldownSecondsUser(userId: string, command: string): number {
     const cfg = getConfig(COMMAND_LIMITS, command);
-    const key = `${userId}:${command === 'mimic' || command === 'rules' ? command : 'default'}`;
-    const state = this.userBuckets.get(key);
+    const state = this.userBuckets.get(`${userId}:${command}`);
     if (!state || state.count < cfg.max) return 0;
     const elapsed = Date.now() - state.windowStart;
     return Math.max(0, Math.ceil((cfg.windowMs - elapsed) / 1000));
