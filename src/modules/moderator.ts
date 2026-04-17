@@ -13,6 +13,7 @@ import { BotErrorCode, ClaudeApiError, ClaudeParseError } from '../utils/errors.
 import { createLogger } from '../utils/logger.js';
 import { VISION_MODEL, MODERATOR_MODEL } from '../config.js';
 import { readFileSync, existsSync } from 'node:fs';
+import { sanitizeForPrompt, sanitizeNickname } from '../utils/prompt-sanitize.js';
 
 // Short banter words/patterns that are normal Chinese group chat — skip moderation entirely
 const BANTER_WHITELIST = new Set([
@@ -193,7 +194,7 @@ export class ModeratorModule implements IModeratorModule {
     const recentMsgs = this.messages.getRecent(msg.groupId, 5);
     // getRecent returns newest-first; reverse for chronological display
     const contextLines = [...recentMsgs].reverse()
-      .map(m => `[${m.nickname}]: ${m.content}`)
+      .map(m => `[${sanitizeNickname(m.nickname)}]: ${sanitizeForPrompt(m.content)}`)
       .join('\n');
 
     // Retrieve RAG examples from learner (fail-safe: empty if disabled or not ready)
@@ -296,7 +297,7 @@ severity说明：1=轻微, 2=一般, 3=严重, 4=很严重, 5=极严重（踢出
 
 ${contextLines}
 
-需要判定的消息：${msg.nickname}（${msg.userId}）说：${msg.content}
+需要判定的消息：${sanitizeNickname(msg.nickname)}（${msg.userId}）说：${sanitizeForPrompt(msg.content)}
 
 该用户近期违规记录：
 ${offenseHistory}${ragSection}${rejectionSection}`;
