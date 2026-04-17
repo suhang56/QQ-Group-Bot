@@ -684,7 +684,10 @@ export class Router implements IRouter {
       this.logger.info({ groupId, totalLines: text.split('\n').length }, 'reply truncated to 3 lines');
     }
     for (let i = 0; i < lines.length; i++) {
-      await new Promise(r => setTimeout(r, randomDelay()));
+      await new Promise<void>(resolve => {
+        const t = setTimeout(resolve, randomDelay());
+        t.unref?.();
+      });
       const msgId = await this.adapter.send(groupId, lines[i]!, i === 0 ? replyToMsgId : undefined);
       if (msgId !== null && this.chatModule) {
         this.chatModule.recordOutgoingMessage(groupId, msgId);

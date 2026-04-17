@@ -357,8 +357,12 @@ strength 范围 0.0-1.0，越高越强。`;
       return;
     }
 
-    // Validate relation type
-    const relType = VALID_RELATION_TYPES.find(t => result.type.includes(t.split('/')[0]!)) ?? '普通群友';
+    // Validate relation type. LLM may return any half of a slash-pair
+    // (e.g. '密友', '欢喜冤家', '暧昧', '粉丝'), so match on any half.
+    const relType = VALID_RELATION_TYPES.find(t => {
+      const halves = t.split('/');
+      return halves.some(half => result.type.includes(half));
+    }) ?? '普通群友';
     const strength = Math.max(0, Math.min(1, result.strength));
     const evidence = typeof result.evidence === 'string' ? result.evidence.slice(0, 200) : null;
 

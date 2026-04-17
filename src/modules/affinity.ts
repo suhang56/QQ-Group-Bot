@@ -317,8 +317,9 @@ export class AffinityModule {
    *   - requester group has linkAcrossGroups=true
    *   - aggregated cross-group score > 70
    *   - at least 2 source groups contribute
-   *   - user's CURRENT-group score is NOT already "well known" (≤70) —
-   *     suppresses noise when the user is already familiar locally.
+   *   - user's CURRENT-group score is low enough that the cross-group signal
+   *     adds information (currentGroupScore ≤ 70). Above 70 means the bot
+   *     already knows them in this group, so the hint would be redundant.
    *
    * On successful emit, writes one row to cross_group_audit. The returned
    * string is concatenation-safe for system-prompt injection (we do not

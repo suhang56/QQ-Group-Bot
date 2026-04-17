@@ -346,6 +346,43 @@ describe('RelationshipTracker.inferRelationships', () => {
     expect(insertCall!.params).toContain('普通群友');
   });
 
+  // Alternate-half slash matching: LLM may return any half of a slash-pair.
+  // Ensures later halves (密友, 欢喜冤家, 暧昧, 粉丝) still resolve to their
+  // full canonical label instead of falling back to '普通群友'.
+  it.each([
+    { llmType: '密友', expected: '铁磁/密友' },
+    { llmType: '欢喜冤家', expected: '互怼/欢喜冤家' },
+    { llmType: '暧昧', expected: 'CP/暧昧' },
+    { llmType: '粉丝', expected: '崇拜/粉丝' },
+  ])('resolves alternate-half "$llmType" to "$expected"', async ({ llmType, expected }) => {
+    const db = makeMockDb();
+    db.queryResults.set('interaction_stats', [
+      { from_user: 'u1', to_user: 'u2', reply_count: 10, mention_count: 0, name_ref_count: 0 },
+    ]);
+
+    const msgs = [
+      makeMsg('u1', 'Alice', 'm1', NOW_SEC),
+      makeMsg('u2', 'Bob', 'm2', NOW_SEC + 10),
+      makeMsg('u1', 'Alice', 'm3', NOW_SEC + 20),
+      makeMsg('u2', 'Bob', 'm4', NOW_SEC + 30),
+      makeMsg('u1', 'Alice', 'm5', NOW_SEC + 40),
+    ];
+
+    const llmResponse = JSON.stringify({
+      fromUser: 'u1', toUser: 'u2',
+      type: llmType, strength: 0.7,
+      evidence: 'slash-alt test',
+    });
+
+    const { tracker, db: mockDb } = makeTracker({ msgs, claudeResponse: llmResponse, db });
+    await tracker.inferRelationships(GROUP);
+
+    const insertCall = mockDb.execCalls.find(c => c.sql.includes('social_relations'));
+    expect(insertCall).toBeDefined();
+    expect(insertCall!.params).toContain(expected);
+    expect(insertCall!.params).not.toContain('普通群友');
+  });
+
   it('clamps strength to [0, 1] range', async () => {
     const db = makeMockDb();
     db.queryResults.set('interaction_stats', [

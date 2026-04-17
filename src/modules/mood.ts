@@ -45,8 +45,7 @@ function applyDecay(state: MoodState, nowMs: number): MoodState {
 export class MoodTracker {
   private readonly logger = createLogger('mood');
   private readonly moods = new Map<string, MoodState>();
-  // M9.2: per-group debounce handles. Timer handles live in a separate map so
-  // mood reads stay allocation-free.
+  // M9.2: per-group debounce handles for scheduleSave.
   private readonly saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(private readonly repo?: IMoodRepository) {

@@ -1408,10 +1408,18 @@ export class ChatModule implements IChatModule {
         const visionPromise = Promise.allSettled(
           rcsToWait.map(rc => vs.describeFromMessage(groupId, rc, triggerMessage.userId, this.botUserId))
         );
-        const timeoutPromise = new Promise<void>(resolve => setTimeout(resolve, 15_000));
-        await Promise.race([visionPromise, timeoutPromise]).catch(err =>
-          this.logger.debug({ err }, 'sync vision wait failed'),
-        );
+        let raceTimer: ReturnType<typeof setTimeout> | undefined;
+        const timeoutPromise = new Promise<void>(resolve => {
+          raceTimer = setTimeout(resolve, 15_000);
+          raceTimer.unref?.();
+        });
+        try {
+          await Promise.race([visionPromise, timeoutPromise]);
+        } catch (err) {
+          this.logger.debug({ err }, 'sync vision wait failed');
+        } finally {
+          if (raceTimer) clearTimeout(raceTimer);
+        }
         this.logger.debug(
           { groupId, count: rcsToWait.length },
           'chat sync vision wait finished',
