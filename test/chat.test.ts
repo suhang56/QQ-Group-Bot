@@ -3364,3 +3364,116 @@ describe('ChatModule — insult recognition', () => {
     expect(userContent).toContain('bot tell');
   });
 });
+
+// ── M6.2c: alias-miner fast-path integration ────────────────────────────────
+
+describe('ChatModule — alias-miner fast-path (M6.2c Option 1b)', () => {
+  const os = require('node:os');
+  const fs = require('node:fs');
+  const pathMod = require('node:path');
+  const GROUP = 'gFast';
+  let tmpLoreDir: string;
+  let db: Database;
+  let claude: IClaudeClient;
+  let chat: ChatModule;
+
+  beforeEach(() => {
+    tmpLoreDir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'lore-fastpath-'));
+    const chunk0 = JSON.stringify({
+      chunkIndex: 0,
+      summary: '### hyw\n- **说话风格**: canonical anchor for test',
+    });
+    fs.writeFileSync(
+      pathMod.join(tmpLoreDir, `${GROUP}.md.chunks.jsonl`),
+      chunk0 + '\n',
+    );
+    fs.writeFileSync(
+      pathMod.join(tmpLoreDir, `${GROUP}.md`),
+      '# lore\n## identity\nbody\n',
+    );
+    db = new Database(':memory:');
+    claude = makeMockClaude('ok');
+    chat = makePassthroughChat(claude, db, { loreDirPath: tmpLoreDir });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    try { fs.rmSync(tmpLoreDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  });
+
+  it('pending alias fact (miner-written) reaches alias-map on first build', () => {
+    // Critical Option 1b invariant: miner-written rows are status='pending'
+    // and must still surface in the alias-map cache.
+    db.learnedFacts.insert({
+      groupId: GROUP, topic: '群友别名 小明', fact: '小明 = hyw (QQ 10086)',
+      sourceUserId: null, sourceUserNickname: '[alias-miner]',
+      sourceMsgId: null, botReplyId: null,
+      confidence: 0.8, status: 'pending',
+    });
+
+    const priv = chat as unknown as {
+      _loadLoreEntityFiltered(g: string, t: string, c: { nickname: string; content: string }[]): string | null | undefined;
+      loreChunkAliasMap: Map<string, Map<string, number[]>>;
+    };
+    priv._loadLoreEntityFiltered(GROUP, 'anything', []);
+
+    const cached = priv.loreChunkAliasMap.get(GROUP);
+    expect(cached).toBeDefined();
+    expect(cached!.has('hyw')).toBe(true);
+    expect(cached!.has('小明')).toBe(true);
+  });
+
+  it('active alias fact also reaches alias-map', () => {
+    db.learnedFacts.insert({
+      groupId: GROUP, topic: '群友别名 小绿', fact: '小绿 = hyw (QQ 10089)',
+      sourceUserId: null, sourceUserNickname: '[admin]',
+      sourceMsgId: null, botReplyId: null,
+      confidence: 0.9, status: 'active',
+    });
+    const priv = chat as unknown as {
+      _loadLoreEntityFiltered(g: string, t: string, c: { nickname: string; content: string }[]): string | null | undefined;
+      loreChunkAliasMap: Map<string, Map<string, number[]>>;
+    };
+    priv._loadLoreEntityFiltered(GROUP, 'x', []);
+    expect(priv.loreChunkAliasMap.get(GROUP)!.has('小绿')).toBe(true);
+  });
+
+  it('invalidateLore clears cache so next lookup picks up newly-inserted pending fact', () => {
+    const priv = chat as unknown as {
+      _loadLoreEntityFiltered(g: string, t: string, c: { nickname: string; content: string }[]): string | null | undefined;
+      loreChunkAliasMap: Map<string, Map<string, number[]>>;
+      invalidateLore(g: string): void;
+    };
+
+    priv._loadLoreEntityFiltered(GROUP, 'warmup', []);
+    expect(priv.loreChunkAliasMap.get(GROUP)!.has('小红')).toBe(false);
+
+    db.learnedFacts.insert({
+      groupId: GROUP, topic: '群友别名 小红', fact: '小红 = hyw (QQ 10087)',
+      sourceUserId: null, sourceUserNickname: '[alias-miner]',
+      sourceMsgId: null, botReplyId: null,
+      confidence: 0.8, status: 'pending',
+    });
+    priv.invalidateLore(GROUP);
+
+    priv._loadLoreEntityFiltered(GROUP, 'warmup2', []);
+    expect(priv.loreChunkAliasMap.get(GROUP)!.has('小红')).toBe(true);
+  });
+
+  it('rejected alias fact does NOT reach alias-map (status filter excludes)', () => {
+    const id = db.learnedFacts.insert({
+      groupId: GROUP, topic: '群友别名 小黑', fact: '小黑 = hyw (QQ 10099)',
+      sourceUserId: null, sourceUserNickname: '[alias-miner]',
+      sourceMsgId: null, botReplyId: null,
+      confidence: 0.8, status: 'pending',
+    });
+    db.learnedFacts.markStatus(id, 'rejected');
+
+    const priv = chat as unknown as {
+      _loadLoreEntityFiltered(g: string, t: string, c: { nickname: string; content: string }[]): string | null | undefined;
+      loreChunkAliasMap: Map<string, Map<string, number[]>>;
+    };
+    priv._loadLoreEntityFiltered(GROUP, 'x', []);
+    expect(priv.loreChunkAliasMap.get(GROUP)!.has('小黑')).toBe(false);
+  });
+});

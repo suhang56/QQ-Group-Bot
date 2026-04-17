@@ -2710,9 +2710,12 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     const chunksPath = path.join(this.loreDirPath, `${groupId}.md.chunks.jsonl`);
     if (!existsSync(chunksPath)) return undefined;
 
-    // Build/cache alias map (lazy, invalidated with invalidateLore)
+    // Build/cache alias map (lazy, invalidated with invalidateLore).
+    // Include both active and pending alias facts: pending miner-written rows
+    // reach lore retrieval without breaking admin /facts_pending review flow.
     if (!this.loreChunkAliasMap.has(groupId)) {
-      this.loreChunkAliasMap.set(groupId, buildAliasMap(chunksPath));
+      const learnedAliases = this.db.learnedFacts.listAliasFactsForMap(groupId);
+      this.loreChunkAliasMap.set(groupId, buildAliasMap(chunksPath, learnedAliases));
     }
     const chunkAliasMap = this.loreChunkAliasMap.get(groupId)!;
 

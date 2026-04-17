@@ -228,3 +228,100 @@ describe('invalidation', () => {
     expect(map1).not.toBe(map2);
   });
 });
+
+describe('buildAliasMap with learned alias facts (M6.2c fast-path)', () => {
+  type MinFact = Pick<
+    import('../src/storage/db.js').LearnedFact,
+    'id' | 'groupId' | 'topic' | 'fact' | 'sourceUserId' | 'sourceUserNickname'
+    | 'sourceMsgId' | 'botReplyId' | 'confidence' | 'status' | 'createdAt' | 'updatedAt'
+  >;
+  const makeFact = (topic: string, fact: string, status: 'active' | 'pending' = 'pending'): MinFact => ({
+    id: 0, groupId: GROUP_ID, topic, fact,
+    sourceUserId: null, sourceUserNickname: '[alias-miner]',
+    sourceMsgId: null, botReplyId: null,
+    confidence: 0.8, status, createdAt: 0, updatedAt: 0,
+  });
+
+  let anchorAlias: string;
+  let anchorChunks: number[];
+  beforeAll(() => {
+    const map = buildAliasMap(CHUNKS_PATH);
+    const hyw = map.get('hyw');
+    if (!hyw || hyw.length === 0) {
+      throw new Error('test fixture regression: hyw not in alias map');
+    }
+    anchorAlias = 'hyw';
+    anchorChunks = hyw;
+  });
+
+  it('registers new alias from miner "X = Y (QQ id)" fact when Y is in chunk map', () => {
+    const facts = [makeFact(
+      '群友别名 小明',
+      `小明 = ${anchorAlias} (QQ 10086)`,
+    )];
+    const map = buildAliasMap(CHUNKS_PATH, facts as never);
+    const minChunks = map.get('小明');
+    expect(minChunks).toBeDefined();
+    for (const idx of anchorChunks) {
+      expect(minChunks!).toContain(idx);
+    }
+  });
+
+  it('registers miner fact with evidence tail "X = Y (QQ id)。evidence"', () => {
+    const facts = [makeFact(
+      '群友别名 小红',
+      `小红 = ${anchorAlias} (QQ 10087)。群里直接叫小红`,
+    )];
+    const map = buildAliasMap(CHUNKS_PATH, facts as never);
+    expect(map.get('小红')).toBeDefined();
+    expect(map.get('小红')!.length).toBeGreaterThan(0);
+  });
+
+  it('silently skips miner fact when canonical Y is NOT in chunk map', () => {
+    const facts = [makeFact(
+      '群友别名 路人甲',
+      '路人甲 = 不存在的人 (QQ 99999)',
+    )];
+    const before = buildAliasMap(CHUNKS_PATH);
+    const after = buildAliasMap(CHUNKS_PATH, facts as never);
+    expect(after.has('路人甲')).toBe(false);
+    expect(after.size).toBe(before.size);
+  });
+
+  it('merges admin-style "X又叫Y" fact alongside miner "X = Y (QQ id)" fact', () => {
+    const facts = [
+      makeFact('群友别名 admin', `${anchorAlias}又叫admin别名`, 'active'),
+      makeFact('群友别名 miner', `miner别名 = ${anchorAlias} (QQ 10088)`, 'pending'),
+    ];
+    const map = buildAliasMap(CHUNKS_PATH, facts as never);
+    expect(map.get('admin别名')).toBeDefined();
+    expect(map.get('miner别名')).toBeDefined();
+  });
+
+  it('empty learnedAliasFacts produces identical map vs omitted arg', () => {
+    const omitted = buildAliasMap(CHUNKS_PATH);
+    const empty = buildAliasMap(CHUNKS_PATH, []);
+    expect(empty.size).toBe(omitted.size);
+    for (const [k, v] of omitted) {
+      expect(empty.get(k)).toEqual(v);
+    }
+  });
+
+  it('does not throw on malformed fact text', () => {
+    const facts = [
+      makeFact('群友别名 junk', 'not a real pattern at all'),
+      makeFact('群友别名 weird', '='),
+      makeFact('群友别名 partial', '小王 = '),
+      makeFact('群友别名 tiny', 'a=b'),
+    ];
+    expect(() => buildAliasMap(CHUNKS_PATH, facts as never)).not.toThrow();
+  });
+
+  it('treats pending-status facts identically to active (M6.2c: pending miner rows reach lore map)', () => {
+    const pending = [makeFact('群友别名 小强', `小强 = ${anchorAlias} (QQ 12345)`, 'pending')];
+    const active = [makeFact('群友别名 小强', `小强 = ${anchorAlias} (QQ 12345)`, 'active')];
+    const mapP = buildAliasMap(CHUNKS_PATH, pending as never);
+    const mapA = buildAliasMap(CHUNKS_PATH, active as never);
+    expect(mapP.get('小强')).toEqual(mapA.get('小强'));
+  });
+});
