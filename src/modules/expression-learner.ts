@@ -1,9 +1,13 @@
-import type { IMessageRepository, IExpressionPatternRepository } from '../storage/db.js';
+import type { IMessageRepository, IExpressionPatternRepository, ExpressionPattern } from '../storage/db.js';
 import { createLogger } from '../utils/logger.js';
 import type { Logger } from 'pino';
 
 const CQ_ONLY_RE = /^\[CQ:[^\]]+\]$/;
 const COMMAND_RE = /^\//;
+
+// M8.3: few-shot emission into cached system block.
+export const FEWSHOT_DEFAULT_N = 3;
+export const FEWSHOT_MAX_N = 5;
 
 export interface ExpressionLearnerOptions {
   messages: IMessageRepository;
@@ -107,5 +111,64 @@ export class ExpressionLearner {
       p => `- 当有人说「${p.situation}」时，你回过「${p.expression}」`,
     );
     return `## 你之前的回复风格参考\n${lines.join('\n')}`;
+  }
+
+  /**
+   * Return up to `n` patterns for few-shot grounding. When `matchContent` is
+   * given, patterns whose situation contains (or is contained by) it are
+   * surfaced first (weight-desc). If fewer than n match, top-by-weight+recency
+   * fills the rest without duplicates. n is capped at FEWSHOT_MAX_N.
+   */
+  getTopRecent(groupId: string, n: number, matchContent?: string): ExpressionPattern[] {
+    const capped = Math.max(0, Math.min(n, FEWSHOT_MAX_N));
+    if (capped === 0) return [];
+
+    if (matchContent && matchContent.length > 0) {
+      const all = this.patterns.listAll(groupId);
+      const hits = all
+        .filter(p => {
+          const s = p.situation;
+          return s.length > 0 && (matchContent.includes(s) || s.includes(matchContent));
+        })
+        .sort((a, b) => {
+          if (b.weight !== a.weight) return b.weight - a.weight;
+          return b.updatedAt - a.updatedAt;
+        });
+
+      if (hits.length >= capped) return hits.slice(0, capped);
+
+      const seen = new Set(hits.map(p => `${p.situation}\u0000${p.expression}`));
+      const fill = this.patterns.getTopRecentN(groupId, capped);
+      const result: ExpressionPattern[] = [...hits];
+      for (const p of fill) {
+        if (result.length >= capped) break;
+        const key = `${p.situation}\u0000${p.expression}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        result.push(p);
+      }
+      return result;
+    }
+
+    return this.patterns.getTopRecentN(groupId, capped);
+  }
+
+  /**
+   * Build a system-block snippet of concrete past (situation → expression) pairs
+   * for few-shot grounding. Returns '' when no patterns exist so caller can
+   * conditionally append without emitting a dangling header.
+   */
+  formatFewShotBlock(
+    groupId: string,
+    n: number = FEWSHOT_DEFAULT_N,
+    matchContent?: string,
+  ): string {
+    const patterns = this.getTopRecent(groupId, n, matchContent);
+    if (patterns.length === 0) return '';
+
+    const pairs = patterns.map(
+      p => `有人说：「${p.situation}」\n你回：「${p.expression}」`,
+    );
+    return `## 你过去的真实回复示例\n${pairs.join('\n\n')}`;
   }
 }
