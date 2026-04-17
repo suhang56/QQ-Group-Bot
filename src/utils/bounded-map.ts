@@ -21,10 +21,11 @@ export class BoundedMap<K, V> {
   set(key: K, value: V): this {
     // If key already exists, delete first to reset insertion order
     if (this._map.has(key)) this._map.delete(key);
-    // Evict oldest if at capacity
+    // Evict oldest if at capacity. Use IteratorResult.done so `undefined` is
+    // a valid key value (BoundedMap<undefined | X, Y>) and still evicts.
     if (this._map.size >= this._cap) {
-      const oldest = this._map.keys().next().value;
-      if (oldest !== undefined) this._map.delete(oldest);
+      const next = this._map.keys().next();
+      if (!next.done) this._map.delete(next.value);
     }
     this._map.set(key, value);
     return this;
