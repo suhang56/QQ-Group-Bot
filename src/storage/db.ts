@@ -432,9 +432,11 @@ export interface IWelcomeLogRepository {
   lastWelcomeAt(groupId: string, userId: string): number | null;
 }
 
-// ---- PersonaPatchProposal (M6.6) ----
+// ---- PersonaPatchProposal (M6.6 + M8.1) ----
 
 export type PersonaPatchStatus = 'pending' | 'approved' | 'rejected' | 'superseded';
+/** M8.1: proposal cadence kind. 'daily' = hourly-ish M6.6 path; 'weekly' = 7-day roll-up. */
+export type PersonaPatchKind = 'daily' | 'weekly';
 
 export interface PersonaPatchProposal {
   id: number;
@@ -447,27 +449,38 @@ export interface PersonaPatchProposal {
   /** Unified-diff summary produced at propose time (+/- lines, truncated to ~40 lines). */
   diffSummary: string;
   status: PersonaPatchStatus;
+  /** M8.1 — cadence kind. Legacy rows default to 'daily'. */
+  kind: PersonaPatchKind;
   createdAt: number;     // unix seconds
   decidedAt: number | null;
   decidedBy: string | null;
 }
 
 export interface IPersonaPatchRepository {
-  insert(row: Omit<PersonaPatchProposal, 'id' | 'status' | 'decidedAt' | 'decidedBy'>): number;
+  /**
+   * Insert a new proposal. `kind` defaults to 'daily' when the caller is a
+   * pre-M8.1 code path that does not pass it.
+   */
+  insert(row: Omit<PersonaPatchProposal, 'id' | 'status' | 'decidedAt' | 'decidedBy' | 'kind'> & { kind?: PersonaPatchKind }): number;
   getById(id: number): PersonaPatchProposal | null;
   /**
    * List pending proposals (status='pending') created within `ttlSec` of `now`.
    * Rows older than ttlSec are silently filtered out (treated as expired) but
    * remain in the table — no `expires_at` column is stored.
+   *
+   * M8.1: weekly-first sort (weekly rows come before daily at the same timestamp).
    */
   listPending(groupId: string, now: number, ttlSec: number, limit?: number): PersonaPatchProposal[];
   /**
    * List all proposals (any status) for a group within `sinceSec .. now`.
-   * Used by /persona_history.
+   * Used by /persona_history. M8.1: weekly-first sort.
    */
   listHistory(groupId: string, sinceSec: number, limit?: number): PersonaPatchProposal[];
-  /** Count proposals inserted since `sinceSec` — used for daily-cap rate limit. */
-  countProposalsSince(groupId: string, sinceSec: number): number;
+  /**
+   * Count proposals inserted since `sinceSec` — used for daily-cap rate limit.
+   * M8.1: optional kind filter so weekly and daily have independent daily caps.
+   */
+  countProposalsSince(groupId: string, sinceSec: number, kind?: PersonaPatchKind): number;
   /** Mark a proposal rejected. */
   reject(id: number, adminId: string, nowSec: number): void;
   /**
@@ -480,8 +493,21 @@ export interface IPersonaPatchRepository {
   /**
    * Returns true iff a proposal with this exact new_persona_text already exists
    * (any status) in the last `windowSec` — used to suppress trivial retries.
+   *
+   * M8.1: if `kind` is given, restrict dedup to that kind so daily + weekly have
+   * independent dedup windows (a weekly can reuse wording a stale daily already
+   * used, etc).
    */
-  hasRecentDuplicate(groupId: string, newPersonaText: string, windowSec: number, now: number): boolean;
+  hasRecentDuplicate(groupId: string, newPersonaText: string, windowSec: number, now: number, kind?: PersonaPatchKind): boolean;
+  /** M8.1 — return the most recent weekly proposal for a group (any status), or null. */
+  findLastWeekly(groupId: string): PersonaPatchProposal | null;
+  /**
+   * M8.1 — mark all pending 'daily' proposals for a group with created_at <
+   * `beforeTs` as rejected (reason: 'stale_after_weekly'). Used when a weekly
+   * proposal is approved — dailies that predate it are off an older persona
+   * baseline and shouldn't ship. Returns the count mutated.
+   */
+  rejectStaleDailiesBefore(groupId: string, beforeTs: number, adminId: string, nowSec: number): number;
 }
 
 export interface LocalSticker {
@@ -2094,6 +2120,7 @@ interface PersonaPatchRow {
   reasoning: string;
   diff_summary: string;
   status: string;
+  kind: string | null;
   created_at: number;
   decided_at: number | null;
   decided_by: string | null;
@@ -2103,6 +2130,9 @@ class PersonaPatchRepository implements IPersonaPatchRepository {
   constructor(private readonly db: DatabaseSync) {}
 
   private _row(r: PersonaPatchRow): PersonaPatchProposal {
+    // Legacy rows predate the `kind` column (NULL here post-migration) — they
+    // default to 'daily' per the ALTER TABLE default.
+    const kind: PersonaPatchKind = r.kind === 'weekly' ? 'weekly' : 'daily';
     return {
       id: r.id,
       groupId: r.group_id,
@@ -2111,23 +2141,26 @@ class PersonaPatchRepository implements IPersonaPatchRepository {
       reasoning: r.reasoning,
       diffSummary: r.diff_summary,
       status: r.status as PersonaPatchStatus,
+      kind,
       createdAt: r.created_at,
       decidedAt: r.decided_at,
       decidedBy: r.decided_by,
     };
   }
 
-  insert(row: Omit<PersonaPatchProposal, 'id' | 'status' | 'decidedAt' | 'decidedBy'>): number {
+  insert(row: Omit<PersonaPatchProposal, 'id' | 'status' | 'decidedAt' | 'decidedBy' | 'kind'> & { kind?: PersonaPatchKind }): number {
+    const kind: PersonaPatchKind = row.kind ?? 'daily';
     const result = this.db.prepare(
       `INSERT INTO persona_patch_proposals
-         (group_id, old_persona_text, new_persona_text, reasoning, diff_summary, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`
+         (group_id, old_persona_text, new_persona_text, reasoning, diff_summary, kind, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
     ).run(
       row.groupId,
       row.oldPersonaText,
       row.newPersonaText,
       row.reasoning,
       row.diffSummary,
+      kind,
       row.createdAt,
     ) as { lastInsertRowid: number };
     return Number(result.lastInsertRowid);
@@ -2142,24 +2175,34 @@ class PersonaPatchRepository implements IPersonaPatchRepository {
 
   listPending(groupId: string, now: number, ttlSec: number, limit = 20): PersonaPatchProposal[] {
     const cutoff = now - ttlSec;
+    // M8.1: weekly-first sort — weekly rows outrank daily at equal timestamps,
+    // so admins see the bigger-picture proposal first when skimming /persona_review.
     const rows = this.db.prepare(
       `SELECT * FROM persona_patch_proposals
          WHERE group_id = ? AND status = 'pending' AND created_at >= ?
-         ORDER BY created_at DESC LIMIT ?`
+         ORDER BY CASE kind WHEN 'weekly' THEN 0 ELSE 1 END, created_at DESC LIMIT ?`
     ).all(groupId, cutoff, limit) as unknown as PersonaPatchRow[];
     return rows.map(r => this._row(r));
   }
 
   listHistory(groupId: string, sinceSec: number, limit = 50): PersonaPatchProposal[] {
+    // M8.1: weekly-first sort (same rationale as listPending).
     const rows = this.db.prepare(
       `SELECT * FROM persona_patch_proposals
          WHERE group_id = ? AND created_at >= ?
-         ORDER BY created_at DESC LIMIT ?`
+         ORDER BY CASE kind WHEN 'weekly' THEN 0 ELSE 1 END, created_at DESC LIMIT ?`
     ).all(groupId, sinceSec, limit) as unknown as PersonaPatchRow[];
     return rows.map(r => this._row(r));
   }
 
-  countProposalsSince(groupId: string, sinceSec: number): number {
+  countProposalsSince(groupId: string, sinceSec: number, kind?: PersonaPatchKind): number {
+    if (kind) {
+      const row = this.db.prepare(
+        `SELECT COUNT(*) AS n FROM persona_patch_proposals
+           WHERE group_id = ? AND created_at >= ? AND kind = ?`
+      ).get(groupId, sinceSec, kind) as { n: number } | undefined;
+      return row?.n ?? 0;
+    }
     const row = this.db.prepare(
       `SELECT COUNT(*) AS n FROM persona_patch_proposals WHERE group_id = ? AND created_at >= ?`
     ).get(groupId, sinceSec) as { n: number } | undefined;
@@ -2174,13 +2217,38 @@ class PersonaPatchRepository implements IPersonaPatchRepository {
     ).run(nowSec, adminId, id);
   }
 
-  hasRecentDuplicate(groupId: string, newPersonaText: string, windowSec: number, now: number): boolean {
+  hasRecentDuplicate(groupId: string, newPersonaText: string, windowSec: number, now: number, kind?: PersonaPatchKind): boolean {
     const cutoff = now - windowSec;
+    if (kind) {
+      const row = this.db.prepare(
+        `SELECT 1 FROM persona_patch_proposals
+           WHERE group_id = ? AND new_persona_text = ? AND kind = ? AND created_at >= ? LIMIT 1`
+      ).get(groupId, newPersonaText, kind, cutoff) as { 1: number } | undefined;
+      return !!row;
+    }
     const row = this.db.prepare(
       `SELECT 1 FROM persona_patch_proposals
          WHERE group_id = ? AND new_persona_text = ? AND created_at >= ? LIMIT 1`
     ).get(groupId, newPersonaText, cutoff) as { 1: number } | undefined;
     return !!row;
+  }
+
+  findLastWeekly(groupId: string): PersonaPatchProposal | null {
+    const r = this.db.prepare(
+      `SELECT * FROM persona_patch_proposals
+         WHERE group_id = ? AND kind = 'weekly'
+         ORDER BY created_at DESC LIMIT 1`
+    ).get(groupId) as PersonaPatchRow | undefined;
+    return r ? this._row(r) : null;
+  }
+
+  rejectStaleDailiesBefore(groupId: string, beforeTs: number, adminId: string, nowSec: number): number {
+    const result = this.db.prepare(
+      `UPDATE persona_patch_proposals
+          SET status = 'rejected', decided_at = ?, decided_by = ?
+        WHERE group_id = ? AND kind = 'daily' AND status = 'pending' AND created_at < ?`
+    ).run(nowSec, adminId, groupId, beforeTs) as { changes: number };
+    return result.changes;
   }
 
   apply(id: number, adminId: string, nowSec: number): boolean {
@@ -2967,7 +3035,7 @@ export class Database {
       )
     `);
 
-    // persona_patch_proposals (M6.6): self-reflection → admin-reviewable persona patch queue.
+    // persona_patch_proposals (M6.6 + M8.1): self-reflection → admin-reviewable persona patch queue.
     // CREATE + indexes wrapped in IF NOT EXISTS so both fresh installs and existing DBs
     // converge on the same schema (per feedback_sqlite_schema_migration: schema.sql alone
     // is silently skipped for existing DBs, so this block is the source of truth for upgrades).
@@ -2980,15 +3048,22 @@ export class Database {
         reasoning         TEXT    NOT NULL,
         diff_summary      TEXT    NOT NULL,
         status            TEXT    NOT NULL DEFAULT 'pending',
+        kind              TEXT    NOT NULL DEFAULT 'daily',
         created_at        INTEGER NOT NULL,
         decided_at        INTEGER,
         decided_by        TEXT
       )
     `);
+    // M8.1 — add kind column to existing DBs (CREATE TABLE above only fires on
+    // fresh installs). Wrapped in try/catch for idempotency (duplicate column
+    // on re-run). Default 'daily' satisfies back-compat for pre-M8.1 rows.
+    try { this._db.exec(`ALTER TABLE persona_patch_proposals ADD COLUMN kind TEXT NOT NULL DEFAULT 'daily'`); } catch { /* already exists */ }
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_persona_patch_group_created
       ON persona_patch_proposals(group_id, created_at DESC)`);
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_persona_patch_group_pending
       ON persona_patch_proposals(group_id, created_at DESC) WHERE status = 'pending'`);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_ppp_group_kind_created
+      ON persona_patch_proposals(group_id, kind, created_at DESC)`);
   }
 
   /**

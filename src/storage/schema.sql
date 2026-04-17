@@ -474,6 +474,7 @@ CREATE TABLE IF NOT EXISTS persona_patch_proposals (
   reasoning         TEXT    NOT NULL,
   diff_summary      TEXT    NOT NULL,
   status            TEXT    NOT NULL DEFAULT 'pending', -- pending|approved|rejected|superseded
+  kind              TEXT    NOT NULL DEFAULT 'daily',   -- M8.1: 'daily' | 'weekly'
   created_at        INTEGER NOT NULL,                -- unix seconds
   decided_at        INTEGER,
   decided_by        TEXT
@@ -484,3 +485,6 @@ CREATE INDEX IF NOT EXISTS idx_persona_patch_group_created
 -- Partial index for the hot pending-lookup path — most groups have 0 pending rows most of the time.
 CREATE INDEX IF NOT EXISTS idx_persona_patch_group_pending
   ON persona_patch_proposals(group_id, created_at DESC) WHERE status = 'pending';
+-- M8.1: per-kind cadence + history queries.
+CREATE INDEX IF NOT EXISTS idx_ppp_group_kind_created
+  ON persona_patch_proposals(group_id, kind, created_at DESC);
