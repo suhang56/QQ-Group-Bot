@@ -499,3 +499,32 @@ describe('extractUserStickers', () => {
     expect(extractUserStickers([], [])).toHaveLength(0);
   });
 });
+
+// UR-A Phase B: cache-split invariants for mimic
+describe('MimicModule — UR-A cache split (system is byte-identical across calls)', () => {
+  it('system[0].text is identical across two calls with different nickname / few-shot', async () => {
+    const claude = makeMockClaude('x');
+    const messages = makeMockMessages();
+    const configs = makeMockConfig();
+    const mod = makeModule(claude, messages, configs);
+
+    const msgsA = Array.from({ length: 10 }, (_, i) => makeMsg({ id: i + 1, nickname: 'Alice', content: `alice ${i}` }));
+    const msgsB = Array.from({ length: 10 }, (_, i) => makeMsg({ id: i + 1, nickname: 'Bob', userId: 'u2', content: `bob ${i}` }));
+
+    vi.mocked(messages.getByUser).mockReturnValueOnce(msgsA);
+    await mod.generateMimic('g1', 'u1', '话题A', []);
+    vi.mocked(messages.getByUser).mockReturnValueOnce(msgsB);
+    await mod.generateMimic('g1', 'u2', '话题B', []);
+
+    const calls = vi.mocked(claude.complete).mock.calls;
+    expect(calls.length).toBe(2);
+    const sysA = (calls[0]![0] as ClaudeRequest).system as Array<{ text: string; cache: boolean }>;
+    const sysB = (calls[1]![0] as ClaudeRequest).system as Array<{ text: string; cache: boolean }>;
+    expect(sysA[0]!.text).toBe(sysB[0]!.text);
+
+    // User message differs because nickname / fewShot / topic are dynamic
+    const userA = (calls[0]![0] as ClaudeRequest).messages[0]!.content;
+    const userB = (calls[1]![0] as ClaudeRequest).messages[0]!.content;
+    expect(userA).not.toBe(userB);
+  });
+});

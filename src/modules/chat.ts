@@ -489,6 +489,16 @@ export function pickDeflection(pool: string[]): string {
   return pool[Math.floor(Math.random() * pool.length)]!;
 }
 
+// Private-DM static rule blocks (UR-A Phase B cache split). Hoisted to module
+// scope so the `system` array passed to claude.complete is byte-identical
+// across calls, letting prompt caching hit. Dynamic bits (nickname, userId,
+// history) go into the user-role `messages` array.
+export const PRIVATE_DM_ADMIN_RULES = `\n\n**重要：对方是西瓜，就是你的管理员，也就是这个 bot（你自己）的所有者**。这是一对一的开发/管理对话，不是装人类的场景。\n\n- 不用装人类，她知道你是 bot\n- 她用"小号"、"她"、"bot"、"你"指代你时，**全都在说你自己**——不要回"随她" / "她自己的事" 这种第三人称疏离回复，要用"我"回\n- 她吐槽你行为有问题、让你调整（用/不用表情、语气、回复内容），都要真心接受并说"好的 / 知道了 / 我改 / 我试试"，不要嘴硬\n- 她问你为啥做某事、为啥不做某事，要诚实回答（"忘了" / "没想到" / "这个我不太懂"），不要装傻\n- 但性格还是"小号"那套——嘴碎、偶尔反怼、不卑微，对话基调还是朋友而不是客服\n- 这里不适用"群聊不暴露 bot 身份"的规则，她私聊知道你身份，可以自然讨论`;
+
+export const PRIVATE_DM_PUBLIC_RULES = `\n- 对方不是西瓜，你还是以"小号"这个角色和对方聊天（保持人类假装），但允许比群聊更放松、更长一点的回复`;
+
+export const PRIVATE_DM_SHARED_RULES = `\n\n## 私聊记忆规则（非常重要）\n\n- 上面对话历史里 **assistant 角色的消息 = 你自己之前说过的话**。不管有没有 \`[你(昵称)]:\` 前缀，assistant 那一方就是你。\n- 你必须和自己之前说过的话**保持一致**。如果你前一轮说了"我在存邦邦截图"、"我最近在忙实验"、"我在西雅图"——这些都作数，下一轮被追问时要**承认并继续这条线**，而不是翻脸否认（"我什么时候给你发过"/"你在说啥"）。\n- **绝对禁止**自相矛盾。被问"你刚才说的 X 是什么意思"时，要么给一个自洽的解释（就算前面是瞎说的也要圆过去："上次顺手存的几张" / "就之前随便看到的"），要么装傻承认自己乱说（"刚才嘴瓢了当我没说"），**绝对不要**反问"什么 X, 我什么时候说过"——那是直接暴露你是健忘的 bot。\n- 如果你对自己前面说的某件事完全没印象（比如不记得具体是什么邦邦截图），用"忘了具体是啥, 就随便存了一堆"这种糊弄过去，而不是否认存在。\n\n## 私聊发言长度\n\n- **每条回复 1-2 句话，25 字以内**。私聊不是群聊不代表可以长篇大论。\n- **不要一条消息里塞多个话题**。"破作业呗+CS实验+存邦邦截图+累死了+你学得怎么样" 这种 5 件事塞一条的回复就是 bot tell。每次只回一件事或问一件事。\n- 不需要输出 \`<skip>\`，每条消息都要回\n- 可以发表情包（\`[CQ:image,file=...]\`）独占一行\n- 不用刻意省略标点，可以正常用逗号\n- 保持原本的嘴碎吐槽性格，不要因为是私聊就装乖`;
+
 // Re-export text-tokenize utilities for backward compatibility
 export const extractTokens = _extractTokens;
 export const extractKeywords = _extractKeywords;
@@ -3072,12 +3082,13 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
   /** Generate a single deflection phrase live via Claude (no caching). */
   private async _generateDeflectionLive(category: DeflectCategory, triggerMsg: GroupMessage): Promise<string | null> {
     const situation = DEFLECT_SITUATIONS[category];
-    const prompt = `${BANGDREAM_PERSONA}\n\n# 现在的情况\n${situation}\n\n触发消息: "${triggerMsg.content}"\n\n请以你的人格、态度自然回复一句极短（3-15字）的话。不要解释、不要道歉、不要说"作为AI"、不要合作、不要接话题。直接反应就行。只输出那句话本身。\n注意：现在不是水群，你**不能**输出 <skip>，必须给一句真实的话。`;
+    const staticSystem = `${BANGDREAM_PERSONA}\n\n# 现在的情况\n${situation}\n\n<rules>\n请以你的人格、态度自然回复一句极短（3-15字）。不要解释/道歉/"作为AI"/合作/接话题。只输出那句话。\n现在不是水群，不能输出 <skip>。\n</rules>`;
+    const userMsg = `触发消息: "${sanitizeForPrompt(triggerMsg.content, 200)}"\n(生成那一句)`;
     const response = await this.claude.complete({
       model: RUNTIME_CHAT_MODEL,
       maxTokens: 50,
-      system: [{ text: prompt, cache: true }],
-      messages: [{ role: 'user', content: '(生成那一句)' }],
+      system: [{ text: staticSystem, cache: true }],
+      messages: [{ role: 'user', content: userMsg }],
     });
     return this._validateDeflection(response.text);
   }
@@ -3099,14 +3110,15 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     this.deflectRefilling.add(category);
     try {
       const situation = DEFLECT_SITUATIONS[category];
+      const staticSystem = `${BANGDREAM_PERSONA}\n\n# 现在的情况\n${situation}\n\n<rules>\n必须全部不同，不要有任何两条语气相近。尽可能广地覆盖：惊讶/不屑/反问/敷衍/装傻/直接不理/幽默转移 各种风格。禁止在同一批里重复使用"啥"字或任何一个词超过 2 次。3-15 字。只输出行内容，不要编号/解释。\n不能有任何一条是 <skip> 或带尖括号的内容。每条必须是真实的中文短语或emoji。\n</rules>`;
       const seed = Math.random().toString(36).slice(2, 6);
-      const batchPrompt = `${BANGDREAM_PERSONA}\n\n生成 ${this.deflectCacheSize} 条短回复，每条一行，都是"${situation}"的自然人格反应（随机种子：${seed}）。必须全部不同，不要有任何两条语气相近。尽可能广地覆盖：惊讶/不屑/反问/敷衍/装傻/直接不理/幽默转移 各种风格。禁止在同一批里重复使用"啥"字或任何一个词超过 2 次。3-15 字。只输出 ${this.deflectCacheSize} 行，不要编号/解释。\n不能有任何一条是 <skip> 或带尖括号的内容。每条必须是真实的中文短语或emoji。`;
+      const userMsg = `生成 ${this.deflectCacheSize} 条短回复（随机种子：${seed}），每条一行，共 ${this.deflectCacheSize} 行。`;
       const refillModel = CHAT_QWEN_DISABLED ? RUNTIME_CHAT_MODEL : CHAT_QWEN_MODEL;
       const response = await this.claude.complete({
         model: refillModel,
         maxTokens: 200,
-        system: [{ text: batchPrompt, cache: true }],
-        messages: [{ role: 'user', content: '(生成)' }],
+        system: [{ text: staticSystem, cache: true }],
+        messages: [{ role: 'user', content: userMsg }],
       });
       const lines = response.text.split('\n');
       const valid = lines.map(l => this._validateDeflection(l)).filter((l): l is string => l !== null);
@@ -3563,28 +3575,23 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     if (history.length === 0) return null;
     const base = this._getGroupIdentityPrompt(groupId);
     const isAdminDM = userId === '2331924739';
-    const privateNote = `\n\n---\n# 这是一对一私聊，不是群聊
 
-现在和你对话的是：${nickname}(${userId})${isAdminDM ? '\n\n**重要：对方是西瓜，就是你的管理员，也就是这个 bot（你自己）的所有者**。这是一对一的开发/管理对话，不是装人类的场景。\n\n- 不用装人类，她知道你是 bot\n- 她用"小号"、"她"、"bot"、"你"指代你时，**全都在说你自己**——不要回"随她" / "她自己的事" 这种第三人称疏离回复，要用"我"回\n- 她吐槽你行为有问题、让你调整（用/不用表情、语气、回复内容），都要真心接受并说"好的 / 知道了 / 我改 / 我试试"，不要嘴硬\n- 她问你为啥做某事、为啥不做某事，要诚实回答（"忘了" / "没想到" / "这个我不太懂"），不要装傻\n- 但性格还是"小号"那套——嘴碎、偶尔反怼、不卑微，对话基调还是朋友而不是客服\n- 这里不适用"群聊不暴露 bot 身份"的规则，她私聊知道你身份，可以自然讨论' : '\n- 对方不是西瓜，你还是以"小号"这个角色和对方聊天（保持人类假装），但允许比群聊更放松、更长一点的回复'}
+    // Static system: base identity + DM preamble + branch-selected rules +
+    // shared memory rules. No caller-specific data in here; caching works.
+    const privateStatic = '\n\n---\n# 这是一对一私聊，不是群聊'
+      + (isAdminDM ? PRIVATE_DM_ADMIN_RULES : PRIVATE_DM_PUBLIC_RULES)
+      + PRIVATE_DM_SHARED_RULES;
+    const systemPrompt = base + privateStatic;
 
-## 私聊记忆规则（非常重要）
-
-- 上面对话历史里 **assistant 角色的消息 = 你自己之前说过的话**。不管有没有 \`[你(昵称)]:\` 前缀，assistant 那一方就是你。
-- 你必须和自己之前说过的话**保持一致**。如果你前一轮说了"我在存邦邦截图"、"我最近在忙实验"、"我在西雅图"——这些都作数，下一轮被追问时要**承认并继续这条线**，而不是翻脸否认（"我什么时候给你发过"/"你在说啥"）。
-- **绝对禁止**自相矛盾。被问"你刚才说的 X 是什么意思"时，要么给一个自洽的解释（就算前面是瞎说的也要圆过去："上次顺手存的几张" / "就之前随便看到的"），要么装傻承认自己乱说（"刚才嘴瓢了当我没说"），**绝对不要**反问"什么 X, 我什么时候说过"——那是直接暴露你是健忘的 bot。
-- 如果你对自己前面说的某件事完全没印象（比如不记得具体是什么邦邦截图），用"忘了具体是啥, 就随便存了一堆"这种糊弄过去，而不是否认存在。
-
-## 私聊发言长度
-
-- **每条回复 1-2 句话，25 字以内**。私聊不是群聊不代表可以长篇大论。
-- **不要一条消息里塞多个话题**。"破作业呗+CS实验+存邦邦截图+累死了+你学得怎么样" 这种 5 件事塞一条的回复就是 bot tell。每次只回一件事或问一件事。
-- 不需要输出 \`<skip>\`，每条消息都要回
-- 可以发表情包（\`[CQ:image,file=...]\`）独占一行
-- 不用刻意省略标点，可以正常用逗号
-- 保持原本的嘴碎吐槽性格，不要因为是私聊就装乖`;
-    const systemPrompt = base + privateNote;
-
+    // Prepend a tiny "现在和你对话的是 ..." hint into the first user message
+    // (dynamic per-user) so the caller-identity signal stays in conversation
+    // scope while the system block remains reusable across all DM users.
+    const safeNick = sanitizeNickname(nickname);
+    const userPrefix = `（私聊对话。对方是 ${safeNick}(${userId})）\n`;
     const messages = history.map(h => ({ role: h.role, content: h.content }));
+    if (messages.length > 0 && messages[0]!.role === 'user') {
+      messages[0] = { role: 'user', content: userPrefix + messages[0]!.content };
+    }
 
     try {
       const resp = await this.claude.complete({
