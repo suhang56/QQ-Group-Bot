@@ -329,6 +329,41 @@ describe('ModeratorModule.assess — punishment ladder', () => {
     expect(modRepo.updateAction).toHaveBeenCalledWith('msg-1', 'kick');
   });
 
+  // M6.0.6: sev 5 kick announces @target warning BEFORE kick + third-person AFTER kick (transparency channel)
+  it('sev 5: announces @target warning before kick, then third-person after kick', async () => {
+    vi.useFakeTimers();
+    try {
+      const opusText = JSON.stringify({ violation: true, severity: 5, reason: 'confirmed', confidence: 0.99 });
+      const claude: IClaudeClient = {
+        complete: vi.fn().mockResolvedValue({ text: opusText, inputTokens: 50, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 }),
+      };
+      const adapter = makeAdapter();
+      const mod = makeModule(claude, adapter, makeConfig());
+      const sendOrder: { to: string; body: string; when: 'before-kick' | 'after-kick' }[] = [];
+      let kicked = false;
+      vi.mocked(adapter.send).mockImplementation(async (to: string, body: string) => {
+        sendOrder.push({ to, body, when: kicked ? 'after-kick' : 'before-kick' });
+        return undefined as unknown as number;
+      });
+      vi.mocked(adapter.kick).mockImplementation(async () => { kicked = true; return undefined; });
+
+      const promise = mod.executePunishment(makePending(5, 'kick'), makeConfig());
+      await vi.advanceTimersByTimeAsync(3100);
+      await promise;
+
+      expect(sendOrder.length).toBe(2);
+      expect(sendOrder[0]?.when).toBe('before-kick');
+      expect(sendOrder[0]?.body).toContain('@Alice');
+      expect(sendOrder[0]?.body).toContain('test reason');
+      expect(sendOrder[1]?.when).toBe('after-kick');
+      expect(sendOrder[1]?.body).toContain('Alice');
+      expect(sendOrder[1]?.body).toContain('test reason');
+      expect(adapter.kick).toHaveBeenCalledWith('g1', 'u1');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   // Records are written to moderation_log even for no-violation
   it('logs non-violation to moderation_log', async () => {
     const claude = makeClaudeVerdict(false, null, 0.95);

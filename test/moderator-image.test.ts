@@ -333,6 +333,11 @@ describe('Router image moderation — severity routing', () => {
     expect((moderation.insert as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(expect.objectContaining({ severity: 5, action: 'delete' }));
     expect((db.pendingModeration.queue as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
     expect((adapter.sendPrivateMessage as ReturnType<typeof vi.fn>)).toHaveBeenCalled();
+    // M6.0.6 transparency channel: in-group @target announcement with reason
+    const groupSends = (adapter.send as ReturnType<typeof vi.fn>).mock.calls.filter(c => c[0] === GROUP_ID);
+    expect(groupSends.length).toBeGreaterThan(0);
+    expect(groupSends[0]?.[1]).toContain('@Alice');
+    expect(groupSends[0]?.[1]).toContain('含完整身份证号');
   });
 
   it('severity 4 (310110 prefix): no deleteMsg, pendingModeration.queue, DM sent', async () => {

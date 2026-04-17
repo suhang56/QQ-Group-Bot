@@ -87,6 +87,12 @@ export class IdCardGuard {
     }
 
     try {
+      await this.opts.adapter.send(msg.groupId, `@${msg.nickname} 你的消息因含完整泄露身份证号被删除。\n原因：${reason}`);
+    } catch (err) {
+      this.logger.error({ err, groupId: msg.groupId }, 'id-guard announce failed');
+    }
+
+    try {
       this.opts.moderation.insert({
         msgId: msg.messageId,
         groupId: msg.groupId,
