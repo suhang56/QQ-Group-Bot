@@ -794,15 +794,37 @@ describe('ChatModule — sentinel: AI self-disclosure prevention', () => {
     expect(systemText).not.toContain('本群的规矩');
   });
 
-  it('persona contains "如果有人问群规" instruction when rules exist', async () => {
+  it('rules prompt reads like a groupmate who knows the rules but won\'t volunteer them', async () => {
     db.rules.insert({ groupId: 'g1', content: '禁止刷屏', type: 'negative', source: 'manual', embedding: null });
     claude.mockResolvedValue({ text: '好的', inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 });
     const chat = makeSentinelChat();
     await chat.generateReply('g1', mentionMsg('群规'), []);
     const call = claude.mock.calls[0]![0] as { system: Array<{ text: string }> };
     const systemText = call.system.map((s: { text: string }) => s.text).join('');
-    expect(systemText).toContain('如果有人问');
-    expect(systemText).toContain('绝对不要说');
+    expect(systemText).toContain('别当 FAQ 机');
+    expect(systemText).toContain('甩"自己看公告"');
+  });
+
+  it('rules prompt no longer carries old assistant-style "must answer" framing', async () => {
+    db.rules.insert({ groupId: 'g1', content: '禁止刷屏', type: 'negative', source: 'manual', embedding: null });
+    claude.mockResolvedValue({ text: '好的', inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 });
+    const chat = makeSentinelChat();
+    await chat.generateReply('g1', mentionMsg('群规'), []);
+    const call = claude.mock.calls[0]![0] as { system: Array<{ text: string }> };
+    const systemText = call.system.map((s: { text: string }) => s.text).join('');
+    expect(systemText).not.toContain('你必须能答上');
+    expect(systemText).not.toContain('绝对不要说 "没群规"');
+    expect(systemText).not.toContain('如果有人问 "群规');
+  });
+
+  it('rules prompt still gives bot an out to recite rules when admin explicitly asks', async () => {
+    db.rules.insert({ groupId: 'g1', content: '禁止刷屏', type: 'negative', source: 'manual', embedding: null });
+    claude.mockResolvedValue({ text: '好的', inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 });
+    const chat = makeSentinelChat();
+    await chat.generateReply('g1', mentionMsg('群规'), []);
+    const call = claude.mock.calls[0]![0] as { system: Array<{ text: string }> };
+    const systemText = call.system.map((s: { text: string }) => s.text).join('');
+    expect(systemText).toContain('只有管理员明确让你列规矩时再展开');
   });
 });
 
