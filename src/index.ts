@@ -342,6 +342,8 @@ chat.setRelationshipSource(relationshipTracker);
 
 const affinity = new AffinityModule(db.rawDb);
 // M6.2b: wire affinity producer + consumer into chat scoring / userContent.
+// M9.3: router.setAffinity below also enables /cross_group_audit +
+//       /forget_me_cross_group admin DM commands on the same injected module.
 chat.setAffinitySource(affinity);
 router.setAffinity(affinity);
 

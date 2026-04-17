@@ -256,6 +256,7 @@ export function defaultGroupConfig(groupId: string): GroupConfig {
     chatInterestMinHits: 1,
     airReadingEnabled: false,
     addresseeGraphEnabled: false,
+    linkAcrossGroups: false,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };

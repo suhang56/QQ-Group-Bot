@@ -52,6 +52,16 @@ export interface IAffinitySource {
   recordInteraction(groupId: string, userId: string, type: 'chat' | 'at_friendly' | 'reply_continue' | 'correction'): void;
   getAffinityFactor(groupId: string, userId: string): number;
   formatAffinityHint(groupId: string, userId: string, nickname: string): string | null;
+  /** M9.3: current-group raw score for the cross-group hint gate. */
+  getScore(groupId: string, userId: string): number;
+  /** M9.3: emit a vague cross-group familiarity hint if bilateral opt-in and
+   *  aggregate score/group-count thresholds are met. Returns null otherwise. */
+  formatCrossGroupHint(
+    requesterGroupId: string,
+    userId: string,
+    nickname: string,
+    currentGroupScore: number,
+  ): string | null;
 }
 
 export interface IRelationshipPromptSource {
@@ -1795,6 +1805,24 @@ export class ChatModule implements IChatModule {
       return `\n〔context 注释：${hint}〕`;
     })();
 
+    // M9.3: cross-group hint — vague "N other groups" cue, gated by bilateral
+    // opt-in. Gating duplicates the affinity line gate (direct trigger, not-bot)
+    // plus a groupConfig.linkAcrossGroups fast-path. The hint is always either
+    // valid or null — formatCrossGroupHint enforces score/groupCount thresholds
+    // and writes its own audit row on success.
+    const crossGroupLine = (() => {
+      if (!this.affinitySource || !isDirectTrigger) return '';
+      if (triggerMessage.userId === this.botUserId) return '';
+      const cfg = this.db.groupConfig.get(groupId);
+      if (!cfg?.linkAcrossGroups) return '';
+      const currentScore = this.affinitySource.getScore(groupId, triggerMessage.userId);
+      const hint = this.affinitySource.formatCrossGroupHint(
+        groupId, triggerMessage.userId, triggerMessage.nickname, currentScore,
+      );
+      if (!hint) return '';
+      return `\n〔context 注释：${hint}〕`;
+    })();
+
     // M6.5: per-user addressing hint — tone cue derived from bot↔user social
     // relation (user→bot edge as bilateral proxy). Same gate as style/affinity:
     // direct trigger only, skip bot-self, skip weak/generic relations.
@@ -1808,7 +1836,7 @@ export class ChatModule implements IChatModule {
       return `\n〔context 注释：${hint}〕`;
     })();
 
-    const userContent = `${liveBlock}${replyContextBlock}${keywordSection}${wideSection}${mediumSection}${immediateSection}${avoidSection}以上语境里 [你(昵称)] 是你自己说过的，[别人昵称] 是群友说的。**不要把群友的话当成你自己说过的**。${atMentionDirective}${youAddressedDirective}${moodHint}${convStateLine}${styleLine}${affinityLine}${addressingLine}
+    const userContent = `${liveBlock}${replyContextBlock}${keywordSection}${wideSection}${mediumSection}${immediateSection}${avoidSection}以上语境里 [你(昵称)] 是你自己说过的，[别人昵称] 是群友说的。**不要把群友的话当成你自己说过的**。${atMentionDirective}${youAddressedDirective}${moodHint}${convStateLine}${styleLine}${affinityLine}${crossGroupLine}${addressingLine}
 
 ← 要接的这条 — 只输出一个：${isAtTrigger ? '一条自然反应（不能是 <skip>）' : '<skip> 或 一条自然反应'}。${distinctSpeakers >= 3 ? `\n最近 ${distinctSpeakers} 个群友同时聊，可以用"你们"集体称呼。` : ''}
 ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMessage.content) ? '\n**注意**: 这条消息有人直接骂你。**绝对不要回"自言自语吗"/"在骂谁"** — 那是 bot tell。要么硬怼回去，要么 <skip>。' : ''}`;
