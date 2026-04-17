@@ -163,4 +163,25 @@ describe('buildVariantSystemPrompt', () => {
     expect(result.systemPrompt).toContain(longCard);
     expect(result.systemPrompt).toContain('身份锚定');
   });
+
+  // UR-A #4: CAREFUL must NOT forbid admitting bot status — only claude / model.
+  it('CAREFUL variant does not contain "绝不承认是 AI"', () => {
+    const result = buildVariantSystemPrompt({ ...BASE_CTX, sensitiveEntityHit: true });
+    expect(result.variant).toBe('careful');
+    expect(result.systemPrompt).not.toContain('绝不承认是 AI');
+    expect(result.systemPrompt).toContain('坦然承认');
+    expect(result.systemPrompt).toContain('不承认是 claude');
+  });
+
+  // UR-A #8: SHARED_VOICE_RULES carries sparse-跟梗 rule for all variants.
+  it('every variant gets sparse 跟梗 rule appended', () => {
+    for (const variant of ['default', 'banter', 'careful'] as const) {
+      const result = buildVariantSystemPrompt({
+        ...BASE_CTX,
+        activeJokeHit: variant === 'banter',
+        sensitiveEntityHit: variant === 'careful',
+      });
+      expect(result.systemPrompt).toContain('跟梗要稀疏');
+    }
+  });
 });

@@ -307,3 +307,26 @@ describe('isEcho', () => {
     expect(isEcho('hello', '')).toBe(false);
   });
 });
+
+// UR-A #15: over-denial sentinel sweep
+describe('hasForbiddenContent — UR-A over-denial phrases', () => {
+  it('flags "我是真人"', () => {
+    expect(hasForbiddenContent('我是真人！')).toBe('我是真人');
+  });
+  it('flags "我不是bot"', () => {
+    expect(hasForbiddenContent('怎么可能我不是bot')).toBeTruthy();
+  });
+  it('flags "我不是ai" (case-insensitive)', () => {
+    expect(hasForbiddenContent('我不是AI啦')).toBeTruthy();
+  });
+  it('flags "我不是机器人"', () => {
+    // may short-circuit on 机器人 substring — either match is fine
+    expect(hasForbiddenContent('我不是机器人，别乱说')).toBeTruthy();
+  });
+  it('flags "你说什么呢我是人"', () => {
+    expect(hasForbiddenContent('你说什么呢我是人啊')).toBe('你说什么呢我是人');
+  });
+  it('does NOT flag "我是 bot" (允许坦然承认)', () => {
+    expect(hasForbiddenContent('对啊 我是 bot')).toBeNull();
+  });
+});

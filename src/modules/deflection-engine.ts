@@ -156,6 +156,8 @@ export class DeflectionEngine implements IDeflectionEngine {
     if (/[<>]/.test(text)) return null;
     if (/[:：——]/.test(text)) return null;
     if (/作为ai|作为机器|我是ai|我是一个|无法|帮您|好的，|当然，/i.test(text)) return null;
+    // UR-A #15: over-denial rejection
+    if (/我是真人|我不是\s*(bot|ai|机器人)|你说什么呢我是人/i.test(text)) return null;
     return text;
   }
 

@@ -3555,5 +3555,33 @@ describe('ChatModule — UR-A prompt-injection hardening (Phase A)', () => {
     expect(content).toContain('Roselia 好听 ✨ 哈哈哈');
   });
 
+  // UR-A #15: over-denial deflection rejected
+  it('_validateDeflection rejects over-denial ("我是真人！")', () => {
+    const priv = chat as unknown as { _validateDeflection(s: string): string | null };
+    expect(priv._validateDeflection('我是真人！')).toBeNull();
+    expect(priv._validateDeflection('我不是bot')).toBeNull();
+    expect(priv._validateDeflection('我不是机器人')).toBeNull();
+    // legitimate short deflection still accepted
+    expect(priv._validateDeflection('啊？')).toBe('啊？');
+  });
 });
 
+// UR-A #16: regen loop cap at 2 iterations
+describe('ChatModule — UR-A regen loop cap (Phase C)', () => {
+  it('regen loop breaks after 2 iterations even if guards keep flagging', async () => {
+    const db = new Database(':memory:');
+    // A stubbed claude that always returns an outsider-tone phrase so guards fail
+    const outsiderText = '你们都在干啥啊';
+    const claude: IClaudeClient = {
+      complete: vi.fn().mockResolvedValue({
+        text: outsiderText, inputTokens: 1, outputTokens: 1,
+        cacheReadTokens: 0, cacheWriteTokens: 0,
+      }),
+    };
+    const chat = makePassthroughChat(claude, db);
+    await chat.generateReply('g1', makeMsg({ content: '群里在聊啥' }), []);
+    // Original call + at most 2 regen calls = at most 3 total
+    const total = (claude.complete as ReturnType<typeof vi.fn>).mock.calls.length;
+    expect(total).toBeLessThanOrEqual(3);
+  });
+});
