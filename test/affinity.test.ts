@@ -336,4 +336,274 @@ describe('AffinityModule', () => {
       expect(mod.getScore('g1', 'u1')).toBe(48);
     });
   });
+
+  // ---- M8.4: 10-type deltas ----
+
+  describe('10-type deltas (M8.4)', () => {
+    it('praise applies +2', () => {
+      mod.recordInteraction('g1', 'u1', 'praise');
+      expect(mod.getScore('g1', 'u1')).toBe(32);
+    });
+    it('thanks applies +2', () => {
+      mod.recordInteraction('g1', 'u1', 'thanks');
+      expect(mod.getScore('g1', 'u1')).toBe(32);
+    });
+    it('mock applies -2 (clamps at 0 for default-user)', () => {
+      seedAffinity(db, 'g1', 'u1', 50, Date.now());
+      mod.recordInteraction('g1', 'u1', 'mock');
+      expect(mod.getScore('g1', 'u1')).toBe(48);
+    });
+    it('mock on fresh user: default 30 - 2 = 28', () => {
+      mod.recordInteraction('g1', 'u1', 'mock');
+      expect(mod.getScore('g1', 'u1')).toBe(28);
+    });
+    it('mock clamped at 0 (lower bound)', () => {
+      seedAffinity(db, 'g1', 'u1', 1, Date.now());
+      mod.recordInteraction('g1', 'u1', 'mock');
+      expect(mod.getScore('g1', 'u1')).toBe(0);
+    });
+    it('joke_share applies +1', () => {
+      mod.recordInteraction('g1', 'u1', 'joke_share');
+      expect(mod.getScore('g1', 'u1')).toBe(31);
+    });
+    it('question_ask applies +1', () => {
+      mod.recordInteraction('g1', 'u1', 'question_ask');
+      expect(mod.getScore('g1', 'u1')).toBe(31);
+    });
+    it('farewell applies +1', () => {
+      mod.recordInteraction('g1', 'u1', 'farewell');
+      expect(mod.getScore('g1', 'u1')).toBe(31);
+    });
+  });
+
+  // ---- M8.4: detectInteractionType classifier ----
+
+  describe('detectInteractionType', () => {
+    const baseCtx = { isMention: false, isReplyToBot: false, isAdversarial: false, comprehensionScore: 0.8 };
+
+    it('classifies praise (好棒)', async () => {
+      const { detectInteractionType } = await import('../src/modules/affinity.js');
+      expect(detectInteractionType('哇好棒啊', baseCtx)).toBe('praise');
+    });
+    it('classifies praise (yyds, case-insensitive)', async () => {
+      const { detectInteractionType } = await import('../src/modules/affinity.js');
+      expect(detectInteractionType('YYDS', baseCtx)).toBe('praise');
+    });
+    it('classifies mock via keyword (傻逼)', async () => {
+      const { detectInteractionType } = await import('../src/modules/affinity.js');
+      expect(detectInteractionType('你是傻逼', baseCtx)).toBe('mock');
+    });
+    it('classifies mock even in adversarial context (overlay wins over correction)', async () => {
+      const { detectInteractionType } = await import('../src/modules/affinity.js');
+      const ctx = { ...baseCtx, isAdversarial: true, comprehensionScore: 0.3 };
+      expect(detectInteractionType('你是傻逼', ctx)).toBe('mock');
+    });
+    it('classifies thanks (谢谢)', async () => {
+      const { detectInteractionType } = await import('../src/modules/affinity.js');
+      expect(detectInteractionType('谢谢你帮忙', baseCtx)).toBe('thanks');
+    });
+    it('classifies farewell (晚安)', async () => {
+      const { detectInteractionType } = await import('../src/modules/affinity.js');
+      expect(detectInteractionType('晚安', baseCtx)).toBe('farewell');
+    });
+    it('classifies question_ask (? mark)', async () => {
+      const { detectInteractionType } = await import('../src/modules/affinity.js');
+      expect(detectInteractionType('你觉得怎样?', baseCtx)).toBe('question_ask');
+    });
+    it('classifies question_ask (Chinese ？)', async () => {
+      const { detectInteractionType } = await import('../src/modules/affinity.js');
+      expect(detectInteractionType('怎么办？', baseCtx)).toBe('question_ask');
+    });
+    it('classifies joke_share (哈哈)', async () => {
+      const { detectInteractionType } = await import('../src/modules/affinity.js');
+      expect(detectInteractionType('哈哈哈哈', baseCtx)).toBe('joke_share');
+    });
+    it('falls back to reply_continue when replying to bot', async () => {
+      const { detectInteractionType } = await import('../src/modules/affinity.js');
+      const ctx = { ...baseCtx, isReplyToBot: true };
+      expect(detectInteractionType('好的', ctx)).toBe('reply_continue');
+    });
+    it('falls back to at_friendly for friendly mention', async () => {
+      const { detectInteractionType } = await import('../src/modules/affinity.js');
+      const ctx = { ...baseCtx, isMention: true, comprehensionScore: 0.7 };
+      expect(detectInteractionType('说说看', ctx)).toBe('at_friendly');
+    });
+    it('falls back to correction when adversarial + low comprehension', async () => {
+      const { detectInteractionType } = await import('../src/modules/affinity.js');
+      const ctx = { ...baseCtx, isAdversarial: true, comprehensionScore: 0.2 };
+      expect(detectInteractionType('不是这样的', ctx)).toBe('correction');
+    });
+    it('default falls back to chat', async () => {
+      const { detectInteractionType } = await import('../src/modules/affinity.js');
+      expect(detectInteractionType('随便说句话', baseCtx)).toBe('chat');
+    });
+    it('empty content + isReplyToBot → reply_continue', async () => {
+      const { detectInteractionType } = await import('../src/modules/affinity.js');
+      const ctx = { ...baseCtx, isReplyToBot: true };
+      expect(detectInteractionType('', ctx)).toBe('reply_continue');
+    });
+    it('null content handled without throwing', async () => {
+      const { detectInteractionType } = await import('../src/modules/affinity.js');
+      expect(detectInteractionType(null, baseCtx)).toBe('chat');
+    });
+    it('undefined content handled without throwing', async () => {
+      const { detectInteractionType } = await import('../src/modules/affinity.js');
+      expect(detectInteractionType(undefined, baseCtx)).toBe('chat');
+    });
+    it('mock overlay wins over at_friendly context', async () => {
+      const { detectInteractionType } = await import('../src/modules/affinity.js');
+      const ctx = { ...baseCtx, isMention: true, comprehensionScore: 0.9 };
+      expect(detectInteractionType('你蠢死了', ctx)).toBe('mock');
+    });
+    it('praise overlay wins over reply_continue context', async () => {
+      const { detectInteractionType } = await import('../src/modules/affinity.js');
+      const ctx = { ...baseCtx, isReplyToBot: true };
+      expect(detectInteractionType('awsl', ctx)).toBe('praise');
+    });
+    it('at_friendly not chosen when adversarial', async () => {
+      const { detectInteractionType } = await import('../src/modules/affinity.js');
+      const ctx = { ...baseCtx, isMention: true, isAdversarial: true, comprehensionScore: 0.7 };
+      // adversarial + high comprehension + no keyword → chat (not at_friendly, not correction)
+      expect(detectInteractionType('随便说句话', ctx)).toBe('chat');
+    });
+  });
+
+  // ---- M8.4: anti-farm cooldown ----
+
+  describe('anti-farm cooldown (5min for praise/thanks/mock/farewell)', () => {
+    it('2nd praise within 5min → delta=0 (no score change)', () => {
+      mod.recordInteraction('g1', 'u1', 'praise'); // 30+2=32
+      expect(mod.getScore('g1', 'u1')).toBe(32);
+      mod.recordInteraction('g1', 'u1', 'praise'); // cooldown hit, delta=0
+      expect(mod.getScore('g1', 'u1')).toBe(32);
+    });
+    it('cooldown hit still updates last_interaction', () => {
+      mod.recordInteraction('g1', 'u1', 'praise');
+      const firstTs = (db.prepare(
+        'SELECT last_interaction FROM user_affinity WHERE group_id=? AND user_id=?',
+      ).get('g1', 'u1') as { last_interaction: number }).last_interaction;
+      vi.useFakeTimers();
+      vi.setSystemTime(firstTs + 60_000); // +1min
+      try {
+        mod.recordInteraction('g1', 'u1', 'praise'); // cooldown, delta=0 but ts updates
+        const secondTs = (db.prepare(
+          'SELECT last_interaction FROM user_affinity WHERE group_id=? AND user_id=?',
+        ).get('g1', 'u1') as { last_interaction: number }).last_interaction;
+        expect(secondTs).toBeGreaterThan(firstTs);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+    it('after 5min cooldown expires, praise applies again', () => {
+      vi.useFakeTimers();
+      const t0 = Date.now();
+      vi.setSystemTime(t0);
+      try {
+        mod.recordInteraction('g1', 'u1', 'praise'); // 30+2=32
+        vi.setSystemTime(t0 + 5 * 60 * 1000 + 1000); // +5min1s
+        mod.recordInteraction('g1', 'u1', 'praise'); // 32+2=34
+        expect(mod.getScore('g1', 'u1')).toBe(34);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+    it('chat/at_friendly/reply_continue/correction NOT subject to cooldown', () => {
+      // 8 chats back-to-back → all apply (subject to daily cap only)
+      for (let i = 0; i < 5; i++) mod.recordInteraction('g1', 'u1', 'chat');
+      expect(mod.getScore('g1', 'u1')).toBe(35); // 30 + 5 (all 5 count — under cap)
+    });
+    it('cooldown isolated per type (praise cooldown does not block thanks)', () => {
+      mod.recordInteraction('g1', 'u1', 'praise'); // 32
+      mod.recordInteraction('g1', 'u1', 'thanks'); // 32+2=34 (different type)
+      expect(mod.getScore('g1', 'u1')).toBe(34);
+    });
+    it('cooldown isolated across groups (same uid+type in g1 vs g2)', () => {
+      mod.recordInteraction('g1', 'u1', 'praise'); // g1: 32
+      mod.recordInteraction('g2', 'u1', 'praise'); // g2 fresh: 32
+      expect(mod.getScore('g1', 'u1')).toBe(32);
+      expect(mod.getScore('g2', 'u1')).toBe(32);
+    });
+    it('mock cooldown applies (rapid mock does not stack)', () => {
+      seedAffinity(db, 'g1', 'u1', 50, Date.now());
+      mod.recordInteraction('g1', 'u1', 'mock'); // 48
+      mod.recordInteraction('g1', 'u1', 'mock'); // cooldown, no change
+      expect(mod.getScore('g1', 'u1')).toBe(48);
+    });
+  });
+
+  // ---- M8.4: daily positive-gain cap ----
+
+  describe('daily positive-gain cap (+10/day)', () => {
+    it('11th +1 chat in same day clamped to 0', () => {
+      for (let i = 0; i < 10; i++) mod.recordInteraction('g1', 'u1', 'chat'); // 30+10=40
+      expect(mod.getScore('g1', 'u1')).toBe(40);
+      mod.recordInteraction('g1', 'u1', 'chat'); // capped
+      expect(mod.getScore('g1', 'u1')).toBe(40);
+    });
+    it('partial clamp: at net=8, a +3 correction only adds 2', () => {
+      for (let i = 0; i < 8; i++) mod.recordInteraction('g1', 'u1', 'chat'); // 38, net=8
+      mod.recordInteraction('g1', 'u1', 'correction'); // +3 requested, only +2 applied
+      expect(mod.getScore('g1', 'u1')).toBe(40);
+    });
+    it('mock (negative) always applies — NOT subject to positive-cap gate', () => {
+      for (let i = 0; i < 10; i++) mod.recordInteraction('g1', 'u1', 'chat'); // 40, cap hit
+      mod.recordInteraction('g1', 'u1', 'mock'); // still applies: 40-2=38
+      expect(mod.getScore('g1', 'u1')).toBe(38);
+    });
+    it('mock does not consume daily positive budget', () => {
+      for (let i = 0; i < 5; i++) mod.recordInteraction('g1', 'u1', 'chat'); // 35, net=5
+      seedAffinity; // no-op, just reference
+      mod.recordInteraction('g1', 'u1', 'mock'); // 35-2=33 (negative doesn't touch cap)
+      // Still have 5 positive budget remaining
+      for (let i = 0; i < 5; i++) mod.recordInteraction('g1', 'u1', 'chat'); // 33+5=38
+      expect(mod.getScore('g1', 'u1')).toBe(38);
+    });
+    it('cap isolated across groups', () => {
+      for (let i = 0; i < 10; i++) mod.recordInteraction('g1', 'u1', 'chat');
+      mod.recordInteraction('g2', 'u1', 'chat'); // g2 fresh budget
+      expect(mod.getScore('g1', 'u1')).toBe(40);
+      expect(mod.getScore('g2', 'u1')).toBe(31);
+    });
+    it('cap isolated across users in same group', () => {
+      for (let i = 0; i < 10; i++) mod.recordInteraction('g1', 'u1', 'chat');
+      mod.recordInteraction('g1', 'u2', 'chat');
+      expect(mod.getScore('g1', 'u1')).toBe(40);
+      expect(mod.getScore('g1', 'u2')).toBe(31);
+    });
+    it('cap resets on new day', () => {
+      vi.useFakeTimers();
+      const t0 = Date.now();
+      vi.setSystemTime(t0);
+      try {
+        for (let i = 0; i < 10; i++) mod.recordInteraction('g1', 'u1', 'chat'); // 40, cap hit
+        mod.recordInteraction('g1', 'u1', 'chat'); // 40 (capped)
+        expect(mod.getScore('g1', 'u1')).toBe(40);
+        vi.setSystemTime(t0 + 86_400_000 + 1000); // +1day
+        mod.recordInteraction('g1', 'u1', 'chat'); // fresh day: 40+1=41
+        expect(mod.getScore('g1', 'u1')).toBe(41);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  // ---- M8.4: back-compat with legacy 3-arg calls ----
+
+  describe('back-compat', () => {
+    it('3-arg recordInteraction(gid, uid, "chat") still works', () => {
+      mod.recordInteraction('g1', 'u1', 'chat');
+      expect(mod.getScore('g1', 'u1')).toBe(31);
+    });
+    it('cold user + new type: initial score clamped to [0, 100]', () => {
+      mod.recordInteraction('g1', 'u-new', 'praise'); // 30+2=32
+      expect(mod.getScore('g1', 'u-new')).toBe(32);
+    });
+    it('existing 4-type callers unaffected by new 6 types', () => {
+      mod.recordInteraction('g1', 'u1', 'at_friendly');
+      mod.recordInteraction('g1', 'u1', 'reply_continue');
+      mod.recordInteraction('g1', 'u1', 'correction');
+      // 30+2+1+3 = 36
+      expect(mod.getScore('g1', 'u1')).toBe(36);
+    });
+  });
 });

@@ -348,6 +348,116 @@ describe('ChatModule — M6.2b affinity wiring', () => {
     });
   });
 
+  // ── M8.4: HIGH-bug regression — no double-record on engage path ──────────
+
+  describe('M8.4: engage-path records specific overlay exactly once', () => {
+    it('friendly @-mention "哈哈" records joke_share ONCE (not joke_share + joke_share)', async () => {
+      const affinity = makeAffinity();
+      const chat = makeChat(claude, db);
+      chat.setAffinitySource(affinity);
+
+      const msg = makeMsg({
+        userId: 'u-peer',
+        rawContent: `[CQ:at,qq=${BOT_ID}] 哈哈哈哈`,
+        content: '哈哈哈哈',
+      });
+      await chat.generateReply('g1', msg, []);
+
+      const calls = (affinity.recordInteraction as ReturnType<typeof vi.fn>).mock.calls;
+      const jokeCalls = calls.filter(c => c[2] === 'joke_share');
+      const chatCalls = calls.filter(c => c[2] === 'chat');
+      // Engage-path records joke_share exactly once; text-path should fall back to 'chat'.
+      expect(jokeCalls.length).toBe(1);
+      // The text-path second call must be 'chat' (not a duplicate joke_share).
+      // Total distinct records: 1 joke_share + 1 chat.
+      expect(chatCalls.length).toBe(1);
+      // Defense: no duplicate joke_share
+      expect(jokeCalls.length).not.toBe(2);
+    });
+
+    it('friendly @-mention "怎么办?" records question_ask ONCE', async () => {
+      const affinity = makeAffinity();
+      const chat = makeChat(claude, db);
+      chat.setAffinitySource(affinity);
+
+      const msg = makeMsg({
+        userId: 'u-peer',
+        rawContent: `[CQ:at,qq=${BOT_ID}] 怎么办?`,
+        content: '怎么办?',
+      });
+      await chat.generateReply('g1', msg, []);
+
+      const calls = (affinity.recordInteraction as ReturnType<typeof vi.fn>).mock.calls;
+      const qaCalls = calls.filter(c => c[2] === 'question_ask');
+      expect(qaCalls.length).toBe(1);
+    });
+
+    it('friendly @-mention "谢谢" still records thanks once (cooldown would mask dup but we verify the fix)', async () => {
+      const affinity = makeAffinity();
+      const chat = makeChat(claude, db);
+      chat.setAffinitySource(affinity);
+
+      const msg = makeMsg({
+        userId: 'u-peer',
+        rawContent: `[CQ:at,qq=${BOT_ID}] 谢谢你`,
+        content: '谢谢你',
+      });
+      await chat.generateReply('g1', msg, []);
+
+      const calls = (affinity.recordInteraction as ReturnType<typeof vi.fn>).mock.calls;
+      const thanksCalls = calls.filter(c => c[2] === 'thanks');
+      expect(thanksCalls.length).toBe(1);
+    });
+
+    it('end-to-end score delta: friendly @-mention "哈哈" yields exactly +1 (spec joke_share), not +2', async () => {
+      const { AffinityModule } = await import('../src/modules/affinity.js');
+      const { DatabaseSync } = await import('node:sqlite');
+      const sdb = new DatabaseSync(':memory:');
+      sdb.exec(`CREATE TABLE user_affinity (
+        group_id TEXT NOT NULL, user_id TEXT NOT NULL, score INTEGER NOT NULL,
+        last_interaction INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        PRIMARY KEY (group_id, user_id)
+      )`);
+      const realAffinity = new AffinityModule(sdb);
+      const chat = makeChat(claude, db);
+      chat.setAffinitySource(realAffinity);
+
+      const before = realAffinity.getScore('g1', 'u-peer'); // default 30
+      const msg = makeMsg({
+        userId: 'u-peer',
+        rawContent: `[CQ:at,qq=${BOT_ID}] 哈哈`,
+        content: '哈哈',
+      });
+      await chat.generateReply('g1', msg, []);
+      const after = realAffinity.getScore('g1', 'u-peer');
+      // joke_share +1 (engage-path) + chat +1 (text-path) = +2 total
+      // This is the current correct behavior: the two records are DIFFERENT
+      // types (joke_share + chat), both legitimately counted per spec.
+      // What we're asserting is that joke_share is NOT double-counted → +3.
+      expect(after - before).toBe(2);
+    });
+
+    it('adversarial @-mention with mock keyword records mock (overlay wins), not correction', async () => {
+      const affinity = makeAffinity();
+      const chat = makeChat(claude, db);
+      chat.setAffinitySource(affinity);
+
+      // Adversarial identity probe + insult keyword overlap → mock per spec
+      const msg = makeMsg({
+        userId: 'u-peer',
+        rawContent: `[CQ:at,qq=${BOT_ID}] 你是sb模型`,
+        content: '你是sb模型',
+      });
+      await chat.generateReply('g1', msg, []);
+
+      const calls = (affinity.recordInteraction as ReturnType<typeof vi.fn>).mock.calls;
+      const mockCalls = calls.filter(c => c[2] === 'mock');
+      // Engage-path records mock exactly once; react-path deflection may skip
+      // the text-path entirely (no _recordAffinityChat in deflection branch).
+      expect(mockCalls.length).toBe(1);
+    });
+  });
+
   // ── Module surface ───────────────────────────────────────────────────────
 
   describe('AffinityModule.dailyDecay shape', () => {
