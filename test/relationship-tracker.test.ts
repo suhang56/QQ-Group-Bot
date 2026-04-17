@@ -696,3 +696,66 @@ describe('RelationshipTracker edge cases', () => {
     expect(insertCall).toBeUndefined();
   });
 });
+
+// ============================================================================
+// getBotUserRelation (M6.5)
+// ============================================================================
+
+describe('RelationshipTracker.getBotUserRelation', () => {
+  const BOT = 'bot-999';
+  const USER = 'u-42';
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  it('returns hydrated SocialRelation when user→bot row exists', () => {
+    const db = makeMockDb();
+    db.queryResults.set('social_relations', [{
+      group_id: GROUP, from_user: USER, to_user: BOT,
+      relation_type: '铁磁/密友', strength: 0.8,
+      evidence: '经常调侃', updated_at: NOW_SEC,
+    }]);
+    const { tracker } = makeTracker({ db });
+
+    const rel = tracker.getBotUserRelation(GROUP, BOT, USER);
+    expect(rel).not.toBeNull();
+    expect(rel!.relationType).toBe('铁磁/密友');
+    expect(rel!.strength).toBe(0.8);
+    expect(rel!.fromUser).toBe(USER);
+    expect(rel!.toUser).toBe(BOT);
+    expect(rel!.evidence).toBe('经常调侃');
+  });
+
+  it('issues query with from_user=userId and to_user=botUserId (user→bot edge as bilateral proxy)', () => {
+    const db = makeMockDb();
+    const { tracker } = makeTracker({ db });
+
+    tracker.getBotUserRelation(GROUP, BOT, USER);
+    const q = db.queryCalls.find(c => c.sql.includes('social_relations'));
+    expect(q).toBeDefined();
+    // Params: groupId, fromUser(=USER), toUser(=BOT)
+    expect(q!.params).toEqual([GROUP, USER, BOT]);
+  });
+
+  it('returns null when bot and user ids coincide', () => {
+    const db = makeMockDb();
+    const { tracker } = makeTracker({ db });
+    expect(tracker.getBotUserRelation(GROUP, BOT, BOT)).toBeNull();
+    // Short-circuit — no db query issued
+    expect(db.queryCalls).toHaveLength(0);
+  });
+
+  it('returns null when no matching row exists', () => {
+    const db = makeMockDb();
+    // empty queryResults — dbQuery returns []
+    const { tracker } = makeTracker({ db });
+    expect(tracker.getBotUserRelation(GROUP, BOT, USER)).toBeNull();
+  });
+
+  it('is group-scoped (query includes group_id param)', () => {
+    const db = makeMockDb();
+    const { tracker } = makeTracker({ db });
+    tracker.getBotUserRelation('other-group', BOT, USER);
+    const q = db.queryCalls.find(c => c.sql.includes('social_relations'));
+    expect(q!.params[0]).toBe('other-group');
+    expect(q!.sql).toMatch(/group_id\s*=\s*\?/);
+  });
+});
