@@ -44,6 +44,7 @@ import { RelationshipTracker } from './modules/relationship-tracker.js';
 import { AffinityModule } from './modules/affinity.js';
 import { FatigueModule } from './modules/fatigue.js';
 import { PreChatJudge } from './modules/pre-chat-judge.js';
+import { ProactiveEngine, loadProactiveEngineConfig } from './modules/proactive-engine.js';
 import { JargonMiner } from './modules/jargon-miner.js';
 import { PhraseMiner } from './modules/phrase-miner.js';
 import { MemeClusterer } from './modules/meme-clusterer.js';
@@ -351,7 +352,21 @@ chat.setFatigueSource(fatigue);
 // switch via PRE_CHAT_JUDGE_DISABLED=1. When GEMINI provider is absent, the
 // router falls back to Claude Haiku; fail-open timeout still applies so a
 // mis-wired provider never blocks the chat path.
-chat.setPreChatJudge(new PreChatJudge(claude));
+const preChatJudge = new PreChatJudge(claude);
+chat.setPreChatJudge(preChatJudge);
+
+// M9.1 — proactive engine (silence-breaker v2). Ships dark by default;
+// enable with PROACTIVE_ENGINE_ENABLED=1. start() is a no-op when disabled.
+const proactiveEngineConfig = loadProactiveEngineConfig(process.env);
+const proactiveEngine = new ProactiveEngine({
+  chat,
+  activityTracker: chat.getActivityTracker(),
+  moodTracker: chat.getMoodTracker(),
+  db,
+  preChatJudge,
+  config: proactiveEngineConfig,
+});
+proactiveEngine.start();
 
 const jargonMiner = new JargonMiner({
   db: db.rawDb,
@@ -512,6 +527,7 @@ const shutdown = async () => {
   aliasMiner.dispose();
   styleLearner.dispose();
   relationshipTracker.dispose();
+  proactiveEngine.stop();
   chat.destroy();
   if (factBackfillTimer) clearInterval(factBackfillTimer);
   if (memeBackfillTimer) clearInterval(memeBackfillTimer);

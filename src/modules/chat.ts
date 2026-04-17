@@ -2703,6 +2703,99 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     this._proactiveAdapter = fn;
   }
 
+  // ── M9.1 proactive-engine integration ──────────────────────────────────
+  /** Exposes the live knownGroups set for ProactiveEngine iteration. */
+  getKnownGroups(): Iterable<string> {
+    return this.knownGroups;
+  }
+
+  /** Activity tracker accessor for ProactiveEngine gate evaluation. */
+  getActivityTracker(): GroupActivityTracker {
+    return this.activityTracker;
+  }
+
+  /** Pre-chat judge accessor (may be null when not wired). */
+  getPreChatJudge(): IPreChatJudge | null {
+    return this.preChatJudge;
+  }
+
+  /** Bot's configured QQ user id (empty string when unset). */
+  getBotUserId(): string {
+    return this.botUserId;
+  }
+
+  /**
+   * M9.1 — Generate + send a proactive silence-break reply via the main chat
+   * pipeline. Routes the final text through the existing `_sendProactive` so
+   * all side-effects (botSpeechTracking reset, _bumpConsecutive, adapter
+   * dispatch, recordOutgoingMessage) stay identical to a mood-driven fire.
+   *
+   * LLM failures are logged and swallowed — the engine should not crash.
+   */
+  async sendProactiveFromEngine(groupId: string, reason: string): Promise<void> {
+    try {
+      const text = await this._generateSilenceBreakReply(groupId);
+      if (!text) {
+        this.logger.debug({ groupId, reason }, 'sendProactiveFromEngine: empty generation, skipping');
+        return;
+      }
+      await this._sendProactive(groupId, text, Date.now(), reason);
+    } catch (err) {
+      this.logger.warn({ err, groupId, reason }, 'sendProactiveFromEngine failed');
+    }
+  }
+
+  private async _generateSilenceBreakReply(groupId: string): Promise<string | null> {
+    const baseSystem = this._getGroupIdentityPrompt(groupId);
+    const moodSection = this._buildMoodSection(groupId);
+    const directive = [
+      '',
+      '---',
+      '# 本次输出 — 主动破冰',
+      '群里很久没人说话了，你想主动开个话头。',
+      '- 1-2 句，自然，像刚想到什么顺嘴说',
+      '- 禁止「大家都在干嘛」「有人在吗」这种套话',
+      '- 禁止 @，禁止问句，禁止「你们」「大家」第二人称复数',
+      '- 不要暴露 bot 身份，不要解释自己在干什么',
+    ].join('\n');
+    const systemPrompt = moodSection
+      ? `${baseSystem}\n\n${moodSection}\n${directive}`
+      : `${baseSystem}\n${directive}`;
+
+    const recentRaw = this.db.messages.getRecent(groupId, 20);
+    const recentChron = [...recentRaw].reverse();
+    const contextLines = recentChron
+      .map(m => {
+        const prefix = m.userId === this.botUserId ? `[你(${m.nickname})]:` : `[${m.nickname}]:`;
+        return `${prefix}${m.content}`;
+      })
+      .join('\n');
+    const userContent = contextLines
+      ? `最近的群聊记录（从上到下时间递增）：\n${contextLines}\n\n现在主动开个话头，输出一条群消息：`
+      : '现在主动开个话头，输出一条群消息：';
+
+    try {
+      const resp = await this.claude.complete({
+        model: RUNTIME_CHAT_MODEL,
+        maxTokens: 120,
+        system: [{ text: systemPrompt, cache: true }],
+        messages: [{ role: 'user', content: userContent }],
+      });
+      const raw = resp.text.trim();
+      if (!raw || raw === '...' || raw === '。') return null;
+      const processed = postProcess(raw);
+      if (!processed) return null;
+      if (hasForbiddenContent(processed)) {
+        this.logger.warn({ groupId, offendingPhrase: hasForbiddenContent(processed) }, 'silence-break sentinel blocked');
+        return null;
+      }
+      return processed;
+    } catch (err) {
+      this.logger.warn({ err, groupId }, 'silence-break LLM call failed');
+      return null;
+    }
+  }
+
   /** Inject a provider of known image-library names. Used as the pic-bot skip whitelist. */
   setPicNameProvider(provider: { getAllNames(groupId: string): string[] }): void {
     this.picNameProvider = provider;
