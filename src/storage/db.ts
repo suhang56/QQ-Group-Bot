@@ -392,6 +392,8 @@ export interface ILearnedFactsRepository {
   recordEmbeddingFailure(id: number): boolean;
   /** List active facts whose topic contains '别名' for a group. Used to merge learned aliases into lore retrieval. */
   listActiveAliasFacts(groupId: string): LearnedFact[];
+  /** List active + pending alias facts for alias-map merging (M6.2c: lets miner's pending rows reach lore retrieval without breaking admin /facts_pending review). */
+  listAliasFactsForMap(groupId: string): LearnedFact[];
 }
 
 export type ProposedAction = 'warn' | 'delete' | 'mute_10m' | 'mute_1h' | 'kick';
@@ -1779,6 +1781,13 @@ class LearnedFactsRepository implements ILearnedFactsRepository {
   listActiveAliasFacts(groupId: string): LearnedFact[] {
     const rows = this.db.prepare(
       `SELECT * FROM learned_facts WHERE group_id = ? AND status = 'active' AND topic LIKE '%别名%' ORDER BY created_at DESC LIMIT 200`
+    ).all(groupId) as unknown as LearnedFactRow[];
+    return rows.map(learnedFactFromRow);
+  }
+
+  listAliasFactsForMap(groupId: string): LearnedFact[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM learned_facts WHERE group_id = ? AND status IN ('active', 'pending') AND topic LIKE '%别名%' ORDER BY created_at DESC LIMIT 200`
     ).all(groupId) as unknown as LearnedFactRow[];
     return rows.map(learnedFactFromRow);
   }

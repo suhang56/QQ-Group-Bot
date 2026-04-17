@@ -113,26 +113,34 @@ export function buildAliasMap(chunksPath: string, learnedAliasFacts?: ReadonlyAr
     }
   }
 
-  // 3. Merge learned alias facts: "X又叫Y" / "X也叫Y" / "X的别名是Y"
-  // Pattern: extract the subject (X) and the new alias (Y), then find X in the
-  // existing aliasMap to determine which chunk(s) Y should point to.
+  // 3. Merge learned alias facts into the chunk alias map.
+  // Admin-style patterns ("X又叫Y") capture subject first, new-alias second.
+  // Alias-miner facts ("X = Y (QQ id)[。ev]") capture the new alias first and
+  // the canonical nickname second — the subject is Y, so the captures are
+  // swapped relative to admin patterns.
   if (learnedAliasFacts && learnedAliasFacts.length > 0) {
     let merged = 0;
-    // Patterns: "X又叫Y", "X也叫Y", "X的别名是Y", "Y是X的别名", "Y就是X"
-    const ALIAS_PATTERNS = [
-      /^(.{2,20})(?:又叫|也叫|也称|别名是|的别名(?:是|叫))(.{2,20})$/,
-      /^(.{2,20})(?:就是|其实是)(.{2,20})$/,
+    // [pattern, swap] — swap=true means m[1]=newAlias, m[2]=subject.
+    const ALIAS_PATTERNS: ReadonlyArray<readonly [RegExp, boolean]> = [
+      [/^(.{2,20})(?:又叫|也叫|也称|别名是|的别名(?:是|叫))(.{2,20})$/, false],
+      [/^(.{2,20})(?:就是|其实是)(.{2,20})$/, false],
+      // Alias-miner format: "<alias> = <nickname> (QQ <id>)" with optional "。<evidence>" tail.
+      [/^(.{2,20}?)\s*=\s*(.{2,20}?)\s*\(QQ\s+\S+\)(?:[。.].*)?$/, true],
     ];
     for (const fact of learnedAliasFacts) {
       const text = fact.fact.trim();
-      for (const pattern of ALIAS_PATTERNS) {
-        const m = pattern.exec(text);
+      for (const [pattern, swap] of ALIAS_PATTERNS) {
+        let m: RegExpExecArray | null;
+        try {
+          m = pattern.exec(text);
+        } catch {
+          continue;
+        }
         if (!m) continue;
-        const subject = m[1]!.trim().toLowerCase();
-        const newAlias = m[2]!.trim().toLowerCase();
-        if (newAlias.length < 2) break;
+        const subject = (swap ? m[2]! : m[1]!).trim().toLowerCase();
+        const newAlias = (swap ? m[1]! : m[2]!).trim().toLowerCase();
+        if (newAlias.length < 2 || subject.length < 2) break;
 
-        // Find which chunks the subject (or its existing aliases) maps to
         const subjectChunks = aliasMap.get(subject);
         if (subjectChunks && subjectChunks.length > 0) {
           const existing = aliasMap.get(newAlias);
@@ -145,7 +153,7 @@ export function buildAliasMap(chunksPath: string, learnedAliasFacts?: ReadonlyAr
           }
           merged++;
         }
-        break; // only match one pattern per fact
+        break;
       }
     }
     if (merged > 0) {

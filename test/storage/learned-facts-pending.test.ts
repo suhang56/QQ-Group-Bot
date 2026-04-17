@@ -99,3 +99,87 @@ describe('LearnedFactsRepository — pending queue (Feature B)', () => {
     expect(db.learnedFacts.listPending('g1', 0, 0)).toHaveLength(0);
   });
 });
+
+describe('LearnedFactsRepository — listAliasFactsForMap (M6.2c)', () => {
+  let db: Database;
+  beforeEach(() => { db = new Database(':memory:'); });
+
+  function insertFact(groupId: string, topic: string | null, fact: string, status: 'active' | 'pending' = 'active'): number {
+    return db.learnedFacts.insert({
+      groupId, topic, fact,
+      sourceUserId: null, sourceUserNickname: null,
+      sourceMsgId: null, botReplyId: null,
+      status,
+    });
+  }
+
+  it('returns active alias facts', () => {
+    insertFact('g1', '群友别名 小明', 'small ming fact', 'active');
+    const rows = db.learnedFacts.listAliasFactsForMap('g1');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.fact).toBe('small ming fact');
+  });
+
+  it('returns pending alias facts (critical: miner rows are pending)', () => {
+    insertFact('g1', '群友别名 拉神', 'laa shen = User5', 'pending');
+    const rows = db.learnedFacts.listAliasFactsForMap('g1');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.status).toBe('pending');
+  });
+
+  it('returns both active and pending alias facts mixed', () => {
+    insertFact('g1', '群友别名 A', 'active fact', 'active');
+    insertFact('g1', '群友别名 B', 'pending fact', 'pending');
+    const rows = db.learnedFacts.listAliasFactsForMap('g1');
+    expect(rows).toHaveLength(2);
+    const statuses = rows.map(r => r.status).sort();
+    expect(statuses).toEqual(['active', 'pending']);
+  });
+
+  it('excludes non-alias-topic rows (topic must LIKE %别名%)', () => {
+    insertFact('g1', '群友别名 A', 'alias fact', 'active');
+    insertFact('g1', '小明的爱好', 'hobby fact', 'active');
+    insertFact('g1', null, 'no-topic fact', 'active');
+    const rows = db.learnedFacts.listAliasFactsForMap('g1');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.fact).toBe('alias fact');
+  });
+
+  it('scopes by group id', () => {
+    insertFact('g1', '群友别名 A', 'g1 alias', 'active');
+    insertFact('g2', '群友别名 B', 'g2 alias', 'active');
+    const g1Rows = db.learnedFacts.listAliasFactsForMap('g1');
+    expect(g1Rows).toHaveLength(1);
+    expect(g1Rows[0]!.fact).toBe('g1 alias');
+  });
+
+  it('returns results respecting LIMIT 200 cap', () => {
+    for (let i = 0; i < 5; i++) {
+      insertFact('g1', `群友别名 k${i}`, `fact ${i}`, i % 2 === 0 ? 'active' : 'pending');
+    }
+    const rows = db.learnedFacts.listAliasFactsForMap('g1');
+    expect(rows).toHaveLength(5);
+    expect(rows.every(r => r.topic?.includes('别名'))).toBe(true);
+  });
+
+  it('regression: listActiveAliasFacts still returns ONLY active alias rows', () => {
+    insertFact('g1', '群友别名 A', 'active fact', 'active');
+    insertFact('g1', '群友别名 B', 'pending fact', 'pending');
+    const rows = db.learnedFacts.listActiveAliasFacts('g1');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.status).toBe('active');
+  });
+
+  it('regression: listPending still returns ALL pending rows (alias + non-alias)', () => {
+    insertFact('g1', '群友别名 A', 'alias pending', 'pending');
+    insertFact('g1', '小明的爱好', 'hobby pending', 'pending');
+    const rows = db.learnedFacts.listPending('g1', 100, 0);
+    expect(rows).toHaveLength(2);
+    const facts = rows.map(r => r.fact).sort();
+    expect(facts).toEqual(['alias pending', 'hobby pending']);
+  });
+
+  it('empty group returns empty array', () => {
+    expect(db.learnedFacts.listAliasFactsForMap('empty-group')).toEqual([]);
+  });
+});
