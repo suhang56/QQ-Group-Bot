@@ -541,6 +541,8 @@ export interface IExpressionPatternRepository {
   upsert(groupId: string, situation: string, expression: string): void;
   listAll(groupId: string): ExpressionPattern[];
   getTopN(groupId: string, limit: number): ExpressionPattern[];
+  /** Top patterns by weight with updated_at as recency tiebreak (M8.3 few-shot source). */
+  getTopRecentN(groupId: string, limit: number): ExpressionPattern[];
   updateWeight(groupId: string, situation: string, expression: string, weight: number): void;
   delete(groupId: string, situation: string, expression: string): void;
 }
@@ -2423,6 +2425,13 @@ class ExpressionPatternRepository implements IExpressionPatternRepository {
   getTopN(groupId: string, limit: number): ExpressionPattern[] {
     const rows = this.db.prepare(
       'SELECT * FROM expression_patterns WHERE group_id = ? ORDER BY weight DESC LIMIT ?'
+    ).all(groupId, limit) as unknown as ExpressionPatternRow[];
+    return rows.map(expressionFromRow);
+  }
+
+  getTopRecentN(groupId: string, limit: number): ExpressionPattern[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM expression_patterns WHERE group_id = ? ORDER BY weight DESC, updated_at DESC LIMIT ?'
     ).all(groupId, limit) as unknown as ExpressionPatternRow[];
     return rows.map(expressionFromRow);
   }

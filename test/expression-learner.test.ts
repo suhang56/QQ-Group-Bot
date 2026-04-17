@@ -48,6 +48,15 @@ function makePatternRepo(): IExpressionPatternRepository & {
         .sort((a, b) => b.weight - a.weight)
         .slice(0, limit);
     }),
+    getTopRecentN: vi.fn().mockImplementation((groupId: string, limit: number) => {
+      return [...store.values()]
+        .filter(p => p.groupId === groupId)
+        .sort((a, b) => {
+          if (b.weight !== a.weight) return b.weight - a.weight;
+          return b.updatedAt - a.updatedAt;
+        })
+        .slice(0, limit);
+    }),
     updateWeight: vi.fn().mockImplementation((groupId: string, situation: string, expression: string, weight: number) => {
       const k = key(groupId, situation, expression);
       const existing = store.get(k);
@@ -347,6 +356,211 @@ describe('ExpressionLearner', () => {
       const result = learner.formatForPrompt(GROUP, 3);
       const lines = result.split('\n').filter(l => l.startsWith('- '));
       expect(lines).toHaveLength(3);
+    });
+  });
+
+  describe('formatFewShotBlock (M8.3)', () => {
+    function seedPattern(
+      repo: ReturnType<typeof makePatternRepo>,
+      situation: string,
+      expression: string,
+      weight: number,
+      updatedAt = Date.now(),
+    ): void {
+      repo._store.set(`${GROUP}|${situation}|${expression}`, {
+        groupId: GROUP, situation, expression,
+        weight, createdAt: updatedAt, updatedAt,
+      });
+    }
+
+    function makeLearner(patternRepo: ReturnType<typeof makePatternRepo>): ExpressionLearner {
+      return new ExpressionLearner({
+        messages: makeMsgRepo([]),
+        expressionPatterns: patternRepo,
+        botUserId: BOT_USER_ID,
+        logger: silentLogger,
+      });
+    }
+
+    // Case 1: empty patterns → empty string.
+    it('returns empty string when no patterns exist (system array unchanged)', () => {
+      const patternRepo = makePatternRepo();
+      const learner = makeLearner(patternRepo);
+      expect(learner.formatFewShotBlock(GROUP, 3)).toBe('');
+    });
+
+    // Case 2: n=3 but only 1 pattern → emit 1 pair, don't pad.
+    it('emits as many pairs as exist when patterns < n (no padding)', () => {
+      const patternRepo = makePatternRepo();
+      seedPattern(patternRepo, '在吗', '在');
+      const learner = makeLearner(patternRepo);
+
+      const out = learner.formatFewShotBlock(GROUP, 3);
+      expect(out).toContain('## 你过去的真实回复示例');
+      expect(out).toContain('有人说：「在吗」');
+      expect(out).toContain('你回：「在」');
+      // Only one pair block — no double pair separator.
+      const pairCount = (out.match(/有人说：/g) ?? []).length;
+      expect(pairCount).toBe(1);
+    });
+
+    // Case 3: matchContent with no substring hit → fallback to top-N by weight.
+    it('falls back to top-N by weight+recency when matchContent has no substring hit', () => {
+      const patternRepo = makePatternRepo();
+      seedPattern(patternRepo, '你好啊', '你好', 5);
+      seedPattern(patternRepo, '再见吧', '拜拜', 3);
+      seedPattern(patternRepo, '晚安哦', '睡个好觉', 1);
+      const learner = makeLearner(patternRepo);
+
+      const out = learner.formatFewShotBlock(GROUP, 2, 'zzzzz completely unrelated ???');
+      // Should contain top-2 by weight: 你好啊 and 再见吧
+      expect(out).toContain('你好啊');
+      expect(out).toContain('再见吧');
+      expect(out).not.toContain('晚安哦');
+    });
+
+    // Case 4: situation/expression with 「 or 」 → format renders, no break.
+    it('preserves 「 」 inside situation/expression without format break', () => {
+      const patternRepo = makePatternRepo();
+      seedPattern(patternRepo, '你说「xxx」是什么', '就是「那个」嘛', 5);
+      const learner = makeLearner(patternRepo);
+
+      const out = learner.formatFewShotBlock(GROUP, 3);
+      expect(out).toContain('有人说：「你说「xxx」是什么」');
+      expect(out).toContain('你回：「就是「那个」嘛」');
+    });
+
+    // Case 5: n capped at FEWSHOT_MAX_N even when caller asks for more.
+    it('caps n at FEWSHOT_MAX_N=5 even when called with n=10', () => {
+      const patternRepo = makePatternRepo();
+      for (let i = 0; i < 10; i++) {
+        seedPattern(patternRepo, `s${i}`, `e${i}`, 10 - i);
+      }
+      const learner = makeLearner(patternRepo);
+
+      const out = learner.formatFewShotBlock(GROUP, 10);
+      const pairCount = (out.match(/有人说：/g) ?? []).length;
+      expect(pairCount).toBe(5);
+    });
+
+    // Case 6: expressionSource null in the caller — modeled by formatFewShotBlock
+    // itself returning '' for empty repo, which callers branch on. Also verify
+    // that getTopRecent honors n=0.
+    it('returns empty for n=0 (null-source equivalent guard)', () => {
+      const patternRepo = makePatternRepo();
+      seedPattern(patternRepo, '你好啊', '你好', 5);
+      const learner = makeLearner(patternRepo);
+      expect(learner.formatFewShotBlock(GROUP, 0)).toBe('');
+    });
+
+    // Case 7: token budget — 5 pairs of (50-char situation + 100-char expression)
+    // renders, and total char count is within the ~425-token envelope.
+    it('renders full 5-pair block within token budget (<1200 chars)', () => {
+      const patternRepo = makePatternRepo();
+      for (let i = 0; i < 5; i++) {
+        seedPattern(patternRepo, 'a'.repeat(50) + i, 'b'.repeat(100) + i, 10 - i);
+      }
+      const learner = makeLearner(patternRepo);
+      const out = learner.formatFewShotBlock(GROUP, 5);
+      expect(out.length).toBeLessThan(1200);
+      const pairCount = (out.match(/有人说：/g) ?? []).length;
+      expect(pairCount).toBe(5);
+    });
+
+    // Case 8: trigger contains situation verbatim → matchContent filter
+    // surfaces it as the first pair.
+    it('surfaces substring-matched situation as first pair', () => {
+      const patternRepo = makePatternRepo();
+      seedPattern(patternRepo, '顶流', '什么顶', 2);
+      seedPattern(patternRepo, '其他的问题', '回复A', 10);
+      seedPattern(patternRepo, '另一个', '回复B', 9);
+      const learner = makeLearner(patternRepo);
+
+      const out = learner.formatFewShotBlock(GROUP, 3, '她是顶流吗');
+      const firstPairIdx = out.indexOf('有人说：');
+      const 顶流Idx = out.indexOf('顶流');
+      expect(firstPairIdx).toBeGreaterThan(-1);
+      expect(顶流Idx).toBeGreaterThan(-1);
+      // 顶流 should appear before the second pair header.
+      const secondPairIdx = out.indexOf('有人说：', firstPairIdx + 1);
+      expect(顶流Idx).toBeLessThan(secondPairIdx);
+    });
+
+    // Case 9: cache invariants — structure is stable, no trailing whitespace or
+    // dangling header drift across calls.
+    it('produces stable structure across repeated calls (cache-friendly)', () => {
+      const patternRepo = makePatternRepo();
+      seedPattern(patternRepo, '你好啊', '你好', 5);
+      seedPattern(patternRepo, '再见吧', '拜拜', 3);
+      const learner = makeLearner(patternRepo);
+
+      const a = learner.formatFewShotBlock(GROUP, 3);
+      const b = learner.formatFewShotBlock(GROUP, 3);
+      expect(a).toBe(b);
+      expect(a.startsWith('## 你过去的真实回复示例')).toBe(true);
+      expect(a.endsWith('」')).toBe(true);
+    });
+
+    // Case 10: concurrent upsert while formatFewShotBlock reads — no throw,
+    // snapshot is consistent with the state at read time.
+    it('tolerates concurrent upsert during read (no throw, consistent snapshot)', async () => {
+      const patternRepo = makePatternRepo();
+      seedPattern(patternRepo, '旧', '旧回复', 5);
+      const learner = makeLearner(patternRepo);
+
+      const reads = Promise.all([
+        Promise.resolve(learner.formatFewShotBlock(GROUP, 3)),
+        Promise.resolve(learner.formatFewShotBlock(GROUP, 3)),
+      ]);
+      patternRepo.upsert(GROUP, '新', '新回复');
+      const [r1, r2] = await reads;
+
+      // Both snapshots succeeded and contain the header.
+      expect(r1).toContain('## 你过去的真实回复示例');
+      expect(r2).toContain('## 你过去的真实回复示例');
+      // After the upsert, a fresh read includes the new entry.
+      const r3 = learner.formatFewShotBlock(GROUP, 3);
+      expect(r3).toContain('新回复');
+    });
+  });
+
+  describe('getTopRecent (M8.3)', () => {
+    it('prefers substring-matched patterns over higher-weight non-matches', () => {
+      const patternRepo = makePatternRepo();
+      const now = Date.now();
+      patternRepo._store.set(`${GROUP}|顶流|什么顶`, {
+        groupId: GROUP, situation: '顶流', expression: '什么顶',
+        weight: 2, createdAt: now, updatedAt: now,
+      });
+      patternRepo._store.set(`${GROUP}|其他|回复`, {
+        groupId: GROUP, situation: '其他', expression: '回复',
+        weight: 50, createdAt: now, updatedAt: now,
+      });
+      const learner = new ExpressionLearner({
+        messages: makeMsgRepo([]), expressionPatterns: patternRepo,
+        botUserId: BOT_USER_ID, logger: silentLogger,
+      });
+
+      const res = learner.getTopRecent(GROUP, 2, '她是顶流吗');
+      expect(res[0]!.situation).toBe('顶流');
+      expect(res[1]!.situation).toBe('其他');
+    });
+
+    it('does not emit duplicates when hit and fallback both include same row', () => {
+      const patternRepo = makePatternRepo();
+      const now = Date.now();
+      patternRepo._store.set(`${GROUP}|hello|hi`, {
+        groupId: GROUP, situation: 'hello', expression: 'hi',
+        weight: 10, createdAt: now, updatedAt: now,
+      });
+      const learner = new ExpressionLearner({
+        messages: makeMsgRepo([]), expressionPatterns: patternRepo,
+        botUserId: BOT_USER_ID, logger: silentLogger,
+      });
+
+      const res = learner.getTopRecent(GROUP, 3, 'say hello there');
+      expect(res).toHaveLength(1);
+      expect(res[0]!.situation).toBe('hello');
     });
   });
 });

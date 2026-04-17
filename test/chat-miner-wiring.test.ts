@@ -75,6 +75,7 @@ describe('ChatModule — M6.2a miner wiring', () => {
         formatForPrompt: vi.fn().mockReturnValue(
           '## 你之前的回复风格参考\n- 当有人说「test」时，你回过「yep」',
         ),
+        formatFewShotBlock: vi.fn().mockReturnValue(''),
       };
       const chat = makeChat(claude, db);
       chat.setExpressionSource(expressionSource);
@@ -90,6 +91,7 @@ describe('ChatModule — M6.2a miner wiring', () => {
     it('omits expression section entirely when helper returns empty string (no dead header)', async () => {
       const expressionSource: IExpressionPromptSource = {
         formatForPrompt: vi.fn().mockReturnValue(''),
+        formatFewShotBlock: vi.fn().mockReturnValue(''),
       };
       const chat = makeChat(claude, db);
       chat.setExpressionSource(expressionSource);
@@ -108,6 +110,42 @@ describe('ChatModule — M6.2a miner wiring', () => {
 
       const { systemText } = captureCall(claude);
       expect(systemText).not.toContain('你之前的回复风格参考');
+    });
+
+    // M8.3: few-shot block injection coexists with the descriptive summary.
+    it('injects few-shot block alongside descriptive summary (both layers)', async () => {
+      const expressionSource: IExpressionPromptSource = {
+        formatForPrompt: vi.fn().mockReturnValue(
+          '## 你之前的回复风格参考\n- 当有人说「hi」时，你回过「哦」',
+        ),
+        formatFewShotBlock: vi.fn().mockReturnValue(
+          '## 你过去的真实回复示例\n有人说：「hi」\n你回：「哦」',
+        ),
+      };
+      const chat = makeChat(claude, db);
+      chat.setExpressionSource(expressionSource);
+
+      await chat.generateReply('g1', makeMsg(), []);
+
+      const { systemText } = captureCall(claude);
+      expect(systemText).toContain('你之前的回复风格参考');
+      expect(systemText).toContain('你过去的真实回复示例');
+      expect(systemText).toContain('有人说：「hi」');
+      expect(expressionSource.formatFewShotBlock).toHaveBeenCalled();
+    });
+
+    it('omits few-shot block when formatFewShotBlock returns empty string', async () => {
+      const expressionSource: IExpressionPromptSource = {
+        formatForPrompt: vi.fn().mockReturnValue(''),
+        formatFewShotBlock: vi.fn().mockReturnValue(''),
+      };
+      const chat = makeChat(claude, db);
+      chat.setExpressionSource(expressionSource);
+
+      await chat.generateReply('g1', makeMsg(), []);
+
+      const { systemText } = captureCall(claude);
+      expect(systemText).not.toContain('你过去的真实回复示例');
     });
   });
 
@@ -280,7 +318,7 @@ describe('ChatModule — M6.2a miner wiring', () => {
 
   it('preserves persona anchor in system prompt when all miner sources empty', async () => {
     const chat = makeChat(claude, db);
-    chat.setExpressionSource({ formatForPrompt: () => '' });
+    chat.setExpressionSource({ formatForPrompt: () => '', formatFewShotBlock: () => '' });
     chat.setRelationshipSource({
       getRelevantRelations: () => [],
       formatRelationsForPrompt: () => '',

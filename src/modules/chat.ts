@@ -41,6 +41,7 @@ import type { IPreChatJudge, PreChatContextMessage, PreChatVerdict } from './pre
 // into unit tests and keeps circular-dep risk low).
 export interface IExpressionPromptSource {
   formatForPrompt(groupId: string, limit?: number): string;
+  formatFewShotBlock(groupId: string, n?: number, matchContent?: string): string;
 }
 export interface IStylePromptSource {
   formatStyleForPrompt(groupId: string, userId: string): string;
@@ -1802,6 +1803,13 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     const charModeActive = !!(this.db.groupConfig.get(groupId)?.activeCharacterId && this.charModule);
     const tuningBlock = charModeActive ? null : this._loadTuning();
 
+    // M8.3: concrete few-shot grounding from expression-learner. Abstract
+    // "风格参考" block still lives in systemPrompt; this layer surfaces the
+    // raw (situation → expression) pairs to reinforce the bot's own voice.
+    const fewShotBlock = this.expressionSource
+      ? this.expressionSource.formatFewShotBlock(groupId, 3, triggerMessage.content)
+      : '';
+
     // P3-2: Pick prompt variant based on conversation context
     const convSnapshot = this.conversationState.getSnapshot(groupId);
     const sensitiveEntityHit = /hhw|hello.*happy|声优|cv|中之人|键政|政治|黑粉|毒唯|引战/i.test(triggerMessage.content);
@@ -1853,6 +1861,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
             ...(rotatedStickerSection ? [{ text: rotatedStickerSection, cache: true as const }] : []),
             ...(factsBlock ? [{ text: factsBlock, cache: true as const }] : []),
             ...(tuningBlock ? [{ text: tuningBlock, cache: true as const }] : []),
+            ...(fewShotBlock ? [{ text: fewShotBlock, cache: true as const }] : []),
           ],
       messages: [{ role: 'user', content: userContent }],
     });
