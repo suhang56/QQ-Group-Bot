@@ -23,6 +23,9 @@ const BASE_SIGNALS: EngagementSignals = {
   lastSpeechIgnored: false,
   consecutiveReplyCount: 0,
   activityLevel: 'normal',
+  relevanceOverride: null,
+  addresseeIsOther: false,
+  awkwardVeto: false,
 };
 
 function signals(overrides: Partial<EngagementSignals>): EngagementSignals {
@@ -219,6 +222,136 @@ describe('makeEngagementDecision', () => {
     }));
     expect(d.shouldReply).toBe(true);
     expect(d.strength).toBe('engage');
+  });
+
+  // ── Gate 3.5a (M7.3): addressee graph ──────────────────────────────────
+  it('M7.3: skip when addresseeIsOther and not direct', () => {
+    const d = makeEngagementDecision(signals({ addresseeIsOther: true, participationScore: 2.0 }));
+    expect(d.shouldReply).toBe(false);
+    expect(d.strength).toBe('skip');
+    expect(d.reason).toContain('addressee');
+  });
+
+  it('M7.3: direct @-mention bypasses addressee-is-other', () => {
+    const d = makeEngagementDecision(signals({ addresseeIsOther: true, isMention: true, participationScore: 0 }));
+    expect(d.shouldReply).toBe(true);
+    expect(d.strength).toBe('engage');
+  });
+
+  it('M7.3: direct reply-to-bot bypasses addressee-is-other', () => {
+    const d = makeEngagementDecision(signals({ addresseeIsOther: true, isReplyToBot: true, participationScore: 0 }));
+    expect(d.shouldReply).toBe(true);
+    expect(d.strength).toBe('engage');
+  });
+
+  it('M7.3: adversarial still reacts even when addressee is other (Gate 3 wins)', () => {
+    const d = makeEngagementDecision(signals({ addresseeIsOther: true, isAdversarial: true }));
+    expect(d.shouldReply).toBe(true);
+    expect(d.strength).toBe('react');
+  });
+
+  // ── Gate 3.5b (M7.4): air-reading veto ─────────────────────────────────
+  it('M7.4: skip when awkwardVeto and not direct', () => {
+    const d = makeEngagementDecision(signals({ awkwardVeto: true, participationScore: 2.0 }));
+    expect(d.shouldReply).toBe(false);
+    expect(d.strength).toBe('skip');
+    expect(d.reason).toContain('air-reading');
+  });
+
+  it('M7.4: direct @-mention bypasses air-reading veto', () => {
+    const d = makeEngagementDecision(signals({ awkwardVeto: true, isMention: true, participationScore: 0 }));
+    expect(d.shouldReply).toBe(true);
+    expect(d.strength).toBe('engage');
+  });
+
+  it('M7.4: direct reply-to-bot bypasses air-reading veto', () => {
+    const d = makeEngagementDecision(signals({ awkwardVeto: true, isReplyToBot: true, participationScore: 0 }));
+    expect(d.shouldReply).toBe(true);
+    expect(d.strength).toBe('engage');
+  });
+
+  // ── Gate 3.5 order: addressee before air-reading ───────────────────────
+  it('M7: gate order — addressee skip reason wins over air-reading when both set', () => {
+    const d = makeEngagementDecision(signals({ addresseeIsOther: true, awkwardVeto: true }));
+    expect(d.shouldReply).toBe(false);
+    expect(d.reason).toContain('addressee');
+  });
+
+  // ── Gate 3.5c (M7.1) + Gate 6: relevance override ──────────────────────
+  it('M7.1: relevanceOverride=engage forces engage when score is below minScore', () => {
+    const d = makeEngagementDecision(signals({
+      relevanceOverride: 'engage',
+      participationScore: 0.1,
+      minScore: 0.5,
+    }));
+    expect(d.shouldReply).toBe(true);
+    expect(d.strength).toBe('engage');
+    expect(d.reason).toContain('pre-chat judge');
+  });
+
+  it('M7.1: relevanceOverride=skip + not direct → skip', () => {
+    const d = makeEngagementDecision(signals({
+      relevanceOverride: 'skip',
+      participationScore: 2.0,
+    }));
+    expect(d.shouldReply).toBe(false);
+    expect(d.strength).toBe('skip');
+    expect(d.reason).toContain('pre-chat judge');
+  });
+
+  it('M7.1: relevanceOverride=skip + direct → engage (direct bypass)', () => {
+    const d = makeEngagementDecision(signals({
+      relevanceOverride: 'skip',
+      isMention: true,
+      participationScore: 0,
+    }));
+    expect(d.shouldReply).toBe(true);
+    expect(d.strength).toBe('engage');
+  });
+
+  it('M7.1: Gate 5.5 (ignored) wins over relevanceOverride=engage', () => {
+    const d = makeEngagementDecision(signals({
+      relevanceOverride: 'engage',
+      lastSpeechIgnored: true,
+      participationScore: 0.1,
+    }));
+    expect(d.shouldReply).toBe(false);
+    expect(d.reason).toContain('ignored');
+  });
+
+  it('M7.1: Gate 5.6 (consecutive cap) wins over relevanceOverride=engage', () => {
+    const d = makeEngagementDecision(signals({
+      relevanceOverride: 'engage',
+      consecutiveReplyCount: MAX_CONSECUTIVE_BOT_REPLIES,
+      participationScore: 0.1,
+    }));
+    expect(d.shouldReply).toBe(false);
+    expect(d.reason).toContain('consecutive-reply cap');
+  });
+
+  it('M7.1: relevanceOverride=null → fall through to normal scoring', () => {
+    const d = makeEngagementDecision(signals({
+      relevanceOverride: null,
+      participationScore: 0.3,
+      minScore: 0.5,
+    }));
+    // non-direct + score 0.3 < 0.5 * 1.5 → skip
+    expect(d.shouldReply).toBe(false);
+  });
+
+  it('M7.1: relevanceOverride=engage reason uses "pre-chat judge: engage"', () => {
+    const d = makeEngagementDecision(signals({
+      relevanceOverride: 'engage',
+      participationScore: 0.1,
+    }));
+    expect(d.reason).toBe('pre-chat judge: engage');
+  });
+
+  it('M7.1: relevanceOverride=skip reason uses "pre-chat judge: skip"', () => {
+    const d = makeEngagementDecision(signals({
+      relevanceOverride: 'skip',
+    }));
+    expect(d.reason).toBe('pre-chat judge: skip');
   });
 });
 

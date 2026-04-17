@@ -67,6 +67,26 @@ export interface EngagementSignals {
    * speaking into an empty room can still pull a reply.
    */
   readonly activityLevel: 'idle' | 'normal' | 'busy';
+  /**
+   * M7.1 — pre-chat LLM judge verdict on whether the bot should engage.
+   *   'engage' → force engage (even if score is below minScore) unless a
+   *              higher-priority suppression gate (5.5, 5.6) fires.
+   *   'skip'   → force skip (unless direct trigger or adversarial).
+   *   null     → no opinion; fall through to existing gates.
+   * Direct triggers (mention/reply-to-bot) always win over 'skip'.
+   */
+  readonly relevanceOverride: 'engage' | 'skip' | null;
+  /**
+   * M7.3 — LLM judged the addressee is a specific peer user (not the bot,
+   * not the group at large). Suppresses non-direct replies so the bot
+   * doesn't barge into a 1:1 conversation. Direct triggers bypass.
+   */
+  readonly addresseeIsOther: boolean;
+  /**
+   * M7.4 — LLM air-reading said the moment is awkward (冷场/跑题/刚发过/
+   * 话题闭合). Suppresses non-direct replies. Direct triggers bypass.
+   */
+  readonly awkwardVeto: boolean;
 }
 
 /**
@@ -76,11 +96,14 @@ export interface EngagementSignals {
  * 1. Pure @-mention (no text) → react (at_only deflection, handled by caller)
  * 2. Short ack / meta-commentary / pic-bot → skip
  * 3. Adversarial patterns → react (deflection, handled by caller)
+ * 3.5a Addressee is another user + not direct → skip (M7.3)
+ * 3.5b Air-reading awkward + not direct → skip (M7.4)
+ * 3.5c LLM judge: skip + not direct → skip (M7.1)
  * 4. Low comprehension + no direct signal → skip
  * 5. Low comprehension + @-mention/reply → react (confused deflection)
  * 5.5 Last speech ignored by group + not direct → skip (Gate 5.5, R3)
  * 5.6 Consecutive bot-reply cap reached + not direct → skip (Gate 5.6, M6.4)
- * 6. Normal scoring: score >= minScore or isDirect → engage
+ * 6. Normal scoring: score >= minScore OR LLM judge: engage OR isDirect → engage
  * 7. Otherwise → skip
  */
 export function makeEngagementDecision(signals: EngagementSignals): EngagementDecision {
@@ -105,6 +128,25 @@ export function makeEngagementDecision(signals: EngagementSignals): EngagementDe
   // Gate 3: adversarial patterns bypass comprehension check
   if (signals.isAdversarial) {
     return { shouldReply: true, strength: 'react', reason: 'adversarial pattern detected' };
+  }
+
+  // Gate 3.5a (M7.3): LLM says addressee is someone else — don't barge in.
+  // Direct triggers bypass; adversarial already returned above.
+  if (signals.addresseeIsOther && !isDirect) {
+    return { shouldReply: false, strength: 'skip', reason: 'addressee is other user' };
+  }
+
+  // Gate 3.5b (M7.4): LLM air-reading judged the moment awkward. Direct
+  // triggers bypass; adversarial already returned above.
+  if (signals.awkwardVeto && !isDirect) {
+    return { shouldReply: false, strength: 'skip', reason: 'air-reading says awkward' };
+  }
+
+  // Gate 3.5c (M7.1): LLM judge says skip. Direct triggers bypass so the
+  // bot still answers when @ed; adversarial already handled. Anti-monologue
+  // gates (5.5, 5.6) still run AFTER and win over any "engage" override.
+  if (signals.relevanceOverride === 'skip' && !isDirect) {
+    return { shouldReply: false, strength: 'skip', reason: 'pre-chat judge: skip' };
   }
 
   // Gate 4-5: comprehension-based decision
@@ -145,24 +187,26 @@ export function makeEngagementDecision(signals: EngagementSignals): EngagementDe
     };
   }
 
-  // Gate 6: normal participation scoring with direct + activity multipliers.
+  // Gate 6: normal participation scoring with direct + activity + LLM multipliers.
   // Direct-ness scales the bar: 1.0x if @ or reply-to-bot (already-engaged),
   // 1.5x for peer-to-peer chat (Case 7 — bot stays silent > 80% of the time).
-  // M7.2 then layers an activity multiplier on top: 1.4x in busy groups (so
-  // the bot doesn't pile on during fast chat), 0.75x in idle groups (so one
-  // peer speaking into an empty room can still pull a reply). Direct
-  // triggers short-circuit below regardless of the scaled bar.
+  // M7.2 layers activity multiplier: 1.4x in busy groups, 0.75x in idle groups.
+  // M7.1: relevanceOverride='engage' bypasses score — LLM already judged
+  // relevance against bot interests with full context.
   const directMultiplier = isDirect ? 1.0 : 1.5;
   const activityMultiplier = signals.activityLevel === 'busy' ? 1.4
                            : signals.activityLevel === 'idle' ? 0.75
                            : 1.0;
   const effectiveMinScore = signals.minScore * directMultiplier * activityMultiplier;
-  if (isDirect || signals.participationScore >= effectiveMinScore) {
+  const llmEngageOverride = signals.relevanceOverride === 'engage';
+  if (isDirect || llmEngageOverride || signals.participationScore >= effectiveMinScore) {
     return {
       shouldReply: true,
       strength: 'engage',
       reason: isDirect
         ? 'direct trigger (mention/reply)'
+        : llmEngageOverride
+        ? 'pre-chat judge: engage'
         : `score ${signals.participationScore.toFixed(3)} >= ${effectiveMinScore.toFixed(3)} [${signals.activityLevel}]`,
     };
   }
