@@ -14,6 +14,27 @@ import {
   BANGDREAM_PERSONA,
   pickDeflection,
 } from './chat.js';
+import { sanitizeForPrompt } from '../utils/prompt-sanitize.js';
+
+const LIVE_DEFLECT_RULES = `<rules>
+请以你的人格、态度自然回复一句极短（3-15字）。不要解释/道歉/"作为AI"/合作/接话题。只输出那句话。
+现在不是水群，不能输出 <skip>。
+</rules>`;
+
+const BATCH_DEFLECT_RULES = `<rules>
+必须全部不同，不要有任何两条语气相近。尽可能广地覆盖：惊讶/不屑/反问/敷衍/装傻/直接不理/幽默转移 各种风格。禁止在同一批里重复使用"啥"字或任何一个词超过 2 次。3-15 字。只输出行内容，不要编号/解释。
+不能有任何一条是 <skip> 或带尖括号的内容。每条必须是真实的中文短语或emoji。
+</rules>`;
+
+function buildLiveDeflectSystem(category: DeflectCategory): string {
+  const situation = DEFLECT_SITUATIONS[category];
+  return `${BANGDREAM_PERSONA}\n\n# 现在的情况\n${situation}\n\n${LIVE_DEFLECT_RULES}`;
+}
+
+function buildBatchDeflectSystem(category: DeflectCategory): string {
+  const situation = DEFLECT_SITUATIONS[category];
+  return `${BANGDREAM_PERSONA}\n\n# 现在的情况\n${situation}\n\n${BATCH_DEFLECT_RULES}`;
+}
 
 const logger = createLogger('deflection-engine');
 
@@ -117,13 +138,13 @@ export class DeflectionEngine implements IDeflectionEngine {
     category: DeflectCategory,
     triggerMsg: { content: string },
   ): Promise<string | null> {
-    const situation = DEFLECT_SITUATIONS[category];
-    const prompt = `${BANGDREAM_PERSONA}\n\n# 现在的情况\n${situation}\n\n触发消息: "${triggerMsg.content}"\n\n请以你的人格、态度自然回复一句极短（3-15字）的话。不要解释、不要道歉、不要说"作为AI"、不要合作、不要接话题。直接反应就行。只输出那句话本身。\n注意：现在不是水群，你**不能**输出 <skip>，必须给一句真实的话。`;
+    const staticSystem = buildLiveDeflectSystem(category);
+    const userMsg = `触发消息: "${sanitizeForPrompt(triggerMsg.content, 200)}"\n(生成那一句)`;
     const response = await this.claude.complete({
       model: RUNTIME_CHAT_MODEL,
       maxTokens: 50,
-      system: [{ text: prompt, cache: true }],
-      messages: [{ role: 'user', content: '(生成那一句)' }],
+      system: [{ text: staticSystem, cache: true }],
+      messages: [{ role: 'user', content: userMsg }],
     });
     return this._validate(response.text);
   }
@@ -135,6 +156,8 @@ export class DeflectionEngine implements IDeflectionEngine {
     if (/[<>]/.test(text)) return null;
     if (/[:：——]/.test(text)) return null;
     if (/作为ai|作为机器|我是ai|我是一个|无法|帮您|好的，|当然，/i.test(text)) return null;
+    // UR-A #15: over-denial rejection
+    if (/我是真人|我不是\s*(bot|ai|机器人)|你说什么呢我是人/i.test(text)) return null;
     return text;
   }
 
@@ -142,15 +165,15 @@ export class DeflectionEngine implements IDeflectionEngine {
     if (this.refilling.has(category)) return;
     this.refilling.add(category);
     try {
-      const situation = DEFLECT_SITUATIONS[category];
+      const staticSystem = buildBatchDeflectSystem(category);
       const seed = Math.random().toString(36).slice(2, 6);
-      const batchPrompt = `${BANGDREAM_PERSONA}\n\n生成 ${this.cacheSize} 条短回复，每条一行，都是"${situation}"的自然人格反应（随机种子：${seed}）。必须全部不同，不要有任何两条语气相近。尽可能广地覆盖：惊讶/不屑/反问/敷衍/装傻/直接不理/幽默转移 各种风格。禁止在同一批里重复使用"啥"字或任何一个词超过 2 次。3-15 字。只输出 ${this.cacheSize} 行，不要编号/解释。\n不能有任何一条是 <skip> 或带尖括号的内容。每条必须是真实的中文短语或emoji。`;
+      const userMsg = `生成 ${this.cacheSize} 条短回复（随机种子：${seed}），每条一行，共 ${this.cacheSize} 行。`;
       const refillModel = CHAT_QWEN_DISABLED ? RUNTIME_CHAT_MODEL : CHAT_QWEN_MODEL;
       const response = await this.claude.complete({
         model: refillModel,
         maxTokens: 200,
-        system: [{ text: batchPrompt, cache: true }],
-        messages: [{ role: 'user', content: '(生成)' }],
+        system: [{ text: staticSystem, cache: true }],
+        messages: [{ role: 'user', content: userMsg }],
       });
       const lines = response.text.split('\n');
       const valid = lines.map(l => this._validate(l)).filter((l): l is string => l !== null);

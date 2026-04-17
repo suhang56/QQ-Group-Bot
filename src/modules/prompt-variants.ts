@@ -42,7 +42,8 @@ function buildIdentityGrounding(groupName?: string): string {
 // Shared rule appended to ALL variants: outsider voice + insult echo prevention
 const SHARED_VOICE_RULES =
   '\n- 禁止用"你们都X啊"/"你们在X什么"这种旁观者句式概括群里行为。用"我也X"/"我觉得X"/直接分享短立场/发表情包。需要发问也不要"你们在X"\n' +
-  '- 群友之间互相贬低/骂人时不要附和("不然呢"/"确实"/"对"/"+1"等), 最好 <skip> 或转移话题';
+  '- 群友之间互相贬低/骂人时不要附和("不然呢"/"确实"/"对"/"+1"等), 最好 <skip> 或转移话题\n' +
+  '- 非直接 @ / reply 时跟梗要稀疏: 90% 纯观察, 10% 扔一个表情 / 短词';
 
 const BANTER_RULES =
   '# 当前模式: 接梗/活跃\n' +
@@ -61,7 +62,7 @@ const CAREFUL_RULES =
   '- 短回应为主, 必要时 <skip>\n' +
   '- 被引战 -> "各有各的粉"/"我只听得见自己要唱的音乐" 转开\n' +
   '- 被问敏感话题(政治/键政) -> "不懂"/"skip"\n' +
-  '- 绝不承认是 AI/claude, 绝不暴露运维知识' +
+  '- 不承认是 claude/具体模型名或暴露运维知识, 被问是不是 bot 还是可以坦然承认' +
   SHARED_VOICE_RULES;
 
 const DEFAULT_RULES =

@@ -5,6 +5,7 @@ import type { Logger } from 'pino';
 import { createLogger } from '../utils/logger.js';
 import { extractJson } from '../utils/json-extract.js';
 import { HARVEST_MODEL } from '../config.js';
+import { sanitizeForPrompt, sanitizeNickname } from '../utils/prompt-sanitize.js';
 
 const MIN_NEW_MESSAGES = 8;
 const MAX_FACTS_PER_RUN = 12;
@@ -50,7 +51,7 @@ export interface OpportunisticHarvestOptions {
 }
 
 function buildPrompt(chronoMsgs: Array<{ nickname: string; content: string }>, maxFacts: number, deep: boolean): string {
-  const msgList = chronoMsgs.map(m => `[${m.nickname}]: ${m.content}`).join('\n');
+  const msgList = chronoMsgs.map(m => `[${sanitizeNickname(m.nickname)}]: ${sanitizeForPrompt(m.content)}`).join('\n');
   const deepHint = deep ? `\n**因为窗口很大（${chronoMsgs.length} 条），重点找：**\n- 反复出现 3+ 次的稳定模式（不是单次玩笑）\n- 跨多个对话的群友行为习惯\n- 长期话题（持续多天的 thread）\n- 上面 1-8 类别中的高 confidence 事实` : '';
 
   return `你在帮一个 QQ 群 bot 持续构建知识库。下面是最近 ${chronoMsgs.length} 条群消息。任务：**广泛抽取**值得让 bot 长期记住的内容，让 bot 越泡越懂这个群。
@@ -350,7 +351,7 @@ export class OpportunisticHarvest {
 
     const recent = this.messages.getRecent(groupId, this.windowMessages);
     const chronoMsgs = [...recent].reverse();
-    const messagesList = chronoMsgs.map(m => `[${m.nickname}]: ${m.content}`).join('\n');
+    const messagesList = chronoMsgs.map(m => `[${sanitizeNickname(m.nickname)}]: ${sanitizeForPrompt(m.content)}`).join('\n');
 
     const existing = this.learnedFacts.listActive(groupId, 1000);
     const knownCorpus = existing.map(f => f.fact).join('\n');

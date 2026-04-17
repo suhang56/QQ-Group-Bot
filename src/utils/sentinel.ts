@@ -24,6 +24,9 @@ const SUBSTR_FORBIDDEN = [
   '根据您', '历史发言', '不当内容', '无法提供',
   '请问您', '您可以提供', '我来模仿', '风格生成', '您希望', '我可以', '需要我帮', '需要我',
   '我是ai', '我是bot', '一个ai', '一个bot',
+  // UR-A #15: over-denial — bot insisting it's NOT a bot / IS a real person
+  // breaks the坦然-admit-bot stance set by BANGDREAM_PERSONA. All blocked.
+  '我是真人', '我不是bot', '我不是ai', '我不是机器人', '你说什么呢我是人',
   // slurs / group-banned terms — 0 tolerance
   '药娘', '雷普', '约炮',
   // image marker leak phrases — bot telling user it has a text description
