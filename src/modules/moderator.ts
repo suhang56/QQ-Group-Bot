@@ -570,7 +570,9 @@ watchlist 命中 → category: "watchlist"，components_seen 列出命中片段
     const confirmed = await this._opusKickConfirm(msg, reason, config);
     if (confirmed && confirmed.severity !== null && confirmed.severity >= 5) {
       await this.adapter.send(msg.groupId,
-        `@${msg.nickname} 你因严重违规即将被移出群聊。\n原因：${reason}`);
+        `@${msg.nickname} 你因严重违规即将被移出群聊。\n原因：${reason}`).catch(err =>
+        this.logger.error({ err, groupId: msg.groupId, userId: msg.userId }, 'sev5 pre-kick announce failed'),
+      );
       await new Promise<void>(resolve => { const t = setTimeout(resolve, 3000); t.unref?.(); });
       try {
         await this.adapter.kick(msg.groupId, msg.userId);
