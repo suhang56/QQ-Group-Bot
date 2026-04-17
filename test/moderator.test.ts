@@ -364,6 +364,34 @@ describe('ModeratorModule.assess — punishment ladder', () => {
     }
   });
 
+  // M6.0.6b: pre-kick announce failure must not cancel the kick
+  it('pre-kick announce failure does not cancel kick', async () => {
+    vi.useFakeTimers();
+    try {
+      const opusText = JSON.stringify({ violation: true, severity: 5, reason: 'confirmed', confidence: 0.99 });
+      const claude: IClaudeClient = {
+        complete: vi.fn().mockResolvedValue({ text: opusText, inputTokens: 50, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 }),
+      };
+      const adapter = makeAdapter();
+      const mod = makeModule(claude, adapter, makeConfig());
+      let sendCalls = 0;
+      vi.mocked(adapter.send).mockImplementation(async () => {
+        sendCalls += 1;
+        if (sendCalls === 1) throw new Error('pre-kick announce failed');
+        return undefined as unknown as number;
+      });
+
+      const promise = mod.executePunishment(makePending(5, 'kick'), makeConfig());
+      await vi.advanceTimersByTimeAsync(3100);
+      await promise;
+
+      expect(adapter.kick).toHaveBeenCalledWith('g1', 'u1');
+      expect(sendCalls).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   // Records are written to moderation_log even for no-violation
   it('logs non-violation to moderation_log', async () => {
     const claude = makeClaudeVerdict(false, null, 0.95);
