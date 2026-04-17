@@ -527,4 +527,28 @@ describe('MimicModule — UR-A cache split (system is byte-identical across call
     const userB = (calls[1]![0] as ClaudeRequest).messages[0]!.content;
     expect(userA).not.toBe(userB);
   });
+
+  // UR-K: stickerSection and loreSection headers must use sanitizeNickname.
+  // Prior versions interpolated raw nickname at mimic.ts:269 + :285, letting
+  // an attacker inject literal <tag> ... </tag> through the bot's own
+  // nickname display. Assert no angle brackets survive anywhere in the
+  // rendered user prompt (the sanitize helper strips < and >).
+  it('UR-K: nickname angle brackets are stripped everywhere in user prompt', async () => {
+    const claude = makeMockClaude('x');
+    const messages = makeMockMessages();
+    const configs = makeMockConfig();
+    const mod = makeModule(claude, messages, configs);
+    const evilNick = '<tag>Evil</tag>';
+    const msgs = Array.from({ length: 10 }, (_, i) => makeMsg({
+      id: 100 + i, nickname: evilNick, content: `note${i}`,
+    }));
+    vi.mocked(messages.getByUser).mockReturnValue(msgs);
+    await mod.generateMimic('g1', 'u1', '话题', []);
+    const call = vi.mocked(claude.complete).mock.calls[0]![0] as ClaudeRequest;
+    const userContent = call.messages[0]!.content;
+    expect(userContent).not.toContain('<tag>');
+    expect(userContent).not.toContain('</tag>');
+    // Sanitized nickname retains inner text without angle brackets
+    expect(userContent).toContain('tagEvil/tag');
+  });
 });
