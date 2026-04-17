@@ -320,8 +320,10 @@ const expressionLearner = new ExpressionLearner({
 const styleLearner = new StyleLearner({
   messages: db.messages,
   userStyles: db.userStyles,
+  userStylesAggregate: db.userStylesAggregate,
   claude,
   activeGroups: ACTIVE_GROUPS,
+  onAggregateUpdated: (gid) => chat.invalidateGroupIdentityCache(gid),
 });
 
 const relationshipTracker = new RelationshipTracker({

@@ -587,6 +587,23 @@ export interface IUserStyleRepository {
   listAll(groupId: string): Array<{ userId: string; nickname: string; style: StyleJsonData; updatedAt: number }>;
 }
 
+// ---- Group-aggregate style (M8.2) ----
+
+export interface GroupAggregateStyle {
+  topCatchphrases: Array<{ phrase: string; userCount: number }>;
+  punctuationDensity: 'minimal' | 'light' | 'normal' | 'heavy';
+  emojiProneness: 'rare' | 'occasional' | 'frequent';
+  commonSentenceTraits: string[];
+  topTopics: Array<{ topic: string; userCount: number }>;
+  userCount: number;
+  updatedAt: number;
+}
+
+export interface IUserStyleAggregateRepository {
+  upsert(groupId: string, agg: Omit<GroupAggregateStyle, 'updatedAt'>): void;
+  get(groupId: string): GroupAggregateStyle | null;
+}
+
 // ---- Meme graph (memes-v1) ----
 
 export interface MemeGraphEntry {
@@ -2568,6 +2585,52 @@ class UserStyleRepository implements IUserStyleRepository {
   }
 }
 
+// ---- User style aggregate repository (M8.2) ----
+
+class UserStyleAggregateRepository implements IUserStyleAggregateRepository {
+  constructor(private readonly db: DatabaseSync) {}
+
+  upsert(groupId: string, agg: Omit<GroupAggregateStyle, 'updatedAt'>): void {
+    const now = Date.now();
+    const json = JSON.stringify({
+      topCatchphrases: agg.topCatchphrases,
+      punctuationDensity: agg.punctuationDensity,
+      emojiProneness: agg.emojiProneness,
+      commonSentenceTraits: agg.commonSentenceTraits,
+      topTopics: agg.topTopics,
+    });
+    this.db.prepare(
+      `INSERT INTO user_styles_aggregate (group_id, aggregate_json, user_count, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(group_id) DO UPDATE SET
+         aggregate_json = excluded.aggregate_json,
+         user_count     = excluded.user_count,
+         updated_at     = excluded.updated_at`
+    ).run(groupId, json, agg.userCount, now);
+  }
+
+  get(groupId: string): GroupAggregateStyle | null {
+    const row = this.db.prepare(
+      'SELECT aggregate_json, user_count, updated_at FROM user_styles_aggregate WHERE group_id = ?'
+    ).get(groupId) as { aggregate_json: string; user_count: number; updated_at: number } | undefined;
+    if (!row) return null;
+    try {
+      const parsed = JSON.parse(row.aggregate_json) as Omit<GroupAggregateStyle, 'userCount' | 'updatedAt'>;
+      return {
+        topCatchphrases: parsed.topCatchphrases ?? [],
+        punctuationDensity: parsed.punctuationDensity ?? 'light',
+        emojiProneness: parsed.emojiProneness ?? 'rare',
+        commonSentenceTraits: parsed.commonSentenceTraits ?? [],
+        topTopics: parsed.topTopics ?? [],
+        userCount: row.user_count,
+        updatedAt: row.updated_at,
+      };
+    } catch {
+      return null;
+    }
+  }
+}
+
 // ---- Main Database class ----
 
 export class Database {
@@ -2592,6 +2655,7 @@ export class Database {
   readonly bandoriLives: IBandoriLiveRepository;
   readonly expressionPatterns: IExpressionPatternRepository;
   readonly userStyles: IUserStyleRepository;
+  readonly userStylesAggregate: IUserStyleAggregateRepository;
   readonly memeGraph: IMemeGraphRepo;
   readonly phraseCandidates: IPhraseCandidatesRepo;
 
@@ -2627,6 +2691,7 @@ export class Database {
     this.bandoriLives = new BandoriLiveRepository(this._db);
     this.expressionPatterns = new ExpressionPatternRepository(this._db);
     this.userStyles = new UserStyleRepository(this._db);
+    this.userStylesAggregate = new UserStyleAggregateRepository(this._db);
     this.memeGraph = new MemeGraphRepository(this._db);
     this.phraseCandidates = new PhraseCandidatesRepository(this._db);
   }
@@ -3024,6 +3089,19 @@ export class Database {
         style_json  TEXT    NOT NULL,
         updated_at  INTEGER NOT NULL,
         PRIMARY KEY (group_id, user_id)
+      )
+    `);
+
+    // user_styles_aggregate — per-group rollup of user styles (M8.2).
+    // schema.sql covers fresh installs; this branch covers existing DBs
+    // (see feedback_sqlite_schema_migration: schema.sql is silently skipped
+    // for DBs that already exist).
+    this._db.exec(`
+      CREATE TABLE IF NOT EXISTS user_styles_aggregate (
+        group_id       TEXT    PRIMARY KEY,
+        aggregate_json TEXT    NOT NULL,
+        user_count     INTEGER NOT NULL,
+        updated_at     INTEGER NOT NULL
       )
     `);
 

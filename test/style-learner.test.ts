@@ -1,7 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { StyleLearner } from '../src/modules/style-learner.js';
 import type { IClaudeClient } from '../src/ai/claude.js';
-import type { IMessageRepository, IUserStyleRepository, StyleJsonData } from '../src/storage/db.js';
+import type {
+  GroupAggregateStyle,
+  IMessageRepository,
+  IUserStyleAggregateRepository,
+  IUserStyleRepository,
+  StyleJsonData,
+} from '../src/storage/db.js';
 import type { Logger } from 'pino';
 
 const silentLogger = {
@@ -330,6 +336,186 @@ describe('StyleLearner', () => {
       learner.dispose();
       // Double dispose should also be safe
       learner.dispose();
+    });
+  });
+
+  // ── M8.2: group-aggregate wiring ─────────────────────────────────────────
+
+  function makeAggregateRepo(): IUserStyleAggregateRepository & {
+    _store: Map<string, GroupAggregateStyle>;
+  } {
+    const store = new Map<string, GroupAggregateStyle>();
+    return {
+      _store: store,
+      upsert: vi.fn().mockImplementation((groupId: string, agg: Omit<GroupAggregateStyle, 'updatedAt'>) => {
+        store.set(groupId, { ...agg, updatedAt: Date.now() });
+      }),
+      get: vi.fn().mockImplementation((groupId: string) => store.get(groupId) ?? null),
+    };
+  }
+
+  function seedStyles(repo: ReturnType<typeof makeStyleRepo>, count: number): void {
+    for (let i = 0; i < count; i++) {
+      repo._store.set(`${GROUP}|pre-u${i}`, {
+        nickname: `User${i}`,
+        style: {
+          catchphrases: ['草'],
+          punctuationStyle: '不用标点',
+          sentencePattern: '',
+          emotionalSignatures: {},
+          topicAffinity: [],
+        },
+      });
+    }
+    (repo.listAll as ReturnType<typeof vi.fn>).mockImplementation((gid: string) => {
+      if (gid !== GROUP) return [];
+      return Array.from(repo._store.entries())
+        .filter(([k]) => k.startsWith(`${GROUP}|`))
+        .map(([k, v]) => {
+          const userId = k.split('|')[1]!;
+          return { userId, nickname: v.nickname, style: v.style, updatedAt: Date.now() };
+        });
+    });
+  }
+
+  describe('group aggregate', () => {
+    it('writes aggregate after learnStyles with >=3 users', async () => {
+      const msgRepo = makeMsgRepo([], new Map());
+      const styleRepo = makeStyleRepo();
+      const aggRepo = makeAggregateRepo();
+      const claude = makeClaudeWith('');
+
+      seedStyles(styleRepo, 3);
+
+      const learner = new StyleLearner({
+        messages: msgRepo, userStyles: styleRepo, userStylesAggregate: aggRepo,
+        claude, activeGroups: [GROUP], logger: silentLogger,
+      });
+
+      await learner.learnStyles(GROUP);
+
+      expect(aggRepo.upsert).toHaveBeenCalledTimes(1);
+      const [calledGid, agg] = (aggRepo.upsert as ReturnType<typeof vi.fn>).mock.calls[0]!;
+      expect(calledGid).toBe(GROUP);
+      expect(agg.userCount).toBe(3);
+      expect(agg.punctuationDensity).toBe('minimal');
+    });
+
+    it('does NOT write aggregate when fewer than 3 users have styles', async () => {
+      const msgRepo = makeMsgRepo([], new Map());
+      const styleRepo = makeStyleRepo();
+      const aggRepo = makeAggregateRepo();
+      const claude = makeClaudeWith('');
+
+      seedStyles(styleRepo, 2);
+
+      const learner = new StyleLearner({
+        messages: msgRepo, userStyles: styleRepo, userStylesAggregate: aggRepo,
+        claude, activeGroups: [GROUP], logger: silentLogger,
+      });
+
+      await learner.learnStyles(GROUP);
+      expect(aggRepo.upsert).not.toHaveBeenCalled();
+    });
+
+    it('fires onAggregateUpdated callback after a successful upsert', async () => {
+      const msgRepo = makeMsgRepo([], new Map());
+      const styleRepo = makeStyleRepo();
+      const aggRepo = makeAggregateRepo();
+      const claude = makeClaudeWith('');
+      const onAggregateUpdated = vi.fn();
+
+      seedStyles(styleRepo, 3);
+
+      const learner = new StyleLearner({
+        messages: msgRepo, userStyles: styleRepo, userStylesAggregate: aggRepo,
+        claude, activeGroups: [GROUP], logger: silentLogger,
+        onAggregateUpdated,
+      });
+
+      await learner.learnStyles(GROUP);
+      expect(onAggregateUpdated).toHaveBeenCalledWith(GROUP);
+      expect(onAggregateUpdated).toHaveBeenCalledTimes(1);
+    });
+
+    it('callback errors do not break the learn cycle', async () => {
+      const msgRepo = makeMsgRepo([], new Map());
+      const styleRepo = makeStyleRepo();
+      const aggRepo = makeAggregateRepo();
+      const claude = makeClaudeWith('');
+      const onAggregateUpdated = vi.fn().mockImplementation(() => { throw new Error('boom'); });
+
+      seedStyles(styleRepo, 3);
+
+      const learner = new StyleLearner({
+        messages: msgRepo, userStyles: styleRepo, userStylesAggregate: aggRepo,
+        claude, activeGroups: [GROUP], logger: silentLogger,
+        onAggregateUpdated,
+      });
+
+      await expect(learner.learnStyles(GROUP)).resolves.toBeUndefined();
+      expect(aggRepo.upsert).toHaveBeenCalledTimes(1);
+    });
+
+    it('no aggregate repo supplied → skips aggregate step silently', async () => {
+      const msgRepo = makeMsgRepo([], new Map());
+      const styleRepo = makeStyleRepo();
+      const claude = makeClaudeWith('');
+
+      seedStyles(styleRepo, 5);
+
+      const learner = new StyleLearner({
+        messages: msgRepo, userStyles: styleRepo, claude,
+        activeGroups: [GROUP], logger: silentLogger,
+      });
+
+      await expect(learner.learnStyles(GROUP)).resolves.toBeUndefined();
+      expect(learner.getGroupAggregate(GROUP)).toBeNull();
+    });
+  });
+
+  describe('formatGroupAggregateForPrompt', () => {
+    it('returns empty string when no aggregate exists', () => {
+      const msgRepo = makeMsgRepo([], new Map());
+      const styleRepo = makeStyleRepo();
+      const aggRepo = makeAggregateRepo();
+      const claude = makeClaudeWith('');
+
+      const learner = new StyleLearner({
+        messages: msgRepo, userStyles: styleRepo, userStylesAggregate: aggRepo,
+        claude, activeGroups: [GROUP], logger: silentLogger,
+      });
+
+      expect(learner.formatGroupAggregateForPrompt(GROUP)).toBe('');
+    });
+
+    it('renders the expected header + bullets', () => {
+      const msgRepo = makeMsgRepo([], new Map());
+      const styleRepo = makeStyleRepo();
+      const aggRepo = makeAggregateRepo();
+      const claude = makeClaudeWith('');
+
+      aggRepo._store.set(GROUP, {
+        topCatchphrases: [{ phrase: '草', userCount: 3 }, { phrase: '哈哈', userCount: 2 }],
+        punctuationDensity: 'minimal',
+        emojiProneness: 'occasional',
+        commonSentenceTraits: [],
+        topTopics: [{ topic: 'BanG Dream', userCount: 2 }],
+        userCount: 3,
+        updatedAt: Date.now(),
+      });
+
+      const learner = new StyleLearner({
+        messages: msgRepo, userStyles: styleRepo, userStylesAggregate: aggRepo,
+        claude, activeGroups: [GROUP], logger: silentLogger,
+      });
+
+      const text = learner.formatGroupAggregateForPrompt(GROUP);
+      expect(text).toContain('## 群的说话氛围');
+      expect(text).toContain('群里常见口头禅：草、哈哈');
+      expect(text).toContain('标点习惯：偏少');
+      expect(text).toContain('表情/颜文字：偶尔用');
+      expect(text).toContain('常聊话题：BanG Dream');
     });
   });
 });

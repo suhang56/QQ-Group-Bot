@@ -1,7 +1,14 @@
 import type { IClaudeClient, ClaudeModel } from '../ai/claude.js';
-import type { IMessageRepository, IUserStyleRepository, StyleJsonData } from '../storage/db.js';
+import type {
+  GroupAggregateStyle,
+  IMessageRepository,
+  IUserStyleAggregateRepository,
+  IUserStyleRepository,
+  StyleJsonData,
+} from '../storage/db.js';
 import { createLogger } from '../utils/logger.js';
 import { extractJson } from '../utils/json-extract.js';
+import { computeGroupAggregate } from './style-aggregator.js';
 import type { Logger } from 'pino';
 
 const CQ_ONLY_RE = /^\[CQ:[^\]]+\]$/;
@@ -14,29 +21,44 @@ export type StyleJson = StyleJsonData;
 export interface StyleLearnerOptions {
   messages: IMessageRepository;
   userStyles: IUserStyleRepository;
+  /** M8.2: per-group aggregate rollup. Optional so tests that only exercise
+   *  per-user learning can omit it. */
+  userStylesAggregate?: IUserStyleAggregateRepository;
   claude: IClaudeClient;
   activeGroups: string[];
   logger?: Logger;
   intervalMs?: number;
+  /** M8.2: fired after a group aggregate is written so callers (e.g. chat)
+   *  can drop any cached identity prompt that inlined the old vibe block. */
+  onAggregateUpdated?: (groupId: string) => void;
 }
+
+/** Group flavor the bot actively avoids mimicking in char-mode — identity
+ *  anchor trumps ambient vibe there. StyleLearner still computes the
+ *  aggregate for audit; chat-side formatter suppresses output. */
+export type { GroupAggregateStyle };
 
 export class StyleLearner {
   private readonly messages: IMessageRepository;
   private readonly userStyles: IUserStyleRepository;
+  private readonly userStylesAggregate: IUserStyleAggregateRepository | null;
   private readonly claude: IClaudeClient;
   private readonly activeGroups: string[];
   private readonly logger: Logger;
   private readonly intervalMs: number;
+  private readonly onAggregateUpdated: ((groupId: string) => void) | null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private firstTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(opts: StyleLearnerOptions) {
     this.messages = opts.messages;
     this.userStyles = opts.userStyles;
+    this.userStylesAggregate = opts.userStylesAggregate ?? null;
     this.claude = opts.claude;
     this.activeGroups = opts.activeGroups;
     this.logger = opts.logger ?? createLogger('style-learner');
     this.intervalMs = opts.intervalMs ?? 4 * 60 * 60_000; // 4 hours
+    this.onAggregateUpdated = opts.onAggregateUpdated ?? null;
   }
 
   start(): void {
@@ -136,10 +158,39 @@ ${sampleText}
     }
 
     this.logger.info({ groupId, usersAnalyzed: learned }, 'style learning cycle complete');
+
+    // M8.2: roll per-user styles into a group-level aggregate. Runs even when
+    // no new users were learned this cycle (existing profiles can still form
+    // a valid aggregate if we crossed the ≥3-users threshold on a prior run
+    // and the aggregate table was empty for some reason — idempotent upsert).
+    this._updateGroupAggregate(groupId);
+  }
+
+  private _updateGroupAggregate(groupId: string): void {
+    if (!this.userStylesAggregate) return;
+    try {
+      const all = this.userStyles.listAll(groupId);
+      if (all.length < 3) return;
+      const agg = computeGroupAggregate(all.map(u => ({ userId: u.userId, style: u.style })));
+      if (!agg) return;
+      this.userStylesAggregate.upsert(groupId, agg);
+      this.logger.info({ groupId, userCount: agg.userCount }, 'group style aggregate updated');
+      if (this.onAggregateUpdated) {
+        try { this.onAggregateUpdated(groupId); } catch (err) {
+          this.logger.warn({ err, groupId }, 'onAggregateUpdated callback failed');
+        }
+      }
+    } catch (err) {
+      this.logger.warn({ err, groupId }, 'group style aggregate update failed');
+    }
   }
 
   getStyle(groupId: string, userId: string): StyleJson | null {
     return this.userStyles.get(groupId, userId);
+  }
+
+  getGroupAggregate(groupId: string): GroupAggregateStyle | null {
+    return this.userStylesAggregate?.get(groupId) ?? null;
   }
 
   formatStyleForPrompt(groupId: string, userId: string): string {
@@ -163,4 +214,43 @@ ${sampleText}
     if (lines.length === 0) return '';
     return `## 这个人的说话风格\n${lines.join('\n')}`;
   }
+
+  /**
+   * M8.2: render the group-level speech vibe for the chat system prompt.
+   * Returns '' when no aggregate exists. Caller is responsible for char-mode
+   * suppression — this method does not inspect group_config.
+   */
+  formatGroupAggregateForPrompt(groupId: string): string {
+    const agg = this.userStylesAggregate?.get(groupId);
+    if (!agg) return '';
+
+    const lines: string[] = [];
+    if (agg.topCatchphrases.length > 0) {
+      lines.push(`- 群里常见口头禅：${agg.topCatchphrases.map(c => c.phrase).join('、')}`);
+    }
+    lines.push(`- 标点习惯：${PUNCT_LABELS[agg.punctuationDensity]}`);
+    lines.push(`- 表情/颜文字：${EMOJI_LABELS[agg.emojiProneness]}`);
+    if (agg.topTopics.length > 0) {
+      lines.push(`- 常聊话题：${agg.topTopics.map(t => t.topic).join('、')}`);
+    }
+    if (agg.commonSentenceTraits.length > 0) {
+      lines.push(`- 句式特点：${agg.commonSentenceTraits.join('、')}`);
+    }
+
+    if (lines.length === 0) return '';
+    return `## 群的说话氛围\n${lines.join('\n')}`;
+  }
 }
+
+const PUNCT_LABELS: Record<GroupAggregateStyle['punctuationDensity'], string> = {
+  minimal: '偏少',
+  light: '正常',
+  normal: '正常偏多',
+  heavy: '偏多',
+};
+
+const EMOJI_LABELS: Record<GroupAggregateStyle['emojiProneness'], string> = {
+  rare: '很少用',
+  occasional: '偶尔用',
+  frequent: '经常用',
+};
