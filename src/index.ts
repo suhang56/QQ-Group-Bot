@@ -14,6 +14,7 @@ import { OLLAMA_ENABLED, OLLAMA_BASE_URL, GEMINI_ENABLED, DEEPSEEK_ENABLED } fro
 import { parseIntOr } from './utils/config-parse.js';
 import { RateLimiter } from './core/rateLimiter.js';
 import { Router } from './core/router.js';
+import { MOD_APPROVAL_ADMIN } from './core/constants.js';
 import { ChatModule } from './modules/chat.js';
 import { CharModule } from './modules/char.js';
 import { StickerFirstModule } from './modules/sticker-first.js';
@@ -300,7 +301,7 @@ const idGuard = new IdCardGuard({
   moderation: db.moderation,
   pendingModeration: db.pendingModeration,
   vision,
-  adminUserId: process.env['MOD_APPROVAL_ADMIN'] ?? '2331924739',
+  adminUserId: MOD_APPROVAL_ADMIN,
   botUserId,
   enabled: () => true,
 });
@@ -309,7 +310,7 @@ router.setIdGuard(idGuard);
 const sequenceGuard = new SequenceGuard({
   adapter,
   pendingModeration: db.pendingModeration,
-  adminUserId: process.env['MOD_APPROVAL_ADMIN'] ?? '2331924739',
+  adminUserId: MOD_APPROVAL_ADMIN,
   botUserId,
 });
 router.setSequenceGuard(sequenceGuard);
