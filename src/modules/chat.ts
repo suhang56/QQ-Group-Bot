@@ -2790,7 +2790,12 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     if (ranked.length === 0) return '';
     const lines = ranked.map(s => {
       const label = s.summary ?? s.key;
-      const ctx = s.contextSamples.slice(0, 1).join('');
+      // UR-G: contextSamples rows are raw attacker-typed group messages stored in
+      // the sticker DB. sanitizeForPrompt strips <>/``` before the 20-char slice
+      // so a crafted message can't smuggle tag/codefence boundaries into the
+      // cached system-prompt hint line.
+      const rawCtx = s.contextSamples.slice(0, 1).join('');
+      const ctx = sanitizeForPrompt(rawCtx, 40);
       return `- ${label}${ctx ? `（常用于"${ctx.slice(0, 20)}"之类的语境）` : ''} → ${s.cqCode}`;
     }).join('\n');
     return `\n【当前语境下推荐使用的群表情（可选，语境合适再用）】\n${lines}`;
