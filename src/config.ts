@@ -162,6 +162,27 @@ export function defaultGroupConfig(groupId: string): GroupConfig {
     idGuardEnabled: true,
     stickerFirstEnabled: false,
     stickerFirstThreshold: 0.55,
+    chatInterestCategories: [
+      // A. 日常分享: first-person life-stream / time-adverb leading share.
+      {
+        name: 'daily-share',
+        pattern: '(?:^|[^\\p{L}])(我今天|我刚|我昨天|我最近|我现在|今晚|刚才|刚刚|刚买|刚吃|刚看|刚回)',
+        weight: 0.8,
+      },
+      // B. 邦多利: BanG Dream band / member / song / event / card-pool / collab.
+      {
+        name: 'bandori',
+        pattern: '(邦多利|BanG ?Dream|MyGO|Ave ?Mujica|Poppin|Afterglow|Roselia|PPP|凑友希那|羊宫妃那|立希|爱音|睦|初华|祥子|海玲|樱子|灯|乐奈|活动|卡池|联动)',
+        weight: 0.85,
+      },
+      // C. 二次元: anime / manga / vtuber / galgame / doujin / waifu / meme vocabulary.
+      {
+        name: 'anime',
+        pattern: '(动画|番|新番|漫画|轻小说|galgame|gal|手游|vtuber|vup|推し|老婆|本子|awsl|xp[e啊]?|补番|追番|二刺螈|作画|作监|声优|配音)',
+        weight: 0.75,
+      },
+    ],
+    chatInterestMinHits: 1,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
