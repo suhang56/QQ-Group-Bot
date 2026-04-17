@@ -220,6 +220,8 @@ export class Router implements IRouter {
     this.pokeModule = pokeModule;
   }
 
+  // M8.4 / M9.3 / M9.4: affinity module injection — concrete AffinityModule
+  // typed by master. Used by cross-group admin DM commands and /bot_status.
   setAffinity(affinity: AffinityModule): void {
     this.affinity = affinity;
   }
@@ -1554,6 +1556,64 @@ ${ctxLine}
       let out = lines.join('\n');
       if (out.length > 1500) out = out.slice(0, 1480) + '\n...(截断)';
       await reply(out);
+      return;
+    }
+
+    // ─── M9.3: cross-group recognition admin commands ─────────────────────
+    // DM-only, admin-only (gated by the isAdmin check above), rate-limited
+    // under the 'cross_group' bucket — shares policy with /persona rate tier.
+    const crossGroupAuditCmd = /^\/cross_group_audit\b(?:\s+@?(\S+))?\s*$/i.exec(text);
+    if (crossGroupAuditCmd) {
+      if (!this.rateLimiter.checkUser(msg.userId, 'cross_group')) {
+        const cooldown = this.rateLimiter.cooldownSecondsUser(msg.userId, 'cross_group');
+        await reply(`操作太频繁，请 ${cooldown}s 后再试。`);
+        return;
+      }
+      if (!this.affinity) {
+        await reply('cross-group 模块未挂载。');
+        return;
+      }
+      const targetUid = crossGroupAuditCmd[1]?.trim();
+      const nowMs = Date.now();
+      const sinceMs = nowMs - 30 * 24 * 60 * 60 * 1000;
+      const rows = this.affinity.listCrossGroupAudit({
+        sinceMs,
+        targetUid: targetUid && targetUid.length > 0 ? targetUid : undefined,
+        limit: 30,
+      });
+      if (rows.length === 0) {
+        await reply(`过去 30 天无 cross-group 读取记录${targetUid ? `（用户 ${targetUid}）` : ''}。`);
+        return;
+      }
+      const lines = rows.slice(0, 20).map(r => {
+        const hoursAgo = Math.floor((nowMs - r.ts) / 3_600_000);
+        return `#${r.id} ${hoursAgo}h前 群${r.requesterGid}→用户${r.targetUid} score=${r.aggregated.toFixed(1)} 源=${r.sourceGids.length}群`;
+      });
+      await reply(`cross-group 审计（最近 30 天，共 ${rows.length} 条，展示前 20）：\n${lines.join('\n')}`);
+      logger.info({ adminId: msg.userId, count: rows.length, targetUid }, 'cross-group audit queried by admin');
+      return;
+    }
+
+    const forgetMeCmd = /^\/forget_me_cross_group\s+(\S+)\s*$/i.exec(text);
+    if (forgetMeCmd) {
+      if (!this.rateLimiter.checkUser(msg.userId, 'cross_group')) {
+        const cooldown = this.rateLimiter.cooldownSecondsUser(msg.userId, 'cross_group');
+        await reply(`操作太频繁，请 ${cooldown}s 后再试。`);
+        return;
+      }
+      if (!this.affinity) {
+        await reply('cross-group 模块未挂载。');
+        return;
+      }
+      const targetUid = forgetMeCmd[1]!;
+      const currentGroupId = this._defaultReviewGroupId();
+      if (!currentGroupId) {
+        await reply('无法确定当前群 ID；请先通过环境变量 ACTIVE_GROUPS 配置。');
+        return;
+      }
+      const removed = this.affinity.forgetUserCrossGroup(currentGroupId, targetUid);
+      await reply(`已从除群 ${currentGroupId} 外的所有群清除用户 ${targetUid} 的 affinity 记录（${removed} 条）。`);
+      logger.info({ adminId: msg.userId, targetUid, currentGroupId, removed }, 'cross-group forget executed by admin');
       return;
     }
 

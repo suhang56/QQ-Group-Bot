@@ -129,6 +129,10 @@ export interface GroupConfig {
   airReadingEnabled: boolean;
   /** M7.3: enable speaker/addressee graph (addressee-is-other skip) in judge. */
   addresseeGraphEnabled: boolean;
+  /** M9.3: enable cross-group user recognition. Bilateral opt-in — both the
+   * requester's group AND each source group must have this flag true before
+   * a user's affinity from that source group counts in the aggregate. */
+  linkAcrossGroups: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -731,6 +735,7 @@ interface GroupConfigRow {
   chat_interest_min_hits: number;
   air_reading_enabled: number;
   addressee_graph_enabled: number;
+  link_across_groups: number;
   created_at: string; updated_at: string;
 }
 
@@ -837,6 +842,7 @@ function configFromRow(row: GroupConfigRow): GroupConfig {
     chatInterestMinHits: row.chat_interest_min_hits ?? 1,
     airReadingEnabled: (row.air_reading_enabled ?? 0) !== 0,
     addresseeGraphEnabled: (row.addressee_graph_enabled ?? 0) !== 0,
+    linkAcrossGroups: (row.link_across_groups ?? 0) !== 0,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -1178,8 +1184,9 @@ class GroupConfigRepository implements IGroupConfigRepository {
         sticker_first_enabled, sticker_first_threshold,
         chat_interest_categories, chat_interest_min_hits,
         air_reading_enabled, addressee_graph_enabled,
+        link_across_groups,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(group_id) DO UPDATE SET
         enabled_modules = excluded.enabled_modules,
         auto_mod = excluded.auto_mod,
@@ -1217,6 +1224,7 @@ class GroupConfigRepository implements IGroupConfigRepository {
         chat_interest_min_hits = excluded.chat_interest_min_hits,
         air_reading_enabled = excluded.air_reading_enabled,
         addressee_graph_enabled = excluded.addressee_graph_enabled,
+        link_across_groups = excluded.link_across_groups,
         updated_at = excluded.updated_at
     `).run(
       config.groupId,
@@ -1256,6 +1264,7 @@ class GroupConfigRepository implements IGroupConfigRepository {
       config.chatInterestMinHits ?? 1,
       (config.airReadingEnabled ?? false) ? 1 : 0,
       (config.addresseeGraphEnabled ?? false) ? 1 : 0,
+      (config.linkAcrossGroups ?? false) ? 1 : 0,
       config.createdAt,
       config.updatedAt,
     );
@@ -2882,6 +2891,22 @@ export class Database {
     // Both default OFF — the judge is opt-in per group to bound quota exposure.
     try { this._db.exec(`ALTER TABLE group_config ADD COLUMN air_reading_enabled INTEGER NOT NULL DEFAULT 0`); } catch { /* already exists */ }
     try { this._db.exec(`ALTER TABLE group_config ADD COLUMN addressee_graph_enabled INTEGER NOT NULL DEFAULT 0`); } catch { /* already exists */ }
+
+    // M9.3 cross-group recognition opt-in flag. Default OFF — privacy-first.
+    try { this._db.exec(`ALTER TABLE group_config ADD COLUMN link_across_groups INTEGER NOT NULL DEFAULT 0`); } catch { /* already exists */ }
+
+    // M9.3 cross-group audit table. CREATE IF NOT EXISTS is idempotent on re-run.
+    this._db.exec(`
+      CREATE TABLE IF NOT EXISTS cross_group_audit (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        requester_gid TEXT    NOT NULL,
+        target_uid    TEXT    NOT NULL,
+        source_gids   TEXT    NOT NULL,
+        aggregated    REAL    NOT NULL,
+        ts            INTEGER NOT NULL
+      )
+    `);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_cross_group_audit_ts ON cross_group_audit(ts DESC)`);
 
     // local_stickers.blocked — banned stickers are excluded from top queries.
     try { this._db.exec(`ALTER TABLE local_stickers ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0`); } catch { /* already exists */ }

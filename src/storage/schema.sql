@@ -116,9 +116,22 @@ CREATE TABLE IF NOT EXISTS group_config (
   chat_interest_min_hits                INTEGER NOT NULL DEFAULT 1,
   air_reading_enabled                   INTEGER NOT NULL DEFAULT 0,
   addressee_graph_enabled               INTEGER NOT NULL DEFAULT 0,
+  link_across_groups                    INTEGER NOT NULL DEFAULT 0,
   created_at                            TEXT    NOT NULL DEFAULT '',
   updated_at                            TEXT    NOT NULL DEFAULT ''
 );
+
+-- M9.3: cross-group recognition audit. Every successful cross-group score read
+-- is logged here so that the privacy boundary is auditable; rows pruned >90d.
+CREATE TABLE IF NOT EXISTS cross_group_audit (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  requester_gid TEXT    NOT NULL,
+  target_uid    TEXT    NOT NULL,
+  source_gids   TEXT    NOT NULL,  -- JSON array
+  aggregated    REAL    NOT NULL,
+  ts            INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_cross_group_audit_ts ON cross_group_audit(ts DESC);
 
 CREATE TABLE IF NOT EXISTS live_stickers (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
