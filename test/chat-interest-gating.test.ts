@@ -129,31 +129,32 @@ describe('ChatModule — interest-gating scoring', () => {
       expect(result).toBeNull();
     });
 
-    it('case 2 variant: "本子" anime hit only, peer-to-peer context → skip', async () => {
-      // Anime hit via "本子" (0.75) only. Non-direct effective threshold = 0.75.
-      // With silence bonus 0.2 and twoUser penalty -0.3, score lands 0.65 < 0.75.
-      // (Using content that doesn't trip the existing TASK_REQUEST adversarial
-      // gate — screenshot wording uses "画" which matches TASK_REQUEST and is
-      // out of scope for this PR; the behavior under snoopy-boundaries scoring
-      // is what's under test here.)
+    it('case 2 literal: "西瓜没看过她画的本子吗" (screenshot bug) → bot stays silent', async () => {
+      // Original user-reported bug. Before the TASK_REQUEST narrow, bare "画"
+      // was matching as a labor-request and the bot replied with a sassy
+      // "我又不是工具人" — pure assistant-leaning failure. A groupmate hearing
+      // this just scrolls past. Now: TASK_REQUEST doesn't fire, anime
+      // interest (本子, 0.75) + silence (0.2) − twoUser (−0.3) = 0.65 <
+      // non-direct threshold 0.75 → skip.
       const now = Math.floor(Date.now() / 1000);
       db.messages.insert({ groupId: GROUP_ID, userId: 'u2', nickname: 'A', content: 'prev', timestamp: now - 5, deleted: false });
       db.messages.insert({ groupId: GROUP_ID, userId: 'u3', nickname: 'B', content: 'prev2', timestamp: now - 3, deleted: false });
       db.messages.insert({ groupId: GROUP_ID, userId: 'u2', nickname: 'A', content: 'prev3', timestamp: now - 1, deleted: false });
       const result = await chat.generateReply(
         GROUP_ID,
-        makeMsg({ userId: 'u3', content: '西瓜看过这个本子吗', rawContent: '西瓜看过这个本子吗' }),
+        makeMsg({ userId: 'u3', content: '西瓜没看过她画的本子吗', rawContent: '西瓜没看过她画的本子吗' }),
         [],
       );
       expect(result).toBeNull();
     });
 
-    it('case 3 variant: generic share with no interest match → skip', async () => {
-      // "二次元" / "生涯" are not in the seed anime regex, and the rest is
-      // a non-first-person share. No interest match → score 0 → skip.
-      // (Screenshot wording "贯穿了我的整个..." contains "整个" which matches
-      // the existing TASK_REQUEST adversarial regex — out of scope for this PR.)
-      const result = await chat.generateReply(GROUP_ID, makeMsg({ content: '这种东西充满了她的二次元生涯' }), []);
+    it('case 3 literal: "贯穿了我的整个二次元生涯了" (screenshot bug) → bot stays silent', async () => {
+      // Original user-reported bug. Before the narrow, "整个" fired
+      // TASK_REQUEST and the bot replied with "自己玩去" / "你恩师是谁啊" —
+      // accusing the peer of demanding labor when they were just sharing
+      // fandom feelings. Now: TASK_REQUEST doesn't fire on attributive "整个",
+      // no interest match, no direct trigger → skip.
+      const result = await chat.generateReply(GROUP_ID, makeMsg({ content: '贯穿了我的整个二次元生涯了' }), []);
       expect(result).toBeNull();
     });
 

@@ -187,10 +187,16 @@ export const CHAT_POLITICAL_RE =
 
 export const IDENTITY_DEFLECTIONS = ['啊？', '什么', '？？', '?', '我不明白', '啧'];
 
-// Matches creative-work exploitation attempts only — NOT conversational asks.
-// Excludes: 讲/说 (conversational), 给我/替我/帮我 alone (casual), 来[个一段首] (casual).
+// Matches creative-work / labor exploitation attempts only — NOT conversational
+// asks and NOT peer-chat mentions of verbs. Every bare action verb must be
+// anchored by an imperative marker — either an agent prefix (帮我/替我/给我/
+// 让你/让我/你来/能不能/麻烦/求你), or an imperative suffix that rules out
+// descriptive use (一下/一个/一首/一段/首诗/个笑话 etc.), or a direct
+// bot-addressed continuation request. False-negatives are fine — real tasks
+// that slip through fall to Gate 7 default skip. False-positives violate the
+// north star (bot accusing peer chat of demanding labor).
 export const TASK_REQUEST =
-  /(写[个一]?|编[个一]?|生成|翻译|画[个一]?|作一首|帮我(?:写|编|做|生成|翻译|画|背|算|总结)|给我(?:写|编|做|生成|翻译|画|作)|推荐|念一?段|背一段|搞一个|搞个|整一个|整个|做一个|算一下|算算|总结|接下[一]?句|后面[几一]?句|后面是.{0,10}[什么啥]|续[一下]|接龙|继续[背念说]|往[下后]接|再来[一几]段|背[一下出来]|[教叫].{0,3}你|恩师|师父|让你接|你要接|现在你(?:需要|要)接|前面是.{0,5}[什么啥]|教.{0,5}(?:swift|python|js|java|代码|编程|算法|怎么写)|怎么(?:写|实现)代码|帮我(?:写|实现)代码|代码怎么|教教.{0,5}(?:怎么)?(?:写|做|实现)|(?:transformer|optimizer|激活函数|神经网络|attention|算法|API).{0,10}(?:怎么|如何|原理))/;
+  /(?:帮我(?:写|编|做|生成|翻译|画|背|算|总结|实现)|给我(?:写|编|做|生成|翻译|画|作|算|总结)|替我(?:写|编|做|生成|翻译|画|背|算|总结)|让你(?:写|编|做|画|背|翻译|接)|让我(?:写|编|做|画|翻译)|麻烦你?(?:写|做|画|翻译|算|总结)|能不能(?:帮[我你]?|给[我你]?)?(?:写|编|做|画|翻译|算|总结)|求(?:你|求)(?:写|画|翻译)|你来(?:写|做|画|背|翻译)|你去(?:写|画|翻译)|写[个一](?:首|段|篇|下|个)?(?!.{0,2}(?:啥|什么))|写一下|编[个一](?:首|段|篇|下|个)?|编一下|生成(?:一个|一下|一段|一张|[个一])|翻译(?:一下|这[段句篇个]|下面)|画[个一](?:张|幅|下|段)?|作一首|推荐(?:一下|个|一个|一下什么|下什么|什么好)|念一?段|背一段|搞(?:一个|个)(?!.{0,3}(?:人|东西|意思|啥|什么|事))|整[个一](?:笑话|段子)|做一个(?!.{0,3}(?:人|梦|事))|算一下|算算(?!.{0,3}(?:看|了|就))|总结(?:一下|[个一]下)|接下一?句|后面[几一]?句|后面是.{0,10}[什么啥]|续[一下]|接龙|继续[背念说]|往[下后]接|再来[一几]段|背[一下出来](?!.{0,3}(?:了|过))|让你接|你要接|现在你(?:需要|要)接|前面是.{0,5}[什么啥]|教.{0,5}(?:swift|python|js|java|代码|编程|算法|怎么写)|怎么(?:写|实现)代码|帮我(?:写|实现)代码|代码怎么|教教.{0,5}(?:怎么)?(?:写|做|实现)|(?:transformer|optimizer|激活函数|神经网络|attention|算法|API).{0,10}(?:怎么|如何|原理))/;
 
 export const TASK_DEFLECTIONS = [
   '我不会', '你自己写', '想屁吃', '懒得', '不想',

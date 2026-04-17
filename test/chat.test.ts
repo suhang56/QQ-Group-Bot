@@ -937,7 +937,6 @@ describe('TASK_REQUEST regex', () => {
 
   // Recite / continue / teacher-roleplay exploits — should still match
   it('matches "现在你需要接：XXX"', () => expect(match('现在你需要接：XXX')).toBe(true));
-  it('matches "恩师教你 ..."', () => expect(match('恩师教你 ...')).toBe(true));
   it('matches "后面几句是什么"', () => expect(match('后面几句是什么')).toBe(true));
   it('matches "再来一段"', () => expect(match('再来一段')).toBe(true));
   it('matches "接下一句"', () => expect(match('接下一句')).toBe(true));
@@ -954,6 +953,29 @@ describe('TASK_REQUEST regex', () => {
   it('does NOT match "你好"', () => expect(match('你好')).toBe(false));
   it('does NOT match "@QAQ 吃饭了吗"', () => expect(match('@QAQ 吃饭了吗')).toBe(false));
   it('does NOT match "背包" (standalone unrelated use)', () => expect(match('背包')).toBe(false));
+
+  // ── Narrowed regex — peer-chat phrasings that USED to fire sassy
+  // deflections on bare verbs must now pass through. These were the original
+  // screenshot-case false-positives flagged by Reviewer and are the whole
+  // reason the regex got tightened. A groupmate reading these wouldn't
+  // think "someone's demanding labor" — they'd just read a normal share.
+  it('does NOT flag "西瓜没看过她画的本子吗" (peer asks peer, not a task for the bot)', () => expect(match('西瓜没看过她画的本子吗')).toBe(false));
+  it('does NOT flag "贯穿了我的整个二次元生涯了" (sharing — "整个" is attributive here)', () => expect(match('贯穿了我的整个二次元生涯了')).toBe(false));
+  it('does NOT flag "我今天画了张图" (first-person share of finished work)', () => expect(match('我今天画了张图')).toBe(false));
+  it('does NOT flag "整个人都不好了" ("整个" as intensifier, not imperative)', () => expect(match('整个人都不好了')).toBe(false));
+  it('does NOT flag "恩师啊" (community meme word, not a task cue)', () => expect(match('恩师啊')).toBe(false));
+  it('does NOT flag "她画得真好" (attributive 画得)', () => expect(match('她画得真好')).toBe(false));
+  it('does NOT flag "我背过这首歌" (past-tense description)', () => expect(match('我背过这首歌')).toBe(false));
+
+  // ── Narrowed regex — genuine imperative/agent-anchored task requests
+  // still caught. These carry explicit agent verbs (帮我/替我/给我/你来/
+  // 麻烦/能不能) plus an action verb, so a groupmate would hear them as
+  // "someone is actually asking a favor."
+  it('matches "帮我画个头像" (agent-anchored)', () => expect(match('帮我画个头像')).toBe(true));
+  it('matches "替我背这首歌" (agent-anchored)', () => expect(match('替我背这首歌')).toBe(true));
+  it('matches "你来写个段子" (addresser points at bot + verb)', () => expect(match('你来写个段子')).toBe(true));
+  it('matches "麻烦你翻译一下" (polite-imperative)', () => expect(match('麻烦你翻译一下')).toBe(true));
+  it('matches "能不能帮我写一个" (请-style anchor)', () => expect(match('能不能帮我写一个')).toBe(true));
 
   // Tech-help deflections
   it('matches "教教我怎么写 swift"', () => expect(match('教教我怎么写 swift')).toBe(true));
