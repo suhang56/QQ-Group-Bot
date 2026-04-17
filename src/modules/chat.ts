@@ -30,6 +30,8 @@ import { scoreComprehensionSafe, type ComprehensionContext } from '../services/c
 import { ConversationStateTracker } from './conversation-state.js';
 import { pickVariant, buildVariantSystemPrompt, type VariantContext, type ActiveMemeJoke } from './prompt-variants.js';
 import type { SocialRelation } from './relationship-tracker.js';
+import type { IFatigueSource } from './fatigue.js';
+import { FATIGUE_THRESHOLD } from './fatigue.js';
 
 // ── M6.2a: miner helper shapes ───────────────────────────────────────────────
 // Narrow structural interfaces so ChatModule can consume the three miners
@@ -149,6 +151,7 @@ export interface ScoreFactors {
   interestMatch: number;
   noveltyPenalty: number;
   affinityBoost: number;
+  fatiguePenalty: number;
 }
 
 // Signal A: bot alias keywords — always indicate a reference to the bot
@@ -750,6 +753,8 @@ export class ChatModule implements IChatModule {
   private relationshipSource: IRelationshipPromptSource | null = null;
   // M6.2b: affinity source (producer + consumer). null-safe; no-op when unset.
   private affinitySource: IAffinitySource | null = null;
+  // M6.3: fatigue source (per-group bot reply pacing). null-safe; no-op when unset.
+  private fatigueSource: IFatigueSource | null = null;
   // per-group: whether the last generateReply call returned an evasive reply
   private readonly lastEvasiveReply = new Map<string, boolean>();
   private readonly conversationState = new ConversationStateTracker();
@@ -918,6 +923,9 @@ export class ChatModule implements IChatModule {
       msgsSinceSpoke: 0,
       engagementReceived: false,
     });
+
+    // M6.3: bump fatigue so a bot spamming a group gets progressively de-weighted
+    this.fatigueSource?.onReply(groupId);
 
     // Track mface keys for rotation cooldown (delegated to StickerFirstModule)
     const mfaceKeys = [...reply.matchAll(/\[CQ:mface,[^\]]*\bemoji_id=([^,\]]+)/g)].map(m => m[1]!.trim());
@@ -1136,6 +1144,9 @@ export class ChatModule implements IChatModule {
   }
   setAffinitySource(src: IAffinitySource | null): void {
     this.affinitySource = src;
+  }
+  setFatigueSource(src: IFatigueSource | null): void {
+    this.fatigueSource = src;
   }
 
   /** Return the key of the most recent sticker sent via sticker-first in this group, or null. */
@@ -1939,6 +1950,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       interestMatch: 0,
       noveltyPenalty: 0,
       affinityBoost: 0,
+      fatiguePenalty: 0,
     };
 
     // M6.2b: affinity boost — +0.15 / -0.10 / 0 based on per-user score threshold.
@@ -2097,6 +2109,26 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       const lastProactiveMs2 = this.lastProactiveReply.get(groupId) ?? 0;
       if (lastProactiveMs2 > 0 && nowMs - lastProactiveMs2 < 3 * 60 * 1000) {
         factors.metaIdentityProbe = 0.6;
+      }
+    }
+
+    // M6.3: fatigue dampens the positive-factor sum once raw score crosses
+    // FATIGUE_THRESHOLD. We express the dampening as a negative fatiguePenalty
+    // factor so reducer / _pickChatModel keep working unchanged, but the
+    // *magnitude* scales with how "hot" the message already was — a reply the
+    // bot would have jumped on (hot) gets pulled back proportionally, while an
+    // already-cold message stays cold (no double penalty). Direct triggers
+    // bypass this entirely via the mention/replyToBot short-circuit above.
+    if (this.fatigueSource) {
+      const rawFatigueScore = this.fatigueSource.getRawScore(groupId);
+      if (rawFatigueScore > FATIGUE_THRESHOLD) {
+        const multiplier = Math.max(0.3, 1 - 0.15 * (rawFatigueScore - FATIGUE_THRESHOLD));
+        let positiveSum = 0;
+        for (const [k, v] of Object.entries(factors)) {
+          if (k === 'fatiguePenalty') continue;
+          if (v > 0) positiveSum += v;
+        }
+        factors.fatiguePenalty = (multiplier - 1) * positiveSum;
       }
     }
 

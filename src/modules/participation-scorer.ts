@@ -36,6 +36,8 @@ export interface ScoreFactors {
   readonly noveltyPenalty: number;
   /** M6.2b per-user affinity boost (+0.15 high / -0.10 low / 0 neutral). */
   readonly affinityBoost: number;
+  /** M6.3 fatigue penalty (<= 0, capped at -0.3 once bot has replied heavily). */
+  readonly fatiguePenalty: number;
 }
 
 export interface IParticipationScorer {
@@ -82,6 +84,7 @@ export class ParticipationScorer implements IParticipationScorer {
         implicitRef: 0, loreKeyword: 0, silence: 0,
         continuity: 0, topicStick: 0, burst: 0,
         interestMatch: 0, noveltyPenalty: 0, affinityBoost: 0,
+        fatiguePenalty: 0,
       },
       isDirect,
     };

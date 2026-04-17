@@ -42,6 +42,7 @@ import { ExpressionLearner } from './modules/expression-learner.js';
 import { StyleLearner } from './modules/style-learner.js';
 import { RelationshipTracker } from './modules/relationship-tracker.js';
 import { AffinityModule } from './modules/affinity.js';
+import { FatigueModule } from './modules/fatigue.js';
 import { JargonMiner } from './modules/jargon-miner.js';
 import { PhraseMiner } from './modules/phrase-miner.js';
 import { MemeClusterer } from './modules/meme-clusterer.js';
@@ -338,6 +339,11 @@ chat.setRelationshipSource(relationshipTracker);
 const affinity = new AffinityModule(db.rawDb);
 // M6.2b: wire affinity producer + consumer into chat scoring / userContent.
 chat.setAffinitySource(affinity);
+
+// M6.3: per-group reply fatigue — exponential decay, additive penalty once
+// bot has replied heavily. Pure in-memory, no persistence.
+const fatigue = new FatigueModule();
+chat.setFatigueSource(fatigue);
 
 const jargonMiner = new JargonMiner({
   db: db.rawDb,
