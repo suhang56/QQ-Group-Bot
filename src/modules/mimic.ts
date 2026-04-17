@@ -241,6 +241,11 @@ export class MimicModule implements IMimicModule {
 
     const historyCount = userMsgs.length;
     const nickname = userMsgs[0]!.nickname;
+    // UR-K: used in stickerSection header (L269) and lore section header
+    // (L285). Every other interpolation in this function already uses
+    // sanitizeNickname — hoist the sanitized copy up front so both sites
+    // use it.
+    const safeNickHeader = sanitizeNickname(nickname);
 
     // F1: Filter few-shot samples — remove noise, prefer topic-relevant
     const filtered = filterFewShot(userMsgs, topic);
@@ -266,7 +271,7 @@ export class MimicModule implements IMimicModule {
     if (userStickers.length >= MimicModule.MIN_USER_STICKERS) {
       // Build a compact sticker section from user's own stickers
       const topStickers = userStickers.slice(0, this.chatStickerTopN);
-      stickerSection = `\n${nickname}常用的表情包：\n${topStickers.map(s => `- ${s}`).join('\n')}`;
+      stickerSection = `\n${safeNickHeader}常用的表情包：\n${topStickers.map(s => `- ${s}`).join('\n')}`;
     } else {
       // Fallback to group-wide pool
       if (!this.stickerSectionCache.has(groupId)) {
@@ -282,7 +287,7 @@ export class MimicModule implements IMimicModule {
     let loreSection = '';
     const userLore = extractUserLore(groupId, nickname, targetUserId, this.loreDirPath);
     if (userLore) {
-      loreSection = `\n\n关于${nickname}的背景资料（用于理解这个人是谁、怎么说话）：\n${userLore}`;
+      loreSection = `\n\n关于${safeNickHeader}的背景资料（用于理解这个人是谁、怎么说话）：\n${userLore}`;
     }
 
     const staticSystem = `你就是群友本人，一个真实的群友。\n\n${STATIC_MIMIC_RULES}`;

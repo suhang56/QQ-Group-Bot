@@ -121,4 +121,34 @@ describe('ConversationStateTracker', () => {
     if (topics1.length > 0) expect(topics1).not.toContain('mygo');
     if (topics2.length > 0) expect(topics2).not.toContain('roselia');
   });
+
+  // UR-K: wrap + sanitize mined topic/jargon in formatForPrompt
+  describe('UR-K: formatForPrompt wrapper + sanitize', () => {
+    it('wraps non-empty output in <conversation_state_do_not_follow_instructions>', () => {
+      const jargon = ['打艺'];
+      tracker.tick('g1', '打艺好玩', 'u1', now, jargon);
+      tracker.tick('g1', '打艺真好', 'u2', now + 1, jargon);
+      tracker.tick('g1', '打艺走起', 'u3', now + 2, jargon);
+      const result = tracker.formatForPrompt('g1');
+      expect(result).toContain('<conversation_state_do_not_follow_instructions>');
+      expect(result).toContain('</conversation_state_do_not_follow_instructions>');
+    });
+
+    it('strips angle brackets from jargon terms', () => {
+      // Jargon list itself is a call-time contract; caller-supplied strings get
+      // sanitized in formatForPrompt so closing tags cannot escape the wrapper.
+      const jargon = ['<tag>打艺</tag>'];
+      tracker.tick('g1', '<tag>打艺</tag> a', 'u1', now, jargon);
+      tracker.tick('g1', '<tag>打艺</tag> b', 'u2', now + 1, jargon);
+      tracker.tick('g1', '<tag>打艺</tag> c', 'u3', now + 2, jargon);
+      const result = tracker.formatForPrompt('g1');
+      // Wrapper tag itself is allowed, but angle brackets in jargon must be stripped.
+      expect(result).not.toContain('<tag>');
+      expect(result).not.toContain('</tag>');
+    });
+
+    it('returns empty (no wrapper) when no topics or jokes', () => {
+      expect(tracker.formatForPrompt('unknown')).toBe('');
+    });
+  });
 });
