@@ -1220,19 +1220,12 @@ describe('ChatModule — image fallback marker (Fix 8 + Fix 9)', () => {
     expect(BANGDREAM_PERSONA).toContain('〔你看到那张图是');
   });
 
-  it('BANGDREAM_PERSONA bans "图没描述" and "未描述" leak phrases', () => {
-    expect(BANGDREAM_PERSONA).toContain('图没描述');
-    expect(BANGDREAM_PERSONA).toContain('未描述');
-    expect(BANGDREAM_PERSONA).toContain('绝对不要说');
-  });
-
-  it('BANGDREAM_PERSONA bans "描述" in image reply context', () => {
-    expect(BANGDREAM_PERSONA).toContain('描述太模糊');
-    expect(BANGDREAM_PERSONA).toContain('描述呢');
-  });
-
-  it('BANGDREAM_PERSONA bans reflexive "X是什么意思" question on image content', () => {
-    expect(BANGDREAM_PERSONA).toContain('绝对不要反问');
+  it('persona describes image handling softly, not with 绝对不要 prohibitions', () => {
+    expect(BANGDREAM_PERSONA).toContain('像亲眼看到一样');
+    expect(BANGDREAM_PERSONA).not.toContain('绝对不要反问');
+    expect(BANGDREAM_PERSONA).not.toContain('绝对不要说');
+    expect(BANGDREAM_PERSONA).not.toContain('描述太模糊');
+    expect(BANGDREAM_PERSONA).not.toContain('描述呢');
   });
 
   it('imageAwarenessLine uses soft "就当你亲眼看到" phrasing, not prescriptive "不要反问"', async () => {
