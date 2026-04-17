@@ -41,6 +41,12 @@ export interface IExpressionPromptSource {
 export interface IStylePromptSource {
   formatStyleForPrompt(groupId: string, userId: string): string;
 }
+export interface IAffinitySource {
+  recordInteraction(groupId: string, userId: string, type: 'chat' | 'at_friendly' | 'reply_continue' | 'correction'): void;
+  getAffinityFactor(groupId: string, userId: string): number;
+  formatAffinityHint(groupId: string, userId: string, nickname: string): string | null;
+}
+
 export interface IRelationshipPromptSource {
   getRelevantRelations(groupId: string, userIds: string[]): SocialRelation[];
   formatRelationsForPrompt(relations: SocialRelation[], nicknameMap: Map<string, string>): string;
@@ -142,6 +148,7 @@ export interface ScoreFactors {
   hasImage: number;
   interestMatch: number;
   noveltyPenalty: number;
+  affinityBoost: number;
 }
 
 // Signal A: bot alias keywords — always indicate a reference to the bot
@@ -741,6 +748,8 @@ export class ChatModule implements IChatModule {
   private expressionSource: IExpressionPromptSource | null = null;
   private styleSource: IStylePromptSource | null = null;
   private relationshipSource: IRelationshipPromptSource | null = null;
+  // M6.2b: affinity source (producer + consumer). null-safe; no-op when unset.
+  private affinitySource: IAffinitySource | null = null;
   // per-group: whether the last generateReply call returned an evasive reply
   private readonly lastEvasiveReply = new Map<string, boolean>();
   private readonly conversationState = new ConversationStateTracker();
@@ -883,6 +892,16 @@ export class ChatModule implements IChatModule {
       const oldest = this.lastReplyToUser.keys().next().value;
       if (oldest !== undefined) this.lastReplyToUser.delete(oldest);
     }
+  }
+
+  // M6.2b: record a 'chat' affinity interaction for the user the bot just
+  // replied to. Skipped when source unset, when the trigger author is the bot
+  // itself, or when triggerUserId is blank.
+  private _recordAffinityChat(groupId: string, triggerUserId: string): void {
+    if (!this.affinitySource) return;
+    if (!triggerUserId || triggerUserId === this.botUserId) return;
+    try { this.affinitySource.recordInteraction(groupId, triggerUserId, 'chat'); }
+    catch (err) { this.logger.warn({ err, groupId, userId: triggerUserId }, 'affinity chat record failed'); }
   }
 
   private _recordOwnReply(groupId: string, reply: string): void {
@@ -1115,6 +1134,9 @@ export class ChatModule implements IChatModule {
   setRelationshipSource(src: IRelationshipPromptSource | null): void {
     this.relationshipSource = src;
   }
+  setAffinitySource(src: IAffinitySource | null): void {
+    this.affinitySource = src;
+  }
 
   /** Return the key of the most recent sticker sent via sticker-first in this group, or null. */
   getLastStickerKey(groupId: string): string | null {
@@ -1331,6 +1353,23 @@ export class ChatModule implements IChatModule {
     this.lastProactiveReply.set(groupId, now);
     // Reset ignored-suppression tracking: committing to reply counts as speech.
     this.botSpeechTracking.set(groupId, { lastSpokeAt: now, msgsSinceSpoke: 0, engagementReceived: false });
+
+    // M6.2b: affinity producer — engage-path interactions. Record BEFORE
+    // react-path deflection branch since the user still engaged with the bot.
+    // Skip when trigger userId matches bot (defensive; peer flow never hits).
+    if (this.affinitySource && triggerMessage.userId !== this.botUserId) {
+      const isFriendlyMention = engagementSignals.isMention
+        && !engagementSignals.isAdversarial
+        && engagementSignals.comprehensionScore >= 0.5;
+      if (isFriendlyMention) {
+        try { this.affinitySource.recordInteraction(groupId, triggerMessage.userId, 'at_friendly'); }
+        catch (err) { this.logger.warn({ err, groupId, userId: triggerMessage.userId }, 'affinity at_friendly record failed'); }
+      }
+      if (engagementSignals.isReplyToBot) {
+        try { this.affinitySource.recordInteraction(groupId, triggerMessage.userId, 'reply_continue'); }
+        catch (err) { this.logger.warn({ err, groupId, userId: triggerMessage.userId }, 'affinity reply_continue record failed'); }
+      }
+    }
 
     // React path: deflection without calling Claude
     if (engagementDecision.strength === 'react') {
@@ -1598,7 +1637,18 @@ export class ChatModule implements IChatModule {
       return `\n〔context 注释：${triggerMessage.nickname} 最近这么说话——${styleText.replace(/\n/g, ' ')}〕`;
     })();
 
-    const userContent = `${liveBlock}${replyContextBlock}${keywordSection}${wideSection}${mediumSection}${immediateSection}${avoidSection}以上语境里 [你(昵称)] 是你自己说过的，[别人昵称] 是群友说的。**不要把群友的话当成你自己说过的**。${atMentionDirective}${youAddressedDirective}${moodHint}${convStateLine}${styleLine}
+    // M6.2b: affinity hint — per-user familiarity cue, user-role only.
+    // Same gate as style hint (direct trigger, non-bot user). Returns null when
+    // score is in the neutral band, so no dead header is emitted.
+    const affinityLine = (() => {
+      if (!this.affinitySource || !isDirectTrigger) return '';
+      if (triggerMessage.userId === this.botUserId) return '';
+      const hint = this.affinitySource.formatAffinityHint(groupId, triggerMessage.userId, triggerMessage.nickname);
+      if (!hint) return '';
+      return `\n〔context 注释：${hint}〕`;
+    })();
+
+    const userContent = `${liveBlock}${replyContextBlock}${keywordSection}${wideSection}${mediumSection}${immediateSection}${avoidSection}以上语境里 [你(昵称)] 是你自己说过的，[别人昵称] 是群友说的。**不要把群友的话当成你自己说过的**。${atMentionDirective}${youAddressedDirective}${moodHint}${convStateLine}${styleLine}${affinityLine}
 
 ← 要接的这条 — 只输出一个：${isAtTrigger ? '一条自然反应（不能是 <skip>）' : '<skip> 或 一条自然反应'}。${distinctSpeakers >= 3 ? `\n最近 ${distinctSpeakers} 个群友同时聊，可以用"你们"集体称呼。` : ''}
 ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMessage.content) ? '\n**注意**: 这条消息有人直接骂你。**绝对不要回"自言自语吗"/"在骂谁"** — 那是 bot tell。要么硬怼回去，要么 <skip>。' : ''}`;
@@ -1826,6 +1876,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
               this.stickerFirst.suppressSticker(groupId, choice.key);
               this.lastStickerKeyByGroup.set(groupId, choice.key);
               this._recordOwnReply(groupId, choice.cqCode);
+              this._recordAffinityChat(groupId, triggerMessage.userId);
               this.logger.info({ groupId, key: choice.key, score: choice.score }, 'sticker-first: sending sticker instead of text');
               return choice.cqCode;
             }
@@ -1839,6 +1890,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       // ────────────────────────────────────────────────────────────────────
 
       this._recordOwnReply(groupId, processed);
+      this._recordAffinityChat(groupId, triggerMessage.userId);
       this.engagedTopic.set(groupId, {
         tokens: extractTokens(triggerMessage.content),
         until: Date.now() + 90_000,
@@ -1886,7 +1938,14 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       hasImage: 0,
       interestMatch: 0,
       noveltyPenalty: 0,
+      affinityBoost: 0,
     };
+
+    // M6.2b: affinity boost — +0.15 / -0.10 / 0 based on per-user score threshold.
+    // Bot self messages never reach generateReply via peer flow, but defend anyway.
+    if (this.affinitySource && msg.userId !== this.botUserId) {
+      factors.affinityBoost = this.affinitySource.getAffinityFactor(groupId, msg.userId);
+    }
 
     // +0.5 for admin/owner — their messages are trusted commands and should
     // reliably trigger a reply (subject to cooldown). Admin dev/management

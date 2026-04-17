@@ -34,6 +34,8 @@ export interface ScoreFactors {
   readonly interestMatch: number;
   /** Novelty penalty (negative when trigger tokens overlap recent bot output). */
   readonly noveltyPenalty: number;
+  /** M6.2b per-user affinity boost (+0.15 high / -0.10 low / 0 neutral). */
+  readonly affinityBoost: number;
 }
 
 export interface IParticipationScorer {
@@ -79,7 +81,7 @@ export class ParticipationScorer implements IParticipationScorer {
         base: 0, mention: 0, replyToBot: 0, replyToOther: 0,
         implicitRef: 0, loreKeyword: 0, silence: 0,
         continuity: 0, topicStick: 0, burst: 0,
-        interestMatch: 0, noveltyPenalty: 0,
+        interestMatch: 0, noveltyPenalty: 0, affinityBoost: 0,
       },
       isDirect,
     };
