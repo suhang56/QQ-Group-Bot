@@ -1,4 +1,5 @@
 import type { GroupMessage } from '../adapter/napcat.js';
+import type { IMoodRepository } from '../storage/db.js';
 import { createLogger } from '../utils/logger.js';
 
 export interface MoodState {
@@ -13,6 +14,10 @@ export interface MoodDescription {
 }
 
 const DECAY_PER_MINUTE = 0.10;
+
+// M9.2: per-group debounced save window. Short enough to survive a typical
+// restart without losing recent mood, long enough to coalesce bursts.
+const SAVE_DEBOUNCE_MS = 10_000;
 
 // Keyword nudge patterns — order matters for clarity, not for matching
 const HAPPY_RE = /哈哈|笑死|绷不住|tql|牛逼|爽|舒服/i;
@@ -40,12 +45,37 @@ function applyDecay(state: MoodState, nowMs: number): MoodState {
 export class MoodTracker {
   private readonly logger = createLogger('mood');
   private readonly moods = new Map<string, MoodState>();
+  // M9.2: per-group debounce handles. Timer handles live in a separate map so
+  // mood reads stay allocation-free.
+  private readonly saveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  constructor(private readonly repo?: IMoodRepository) {
+    if (repo) {
+      try {
+        for (const row of repo.loadAll()) {
+          this.moods.set(row.groupId, {
+            valence: row.valence,
+            arousal: row.arousal,
+            lastUpdate: row.lastUpdate,
+          });
+        }
+      } catch (err) {
+        this.logger.warn({ err }, 'mood hydrate failed — starting with empty state');
+      }
+    }
+  }
 
   getMood(groupId: string): MoodState {
     const now = Date.now();
-    const state = this.moods.get(groupId) ?? { valence: 0, arousal: 0, lastUpdate: now };
-    const decayed = applyDecay(state, now);
+    const prev = this.moods.get(groupId) ?? { valence: 0, arousal: 0, lastUpdate: now };
+    const decayed = applyDecay(prev, now);
     this.moods.set(groupId, decayed);
+    // Only schedule save when decay actually mutated state — applyDecay returns
+    // the same reference for minutesElapsed <= 0. Without this guard chatty
+    // groups would schedule saves on every read-only mood lookup.
+    if (decayed !== prev) {
+      this.scheduleSave(groupId);
+    }
     return decayed;
   }
 
@@ -73,6 +103,7 @@ export class MoodTracker {
       lastUpdate: now,
     };
     this.moods.set(groupId, state);
+    this.scheduleSave(groupId);
     this.logger.debug({ groupId, dv, da, valence: state.valence, arousal: state.arousal }, 'mood updated');
   }
 
@@ -88,6 +119,7 @@ export class MoodTracker {
       arousal: state.arousal,
       lastUpdate: now,
     });
+    this.scheduleSave(groupId);
   }
 
   /** Apply environment-based arousal tick (group silence or burst). */
@@ -110,15 +142,60 @@ export class MoodTracker {
       arousal: clamp(state.arousal + da),
       lastUpdate: now,
     });
+    this.scheduleSave(groupId);
   }
 
   tickDecay(groupId: string): void {
-    this.getMood(groupId); // side-effect: decay + store
+    this.getMood(groupId); // side-effect: decay + store (+ conditional save)
   }
 
   describe(groupId: string): MoodDescription {
     const { valence, arousal } = this.getMood(groupId);
     return describeMood(valence, arousal);
+  }
+
+  /**
+   * Flush all pending per-group saves immediately. Call from shutdown so the
+   * most recent mood survives process exit without waiting for the debounce.
+   */
+  flushAll(): void {
+    const groupIds = Array.from(this.saveTimers.keys());
+    for (const groupId of groupIds) {
+      const timer = this.saveTimers.get(groupId);
+      if (timer) clearTimeout(timer);
+      this.saveTimers.delete(groupId);
+      this.flushOne(groupId);
+    }
+  }
+
+  private scheduleSave(groupId: string): void {
+    if (!this.repo) return;
+    const existing = this.saveTimers.get(groupId);
+    if (existing) clearTimeout(existing);
+    const h = setTimeout(() => {
+      this.saveTimers.delete(groupId);
+      this.flushOne(groupId);
+    }, SAVE_DEBOUNCE_MS);
+    // unref mandatory — pending timers otherwise keep the process alive and
+    // block clean shutdown (feedback_timer_unref).
+    h.unref?.();
+    this.saveTimers.set(groupId, h);
+  }
+
+  private flushOne(groupId: string): void {
+    if (!this.repo) return;
+    const state = this.moods.get(groupId);
+    if (!state) return;
+    try {
+      this.repo.upsert({
+        groupId,
+        valence: state.valence,
+        arousal: state.arousal,
+        lastUpdate: state.lastUpdate,
+      });
+    } catch (err) {
+      this.logger.warn({ err, groupId }, 'mood persist failed');
+    }
   }
 }
 

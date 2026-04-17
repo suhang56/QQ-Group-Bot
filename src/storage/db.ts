@@ -604,6 +604,20 @@ export interface IUserStyleAggregateRepository {
   get(groupId: string): GroupAggregateStyle | null;
 }
 
+// ---- Mood state (M9.2) ----
+
+export interface MoodRow {
+  groupId: string;
+  valence: number;
+  arousal: number;
+  lastUpdate: number; // ms timestamp
+}
+
+export interface IMoodRepository {
+  loadAll(): MoodRow[];
+  upsert(row: MoodRow): void;
+}
+
 // ---- Meme graph (memes-v1) ----
 
 export interface MemeGraphEntry {
@@ -2631,6 +2645,38 @@ class UserStyleAggregateRepository implements IUserStyleAggregateRepository {
   }
 }
 
+// ---- Mood repository (M9.2) ----
+
+class MoodRepository implements IMoodRepository {
+  private readonly loadStmt;
+  private readonly upsertStmt;
+
+  constructor(db: DatabaseSync) {
+    this.loadStmt = db.prepare(
+      'SELECT group_id, valence, arousal, last_update FROM mood_state',
+    );
+    this.upsertStmt = db.prepare(
+      'INSERT OR REPLACE INTO mood_state (group_id, valence, arousal, last_update) VALUES (?, ?, ?, ?)',
+    );
+  }
+
+  loadAll(): MoodRow[] {
+    const rows = this.loadStmt.all() as unknown as Array<{
+      group_id: string; valence: number; arousal: number; last_update: number;
+    }>;
+    return rows.map(r => ({
+      groupId: r.group_id,
+      valence: r.valence,
+      arousal: r.arousal,
+      lastUpdate: r.last_update,
+    }));
+  }
+
+  upsert(row: MoodRow): void {
+    this.upsertStmt.run(row.groupId, row.valence, row.arousal, row.lastUpdate);
+  }
+}
+
 // ---- Main Database class ----
 
 export class Database {
@@ -2656,6 +2702,7 @@ export class Database {
   readonly expressionPatterns: IExpressionPatternRepository;
   readonly userStyles: IUserStyleRepository;
   readonly userStylesAggregate: IUserStyleAggregateRepository;
+  readonly mood: IMoodRepository;
   readonly memeGraph: IMemeGraphRepo;
   readonly phraseCandidates: IPhraseCandidatesRepo;
 
@@ -2692,6 +2739,7 @@ export class Database {
     this.expressionPatterns = new ExpressionPatternRepository(this._db);
     this.userStyles = new UserStyleRepository(this._db);
     this.userStylesAggregate = new UserStyleAggregateRepository(this._db);
+    this.mood = new MoodRepository(this._db);
     this.memeGraph = new MemeGraphRepository(this._db);
     this.phraseCandidates = new PhraseCandidatesRepository(this._db);
   }
@@ -3151,6 +3199,18 @@ export class Database {
       ON persona_patch_proposals(group_id, created_at DESC) WHERE status = 'pending'`);
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_ppp_group_kind_created
       ON persona_patch_proposals(group_id, kind, created_at DESC)`);
+
+    // mood_state (M9.2): per-group persisted mood (valence/arousal).
+    // Mirrors schema.sql — required for existing DBs per feedback_sqlite_schema_migration
+    // since schema.sql is silently skipped when the target DB already has tables.
+    this._db.exec(`
+      CREATE TABLE IF NOT EXISTS mood_state (
+        group_id    TEXT    PRIMARY KEY,
+        valence     REAL    NOT NULL DEFAULT 0,
+        arousal     REAL    NOT NULL DEFAULT 0,
+        last_update INTEGER NOT NULL
+      )
+    `);
   }
 
   /**

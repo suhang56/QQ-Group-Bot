@@ -694,7 +694,9 @@ export class ChatModule implements IChatModule {
   private readonly atMentionSpamWindowMs = 10 * 60 * 1000; // 10 minutes
   private readonly atMentionSpamThreshold = 4;             // >= 4 @s in window → annoyed
 
-  private readonly moodTracker = new MoodTracker();
+  // M9.2: constructed in the ctor body so we can inject db.mood for persistence.
+  // Left readonly (single assignment in ctor) — same contract as before.
+  private readonly moodTracker: MoodTracker;
   private readonly moodProactiveIntervalMs: number;
   private readonly moodProactiveMinSilenceMs: number;
   private readonly moodProactiveMaxPerGroupMs: number;
@@ -799,6 +801,9 @@ export class ChatModule implements IChatModule {
     private readonly db: Database,
     options: ChatOptions = {}
   ) {
+    // M9.2: wire in persistence repo so mood survives process restart. Passing
+    // db.mood also triggers synchronous hydration in the MoodTracker ctor.
+    this.moodTracker = new MoodTracker(db.mood);
     this.debounceMs = options.debounceMs ?? 2000;
     this.maxGroupRepliesPerMinute = options.maxGroupRepliesPerMinute ?? 20;
     this.keywordMatchCount = options.chatKeywordMatchCount ?? chatHistoryDefaults.chatKeywordMatchCount;
@@ -890,6 +895,8 @@ export class ChatModule implements IChatModule {
       clearInterval(this.deflectRefillTimer);
       this.deflectRefillTimer = null;
     }
+    // M9.2: persist any pending debounced mood writes before the DB goes away.
+    this.moodTracker.flushAll();
     this.conversationState.destroy();
   }
 
@@ -1453,6 +1460,13 @@ export class ChatModule implements IChatModule {
     // Use the pre-trigger snapshot so the trigger itself doesn't bias its
     // own decision (see activityLevelPre comment above generateReply top).
     const activityLevel = activityLevelPre;
+    // M9.2: mood level snapshot BEFORE trigger-side mood update. Read-only
+    // lookup — getMood's decay side-effect is fine here (no keyword nudge).
+    const moodNow = this.moodTracker.getMood(groupId);
+    const moodLevel: 'low' | 'normal' | 'high' =
+      moodNow.valence < -0.4 ? 'low'
+      : moodNow.valence > 0.4 ? 'high'
+      : 'normal';
     const engagementSignals: EngagementSignals = {
       isMention: this._isMention(triggerMessage),
       isReplyToBot: this._isReplyToBot(triggerMessage),
@@ -1470,12 +1484,14 @@ export class ChatModule implements IChatModule {
       relevanceOverride,
       addresseeIsOther,
       awkwardVeto,
+      moodLevel,
     };
     const engagementDecision = makeEngagementDecision(engagementSignals);
     const isDirectForLog = engagementSignals.isMention || engagementSignals.isReplyToBot;
     const directMult = isDirectForLog ? 1.0 : 1.5;
     const activityMult = activityLevel === 'busy' ? 1.4 : activityLevel === 'idle' ? 0.75 : 1.0;
-    const effectiveMinScore = this.chatMinScore * directMult * activityMult;
+    const moodMult = moodLevel === 'low' ? 1.2 : moodLevel === 'high' ? 0.9 : 1.0;
+    const effectiveMinScore = this.chatMinScore * directMult * activityMult * moodMult;
 
     this.logger.debug({
       groupId,
@@ -1485,6 +1501,8 @@ export class ChatModule implements IChatModule {
       engagement: engagementDecision.strength,
       reason: engagementDecision.reason,
       activityLevel,
+      moodLevel,
+      moodMultiplier: moodMult,
       effectiveMinScore: +effectiveMinScore.toFixed(3),
     }, 'engagement decision');
 
@@ -2349,7 +2367,15 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     const teaseActive = !!entry && entry.count > 0 && (Date.now() - entry.lastHit) < this.teaseCounterWindowMs;
     if (teaseActive) return primary;
 
-    // 14. Default: lurker-mode casual banter → fast path.
+    // 14. M9.2: low-mood → primary model. Irritable bot on the fast path blurts
+    // snappy one-liners that miss the emotional register the persona wants;
+    // route to primary so persona coherence survives the down-swing. Read-only
+    // getMood lookup (decay-only side effect). Direct hits were already routed
+    // to primary above (Steps 2-4), so this only catches lurker/peer chat.
+    const moodNow = this.moodTracker.getMood(groupId);
+    if (moodNow.valence < -0.4) return primary;
+
+    // 15. Default: lurker-mode casual banter → fast path.
     return CHAT_QWEN_MODEL;
   }
 

@@ -498,3 +498,14 @@ CREATE INDEX IF NOT EXISTS idx_persona_patch_group_pending
 -- M8.1: per-kind cadence + history queries.
 CREATE INDEX IF NOT EXISTS idx_ppp_group_kind_created
   ON persona_patch_proposals(group_id, kind, created_at DESC);
+
+-- mood_state (M9.2): per-group persisted valence/arousal. In-memory MoodTracker
+-- hydrates from this table at construction and debounce-writes back (10s). Without
+-- persistence the bot starts every process with neutral mood, losing accumulated
+-- sentiment from the last session.
+CREATE TABLE IF NOT EXISTS mood_state (
+  group_id    TEXT    PRIMARY KEY,
+  valence     REAL    NOT NULL DEFAULT 0,
+  arousal     REAL    NOT NULL DEFAULT 0,
+  last_update INTEGER NOT NULL
+);

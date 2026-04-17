@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MoodTracker, describeMood, PROACTIVE_POOLS } from '../src/modules/mood.js';
-import { ChatModule, TASK_DEFLECTIONS, SILENCE_BREAKER_POOL } from '../src/modules/chat.js';
+import { ChatModule, SILENCE_BREAKER_POOL, type ScoreFactors } from '../src/modules/chat.js';
 import { Database } from '../src/storage/db.js';
 import type { IClaudeClient, ClaudeResponse } from '../src/ai/claude.js';
 import type { GroupMessage } from '../src/adapter/napcat.js';
@@ -381,5 +381,326 @@ describe('ChatModule — silence-breaker proactive', () => {
     await chat['_moodProactiveTick']();
     expect(sent.length).toBe(1);
     expect(sent[0]!.groupId).toBe('g1');
+  });
+});
+
+// ── M9.2 persistence ─────────────────────────────────────────────────────────
+
+describe('MoodTracker — M9.2 persistence', () => {
+  // Use fake timers so debounce semantics are deterministic. Each test tears
+  // them down in afterEach via vi.useRealTimers().
+  beforeEach(() => { vi.useFakeTimers(); });
+
+  it('hydrates multiple groups from repo in constructor', () => {
+    const rows = [
+      { groupId: 'g1', valence: 0.5, arousal: 0.3, lastUpdate: Date.now() },
+      { groupId: 'g2', valence: -0.2, arousal: -0.4, lastUpdate: Date.now() },
+      { groupId: 'g3', valence: 0.1, arousal: 0.1, lastUpdate: Date.now() },
+    ];
+    const repo = {
+      loadAll: vi.fn().mockReturnValue(rows),
+      upsert: vi.fn(),
+    };
+    const tracker = new MoodTracker(repo);
+    expect(tracker['moods'].size).toBe(3);
+    expect(tracker['moods'].get('g1')!.valence).toBeCloseTo(0.5, 3);
+    expect(tracker['moods'].get('g2')!.valence).toBeCloseTo(-0.2, 3);
+    expect(tracker['moods'].get('g3')!.valence).toBeCloseTo(0.1, 3);
+    expect(repo.loadAll).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
+  it('no-repo ctor works and no save is scheduled', () => {
+    const tracker = new MoodTracker();
+    tracker.updateFromMessage('g1', makeMsg({ content: '笑死' }));
+    expect(tracker['saveTimers'].size).toBe(0);
+    vi.useRealTimers();
+  });
+
+  it('updateFromMessage schedules save; fires after 10s', () => {
+    const repo = { loadAll: vi.fn().mockReturnValue([]), upsert: vi.fn() };
+    const tracker = new MoodTracker(repo);
+    tracker.updateFromMessage('g1', makeMsg({ content: '笑死哈哈' }));
+    expect(repo.upsert).not.toHaveBeenCalled();
+    expect(tracker['saveTimers'].size).toBe(1);
+    vi.advanceTimersByTime(10_000);
+    expect(repo.upsert).toHaveBeenCalledTimes(1);
+    expect(repo.upsert.mock.calls[0]![0].groupId).toBe('g1');
+    expect(tracker['saveTimers'].size).toBe(0);
+    vi.useRealTimers();
+  });
+
+  it('multiple rapid updates debounce to a single save', () => {
+    const repo = { loadAll: vi.fn().mockReturnValue([]), upsert: vi.fn() };
+    const tracker = new MoodTracker(repo);
+    // 5 updates spaced 1s apart — each resets the debounce.
+    for (let i = 0; i < 5; i++) {
+      tracker.updateFromMessage('g1', makeMsg({ content: '笑死' }));
+      vi.advanceTimersByTime(1_000);
+    }
+    expect(repo.upsert).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(10_000);
+    expect(repo.upsert).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
+  it('flushAll clears all timers and flushes all pending', () => {
+    const repo = { loadAll: vi.fn().mockReturnValue([]), upsert: vi.fn() };
+    const tracker = new MoodTracker(repo);
+    tracker.updateFromMessage('g1', makeMsg({ groupId: 'g1', content: '笑死' }));
+    tracker.updateFromMessage('g2', makeMsg({ groupId: 'g2', content: 'Roselia' }));
+    tracker.updateFromMessage('g3', makeMsg({ groupId: 'g3', content: '牛逼' }));
+    expect(tracker['saveTimers'].size).toBe(3);
+    tracker.flushAll();
+    expect(repo.upsert).toHaveBeenCalledTimes(3);
+    expect(tracker['saveTimers'].size).toBe(0);
+    // Advancing past the debounce window should not re-fire (timers were cleared).
+    vi.advanceTimersByTime(20_000);
+    expect(repo.upsert).toHaveBeenCalledTimes(3);
+    vi.useRealTimers();
+  });
+
+  it('flushOne tolerates repo throw (logs warn, no crash)', () => {
+    const repo = {
+      loadAll: vi.fn().mockReturnValue([]),
+      upsert: vi.fn().mockImplementation(() => { throw new Error('db gone'); }),
+    };
+    const tracker = new MoodTracker(repo);
+    tracker.updateFromMessage('g1', makeMsg({ content: '笑死' }));
+    // Should not throw
+    expect(() => vi.advanceTimersByTime(10_000)).not.toThrow();
+    expect(repo.upsert).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
+  it('getMood with minutesElapsed <= 0 does NOT schedule save', () => {
+    const repo = { loadAll: vi.fn().mockReturnValue([]), upsert: vi.fn() };
+    const tracker = new MoodTracker(repo);
+    // Seed state at exactly now; getMood should see minutesElapsed=0 and not decay.
+    const now = Date.now();
+    tracker['moods'].set('g1', { valence: 0.3, arousal: 0.2, lastUpdate: now });
+    tracker.getMood('g1');
+    expect(tracker['saveTimers'].size).toBe(0);
+    vi.useRealTimers();
+  });
+
+  it('getMood with decay mutation DOES schedule save', () => {
+    const repo = { loadAll: vi.fn().mockReturnValue([]), upsert: vi.fn() };
+    const tracker = new MoodTracker(repo);
+    // Seed state 5 minutes in the past so decay kicks in.
+    tracker['moods'].set('g1', { valence: 0.5, arousal: 0.5, lastUpdate: Date.now() - 5 * 60_000 });
+    tracker.getMood('g1');
+    expect(tracker['saveTimers'].size).toBe(1);
+    vi.useRealTimers();
+  });
+
+  it('save timer is unref-ed', () => {
+    const repo = { loadAll: vi.fn().mockReturnValue([]), upsert: vi.fn() };
+    const tracker = new MoodTracker(repo);
+    // Stub setTimeout so we can inspect the unref call. vitest fake timers
+    // don't expose .unref on the handle directly; use a spy instead.
+    const unrefSpy = vi.fn();
+    const origSet = global.setTimeout;
+    (global as unknown as { setTimeout: typeof setTimeout }).setTimeout = ((fn: () => void, ms: number) => {
+      const handle = origSet(fn, ms) as unknown as { unref?: () => void };
+      handle.unref = unrefSpy;
+      return handle as unknown as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout;
+    try {
+      tracker.updateFromMessage('g1', makeMsg({ content: '笑死' }));
+      expect(unrefSpy).toHaveBeenCalled();
+    } finally {
+      (global as unknown as { setTimeout: typeof setTimeout }).setTimeout = origSet;
+    }
+    vi.useRealTimers();
+  });
+
+  it('rewardEngagement schedules save', () => {
+    const repo = { loadAll: vi.fn().mockReturnValue([]), upsert: vi.fn() };
+    const tracker = new MoodTracker(repo);
+    tracker.rewardEngagement('g1');
+    expect(tracker['saveTimers'].size).toBe(1);
+    vi.useRealTimers();
+  });
+
+  it('tickEnvironment schedules save', () => {
+    const repo = { loadAll: vi.fn().mockReturnValue([]), upsert: vi.fn() };
+    const tracker = new MoodTracker(repo);
+    tracker.tickEnvironment('g1', 10 * 60_000, false);
+    expect(tracker['saveTimers'].size).toBe(1);
+    vi.useRealTimers();
+  });
+
+  it('hydrate failure falls back to empty state (no crash)', () => {
+    const repo = {
+      loadAll: vi.fn().mockImplementation(() => { throw new Error('db corrupt'); }),
+      upsert: vi.fn(),
+    };
+    let tracker!: MoodTracker;
+    expect(() => { tracker = new MoodTracker(repo); }).not.toThrow();
+    expect(tracker['moods'].size).toBe(0);
+    vi.useRealTimers();
+  });
+});
+
+// ── M9.2 Database.mood integration ───────────────────────────────────────────
+
+describe('Database.mood repository — M9.2', () => {
+  it('fresh DB: loadAll returns empty array', () => {
+    const db = new Database(':memory:');
+    expect(db.mood.loadAll()).toEqual([]);
+  });
+
+  it('upsert + loadAll round-trips a row', () => {
+    const db = new Database(':memory:');
+    const row = { groupId: 'g1', valence: 0.42, arousal: -0.17, lastUpdate: 1700000000000 };
+    db.mood.upsert(row);
+    const rows = db.mood.loadAll();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.groupId).toBe('g1');
+    expect(rows[0]!.valence).toBeCloseTo(0.42, 5);
+    expect(rows[0]!.arousal).toBeCloseTo(-0.17, 5);
+    expect(rows[0]!.lastUpdate).toBe(1700000000000);
+  });
+
+  it('upsert on existing PK replaces the row', () => {
+    const db = new Database(':memory:');
+    db.mood.upsert({ groupId: 'g1', valence: 0.5, arousal: 0.5, lastUpdate: 100 });
+    db.mood.upsert({ groupId: 'g1', valence: -0.3, arousal: 0.1, lastUpdate: 200 });
+    const rows = db.mood.loadAll();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.valence).toBeCloseTo(-0.3, 5);
+    expect(rows[0]!.lastUpdate).toBe(200);
+  });
+
+  it('multiple groups coexist', () => {
+    const db = new Database(':memory:');
+    db.mood.upsert({ groupId: 'g1', valence: 0.4, arousal: 0.2, lastUpdate: 1 });
+    db.mood.upsert({ groupId: 'g2', valence: -0.5, arousal: -0.1, lastUpdate: 2 });
+    const byId = new Map(db.mood.loadAll().map(r => [r.groupId, r]));
+    expect(byId.size).toBe(2);
+    expect(byId.get('g1')!.valence).toBeCloseTo(0.4, 5);
+    expect(byId.get('g2')!.valence).toBeCloseTo(-0.5, 5);
+  });
+});
+
+// ── M9.2 ChatModule restart persistence + model pick ─────────────────────────
+
+describe('ChatModule — M9.2 mood persistence + model pick', () => {
+  beforeEach(() => { vi.useRealTimers(); });
+
+  function makeClaude(): ReturnType<typeof vi.fn> {
+    return vi.fn().mockResolvedValue({
+      text: 'bot reply', inputTokens: 10, outputTokens: 5,
+      cacheReadTokens: 0, cacheWriteTokens: 0,
+    } satisfies ClaudeResponse);
+  }
+
+  it('mood persists across ChatModule reconstruction (restart scenario)', () => {
+    const db = new Database(':memory:');
+    const claude = makeClaude();
+    const chat1 = new ChatModule(
+      { complete: claude } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID, moodProactiveEnabled: false },
+    );
+    chat1.getMoodTracker().updateFromMessage('g1', makeMsg({ content: '笑死哈哈' }));
+    const before = chat1.getMoodTracker().getMood('g1');
+    expect(before.valence).toBeGreaterThan(0);
+    // Flush pending debounced save to DB (simulates graceful shutdown).
+    chat1.destroy();
+
+    // Simulate restart: new ChatModule sharing the same DB.
+    const chat2 = new ChatModule(
+      { complete: claude } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID, moodProactiveEnabled: false },
+    );
+    const after = chat2.getMoodTracker().getMood('g1');
+    // Should be at least the same rough sign; decay may have happened but
+    // valence should still be positive (we saved a positive valence).
+    expect(after.valence).toBeGreaterThan(0);
+    chat2.destroy();
+  });
+
+  function makeFactors(overrides: Partial<ScoreFactors> = {}): ScoreFactors {
+    return {
+      mention: 0, replyToBot: 0, question: 0, silence: 0, loreKw: 0,
+      length: 0, twoUser: 0, burst: 0, replyToOther: 0, implicitBotRef: 0,
+      continuity: 0, clarification: 0, topicStick: 0, metaIdentityProbe: 0,
+      adminBoost: 0, stickerRequest: 0, hasImage: 0, ...overrides,
+    };
+  }
+
+  function pick(chat: ChatModule, groupId: string, msg: GroupMessage, factors: ScoreFactors): string {
+    return (chat as unknown as {
+      _pickChatModel: (g: string, m: GroupMessage, f: ScoreFactors) => string;
+    })._pickChatModel(groupId, msg, factors);
+  }
+
+  it('_pickChatModel picks primary when mood valence < -0.4 on non-direct message', () => {
+    delete process.env['CHAT_QWEN_DISABLED'];
+    delete process.env['DEEPSEEK_API_KEY'];
+    const db = new Database(':memory:');
+    const claude = makeClaude();
+    const chat = new ChatModule(
+      { complete: claude } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID, moodProactiveEnabled: false },
+    );
+    // Seed low-mood state
+    chat.getMoodTracker()['moods'].set('g1', {
+      valence: -0.6, arousal: 0, lastUpdate: Date.now(),
+    });
+    const msg = makeMsg({
+      groupId: 'g1', userId: 'u1', role: 'member',
+      content: '今天天气不错',
+    });
+    const picked = pick(chat, 'g1', msg, makeFactors());
+    // Primary is sonnet by default (DEEPSEEK not enabled).
+    expect(picked).toBe('claude-sonnet-4-6');
+    chat.destroy();
+  });
+
+  it('_pickChatModel picks fast path (qwen) when mood is normal on non-direct message', () => {
+    delete process.env['CHAT_QWEN_DISABLED'];
+    delete process.env['DEEPSEEK_API_KEY'];
+    const db = new Database(':memory:');
+    const claude = makeClaude();
+    const chat = new ChatModule(
+      { complete: claude } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID, moodProactiveEnabled: false },
+    );
+    chat.getMoodTracker()['moods'].set('g1', {
+      valence: 0, arousal: 0, lastUpdate: Date.now(),
+    });
+    const msg = makeMsg({
+      groupId: 'g1', userId: 'u1', role: 'member',
+      content: '今天天气不错',
+    });
+    const picked = pick(chat, 'g1', msg, makeFactors());
+    // Default fast path is qwen3:8b — not one of the primaries.
+    expect(picked).toBe('qwen3:8b');
+    chat.destroy();
+  });
+
+  it('_pickChatModel still picks primary on direct @ even with high mood', () => {
+    delete process.env['CHAT_QWEN_DISABLED'];
+    delete process.env['DEEPSEEK_API_KEY'];
+    const db = new Database(':memory:');
+    const claude = makeClaude();
+    const chat = new ChatModule(
+      { complete: claude } as unknown as IClaudeClient,
+      db,
+      { botUserId: BOT_ID, moodProactiveEnabled: false },
+    );
+    chat.getMoodTracker()['moods'].set('g1', {
+      valence: 0.9, arousal: 0.9, lastUpdate: Date.now(),
+    });
+    const msg = makeMsg({ groupId: 'g1', content: '@bot hello' });
+    const picked = pick(chat, 'g1', msg, makeFactors({ mention: 1 }));
+    expect(picked).toBe('claude-sonnet-4-6');
+    chat.destroy();
   });
 });
