@@ -241,14 +241,43 @@ export class NapCatAdapter extends EventEmitter implements INapCatAdapter {
   }
 
   async getImage(file: string): Promise<{ filename: string; url: string; size: number; base64?: string }> {
-    const resp = await this.action('get_image', { file });
-    const data = resp.data as { filename?: string; url?: string; size?: number; base64?: string } | undefined;
-    return {
-      filename: data?.filename ?? '',
-      url: data?.url ?? '',
-      size: data?.size ?? 0,
-      base64: data?.base64,
-    };
+    const BACKOFFS_MS = [500, 1500];
+    const fileShort = file.slice(0, 12);
+    let lastErr: unknown;
+    for (let attempt = 0; attempt <= BACKOFFS_MS.length; attempt++) {
+      try {
+        const resp = await this.action('get_image', { file });
+        const data = resp.data as { filename?: string; url?: string; size?: number; base64?: string } | undefined;
+        return {
+          filename: data?.filename ?? '',
+          url: data?.url ?? '',
+          size: data?.size ?? 0,
+          base64: data?.base64,
+        };
+      } catch (err) {
+        lastErr = err;
+        const isRetryable = err instanceof Error && /Timeout.*downloadRichMedia/i.test(err.message);
+        if (!isRetryable || attempt >= BACKOFFS_MS.length) {
+          if (isRetryable && attempt >= BACKOFFS_MS.length) {
+            this.logger.warn(
+              { file: fileShort, err },
+              `[napcat] getImage exhausted 3 attempts, giving up (file=${fileShort})`,
+            );
+          }
+          throw err;
+        }
+        const backoff = BACKOFFS_MS[attempt]!;
+        this.logger.warn(
+          { file: fileShort, backoff, attempt: attempt + 1 },
+          `[napcat] getImage retry ${attempt + 1}/2 after Timeout (file=${fileShort}, waited ${backoff}ms)`,
+        );
+        await new Promise<void>(resolve => {
+          const t = setTimeout(resolve, backoff);
+          t.unref?.();
+        });
+      }
+    }
+    throw lastErr;
   }
 
   async getGroupInfo(groupId: string): Promise<{ groupId: string; name: string; description: string; memberCount: number }> {
