@@ -260,20 +260,24 @@ export class NapCatAdapter extends EventEmitter implements INapCatAdapter {
           err instanceof NapCatActionError &&
           err.message.includes("'get_image'") &&
           err.cause instanceof Error &&
-          /timed out/i.test(err.cause.message);
+          /timed out|file not found/i.test(err.cause.message);
+        const category =
+          isRetryable && /file not found/i.test((err as NapCatActionError).cause instanceof Error ? ((err as NapCatActionError).cause as Error).message : '')
+            ? 'file-not-found'
+            : 'timeout';
         if (!isRetryable || attempt >= BACKOFFS_MS.length) {
           if (isRetryable && attempt >= BACKOFFS_MS.length) {
             this.logger.warn(
-              { file: fileShort, err },
-              `[napcat] getImage exhausted retries after get_image timeout (file=${fileShort}, total ${500 + 1500}ms)`,
+              { file: fileShort, err, category },
+              `[napcat] getImage exhausted retries after get_image ${category} (file=${fileShort}, total ${500 + 1500}ms)`,
             );
           }
           throw err;
         }
         const backoff = BACKOFFS_MS[attempt]!;
         this.logger.warn(
-          { file: fileShort, backoff, attempt: attempt + 1 },
-          `[napcat] getImage retry ${attempt + 1}/2 after get_image timeout (file=${fileShort}, waited ${backoff}ms)`,
+          { file: fileShort, backoff, attempt: attempt + 1, category },
+          `[napcat] getImage retry ${attempt + 1}/2 after get_image ${category} (file=${fileShort}, waited ${backoff}ms)`,
         );
         await new Promise<void>(resolve => {
           const t = setTimeout(resolve, backoff);
