@@ -64,11 +64,16 @@ describe('OpportunisticHarvest — pending queue (Feature B)', () => {
     }
   });
 
-  it('auto-activates high-confidence rows (>= 0.85)', async () => {
+  it('UR-H: high-confidence rows also land as pending (auto-activate removed)', async () => {
+    // UR-H security hardening: the pending-queue isolation gate only holds
+    // if every harvested row actually lands pending. Auto-activating rows
+    // with confidence >= 0.85 let an adversarial sample with a confident
+    // LLM score bypass human approval and inject directly into chat via
+    // formatFactsForPrompt (which filters status='active').
     const factRepo = makeFactRepo();
     const claude = makeClaude([
-      { topic: 'T', fact: '高置信度直接激活的事实A', sourceNickname: 'A', confidence: 0.9 },
-      { topic: 'T', fact: '低置信度需要审核的事实B', sourceNickname: 'B', confidence: 0.5 },
+      { topic: 'T', fact: '高置信度事实A内容示例足够长', sourceNickname: 'A', confidence: 0.9 },
+      { topic: 'T', fact: '低置信度事实B内容示例足够长', sourceNickname: 'B', confidence: 0.5 },
     ]);
     const harvest = new OpportunisticHarvest({
       messages: makeMsgRepo(makeMsgs(15)), learnedFacts: factRepo,
@@ -76,7 +81,7 @@ describe('OpportunisticHarvest — pending queue (Feature B)', () => {
     });
     await harvest._run();
     expect(factRepo.inserted).toHaveLength(2);
-    expect(factRepo.inserted[0]!.status).toBe('active');
+    expect(factRepo.inserted[0]!.status).toBe('pending');
     expect(factRepo.inserted[1]!.status).toBe('pending');
   });
 
