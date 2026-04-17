@@ -44,6 +44,8 @@ export interface IExpressionPromptSource {
 }
 export interface IStylePromptSource {
   formatStyleForPrompt(groupId: string, userId: string): string;
+  /** M8.2: group-level speech vibe; '' when no aggregate exists. */
+  formatGroupAggregateForPrompt(groupId: string): string;
 }
 export interface IAffinitySource {
   recordInteraction(groupId: string, userId: string, type: 'chat' | 'at_friendly' | 'reply_continue' | 'correction'): void;
@@ -1204,6 +1206,14 @@ export class ChatModule implements IChatModule {
     this.groupIdentityCache.delete(groupId);
     this.stickerSectionCache.delete(groupId);
     this.stickerRefreshCounter.set(groupId, 0);
+  }
+
+  /**
+   * M8.2: evict the identity prompt cache so the next message rebuilds with
+   * the fresh aggregate. Called from StyleLearner's onAggregateUpdated hook.
+   */
+  invalidateGroupIdentityCache(groupId: string): void {
+    this.groupIdentityCache.delete(groupId);
   }
 
   /** Increment per-group sticker legend counter; evicts sticker section cache when threshold hit. */
@@ -3366,6 +3376,15 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     const jargonEntries = loadGroupJargon(this.db.rawDb, groupId);
     const jargonSection = formatJargonBlock(jargonEntries);
 
+    // M8.2: group-aggregate speech vibe. Char-mode suppresses this block so
+    // the active character's voice is not diluted by the host group's flavor.
+    const groupStyleSection = (() => {
+      if (!this.styleSource) return '';
+      if (config?.activeCharacterId && this.charModule) return '';
+      const text = this.styleSource.formatGroupAggregateForPrompt(groupId);
+      return text ? `\n\n${text}` : '';
+    })();
+
     // M6.2a: expression-learner — group-scoped past reply patterns. Helper
     // returns '' when no rows; prepend a newline separator only when non-empty
     // so we never emit a dangling header.
@@ -3409,7 +3428,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       ? '\n群友随口问群规，甩"自己看公告"/"不记得了"/"问 @管理"/"?"就行，别当 FAQ 机。只有管理员明确让你列规矩时再展开说。'
       : '';
 
-    const text = `${personaBase}${adminStyleSection}${loreSection}${jargonSection}${expressionSection}${relationshipSection}${rulesBlock}${imageAwarenessLine}\n\n---\n简短自然（普通闲聊 1-3 句话；涉及列举 / 计数 / 时间线 / 多人信息且事实段落有料时允许 2-4 行展开）。群友提到群里的人名、梗、黑话，基于上面资料接一下；不知道的就"啥来的"，不要装懂。${rulesInstruction}${outputRules}`;
+    const text = `${personaBase}${adminStyleSection}${loreSection}${jargonSection}${groupStyleSection}${expressionSection}${relationshipSection}${rulesBlock}${imageAwarenessLine}\n\n---\n简短自然（普通闲聊 1-3 句话；涉及列举 / 计数 / 时间线 / 多人信息且事实段落有料时允许 2-4 行展开）。群友提到群里的人名、梗、黑话，基于上面资料接一下；不知道的就"啥来的"，不要装懂。${rulesInstruction}${outputRules}`;
 
     // Only cache the full text when NOT using per-member lore and NOT using
     // per-call relationship data (both vary per call otherwise).

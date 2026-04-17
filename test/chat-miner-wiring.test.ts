@@ -119,6 +119,7 @@ describe('ChatModule — M6.2a miner wiring', () => {
         formatStyleForPrompt: vi.fn().mockReturnValue(
           '## 这个人的说话风格\n- 口头禅: 草、啊这',
         ),
+        formatGroupAggregateForPrompt: vi.fn().mockReturnValue(''),
       };
       const chat = makeChat(claude, db);
       chat.setStyleSource(styleSource);
@@ -142,6 +143,7 @@ describe('ChatModule — M6.2a miner wiring', () => {
     it('does NOT call style helper on non-direct triggers (ambient chat)', async () => {
       const styleSource: IStylePromptSource = {
         formatStyleForPrompt: vi.fn().mockReturnValue('## 这个人的说话风格\n- 口头禅: x'),
+        formatGroupAggregateForPrompt: vi.fn().mockReturnValue(''),
       };
       const chat = makeChat(claude, db);
       chat.setStyleSource(styleSource);
@@ -157,6 +159,7 @@ describe('ChatModule — M6.2a miner wiring', () => {
     it('skips style hint when helper returns empty (no dead brackets)', async () => {
       const styleSource: IStylePromptSource = {
         formatStyleForPrompt: vi.fn().mockReturnValue(''),
+        formatGroupAggregateForPrompt: vi.fn().mockReturnValue(''),
       };
       const chat = makeChat(claude, db);
       chat.setStyleSource(styleSource);
@@ -177,6 +180,7 @@ describe('ChatModule — M6.2a miner wiring', () => {
     it('skips style hint when trigger userId matches bot', async () => {
       const styleSource: IStylePromptSource = {
         formatStyleForPrompt: vi.fn().mockReturnValue('## 这个人的说话风格\n- 口头禅: x'),
+        formatGroupAggregateForPrompt: vi.fn().mockReturnValue(''),
       };
       const chat = makeChat(claude, db);
       chat.setStyleSource(styleSource);

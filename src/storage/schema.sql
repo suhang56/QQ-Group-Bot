@@ -427,6 +427,16 @@ CREATE TABLE IF NOT EXISTS user_styles (
   PRIMARY KEY (group_id, user_id)
 );
 
+-- user_styles_aggregate (M8.2): per-group rollup of user style profiles.
+-- Populated by StyleLearner when ≥3 users have analyzed styles; consumed by
+-- chat identity prompt to inject a "group speech vibe" section.
+CREATE TABLE IF NOT EXISTS user_styles_aggregate (
+  group_id       TEXT    PRIMARY KEY,
+  aggregate_json TEXT    NOT NULL,
+  user_count     INTEGER NOT NULL,
+  updated_at     INTEGER NOT NULL
+);
+
 -- interaction_stats: hourly-updated pairwise interaction counts for relationship tracking.
 CREATE TABLE IF NOT EXISTS interaction_stats (
   group_id       TEXT    NOT NULL,
