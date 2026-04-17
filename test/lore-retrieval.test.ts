@@ -324,4 +324,19 @@ describe('buildAliasMap with learned alias facts (M6.2c fast-path)', () => {
     const mapA = buildAliasMap(CHUNKS_PATH, active as never);
     expect(mapP.get('小强')).toEqual(mapA.get('小强'));
   });
+
+  it('miner fact with extra whitespace around tokens trims cleanly', () => {
+    const facts = [makeFact('群友别名 小空', `小空 =   ${anchorAlias}   (QQ 77777)`)];
+    const map = buildAliasMap(CHUNKS_PATH, facts as never);
+    expect(map.get('小空')).toBeDefined();
+    expect(map.get('小空')!.length).toBeGreaterThan(0);
+  });
+
+  it('regex does not over-match when parens are malformed (missing close paren)', () => {
+    const facts = [makeFact('群友别名 残缺', `残缺 = ${anchorAlias} (QQ 88888`)];
+    const before = buildAliasMap(CHUNKS_PATH);
+    const after = buildAliasMap(CHUNKS_PATH, facts as never);
+    expect(after.has('残缺')).toBe(false);
+    expect(after.size).toBe(before.size);
+  });
 });

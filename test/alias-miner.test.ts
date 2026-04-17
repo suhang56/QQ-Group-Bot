@@ -199,4 +199,40 @@ describe('AliasMiner', () => {
     miner.dispose();
     expect((miner as unknown as { firstTimer: unknown }).firstTimer).toBeNull();
   });
+
+  it('end-to-end: miner insert lands in listAliasFactsForMap (M6.2c)', async () => {
+    // Real DB to exercise the full write + read path through listAliasFactsForMap.
+    const { Database } = await import('../src/storage/db.js');
+    const db = new Database(':memory:');
+
+    // Seed 60 messages so miner passes the MIN_NEW_MESSAGES gate.
+    const ts = 1700000000;
+    for (let i = 0; i < 60; i++) {
+      db.messages.insert({
+        groupId: GROUP, userId: `u${i}`, nickname: `User${i}`,
+        content: `msg ${i}`, timestamp: ts + i, deleted: false,
+      });
+    }
+
+    const claude = makeClaudeWith(JSON.stringify([
+      { alias: '拉神', realUserNickname: 'User5', realUserId: 'u5', evidence: '直接叫拉神' },
+    ]));
+    const miner = new AliasMiner({
+      messages: db.messages, learnedFacts: db.learnedFacts, claude,
+      activeGroups: [GROUP], logger: silentLogger, enabled: true,
+    });
+
+    await miner._run();
+
+    // Miner writes pending; listAliasFactsForMap MUST surface it so the
+    // alias-map fast-path lights up without admin approval.
+    const mapRows = db.learnedFacts.listAliasFactsForMap(GROUP);
+    expect(mapRows).toHaveLength(1);
+    expect(mapRows[0]!.status).toBe('pending');
+    expect(mapRows[0]!.topic).toBe('群友别名 拉神');
+
+    // Regression: listActiveAliasFacts must still exclude the pending miner row.
+    const activeRows = db.learnedFacts.listActiveAliasFacts(GROUP);
+    expect(activeRows).toHaveLength(0);
+  });
 });
