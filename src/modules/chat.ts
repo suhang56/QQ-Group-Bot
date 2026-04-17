@@ -26,6 +26,7 @@ import { tokenizeLore as _tokenizeLore, extractTokens as _extractTokens, extract
 import { BoundedMap } from '../utils/bounded-map.js';
 import { loadGroupJargon, formatJargonBlock } from './jargon-provider.js';
 import { makeEngagementDecision, type EngagementSignals } from './engagement-decision.js';
+import { GroupActivityTracker } from './group-activity-tracker.js';
 import { scoreComprehensionSafe, type ComprehensionContext } from '../services/comprehension-scorer.js';
 import { ConversationStateTracker } from './conversation-state.js';
 import { pickVariant, buildVariantSystemPrompt, type VariantContext, type ActiveMemeJoke } from './prompt-variants.js';
@@ -736,6 +737,9 @@ export class ChatModule implements IChatModule {
   // M6.4: per-group consecutive bot-reply counter; resets on any peer message
   // (even debounced). Bumped on every real bot output, including deflections.
   private readonly consecutiveReplies = new BoundedMap<string, number>(200);
+  // M7.2: per-group peer-activity tracker. Feeds engagement-decision Gate 6
+  // so busy groups get a stricter threshold and idle groups get a softer one.
+  private readonly activityTracker = new GroupActivityTracker();
   // per-group: compiled interest-category regex cache. Invalidated when config changes.
   private readonly interestRegexCache = new Map<string, {
     updatedAt: string;
@@ -1221,8 +1225,17 @@ export class ChatModule implements IChatModule {
     // the streak — reset runs BEFORE debounce so a rapid peer interjection
     // still breaks the streak for subsequent replies.
     const preResetConsecutive = this.consecutiveReplies.get(groupId) ?? 0;
+    // M7.2: snapshot the activity level as it stood BEFORE this trigger
+    // arrived. Gate 6 reads this snapshot; the trigger itself is recorded
+    // into the tracker right after so it feeds the NEXT turn's decision
+    // (but not its own — otherwise the first peer msg in a fresh group
+    // would immediately flip the group to idle).
+    const activityLevelPre = this.activityTracker.level(groupId);
     if (triggerMessage.userId !== this.botUserId) {
       this.consecutiveReplies.set(groupId, 0);
+      // Napcat timestamps are in seconds (OneBot `time` field), but the
+      // tracker compares against Date.now() → convert to ms.
+      this.activityTracker.record(groupId, triggerMessage.timestamp * 1000);
     }
 
     // Pure @-mention with no other content: reply with at_only deflection
@@ -1370,6 +1383,9 @@ export class ChatModule implements IChatModule {
     const lastSpeechIgnored = this._isLastSpeechIgnored(groupId, now);
 
     // ── Engagement decision (decision BEFORE Claude call) ─────────────
+    // Use the pre-trigger snapshot so the trigger itself doesn't bias its
+    // own decision (see activityLevelPre comment above generateReply top).
+    const activityLevel = activityLevelPre;
     const engagementSignals: EngagementSignals = {
       isMention: this._isMention(triggerMessage),
       isReplyToBot: this._isReplyToBot(triggerMessage),
@@ -1383,8 +1399,13 @@ export class ChatModule implements IChatModule {
       isPureAtMention: false, // already handled above
       lastSpeechIgnored,
       consecutiveReplyCount: preResetConsecutive,
+      activityLevel,
     };
     const engagementDecision = makeEngagementDecision(engagementSignals);
+    const isDirectForLog = engagementSignals.isMention || engagementSignals.isReplyToBot;
+    const directMult = isDirectForLog ? 1.0 : 1.5;
+    const activityMult = activityLevel === 'busy' ? 1.4 : activityLevel === 'idle' ? 0.75 : 1.0;
+    const effectiveMinScore = this.chatMinScore * directMult * activityMult;
 
     this.logger.debug({
       groupId,
@@ -1393,6 +1414,8 @@ export class ChatModule implements IChatModule {
       comprehension: +comprehensionScore.toFixed(2),
       engagement: engagementDecision.strength,
       reason: engagementDecision.reason,
+      activityLevel,
+      effectiveMinScore: +effectiveMinScore.toFixed(3),
     }, 'engagement decision');
 
     if (!engagementDecision.shouldReply) {
