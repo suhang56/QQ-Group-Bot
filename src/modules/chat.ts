@@ -86,6 +86,8 @@ export interface IChatModule {
   noteAdminActivity(groupId: string, userId: string, nickname: string, content: string): void;
   getEvasiveFlagForLastReply(groupId: string): boolean;
   getInjectedFactIdsForLastReply(groupId: string): number[];
+  getConsecutiveReplies(groupId: string): number;
+  getActivityLevel(groupId: string): 'idle' | 'normal' | 'busy';
 }
 
 interface ChatOptions {
@@ -1116,6 +1118,14 @@ export class ChatModule implements IChatModule {
    */
   getEvasiveFlagForLastReply(groupId: string): boolean {
     return this.lastEvasiveReply.get(groupId) ?? false;
+  }
+
+  getConsecutiveReplies(groupId: string): number {
+    return this.consecutiveReplies.get(groupId) ?? 0;
+  }
+
+  getActivityLevel(groupId: string): 'idle' | 'normal' | 'busy' {
+    return this.activityTracker.level(groupId);
   }
 
   /**
