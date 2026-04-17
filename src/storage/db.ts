@@ -113,6 +113,18 @@ export interface GroupConfig {
   idGuardEnabled: boolean;
   stickerFirstEnabled: boolean;
   stickerFirstThreshold: number;
+  /**
+   * Interest categories that gate proactive chat engagement. Non-direct
+   * messages must hit at least `chatInterestMinHits` of these patterns (by
+   * regex match) before engagement scoring considers them worth replying to.
+   */
+  chatInterestCategories: ReadonlyArray<{
+    readonly name: string;
+    readonly pattern: string;
+    readonly weight: number;
+  }>;
+  /** Minimum number of interest-category matches required (default 1). */
+  chatInterestMinHits: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -612,6 +624,8 @@ interface GroupConfigRow {
   id_guard_enabled: number;
   sticker_first_enabled: number;
   sticker_first_threshold: number;
+  chat_interest_categories: string;
+  chat_interest_min_hits: number;
   created_at: string; updated_at: string;
 }
 
@@ -712,6 +726,10 @@ function configFromRow(row: GroupConfigRow): GroupConfig {
     idGuardEnabled: (row.id_guard_enabled ?? 1) !== 0,
     stickerFirstEnabled: (row.sticker_first_enabled ?? 0) !== 0,
     stickerFirstThreshold: row.sticker_first_threshold ?? 0.55,
+    chatInterestCategories: JSON.parse(row.chat_interest_categories ?? '[]') as Array<{
+      name: string; pattern: string; weight: number;
+    }>,
+    chatInterestMinHits: row.chat_interest_min_hits ?? 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -1051,8 +1069,9 @@ class GroupConfigRepository implements IGroupConfigRepository {
         chat_persona_text, active_character_id, char_started_by,
         welcome_enabled, id_guard_enabled,
         sticker_first_enabled, sticker_first_threshold,
+        chat_interest_categories, chat_interest_min_hits,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(group_id) DO UPDATE SET
         enabled_modules = excluded.enabled_modules,
         auto_mod = excluded.auto_mod,
@@ -1086,6 +1105,8 @@ class GroupConfigRepository implements IGroupConfigRepository {
         id_guard_enabled = excluded.id_guard_enabled,
         sticker_first_enabled = excluded.sticker_first_enabled,
         sticker_first_threshold = excluded.sticker_first_threshold,
+        chat_interest_categories = excluded.chat_interest_categories,
+        chat_interest_min_hits = excluded.chat_interest_min_hits,
         updated_at = excluded.updated_at
     `).run(
       config.groupId,
@@ -1121,6 +1142,8 @@ class GroupConfigRepository implements IGroupConfigRepository {
       (config.idGuardEnabled ?? true) ? 1 : 0,
       (config.stickerFirstEnabled ?? false) ? 1 : 0,
       config.stickerFirstThreshold ?? 0.55,
+      JSON.stringify(config.chatInterestCategories ?? []),
+      config.chatInterestMinHits ?? 1,
       config.createdAt,
       config.updatedAt,
     );
@@ -2486,6 +2509,10 @@ export class Database {
     // /char feature columns on group_config — added for BanG Dream character role-play.
     try { this._db.exec(`ALTER TABLE group_config ADD COLUMN active_character_id TEXT`); } catch { /* already exists */ }
     try { this._db.exec(`ALTER TABLE group_config ADD COLUMN char_started_by TEXT`); } catch { /* already exists */ }
+
+    // Snoopy-boundaries: interest-gating columns on group_config.
+    try { this._db.exec(`ALTER TABLE group_config ADD COLUMN chat_interest_categories TEXT NOT NULL DEFAULT '[]'`); } catch { /* already exists */ }
+    try { this._db.exec(`ALTER TABLE group_config ADD COLUMN chat_interest_min_hits INTEGER NOT NULL DEFAULT 1`); } catch { /* already exists */ }
 
     // local_stickers.blocked — banned stickers are excluded from top queries.
     try { this._db.exec(`ALTER TABLE local_stickers ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0`); } catch { /* already exists */ }

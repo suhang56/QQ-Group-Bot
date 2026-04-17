@@ -261,19 +261,20 @@ describe('ChatModule — weighted participation scoring', () => {
     expect(result).toBeNull();
   });
 
-  // 5. General question after long silence → respond
-  it('question after long silence (> chatSilenceBonusSec) → score passes threshold', async () => {
-    // No recent messages → lastProactiveReply is epoch 0 → silenceSec >> 300
+  // 5. Plain question after long silence should NOT pass (R2 snoopy-boundaries):
+  //    questions from peers don't summon the bot. question factor is now 0
+  //    and silence is weakened to 0.2 — non-direct effective threshold is 1.5×minScore=0.75.
+  it('question after long silence alone does NOT pass non-direct threshold (R2)', async () => {
     const chat = makeScoringChat({ chatMinScore: 0.5, chatSilenceBonusSec: 300 });
-    // "吃啥" ends with stopword but let's use something that ends with a question marker
     const msg = makeMsg({ content: '吃啥呢', rawContent: '吃啥呢' });
-    // Score: question=0.6 (ends with 呢), silence=0.4 → total=1.0 ≥ 0.5
+    // score: silence=0.2 → 0.2 < 0.75 → skip
     const result = await chat.generateReply('g1', msg, []);
-    expect(result).toBe('bot reply');
+    expect(result).toBeNull();
   });
 
-  // 6. Lore-keyword match triggers response even without question or silence bonus
-  it('lore-keyword match in trigger → loreKw=0.4 contributes to score', async () => {
+  // 6. Lore keyword alone (0.2) + silence (0.2) is 0.4 — still below non-direct
+  //    threshold 0.75. Lore is grounding, not a standalone engagement trigger (R1).
+  it('lore-keyword + silence alone does NOT pass non-direct threshold', async () => {
     const os = await import('node:os');
     const path = await import('node:path');
     const fs = await import('node:fs');
@@ -286,11 +287,10 @@ describe('ChatModule — weighted participation scoring', () => {
       loreDirPath: os.tmpdir(),
     });
 
-    // lore keyword (+0.4), silence bonus (+0.4) → total 0.8 ≥ 0.5 → respond
-    // Space after ygfn ensures tokenizeLore produces 'ygfn' as a separate token
+    // loreKw=0.2, silence=0.2 → 0.4 < 0.75 → skip (new weights)
     const msg = makeMsg({ groupId: 'g-score-lore', content: 'ygfn 的服务器今天在线人数很多啊', rawContent: 'ygfn 的服务器今天在线人数很多啊' });
     const result = await chat.generateReply('g-score-lore', msg, []);
-    expect(result).toBe('bot reply');
+    expect(result).toBeNull();
   });
 
   // 7. Burst blocks all non-direct messages regardless of other factors
@@ -937,7 +937,6 @@ describe('TASK_REQUEST regex', () => {
 
   // Recite / continue / teacher-roleplay exploits — should still match
   it('matches "现在你需要接：XXX"', () => expect(match('现在你需要接：XXX')).toBe(true));
-  it('matches "恩师教你 ..."', () => expect(match('恩师教你 ...')).toBe(true));
   it('matches "后面几句是什么"', () => expect(match('后面几句是什么')).toBe(true));
   it('matches "再来一段"', () => expect(match('再来一段')).toBe(true));
   it('matches "接下一句"', () => expect(match('接下一句')).toBe(true));
@@ -954,6 +953,29 @@ describe('TASK_REQUEST regex', () => {
   it('does NOT match "你好"', () => expect(match('你好')).toBe(false));
   it('does NOT match "@QAQ 吃饭了吗"', () => expect(match('@QAQ 吃饭了吗')).toBe(false));
   it('does NOT match "背包" (standalone unrelated use)', () => expect(match('背包')).toBe(false));
+
+  // ── Narrowed regex — peer-chat phrasings that USED to fire sassy
+  // deflections on bare verbs must now pass through. These were the original
+  // screenshot-case false-positives flagged by Reviewer and are the whole
+  // reason the regex got tightened. A groupmate reading these wouldn't
+  // think "someone's demanding labor" — they'd just read a normal share.
+  it('does NOT flag "西瓜没看过她画的本子吗" (peer asks peer, not a task for the bot)', () => expect(match('西瓜没看过她画的本子吗')).toBe(false));
+  it('does NOT flag "贯穿了我的整个二次元生涯了" (sharing — "整个" is attributive here)', () => expect(match('贯穿了我的整个二次元生涯了')).toBe(false));
+  it('does NOT flag "我今天画了张图" (first-person share of finished work)', () => expect(match('我今天画了张图')).toBe(false));
+  it('does NOT flag "整个人都不好了" ("整个" as intensifier, not imperative)', () => expect(match('整个人都不好了')).toBe(false));
+  it('does NOT flag "恩师啊" (community meme word, not a task cue)', () => expect(match('恩师啊')).toBe(false));
+  it('does NOT flag "她画得真好" (attributive 画得)', () => expect(match('她画得真好')).toBe(false));
+  it('does NOT flag "我背过这首歌" (past-tense description)', () => expect(match('我背过这首歌')).toBe(false));
+
+  // ── Narrowed regex — genuine imperative/agent-anchored task requests
+  // still caught. These carry explicit agent verbs (帮我/替我/给我/你来/
+  // 麻烦/能不能) plus an action verb, so a groupmate would hear them as
+  // "someone is actually asking a favor."
+  it('matches "帮我画个头像" (agent-anchored)', () => expect(match('帮我画个头像')).toBe(true));
+  it('matches "替我背这首歌" (agent-anchored)', () => expect(match('替我背这首歌')).toBe(true));
+  it('matches "你来写个段子" (addresser points at bot + verb)', () => expect(match('你来写个段子')).toBe(true));
+  it('matches "麻烦你翻译一下" (polite-imperative)', () => expect(match('麻烦你翻译一下')).toBe(true));
+  it('matches "能不能帮我写一个" (请-style anchor)', () => expect(match('能不能帮我写一个')).toBe(true));
 
   // Tech-help deflections
   it('matches "教教我怎么写 swift"', () => expect(match('教教我怎么写 swift')).toBe(true));
@@ -2056,17 +2078,18 @@ describe('ChatModule — self-repetition avoidance', () => {
     expect(prompt).not.toContain('避免重复相同意思');
   });
 
-  it('clarification message (why/为啥) gets +0.3 score boost', async () => {
+  it('clarification message (why/为啥) alone no longer auto-engages (R2)', async () => {
+    // Snoopy-boundaries R2: clarification factor is removed for non-direct
+    // messages. "why" from a peer isn't a summons — bot stays silent.
     const chat = new ChatModule(
       { complete: claude } as unknown as IClaudeClient,
       db,
       { botUserId: BOT_ID, debounceMs: 0, chatMinScore: 0.25, moodProactiveEnabled: false, deflectCacheEnabled: false },
     );
     db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'why', timestamp: Math.floor(Date.now() / 1000), deleted: false });
-    // "why" alone scores: question=0.6 (ends with y? no), clarification=0.3 → 0.3 ≥ 0.25 → should reply
     const result = await chat.generateReply('g1', makeMsg({ content: 'why' }), []);
-    expect(result).not.toBeNull();
-    expect(claude).toHaveBeenCalled();
+    expect(result).toBeNull();
+    expect(claude).not.toHaveBeenCalled();
   });
 });
 

@@ -112,6 +112,8 @@ CREATE TABLE IF NOT EXISTS group_config (
   id_guard_enabled                      INTEGER NOT NULL DEFAULT 1,
   sticker_first_enabled                 INTEGER NOT NULL DEFAULT 0,
   sticker_first_threshold               REAL    NOT NULL DEFAULT 0.55,
+  chat_interest_categories              TEXT    NOT NULL DEFAULT '[]',
+  chat_interest_min_hits                INTEGER NOT NULL DEFAULT 1,
   created_at                            TEXT    NOT NULL DEFAULT '',
   updated_at                            TEXT    NOT NULL DEFAULT ''
 );

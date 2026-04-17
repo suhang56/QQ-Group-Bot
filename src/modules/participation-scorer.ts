@@ -30,6 +30,10 @@ export interface ScoreFactors {
   readonly continuity: number;
   readonly topicStick: number;
   readonly burst: number;
+  /** Interest category match weight (0 when nothing matched). */
+  readonly interestMatch: number;
+  /** Novelty penalty (negative when trigger tokens overlap recent bot output). */
+  readonly noveltyPenalty: number;
 }
 
 export interface IParticipationScorer {
@@ -75,6 +79,7 @@ export class ParticipationScorer implements IParticipationScorer {
         base: 0, mention: 0, replyToBot: 0, replyToOther: 0,
         implicitRef: 0, loreKeyword: 0, silence: 0,
         continuity: 0, topicStick: 0, burst: 0,
+        interestMatch: 0, noveltyPenalty: 0,
       },
       isDirect,
     };
