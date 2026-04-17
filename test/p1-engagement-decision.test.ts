@@ -26,6 +26,7 @@ const BASE_SIGNALS: EngagementSignals = {
   relevanceOverride: null,
   addresseeIsOther: false,
   awkwardVeto: false,
+  moodLevel: 'normal',
 };
 
 function signals(overrides: Partial<EngagementSignals>): EngagementSignals {
@@ -495,5 +496,80 @@ describe('makeEngagementDecision — M7.2 activity multiplier', () => {
       activityLevel: 'normal',
     }));
     expect(dSkip.shouldReply).toBe(false);
+  });
+});
+
+// ── M9.2 Gate 6 mood multiplier ──────────────────────────────────────────────
+
+describe('Gate 6 — M9.2 mood multiplier', () => {
+  // effective threshold = minScore * directMult * activityMult * moodMult
+  // non-direct, normal activity, minScore=0.5 → base 0.75
+  //   moodLevel 'low'    → 0.75 * 1.2 = 0.90   (raise bar)
+  //   moodLevel 'high'   → 0.75 * 0.9 = 0.675  (lower bar)
+  //   moodLevel 'normal' → 0.75 * 1.0 = 0.75   (baseline)
+
+  it('low mood + non-direct score at old threshold (0.75) → skip (1.2x raises bar to 0.90)', () => {
+    const d = makeEngagementDecision(signals({
+      isMention: false, isReplyToBot: false,
+      participationScore: 0.75, minScore: 0.5,
+      activityLevel: 'normal', moodLevel: 'low',
+    }));
+    expect(d.shouldReply).toBe(false);
+    expect(d.reason).toContain('[low]');
+  });
+
+  it('high mood + non-direct score at 0.70 → engage (0.9x lowers bar to 0.675)', () => {
+    const d = makeEngagementDecision(signals({
+      isMention: false, isReplyToBot: false,
+      participationScore: 0.70, minScore: 0.5,
+      activityLevel: 'normal', moodLevel: 'high',
+    }));
+    expect(d.shouldReply).toBe(true);
+    expect(d.strength).toBe('engage');
+    expect(d.reason).toContain('[high]');
+  });
+
+  it('low mood + direct mention → still engages (multipliers bypassed)', () => {
+    const d = makeEngagementDecision(signals({
+      isMention: true,
+      participationScore: 0, minScore: 0.5,
+      activityLevel: 'normal', moodLevel: 'low',
+    }));
+    expect(d.shouldReply).toBe(true);
+    expect(d.strength).toBe('engage');
+  });
+
+  it('normal mood is baseline (multiplier = 1.0)', () => {
+    const dPass = makeEngagementDecision(signals({
+      isMention: false, participationScore: 0.80, minScore: 0.5,
+      activityLevel: 'normal', moodLevel: 'normal',
+    }));
+    expect(dPass.shouldReply).toBe(true);
+
+    const dSkip = makeEngagementDecision(signals({
+      isMention: false, participationScore: 0.70, minScore: 0.5,
+      activityLevel: 'normal', moodLevel: 'normal',
+    }));
+    expect(dSkip.shouldReply).toBe(false);
+  });
+
+  it('mood multiplier stacks with activity multiplier', () => {
+    // idle (0.75x) + low (1.2x) = 0.9x overall; non-direct → 1.5 * 0.5 * 0.9 = 0.675
+    const d = makeEngagementDecision(signals({
+      isMention: false,
+      participationScore: 0.70, minScore: 0.5,
+      activityLevel: 'idle', moodLevel: 'low',
+    }));
+    expect(d.shouldReply).toBe(true); // 0.70 >= 0.675
+  });
+
+  it('skip reason string tags both activity and mood', () => {
+    const d = makeEngagementDecision(signals({
+      isMention: false, participationScore: 0.1, minScore: 0.5,
+      activityLevel: 'busy', moodLevel: 'high',
+    }));
+    expect(d.shouldReply).toBe(false);
+    expect(d.reason).toContain('[busy]');
+    expect(d.reason).toContain('[high]');
   });
 });

@@ -87,6 +87,15 @@ export interface EngagementSignals {
    * 话题闭合). Suppresses non-direct replies. Direct triggers bypass.
    */
   readonly awkwardVeto: boolean;
+  /**
+   * M9.2 — group mood level derived from MoodTracker valence.
+   *   'low'    → valence < -0.4 (irritable/down bot should speak less)
+   *   'high'   → valence >  0.4 (upbeat bot pipes up more readily)
+   *   'normal' → otherwise
+   * Gate 6 applies a multiplier: 1.2x raise-the-bar when low, 0.9x lower-the-bar
+   * when high. Direct triggers (mention / reply) are unaffected.
+   */
+  readonly moodLevel: 'low' | 'normal' | 'high';
 }
 
 /**
@@ -187,17 +196,23 @@ export function makeEngagementDecision(signals: EngagementSignals): EngagementDe
     };
   }
 
-  // Gate 6: normal participation scoring with direct + activity + LLM multipliers.
+  // Gate 6: normal participation scoring with direct + activity + mood + LLM multipliers.
   // Direct-ness scales the bar: 1.0x if @ or reply-to-bot (already-engaged),
   // 1.5x for peer-to-peer chat (Case 7 — bot stays silent > 80% of the time).
   // M7.2 layers activity multiplier: 1.4x in busy groups, 0.75x in idle groups.
+  // M9.2 layers mood multiplier: 1.2x when low (irritable bot shuts up more),
+  // 0.9x when high (upbeat bot pipes up more readily). Direct triggers bypass
+  // regardless.
   // M7.1: relevanceOverride='engage' bypasses score — LLM already judged
   // relevance against bot interests with full context.
   const directMultiplier = isDirect ? 1.0 : 1.5;
   const activityMultiplier = signals.activityLevel === 'busy' ? 1.4
                            : signals.activityLevel === 'idle' ? 0.75
                            : 1.0;
-  const effectiveMinScore = signals.minScore * directMultiplier * activityMultiplier;
+  const moodMultiplier = signals.moodLevel === 'low' ? 1.2
+                       : signals.moodLevel === 'high' ? 0.9
+                       : 1.0;
+  const effectiveMinScore = signals.minScore * directMultiplier * activityMultiplier * moodMultiplier;
   const llmEngageOverride = signals.relevanceOverride === 'engage';
   if (isDirect || llmEngageOverride || signals.participationScore >= effectiveMinScore) {
     return {
@@ -207,7 +222,7 @@ export function makeEngagementDecision(signals: EngagementSignals): EngagementDe
         ? 'direct trigger (mention/reply)'
         : llmEngageOverride
         ? 'pre-chat judge: engage'
-        : `score ${signals.participationScore.toFixed(3)} >= ${effectiveMinScore.toFixed(3)} [${signals.activityLevel}]`,
+        : `score ${signals.participationScore.toFixed(3)} >= ${effectiveMinScore.toFixed(3)} [${signals.activityLevel}][${signals.moodLevel}]`,
     };
   }
 
@@ -215,6 +230,6 @@ export function makeEngagementDecision(signals: EngagementSignals): EngagementDe
   return {
     shouldReply: false,
     strength: 'skip',
-    reason: `score ${signals.participationScore.toFixed(3)} < ${effectiveMinScore.toFixed(3)} [${signals.activityLevel}]`,
+    reason: `score ${signals.participationScore.toFixed(3)} < ${effectiveMinScore.toFixed(3)} [${signals.activityLevel}][${signals.moodLevel}]`,
   };
 }
