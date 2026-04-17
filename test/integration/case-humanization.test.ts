@@ -74,6 +74,8 @@ const BASE_SIGNALS: EngagementSignals = {
   comprehensionScore: 0.7,
   isAdversarial: false,
   isPureAtMention: false,
+  lastSpeechIgnored: false,
+  consecutiveReplyCount: 0,
 };
 
 function signals(overrides: Partial<EngagementSignals>): EngagementSignals {
