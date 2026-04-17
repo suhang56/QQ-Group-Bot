@@ -83,6 +83,38 @@ export const DEEPSEEK_ENABLED = (): boolean => !!process.env['DEEPSEEK_API_KEY']
  * (matches DEEPSEEK_ENABLED pattern) so tests can toggle per-case. */
 export const FACTS_RAG_DISABLED = (): boolean => process.env['FACTS_RAG_DISABLED'] === '1';
 
+// ============================================================================
+// M6.6 — persona patch self-reflection tuning
+// ----------------------------------------------------------------------------
+// Generates persona patch proposals once a day from recent chat + bot replies.
+// Proposals sit in persona_patch_proposals with status=pending until an admin
+// runs /persona_apply (updates group_config.chat_persona_text) or /persona_reject.
+// Rows older than PERSONA_PATCH_TTL_DAYS are filtered out of /persona_review.
+// ============================================================================
+
+/** Days a pending proposal stays listable in /persona_review. */
+export const PERSONA_PATCH_TTL_DAYS = parseInt(process.env['PERSONA_PATCH_TTL_DAYS'] ?? '7', 10);
+
+/** Max new proposals the scheduler may insert per group per UTC day. */
+export const PERSONA_PATCH_DAILY_CAP = parseInt(process.env['PERSONA_PATCH_DAILY_CAP'] ?? '1', 10);
+
+/** Scheduler period — 24h by default. Offset from the hourly reflect loop avoids double-LLM ticks. */
+export const PERSONA_PATCH_PERIOD_MS = parseInt(process.env['PERSONA_PATCH_PERIOD_MS'] ?? `${24 * 60 * 60 * 1000}`, 10);
+
+/** Offset from self-reflection timer so the two LLM calls don't pile up. */
+export const PERSONA_PATCH_OFFSET_MS = parseInt(process.env['PERSONA_PATCH_OFFSET_MS'] ?? `${5 * 60 * 1000}`, 10);
+
+/** Kill switch: set PERSONA_PATCH_DISABLED=1 to disable the scheduler tick entirely. */
+export const PERSONA_PATCH_DISABLED = (): boolean => process.env['PERSONA_PATCH_DISABLED'] === '1';
+
+/** Sanity-check bounds on the generated new_persona_text. */
+export const PERSONA_PATCH_MIN_LEN = 50;
+export const PERSONA_PATCH_MAX_LEN = 8000;
+
+/** Sanity-check bounds on reasoning. */
+export const PERSONA_PATCH_REASONING_MIN = 20;
+export const PERSONA_PATCH_REASONING_MAX = 2000;
+
 /** Kill switch for memes-v1 pipeline. Set MEMES_V1_DISABLED=1 to disable:
  * (a) phrase-miner scheduling in onCycleComplete, (b) meme-clusterer scheduling,
  * (c) meme_graph retrieval in formatFactsForPrompt, (d) meme_graph term tick in conversation-state.

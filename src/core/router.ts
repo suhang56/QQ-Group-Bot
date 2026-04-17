@@ -17,7 +17,7 @@ import type { IStickerFirstModule } from '../modules/sticker-first.js';
 import { extractTokens } from '../utils/text-tokenize.js';
 import { BotErrorCode } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
-import { defaultGroupConfig } from '../config.js';
+import { defaultGroupConfig, PERSONA_PATCH_TTL_DAYS } from '../config.js';
 import { resolveAtTarget } from '../utils/cqcode.js';
 import { expandForwards, purgeExpiredForwardCache } from './forward-expand.js';
 
@@ -786,6 +786,28 @@ export class Router implements IRouter {
     return defaultGroupConfig(groupId);
   }
 
+  /**
+   * Pick a default group_id to operate on when an admin DM command doesn't
+   * specify one (e.g. `/persona_review` with no arg). Returns the most recently
+   * active group with a persona_patch_proposals row; falls back to the first
+   * group_config row; null if the bot has seen no groups yet.
+   */
+  private _defaultReviewGroupId(): string | null {
+    const raw = (this.db as unknown as { _db: { prepare(s: string): { get(): unknown } } })._db;
+    try {
+      const recent = raw.prepare(
+        'SELECT group_id FROM persona_patch_proposals ORDER BY created_at DESC LIMIT 1'
+      ).get() as { group_id: string } | undefined;
+      if (recent) return recent.group_id;
+    } catch { /* table may not exist yet in weird test setups */ }
+    try {
+      const any = raw.prepare('SELECT group_id FROM group_config LIMIT 1').get() as { group_id: string } | undefined;
+      return any?.group_id ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   /** Returns true and sends the repeated content if 3+ distinct users just said the same thing. */
   private async _checkRepeater(msg: GroupMessage, config: GroupConfig): Promise<boolean> {
     if (!config.repeaterEnabled) return false;
@@ -1246,7 +1268,7 @@ ${ctxLine}
     }
 
     if (text === '/help') {
-      await reply('/approve <id> — 执行建议处理\n/reject <id> — 拒绝，不处理\n/pending — 查看待处理列表\n/appeals — 查看待处理申诉\n/appeal_approve <id> — 批准申诉并解除禁言\n/appeal_reject <id> — 驳回申诉\n/mod_on — 开启所有群的自动审核\n/mod_off — 关闭所有群的自动审核（仅观察）\n/welcome_on <groupId> — 开启该群欢迎消息\n/welcome_off <groupId> — 关闭该群欢迎消息\n/idguard_on <groupId> — 开启该群身份证拦截\n/idguard_off <groupId> — 关闭该群身份证拦截\n/cache_clear_images — 清除图片审核缓存（规则更新后使用）');
+      await reply('/approve <id> — 执行建议处理\n/reject <id> — 拒绝，不处理\n/pending — 查看待处理列表\n/appeals — 查看待处理申诉\n/appeal_approve <id> — 批准申诉并解除禁言\n/appeal_reject <id> — 驳回申诉\n/mod_on — 开启所有群的自动审核\n/mod_off — 关闭所有群的自动审核（仅观察）\n/welcome_on <groupId> — 开启该群欢迎消息\n/welcome_off <groupId> — 关闭该群欢迎消息\n/idguard_on <groupId> — 开启该群身份证拦截\n/idguard_off <groupId> — 关闭该群身份证拦截\n/cache_clear_images — 清除图片审核缓存（规则更新后使用）\n/persona_review [groupId] — 待审 persona 提案\n/persona_diff <id> — 查看某提案 diff\n/persona_apply <id> [confirm=yes] — 应用提案\n/persona_reject <id> — 拒绝提案\n/persona_history [groupId] [days] — 历史提案');
       return;
     }
 
@@ -1300,6 +1322,142 @@ ${ctxLine}
       await reply(`已清除 ${purged} 条图片审核缓存。`);
       logger.info({ purged }, 'image mod cache cleared by admin');
       return;
+    }
+
+    // ─── M6.6: persona patch admin review ─────────────────────────────────
+    // Admin DM commands that operate on persona_patch_proposals. All gated by
+    // the admin check above (MOD_APPROVAL_ADMIN) + per-user rate limiter.
+    const personaPatchCmd = /^\/persona_(review|diff|apply|reject|history)\b(.*)$/i.exec(text);
+    if (personaPatchCmd) {
+      const sub = personaPatchCmd[1]!.toLowerCase();
+      const argsTail = (personaPatchCmd[2] ?? '').trim();
+
+      // Rate-limit: follow router.ts:451 pattern — per-user bucket.
+      if (!this.rateLimiter.checkUser(msg.userId, 'persona')) {
+        const cooldown = this.rateLimiter.cooldownSecondsUser(msg.userId, 'persona');
+        await reply(`操作太频繁，请 ${cooldown}s 后再试。`);
+        return;
+      }
+
+      const nowSec = Math.floor(Date.now() / 1000);
+      const ttlSec = PERSONA_PATCH_TTL_DAYS * 24 * 60 * 60;
+
+      if (sub === 'review') {
+        // Default: admin's primary group (first ACTIVE_GROUPS entry) — matches
+        // how /pending_list works. Admin can pass /persona_review <groupId> to override.
+        const groupId = argsTail.length > 0 ? argsTail.split(/\s+/)[0]! : this._defaultReviewGroupId();
+        if (!groupId) { await reply('无法确定要查看的群 ID；请用 /persona_review <groupId>。'); return; }
+        const pending = this.db.personaPatches.listPending(groupId, nowSec, ttlSec, 20);
+        if (pending.length === 0) {
+          await reply(`群 ${groupId} 没有待审 persona 调优提案。`);
+          return;
+        }
+        const lines = pending.map(p => {
+          const ageH = Math.floor((nowSec - p.createdAt) / 3600);
+          const reasonShort = p.reasoning.split(/[。.!?！？\n]/)[0]!.slice(0, 40);
+          return `#${p.id} [${ageH}h前] ${reasonShort}`;
+        });
+        await reply(`待审 persona 提案（群 ${groupId}，共 ${pending.length} 条）：\n${lines.join('\n')}\n\n用 /persona_diff <id> 查看 diff，/persona_apply <id> 应用。`);
+        return;
+      }
+
+      if (sub === 'diff') {
+        const idMatch = /^(\d+)\s*$/.exec(argsTail);
+        if (!idMatch) { await reply('用法：/persona_diff <id>'); return; }
+        const id = parseInt(idMatch[1]!, 10);
+        const p = this.db.personaPatches.getById(id);
+        if (!p) { await reply(`找不到 persona 提案 #${id}。`); return; }
+        const ageSec = nowSec - p.createdAt;
+        if (p.status === 'pending' && ageSec > ttlSec) {
+          await reply(`persona 提案 #${id} 已超过 ${PERSONA_PATCH_TTL_DAYS} 天过期，无法操作。`);
+          return;
+        }
+        await reply(`persona 提案 #${id}（状态：${p.status}）\n\n## 动机\n${p.reasoning}\n\n## diff\n${p.diffSummary}`);
+        return;
+      }
+
+      if (sub === 'apply') {
+        // Args: <id> [confirm=yes]
+        const applyMatch = /^(\d+)(?:\s+(confirm=yes))?\s*$/i.exec(argsTail);
+        if (!applyMatch) { await reply('用法：/persona_apply <id> [confirm=yes]'); return; }
+        const id = parseInt(applyMatch[1]!, 10);
+        const confirmed = applyMatch[2]?.toLowerCase() === 'confirm=yes';
+        const p = this.db.personaPatches.getById(id);
+        if (!p) { await reply(`找不到 persona 提案 #${id}。`); return; }
+        if (p.status !== 'pending') {
+          await reply(`persona 提案 #${id} 不在 pending 状态（当前：${p.status}），无法应用。`);
+          return;
+        }
+        const ageSec = nowSec - p.createdAt;
+        if (ageSec > ttlSec) {
+          await reply(`persona 提案 #${id} 已超过 ${PERSONA_PATCH_TTL_DAYS} 天过期，无法应用。`);
+          return;
+        }
+
+        // Secondary confirmation: (a) empty chatPersonaText at propose time
+        // (the "override from nothing" case), (b) the current persona drifted
+        // away from oldPersonaText since propose time (manual edit conflict).
+        const cfg = this.db.groupConfig.get(p.groupId);
+        const currentPersona = cfg?.chatPersonaText ?? null;
+        const oldTrim = p.oldPersonaText?.trim() ?? null;
+        const curTrim = currentPersona?.trim() ?? null;
+        const emptyOverride = oldTrim === null || oldTrim.length === 0;
+        const conflict = oldTrim !== curTrim;
+
+        if (!confirmed && emptyOverride) {
+          await reply(`警告：提案 #${id} 会从空 persona 开始设置。确认请重发：/persona_apply ${id} confirm=yes`);
+          return;
+        }
+        if (!confirmed && conflict) {
+          await reply(`警告：提案 #${id} 捕获的旧 persona 与当前不一致（有人手动改过）。确认覆盖请重发：/persona_apply ${id} confirm=yes`);
+          return;
+        }
+
+        const ok = this.db.personaPatches.apply(id, msg.userId, nowSec);
+        if (!ok) {
+          await reply(`persona 提案 #${id} 应用失败（可能并发状态已变），请 /persona_diff 重看。`);
+          return;
+        }
+        await reply(`已应用 persona 提案 #${id}：群 ${p.groupId} 的 chat_persona_text 已更新；同群其它待审提案已标记 superseded。`);
+        logger.info({ id, groupId: p.groupId, adminId: msg.userId }, 'persona patch applied by admin');
+        return;
+      }
+
+      if (sub === 'reject') {
+        const idMatch = /^(\d+)\s*$/.exec(argsTail);
+        if (!idMatch) { await reply('用法：/persona_reject <id>'); return; }
+        const id = parseInt(idMatch[1]!, 10);
+        const p = this.db.personaPatches.getById(id);
+        if (!p) { await reply(`找不到 persona 提案 #${id}。`); return; }
+        if (p.status !== 'pending') {
+          await reply(`persona 提案 #${id} 不在 pending 状态（当前：${p.status}）。`);
+          return;
+        }
+        this.db.personaPatches.reject(id, msg.userId, nowSec);
+        await reply(`已拒绝 persona 提案 #${id}。`);
+        logger.info({ id, groupId: p.groupId, adminId: msg.userId }, 'persona patch rejected by admin');
+        return;
+      }
+
+      if (sub === 'history') {
+        const historyMatch = /^(\S+)?\s*(\d+)?\s*$/.exec(argsTail);
+        const groupId = (historyMatch?.[1] && !/^\d+$/.test(historyMatch[1])) ? historyMatch[1] : this._defaultReviewGroupId();
+        const days = historyMatch?.[2] ? parseInt(historyMatch[2], 10) : 30;
+        if (!groupId) { await reply('用法：/persona_history [groupId] [days]'); return; }
+        const sinceSec = nowSec - days * 24 * 60 * 60;
+        const rows = this.db.personaPatches.listHistory(groupId, sinceSec, 50);
+        if (rows.length === 0) {
+          await reply(`群 ${groupId} 过去 ${days} 天无 persona 提案。`);
+          return;
+        }
+        const lines = rows.map(p => {
+          const dayAgo = Math.floor((nowSec - p.createdAt) / 86400);
+          const reasonShort = p.reasoning.split(/[。.!?！？\n]/)[0]!.slice(0, 35);
+          return `#${p.id} [${p.status}] ${dayAgo}d前: ${reasonShort}`;
+        });
+        await reply(`群 ${groupId} 过去 ${days} 天 persona 提案历史（${rows.length}）：\n${lines.join('\n')}`);
+        return;
+      }
     }
 
     const approveMatch = /^\/approve\s+(\d+)$/i.exec(text);
