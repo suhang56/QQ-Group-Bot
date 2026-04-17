@@ -39,6 +39,13 @@ export interface EngagementSignals {
   readonly isAdversarial: boolean;
   /** True if the trigger message is purely an @-mention with no text */
   readonly isPureAtMention: boolean;
+  /**
+   * True if the bot's last proactive reply was ignored by the group: bot spoke
+   * recently, ≥3 messages have passed, and none of them addressed the bot
+   * (@, reply-to-bot, or implicit bot reference). Non-direct messages under
+   * this condition get suppressed by Gate 5.5.
+   */
+  readonly lastSpeechIgnored: boolean;
 }
 
 /**
@@ -92,6 +99,15 @@ export function makeEngagementDecision(signals: EngagementSignals): EngagementDe
       strength: 'skip',
       reason: `low comprehension (${signals.comprehensionScore.toFixed(2)}) and not direct`,
     };
+  }
+
+  // Gate 5.5: last speech ignored by group — mute proactive chat, but direct
+  // triggers (mention / reply-to-bot) bypass this gate. Rationale (R3):
+  // when the bot's last reply got no engagement over 3+ messages, it's
+  // intruding on a conversation that doesn't want it — shut up until
+  // someone actually addresses the bot.
+  if (signals.lastSpeechIgnored && !isDirect) {
+    return { shouldReply: false, strength: 'skip', reason: 'last speech ignored by group' };
   }
 
   // Gate 6: normal participation scoring

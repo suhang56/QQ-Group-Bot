@@ -16,6 +16,7 @@ const BASE_SIGNALS: EngagementSignals = {
   comprehensionScore: 0.7,
   isAdversarial: false,
   isPureAtMention: false,
+  lastSpeechIgnored: false,
 };
 
 function signals(overrides: Partial<EngagementSignals>): EngagementSignals {
@@ -115,6 +116,39 @@ describe('makeEngagementDecision', () => {
     const d = makeEngagementDecision(signals({ comprehensionScore: 0.29 }));
     expect(d.shouldReply).toBe(false);
     expect(d.strength).toBe('skip');
+  });
+
+  // ── Gate 5.5: ignored-suppression (R3) ─────────────────────────────────
+  it('skip when last speech ignored and not direct', () => {
+    const d = makeEngagementDecision(signals({ lastSpeechIgnored: true, participationScore: 2.0 }));
+    expect(d.shouldReply).toBe(false);
+    expect(d.strength).toBe('skip');
+    expect(d.reason).toContain('ignored');
+  });
+
+  it('direct @-mention overrides ignored-suppression', () => {
+    const d = makeEngagementDecision(signals({ lastSpeechIgnored: true, isMention: true, participationScore: 0 }));
+    expect(d.shouldReply).toBe(true);
+    expect(d.strength).toBe('engage');
+  });
+
+  it('direct reply-to-bot overrides ignored-suppression', () => {
+    const d = makeEngagementDecision(signals({ lastSpeechIgnored: true, isReplyToBot: true, participationScore: 0 }));
+    expect(d.shouldReply).toBe(true);
+    expect(d.strength).toBe('engage');
+  });
+
+  it('lastSpeechIgnored=false → normal scoring path', () => {
+    const d = makeEngagementDecision(signals({ lastSpeechIgnored: false, participationScore: 1.2 }));
+    expect(d.shouldReply).toBe(true);
+    expect(d.strength).toBe('engage');
+  });
+
+  it('ignored-suppression applied AFTER adversarial react (adversarial still reacts)', () => {
+    // Adversarial gate runs at Gate 3 (before 5.5), so adversarial still reacts even when ignored.
+    const d = makeEngagementDecision(signals({ lastSpeechIgnored: true, isAdversarial: true }));
+    expect(d.shouldReply).toBe(true);
+    expect(d.strength).toBe('react');
   });
 });
 
