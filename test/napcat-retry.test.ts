@@ -20,6 +20,10 @@ function getImageTimeout(): NapCatActionError {
   return new NapCatActionError('get_image', new Error('Action timed out'));
 }
 
+function getImageFileNotFound(): NapCatActionError {
+  return new NapCatActionError('get_image', new Error('file not found'));
+}
+
 describe('NapCatAdapter.getImage retry on get_image timeout', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -163,5 +167,93 @@ describe('NapCatAdapter.getImage retry on get_image timeout', () => {
     const result = await promise;
     expect(result.filename).toBe('c.jpg');
     expect(actionSpy).toHaveBeenCalledTimes(3);
+  });
+
+  it('Case 8 positive: persistent file-not-found → 3 attempts then exhausted-warn mentions file-not-found', async () => {
+    const { adapter, internal } = makeAdapter();
+    const actionSpy = vi
+      .spyOn(internal, 'action')
+      .mockRejectedValue(getImageFileNotFound());
+    const warnSpy = vi.spyOn(internal.logger, 'warn');
+
+    const promise = adapter.getImage('abcdef012345XYZ');
+    const rejection = expect(promise).rejects.toBeInstanceOf(NapCatActionError);
+    await vi.advanceTimersByTimeAsync(500);
+    await vi.advanceTimersByTimeAsync(1500);
+    await rejection;
+
+    expect(actionSpy).toHaveBeenCalledTimes(3);
+    expect(warnSpy).toHaveBeenCalledTimes(3);
+    expect(warnSpy.mock.calls[0]![0]).toMatchObject({ category: 'file-not-found' });
+    expect(warnSpy.mock.calls[0]![1]).toMatch(/getImage retry 1\/2 after get_image file-not-found/);
+    expect(warnSpy.mock.calls[1]![0]).toMatchObject({ category: 'file-not-found' });
+    expect(warnSpy.mock.calls[1]![1]).toMatch(/getImage retry 2\/2 after get_image file-not-found/);
+    expect(warnSpy.mock.calls[2]![0]).toMatchObject({ file: 'abcdef012345', category: 'file-not-found' });
+    expect(warnSpy.mock.calls[2]![1]).toMatch(/exhausted retries after get_image file-not-found .*total 2000ms/);
+  });
+
+  it('Case 9 positive: file-not-found then succeeds on 2nd → 2 calls, retry warn mentions file-not-found', async () => {
+    const { adapter, internal } = makeAdapter();
+    const actionSpy = vi
+      .spyOn(internal, 'action')
+      .mockRejectedValueOnce(getImageFileNotFound())
+      .mockResolvedValueOnce({
+        status: 'ok',
+        retcode: 0,
+        data: { filename: 'd.jpg', url: 'http://x/d.jpg', size: 99 },
+        echo: '1',
+      });
+    const warnSpy = vi.spyOn(internal.logger, 'warn');
+
+    const promise = adapter.getImage('abcdef012345XYZ');
+    await vi.advanceTimersByTimeAsync(500);
+    const result = await promise;
+
+    expect(result.filename).toBe('d.jpg');
+    expect(actionSpy).toHaveBeenCalledTimes(2);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0]![0]).toMatchObject({ file: 'abcdef012345', backoff: 500, attempt: 1, category: 'file-not-found' });
+    expect(warnSpy.mock.calls[0]![1]).toMatch(/getImage retry 1\/2 after get_image file-not-found .*waited 500ms/);
+  });
+
+  it('Case 10 negative: get_image with non-transient cause (invalid file format) → no retry, 1 call', async () => {
+    const { adapter, internal } = makeAdapter();
+    const actionSpy = vi
+      .spyOn(internal, 'action')
+      .mockRejectedValue(new NapCatActionError('get_image', new Error('invalid file format')));
+    const warnSpy = vi.spyOn(internal.logger, 'warn');
+
+    await expect(adapter.getImage('abcdef012345XYZ')).rejects.toBeInstanceOf(NapCatActionError);
+
+    expect(actionSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('Case 11 mixed: timeout then file-not-found then success → 3 calls, categories reflect each attempt', async () => {
+    const { adapter, internal } = makeAdapter();
+    const actionSpy = vi
+      .spyOn(internal, 'action')
+      .mockRejectedValueOnce(getImageTimeout())
+      .mockRejectedValueOnce(getImageFileNotFound())
+      .mockResolvedValueOnce({
+        status: 'ok',
+        retcode: 0,
+        data: { filename: 'e.jpg', url: 'http://x/e.jpg', size: 77 },
+        echo: '1',
+      });
+    const warnSpy = vi.spyOn(internal.logger, 'warn');
+
+    const promise = adapter.getImage('abcdef012345XYZ');
+    await vi.advanceTimersByTimeAsync(500);
+    await vi.advanceTimersByTimeAsync(1500);
+    const result = await promise;
+
+    expect(result.filename).toBe('e.jpg');
+    expect(actionSpy).toHaveBeenCalledTimes(3);
+    expect(warnSpy).toHaveBeenCalledTimes(2);
+    expect(warnSpy.mock.calls[0]![0]).toMatchObject({ category: 'timeout', attempt: 1, backoff: 500 });
+    expect(warnSpy.mock.calls[0]![1]).toMatch(/getImage retry 1\/2 after get_image timeout .*waited 500ms/);
+    expect(warnSpy.mock.calls[1]![0]).toMatchObject({ category: 'file-not-found', attempt: 2, backoff: 1500 });
+    expect(warnSpy.mock.calls[1]![1]).toMatch(/getImage retry 2\/2 after get_image file-not-found .*waited 1500ms/);
   });
 });
