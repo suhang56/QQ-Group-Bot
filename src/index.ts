@@ -407,6 +407,9 @@ const selfReflection = ACTIVE_GROUPS[0]
       groupId: ACTIVE_GROUPS[0],
       outputPath: tuningPath,
       enabled: selfReflectionEnabled,
+      messages: db.messages,
+      groupConfig: db.groupConfig,
+      personaPatches: db.personaPatches,
     })
   : null;
 

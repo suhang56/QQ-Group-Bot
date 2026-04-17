@@ -452,3 +452,33 @@ CREATE TABLE IF NOT EXISTS social_relations (
 );
 
 CREATE INDEX IF NOT EXISTS idx_social_relations_group ON social_relations(group_id, strength DESC);
+
+-- persona_patch_proposals (M6.6): self-reflection → persona patch proposals,
+-- queued here pending admin review. status lifecycle:
+--   pending → approved (admin /persona_apply, updates group_config.chat_persona_text)
+--           → rejected (admin /persona_reject)
+--           → superseded (another proposal approved, older pendings auto-close)
+--           → expired (older than PERSONA_PATCH_TTL_DAYS, filtered at listPending time
+--             — NOT via a stored expires_at column. Runtime cutoff keeps the row
+--             auditable after it times out without rewriting state every tick.)
+-- old_persona_text snapshot captured at creation time so the diff/apply view is
+-- stable even if someone manually edited group_config.chat_persona_text between
+-- propose and apply (apply does a conflict check; see repo.apply).
+CREATE TABLE IF NOT EXISTS persona_patch_proposals (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id          TEXT    NOT NULL,
+  old_persona_text  TEXT,                            -- nullable: empty persona → override hint
+  new_persona_text  TEXT    NOT NULL,
+  reasoning         TEXT    NOT NULL,
+  diff_summary      TEXT    NOT NULL,
+  status            TEXT    NOT NULL DEFAULT 'pending', -- pending|approved|rejected|superseded
+  created_at        INTEGER NOT NULL,                -- unix seconds
+  decided_at        INTEGER,
+  decided_by        TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_persona_patch_group_created
+  ON persona_patch_proposals(group_id, created_at DESC);
+-- Partial index for the hot pending-lookup path — most groups have 0 pending rows most of the time.
+CREATE INDEX IF NOT EXISTS idx_persona_patch_group_pending
+  ON persona_patch_proposals(group_id, created_at DESC) WHERE status = 'pending';

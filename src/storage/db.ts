@@ -428,6 +428,58 @@ export interface IWelcomeLogRepository {
   lastWelcomeAt(groupId: string, userId: string): number | null;
 }
 
+// ---- PersonaPatchProposal (M6.6) ----
+
+export type PersonaPatchStatus = 'pending' | 'approved' | 'rejected' | 'superseded';
+
+export interface PersonaPatchProposal {
+  id: number;
+  groupId: string;
+  /** Snapshot of chat_persona_text at proposal time. null when no persona was set. */
+  oldPersonaText: string | null;
+  newPersonaText: string;
+  /** LLM-written natural-language explanation of what changed and why, 1-3 sentences. */
+  reasoning: string;
+  /** Unified-diff summary produced at propose time (+/- lines, truncated to ~40 lines). */
+  diffSummary: string;
+  status: PersonaPatchStatus;
+  createdAt: number;     // unix seconds
+  decidedAt: number | null;
+  decidedBy: string | null;
+}
+
+export interface IPersonaPatchRepository {
+  insert(row: Omit<PersonaPatchProposal, 'id' | 'status' | 'decidedAt' | 'decidedBy'>): number;
+  getById(id: number): PersonaPatchProposal | null;
+  /**
+   * List pending proposals (status='pending') created within `ttlSec` of `now`.
+   * Rows older than ttlSec are silently filtered out (treated as expired) but
+   * remain in the table — no `expires_at` column is stored.
+   */
+  listPending(groupId: string, now: number, ttlSec: number, limit?: number): PersonaPatchProposal[];
+  /**
+   * List all proposals (any status) for a group within `sinceSec .. now`.
+   * Used by /persona_history.
+   */
+  listHistory(groupId: string, sinceSec: number, limit?: number): PersonaPatchProposal[];
+  /** Count proposals inserted since `sinceSec` — used for daily-cap rate limit. */
+  countProposalsSince(groupId: string, sinceSec: number): number;
+  /** Mark a proposal rejected. */
+  reject(id: number, adminId: string, nowSec: number): void;
+  /**
+   * Transactional apply: mark proposal approved, update group_config.chat_persona_text
+   * to its new_persona_text, and mark all other pending proposals for the same
+   * group as superseded. Returns true on success; false if the proposal isn't
+   * currently pending (lost race) or the group_config update failed.
+   */
+  apply(id: number, adminId: string, nowSec: number): boolean;
+  /**
+   * Returns true iff a proposal with this exact new_persona_text already exists
+   * (any status) in the last `windowSec` — used to suppress trivial retries.
+   */
+  hasRecentDuplicate(groupId: string, newPersonaText: string, windowSec: number, now: number): boolean;
+}
+
 export interface LocalSticker {
   id: number;
   groupId: string;
@@ -2021,6 +2073,152 @@ class WelcomeLogRepository implements IWelcomeLogRepository {
   }
 }
 
+interface PersonaPatchRow {
+  id: number;
+  group_id: string;
+  old_persona_text: string | null;
+  new_persona_text: string;
+  reasoning: string;
+  diff_summary: string;
+  status: string;
+  created_at: number;
+  decided_at: number | null;
+  decided_by: string | null;
+}
+
+class PersonaPatchRepository implements IPersonaPatchRepository {
+  constructor(private readonly db: DatabaseSync) {}
+
+  private _row(r: PersonaPatchRow): PersonaPatchProposal {
+    return {
+      id: r.id,
+      groupId: r.group_id,
+      oldPersonaText: r.old_persona_text,
+      newPersonaText: r.new_persona_text,
+      reasoning: r.reasoning,
+      diffSummary: r.diff_summary,
+      status: r.status as PersonaPatchStatus,
+      createdAt: r.created_at,
+      decidedAt: r.decided_at,
+      decidedBy: r.decided_by,
+    };
+  }
+
+  insert(row: Omit<PersonaPatchProposal, 'id' | 'status' | 'decidedAt' | 'decidedBy'>): number {
+    const result = this.db.prepare(
+      `INSERT INTO persona_patch_proposals
+         (group_id, old_persona_text, new_persona_text, reasoning, diff_summary, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    ).run(
+      row.groupId,
+      row.oldPersonaText,
+      row.newPersonaText,
+      row.reasoning,
+      row.diffSummary,
+      row.createdAt,
+    ) as { lastInsertRowid: number };
+    return Number(result.lastInsertRowid);
+  }
+
+  getById(id: number): PersonaPatchProposal | null {
+    const r = this.db.prepare(
+      'SELECT * FROM persona_patch_proposals WHERE id = ?'
+    ).get(id) as PersonaPatchRow | undefined;
+    return r ? this._row(r) : null;
+  }
+
+  listPending(groupId: string, now: number, ttlSec: number, limit = 20): PersonaPatchProposal[] {
+    const cutoff = now - ttlSec;
+    const rows = this.db.prepare(
+      `SELECT * FROM persona_patch_proposals
+         WHERE group_id = ? AND status = 'pending' AND created_at >= ?
+         ORDER BY created_at DESC LIMIT ?`
+    ).all(groupId, cutoff, limit) as unknown as PersonaPatchRow[];
+    return rows.map(r => this._row(r));
+  }
+
+  listHistory(groupId: string, sinceSec: number, limit = 50): PersonaPatchProposal[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM persona_patch_proposals
+         WHERE group_id = ? AND created_at >= ?
+         ORDER BY created_at DESC LIMIT ?`
+    ).all(groupId, sinceSec, limit) as unknown as PersonaPatchRow[];
+    return rows.map(r => this._row(r));
+  }
+
+  countProposalsSince(groupId: string, sinceSec: number): number {
+    const row = this.db.prepare(
+      `SELECT COUNT(*) AS n FROM persona_patch_proposals WHERE group_id = ? AND created_at >= ?`
+    ).get(groupId, sinceSec) as { n: number } | undefined;
+    return row?.n ?? 0;
+  }
+
+  reject(id: number, adminId: string, nowSec: number): void {
+    this.db.prepare(
+      `UPDATE persona_patch_proposals
+          SET status = 'rejected', decided_at = ?, decided_by = ?
+        WHERE id = ? AND status = 'pending'`
+    ).run(nowSec, adminId, id);
+  }
+
+  hasRecentDuplicate(groupId: string, newPersonaText: string, windowSec: number, now: number): boolean {
+    const cutoff = now - windowSec;
+    const row = this.db.prepare(
+      `SELECT 1 FROM persona_patch_proposals
+         WHERE group_id = ? AND new_persona_text = ? AND created_at >= ? LIMIT 1`
+    ).get(groupId, newPersonaText, cutoff) as { 1: number } | undefined;
+    return !!row;
+  }
+
+  apply(id: number, adminId: string, nowSec: number): boolean {
+    // Transactional: mark approved → update group_config.chat_persona_text → supersede siblings.
+    // All three must land together or none. node:sqlite exposes manual BEGIN/COMMIT/ROLLBACK.
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const proposal = this.db.prepare(
+        `SELECT group_id, new_persona_text, status FROM persona_patch_proposals WHERE id = ?`
+      ).get(id) as { group_id: string; new_persona_text: string; status: string } | undefined;
+
+      if (!proposal || proposal.status !== 'pending') {
+        this.db.exec('ROLLBACK');
+        return false;
+      }
+
+      const update = this.db.prepare(
+        `UPDATE persona_patch_proposals
+            SET status = 'approved', decided_at = ?, decided_by = ?
+          WHERE id = ? AND status = 'pending'`
+      ).run(nowSec, adminId, id) as { changes: number };
+
+      if (update.changes !== 1) {
+        this.db.exec('ROLLBACK');
+        return false;
+      }
+
+      const cfg = this.db.prepare(
+        `UPDATE group_config SET chat_persona_text = ?, updated_at = ? WHERE group_id = ?`
+      ).run(proposal.new_persona_text, new Date(nowSec * 1000).toISOString(), proposal.group_id) as { changes: number };
+
+      if (cfg.changes !== 1) {
+        this.db.exec('ROLLBACK');
+        return false;
+      }
+
+      this.db.prepare(
+        `UPDATE persona_patch_proposals
+            SET status = 'superseded', decided_at = ?, decided_by = ?
+          WHERE group_id = ? AND status = 'pending' AND id != ?`
+      ).run(nowSec, adminId, proposal.group_id, id);
+
+      this.db.exec('COMMIT');
+      return true;
+    } catch (err) {
+      try { this.db.exec('ROLLBACK'); } catch { /* best-effort */ }
+      throw err;
+    }
+  }
+}
+
 // ---- BandoriLive ----
 
 export interface BandoriLiveRow {
@@ -2299,6 +2497,7 @@ export class Database {
   readonly learnedFacts: ILearnedFactsRepository;
   readonly pendingModeration: IPendingModerationRepository;
   readonly welcomeLog: IWelcomeLogRepository;
+  readonly personaPatches: IPersonaPatchRepository;
   readonly modRejections: IModRejectionRepository;
   readonly bandoriLives: IBandoriLiveRepository;
   readonly expressionPatterns: IExpressionPatternRepository;
@@ -2333,6 +2532,7 @@ export class Database {
     this.learnedFacts = new LearnedFactsRepository(this._db);
     this.pendingModeration = new PendingModerationRepository(this._db);
     this.welcomeLog = new WelcomeLogRepository(this._db);
+    this.personaPatches = new PersonaPatchRepository(this._db);
     this.modRejections = new ModRejectionRepository(this._db);
     this.bandoriLives = new BandoriLiveRepository(this._db);
     this.expressionPatterns = new ExpressionPatternRepository(this._db);
@@ -2748,6 +2948,29 @@ export class Database {
         rating INTEGER, rating_comment TEXT, rated_at INTEGER
       )
     `);
+
+    // persona_patch_proposals (M6.6): self-reflection → admin-reviewable persona patch queue.
+    // CREATE + indexes wrapped in IF NOT EXISTS so both fresh installs and existing DBs
+    // converge on the same schema (per feedback_sqlite_schema_migration: schema.sql alone
+    // is silently skipped for existing DBs, so this block is the source of truth for upgrades).
+    this._db.exec(`
+      CREATE TABLE IF NOT EXISTS persona_patch_proposals (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id          TEXT    NOT NULL,
+        old_persona_text  TEXT,
+        new_persona_text  TEXT    NOT NULL,
+        reasoning         TEXT    NOT NULL,
+        diff_summary      TEXT    NOT NULL,
+        status            TEXT    NOT NULL DEFAULT 'pending',
+        created_at        INTEGER NOT NULL,
+        decided_at        INTEGER,
+        decided_by        TEXT
+      )
+    `);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_persona_patch_group_created
+      ON persona_patch_proposals(group_id, created_at DESC)`);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_persona_patch_group_pending
+      ON persona_patch_proposals(group_id, created_at DESC) WHERE status = 'pending'`);
   }
 
   /**
