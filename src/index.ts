@@ -336,6 +336,8 @@ chat.setStyleSource(styleLearner);
 chat.setRelationshipSource(relationshipTracker);
 
 const affinity = new AffinityModule(db.rawDb);
+// M6.2b: wire affinity producer + consumer into chat scoring / userContent.
+chat.setAffinitySource(affinity);
 
 const jargonMiner = new JargonMiner({
   db: db.rawDb,
