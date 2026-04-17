@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { makeEngagementDecision, type EngagementSignals } from '../src/modules/engagement-decision.js';
+import {
+  makeEngagementDecision,
+  MAX_CONSECUTIVE_BOT_REPLIES,
+  type EngagementSignals,
+} from '../src/modules/engagement-decision.js';
 import { scoreComprehension, type ComprehensionContext } from '../src/services/comprehension-scorer.js';
 import { initLogger } from '../src/utils/logger.js';
 
@@ -17,6 +21,7 @@ const BASE_SIGNALS: EngagementSignals = {
   isAdversarial: false,
   isPureAtMention: false,
   lastSpeechIgnored: false,
+  consecutiveReplyCount: 0,
 };
 
 function signals(overrides: Partial<EngagementSignals>): EngagementSignals {
@@ -149,6 +154,70 @@ describe('makeEngagementDecision', () => {
     const d = makeEngagementDecision(signals({ lastSpeechIgnored: true, isAdversarial: true }));
     expect(d.shouldReply).toBe(true);
     expect(d.strength).toBe('react');
+  });
+
+  // ── Gate 5.6 (M6.4): consecutive bot-reply cap ────────────────────────
+  it('M6.4: skip when consecutive-reply cap reached and not direct', () => {
+    const d = makeEngagementDecision(signals({
+      consecutiveReplyCount: MAX_CONSECUTIVE_BOT_REPLIES,
+      participationScore: 2.0,
+    }));
+    expect(d.shouldReply).toBe(false);
+    expect(d.strength).toBe('skip');
+    expect(d.reason).toContain('consecutive-reply cap');
+    expect(d.reason).toContain(`${MAX_CONSECUTIVE_BOT_REPLIES}/${MAX_CONSECUTIVE_BOT_REPLIES}`);
+  });
+
+  it('M6.4: reason string exposes current count (e.g. 5/3)', () => {
+    const d = makeEngagementDecision(signals({ consecutiveReplyCount: 5 }));
+    expect(d.shouldReply).toBe(false);
+    expect(d.reason).toContain(`5/${MAX_CONSECUTIVE_BOT_REPLIES}`);
+  });
+
+  it('M6.4: direct @-mention bypasses consecutive-reply cap', () => {
+    const d = makeEngagementDecision(signals({
+      consecutiveReplyCount: MAX_CONSECUTIVE_BOT_REPLIES,
+      isMention: true,
+      participationScore: 0,
+    }));
+    expect(d.shouldReply).toBe(true);
+    expect(d.strength).toBe('engage');
+  });
+
+  it('M6.4: direct reply-to-bot bypasses consecutive-reply cap', () => {
+    const d = makeEngagementDecision(signals({
+      consecutiveReplyCount: MAX_CONSECUTIVE_BOT_REPLIES,
+      isReplyToBot: true,
+      participationScore: 0,
+    }));
+    expect(d.shouldReply).toBe(true);
+    expect(d.strength).toBe('engage');
+  });
+
+  it('M6.4: count below cap → normal scoring continues', () => {
+    const d = makeEngagementDecision(signals({
+      consecutiveReplyCount: MAX_CONSECUTIVE_BOT_REPLIES - 1,
+      participationScore: 1.2,
+    }));
+    expect(d.shouldReply).toBe(true);
+    expect(d.strength).toBe('engage');
+  });
+
+  it('M6.4: boundary — count exactly at cap triggers skip', () => {
+    const d = makeEngagementDecision(signals({
+      consecutiveReplyCount: MAX_CONSECUTIVE_BOT_REPLIES,
+    }));
+    expect(d.shouldReply).toBe(false);
+    expect(d.strength).toBe('skip');
+  });
+
+  it('M6.4: boundary — count one below cap allows engage', () => {
+    const d = makeEngagementDecision(signals({
+      consecutiveReplyCount: MAX_CONSECUTIVE_BOT_REPLIES - 1,
+      participationScore: 2.0,
+    }));
+    expect(d.shouldReply).toBe(true);
+    expect(d.strength).toBe('engage');
   });
 });
 

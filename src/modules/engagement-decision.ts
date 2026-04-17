@@ -12,6 +12,13 @@
 
 export type EngagementStrength = 'skip' | 'lurk' | 'react' | 'engage';
 
+/**
+ * M6.4: hard cap on the number of consecutive bot replies without an
+ * intervening peer message. Re-exported so chat.ts and tests share a single
+ * source of truth.
+ */
+export const MAX_CONSECUTIVE_BOT_REPLIES = 3;
+
 export interface EngagementDecision {
   readonly shouldReply: boolean;
   readonly strength: EngagementStrength;
@@ -46,6 +53,13 @@ export interface EngagementSignals {
    * this condition get suppressed by Gate 5.5.
    */
   readonly lastSpeechIgnored: boolean;
+  /**
+   * M6.4: number of consecutive bot replies since the last peer message in
+   * this group. Bot-side counter maintained by chat.ts — resets on any peer
+   * message. Gate 5.6 suppresses non-direct replies when this reaches
+   * MAX_CONSECUTIVE_BOT_REPLIES.
+   */
+  readonly consecutiveReplyCount: number;
 }
 
 /**
@@ -57,6 +71,8 @@ export interface EngagementSignals {
  * 3. Adversarial patterns → react (deflection, handled by caller)
  * 4. Low comprehension + no direct signal → skip
  * 5. Low comprehension + @-mention/reply → react (confused deflection)
+ * 5.5 Last speech ignored by group + not direct → skip (Gate 5.5, R3)
+ * 5.6 Consecutive bot-reply cap reached + not direct → skip (Gate 5.6, M6.4)
  * 6. Normal scoring: score >= minScore or isDirect → engage
  * 7. Otherwise → skip
  */
@@ -108,6 +124,18 @@ export function makeEngagementDecision(signals: EngagementSignals): EngagementDe
   // someone actually addresses the bot.
   if (signals.lastSpeechIgnored && !isDirect) {
     return { shouldReply: false, strength: 'skip', reason: 'last speech ignored by group' };
+  }
+
+  // Gate 5.6 (M6.4): consecutive bot-reply cap — hard anti-monologue gate.
+  // Direct triggers still bypass: if someone @s or replies to the bot, respond
+  // even mid-streak. Otherwise, after MAX replies without a peer interjection,
+  // the bot is talking to itself and must shut up until the streak breaks.
+  if (signals.consecutiveReplyCount >= MAX_CONSECUTIVE_BOT_REPLIES && !isDirect) {
+    return {
+      shouldReply: false,
+      strength: 'skip',
+      reason: `consecutive-reply cap reached (${signals.consecutiveReplyCount}/${MAX_CONSECUTIVE_BOT_REPLIES})`,
+    };
   }
 
   // Gate 6: normal participation scoring

@@ -721,6 +721,9 @@ export class ChatModule implements IChatModule {
     msgsSinceSpoke: number;
     engagementReceived: boolean;
   }>(200);
+  // M6.4: per-group consecutive bot-reply counter; resets on any peer message
+  // (even debounced). Bumped on every real bot output, including deflections.
+  private readonly consecutiveReplies = new BoundedMap<string, number>(200);
   // per-group: compiled interest-category regex cache. Invalidated when config changes.
   private readonly interestRegexCache = new Map<string, {
     updatedAt: string;
@@ -932,6 +935,16 @@ export class ChatModule implements IChatModule {
     if (mfaceKeys.length > 0 && this.stickerFirst) {
       this.stickerFirst.recordMfaceOutput(groupId, mfaceKeys);
     }
+
+    // M6.4: each whole reply counts once toward the consecutive-bot-reply cap.
+    this._bumpConsecutive(groupId);
+  }
+
+  // M6.4: bump the per-group consecutive-reply counter. Called from
+  // _recordOwnReply AND from every deflection return (deflection path does
+  // not flow through _recordOwnReply).
+  private _bumpConsecutive(groupId: string): void {
+    this.consecutiveReplies.set(groupId, (this.consecutiveReplies.get(groupId) ?? 0) + 1);
   }
 
   /**
@@ -1188,6 +1201,18 @@ export class ChatModule implements IChatModule {
   ): Promise<string | null> {
     this.knownGroups.add(groupId);
 
+    // M6.4: snapshot consecutive-reply count as it stood at the moment this
+    // peer message arrived, BEFORE any reset. Gate 5.6 reads this snapshot
+    // so the cap can block the first peer message that arrives after the
+    // bot has already monologued past MAX. Any peer message (even one that
+    // gets debounced / rate-limited / short-ack-dropped below) then resets
+    // the streak — reset runs BEFORE debounce so a rapid peer interjection
+    // still breaks the streak for subsequent replies.
+    const preResetConsecutive = this.consecutiveReplies.get(groupId) ?? 0;
+    if (triggerMessage.userId !== this.botUserId) {
+      this.consecutiveReplies.set(groupId, 0);
+    }
+
     // Pure @-mention with no other content: reply with at_only deflection
     const isPureAtMention = this.botUserId
       && triggerMessage.rawContent.includes(`[CQ:at,qq=${this.botUserId}]`)
@@ -1222,6 +1247,7 @@ export class ChatModule implements IChatModule {
     if (isPureAtMention) {
       this.lastProactiveReply.set(groupId, now);
       this.botSpeechTracking.set(groupId, { lastSpokeAt: now, msgsSinceSpoke: 0, engagementReceived: false });
+      this._bumpConsecutive(groupId);
       return this._generateDeflection('at_only', triggerMessage);
     }
 
@@ -1344,6 +1370,7 @@ export class ChatModule implements IChatModule {
       isAdversarial,
       isPureAtMention: false, // already handled above
       lastSpeechIgnored,
+      consecutiveReplyCount: preResetConsecutive,
     };
     const engagementDecision = makeEngagementDecision(engagementSignals);
 
@@ -1384,6 +1411,10 @@ export class ChatModule implements IChatModule {
 
     // React path: deflection without calling Claude
     if (engagementDecision.strength === 'react') {
+      // M6.4: deflections do not flow through _recordOwnReply, so bump the
+      // consecutive-reply counter explicitly here. Covers all 6 deflection
+      // branches below (curse/harass/probe/task/recite/memory/confused).
+      this._bumpConsecutive(groupId);
       if (isAdversarial) {
         const isCurse = this._teaseIncrement(groupId, triggerMessage.userId, now);
         if (isCurse) return this._generateDeflection('curse', triggerMessage);
@@ -2484,6 +2515,10 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       msgsSinceSpoke: 0,
       engagementReceived: false,
     });
+    // M6.4: proactive (unsolicited) speech also counts toward the consecutive-
+    // reply cap — two silence-breakers in a row without peer response should
+    // make Gate 5.6 block the next non-direct trigger.
+    this._bumpConsecutive(groupId);
     this.logger.info({ groupId, text, reason }, 'proactive message');
     if (this._proactiveAdapter) {
       const msgId = await this._proactiveAdapter(groupId, text);
