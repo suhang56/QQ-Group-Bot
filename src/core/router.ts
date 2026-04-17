@@ -14,6 +14,8 @@ import type { SequenceGuard } from '../modules/sequence-guard.js';
 import type { VisionService } from '../modules/vision.js';
 import type { ICharModule } from '../modules/char.js';
 import type { IStickerFirstModule } from '../modules/sticker-first.js';
+import type { AffinityModule } from '../modules/affinity.js';
+import type { IFatigueSource } from '../modules/fatigue.js';
 import { extractTokens } from '../utils/text-tokenize.js';
 import { BotErrorCode } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
@@ -115,6 +117,8 @@ export class Router implements IRouter {
   private charModule: ICharModule | null = null;
   private stickerFirstModule: IStickerFirstModule | null = null;
   private pokeModule: IPokeModule | null = null;
+  private affinity: AffinityModule | null = null;
+  private fatigue: IFatigueSource | null = null;
   private forwardPurgeInterval: ReturnType<typeof setInterval> | null = null;
 
   // Repeater cooldown: key = `${groupId}:${content}`, value = last-triggered timestamp
@@ -214,6 +218,14 @@ export class Router implements IRouter {
 
   setPoke(pokeModule: IPokeModule): void {
     this.pokeModule = pokeModule;
+  }
+
+  setAffinity(affinity: AffinityModule): void {
+    this.affinity = affinity;
+  }
+
+  setFatigue(fatigue: IFatigueSource): void {
+    this.fatigue = fatigue;
   }
 
   dispose(): void {
@@ -1458,6 +1470,63 @@ ${ctxLine}
         await reply(`群 ${groupId} 过去 ${days} 天 persona 提案历史（${rows.length}）：\n${lines.join('\n')}`);
         return;
       }
+    }
+
+    // ─── M9.4: /bot_status admin DM dashboard ──────────────────────────────
+    if (text.startsWith('/bot_status')) {
+      if (msg.userId !== MOD_APPROVAL_ADMIN) { await reply('仅管理员'); return; }
+      if (!this.rateLimiter.checkUser(msg.userId, 'bot_status')) {
+        const cd = this.rateLimiter.cooldownSecondsUser(msg.userId, 'bot_status');
+        await reply(`操作太频繁，请 ${cd}s 后再试。`);
+        return;
+      }
+      const argsTail = text.slice('/bot_status'.length).trim();
+      const groupId = argsTail.length > 0 ? argsTail.split(/\s+/)[0]! : this._defaultReviewGroupId();
+      if (!groupId) { await reply('用法：/bot_status [groupId]'); return; }
+
+      const nowSec = Math.floor(Date.now() / 1000);
+      const lines: string[] = [`=== bot_status 群 ${groupId} ===`];
+
+      if (this.chatModule) {
+        const m = this.chatModule.getMoodTracker().getMood(groupId);
+        lines.push(`mood: v=${m.valence.toFixed(2)} a=${m.arousal.toFixed(2)}`);
+      } else {
+        lines.push('mood: (chat未就绪)');
+      }
+
+      if (this.fatigue) {
+        const f = this.fatigue.getRawScore(groupId);
+        lines.push(`fatigue: ${f.toFixed(2)} / 阈值 4.0`);
+      }
+
+      if (this.affinity) {
+        const top = this.affinity.listTopN(groupId, 3);
+        const rendered = top.length === 0
+          ? '(无)'
+          : top.map(r => `${r.userId.slice(-6)}=${r.score}`).join(', ');
+        lines.push(`affinity top3: ${rendered}`);
+      }
+
+      if (this.chatModule) {
+        lines.push(`consecutive_replies: ${this.chatModule.getConsecutiveReplies(groupId)}`);
+        lines.push(`activity: ${this.chatModule.getActivityLevel(groupId)}`);
+      }
+
+      const personaRows = this.db.personaPatches.listHistory(groupId, nowSec - 7 * 86400, 5);
+      if (personaRows.length === 0) {
+        lines.push('persona: 7天内无提案');
+      } else {
+        lines.push('persona 近5条:');
+        for (const p of personaRows) {
+          const dAgo = Math.floor((nowSec - p.createdAt) / 86400);
+          lines.push(`  #${p.id} [${p.status}] ${dAgo}d前`);
+        }
+      }
+
+      let out = lines.join('\n');
+      if (out.length > 1500) out = out.slice(0, 1480) + '\n...(截断)';
+      await reply(out);
+      return;
     }
 
     const approveMatch = /^\/approve\s+(\d+)$/i.exec(text);

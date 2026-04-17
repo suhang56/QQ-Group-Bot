@@ -95,4 +95,12 @@ export class AffinityModule {
     if (score < 30) return `（${nickname} 你不太熟）`;
     return null;
   }
+
+  listTopN(groupId: string, n: number): Array<{ userId: string; score: number }> {
+    if (n <= 0) return [];
+    const rows = this.db.prepare(
+      'SELECT user_id, score FROM user_affinity WHERE group_id = ? ORDER BY score DESC LIMIT ?',
+    ).all(groupId, n) as Array<{ user_id: string; score: number }>;
+    return rows.map(r => ({ userId: r.user_id, score: r.score }));
+  }
 }

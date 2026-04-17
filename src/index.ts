@@ -340,11 +340,13 @@ chat.setRelationshipSource(relationshipTracker);
 const affinity = new AffinityModule(db.rawDb);
 // M6.2b: wire affinity producer + consumer into chat scoring / userContent.
 chat.setAffinitySource(affinity);
+router.setAffinity(affinity);
 
 // M6.3: per-group reply fatigue — exponential decay, additive penalty once
 // bot has replied heavily. Pure in-memory, no persistence.
 const fatigue = new FatigueModule();
 chat.setFatigueSource(fatigue);
+router.setFatigue(fatigue);
 
 // M7 (M7.1+M7.3+M7.4): pre-chat LLM judge — routed through ModelRouter so
 // gemini-2.5-flash goes to the Google AI Studio provider. Module-level kill
