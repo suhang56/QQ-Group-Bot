@@ -256,12 +256,16 @@ export class NapCatAdapter extends EventEmitter implements INapCatAdapter {
         };
       } catch (err) {
         lastErr = err;
-        const isRetryable = err instanceof Error && /Timeout.*downloadRichMedia/i.test(err.message);
+        const isRetryable =
+          err instanceof NapCatActionError &&
+          err.message.includes("'get_image'") &&
+          err.cause instanceof Error &&
+          /timed out/i.test(err.cause.message);
         if (!isRetryable || attempt >= BACKOFFS_MS.length) {
           if (isRetryable && attempt >= BACKOFFS_MS.length) {
             this.logger.warn(
               { file: fileShort, err },
-              `[napcat] getImage exhausted 3 attempts, giving up (file=${fileShort})`,
+              `[napcat] getImage exhausted retries after get_image timeout (file=${fileShort}, total ${500 + 1500}ms)`,
             );
           }
           throw err;
@@ -269,7 +273,7 @@ export class NapCatAdapter extends EventEmitter implements INapCatAdapter {
         const backoff = BACKOFFS_MS[attempt]!;
         this.logger.warn(
           { file: fileShort, backoff, attempt: attempt + 1 },
-          `[napcat] getImage retry ${attempt + 1}/2 after Timeout (file=${fileShort}, waited ${backoff}ms)`,
+          `[napcat] getImage retry ${attempt + 1}/2 after get_image timeout (file=${fileShort}, waited ${backoff}ms)`,
         );
         await new Promise<void>(resolve => {
           const t = setTimeout(resolve, backoff);
