@@ -29,6 +29,22 @@ import { makeEngagementDecision, type EngagementSignals } from './engagement-dec
 import { scoreComprehensionSafe, type ComprehensionContext } from '../services/comprehension-scorer.js';
 import { ConversationStateTracker } from './conversation-state.js';
 import { pickVariant, buildVariantSystemPrompt, type VariantContext, type ActiveMemeJoke } from './prompt-variants.js';
+import type { SocialRelation } from './relationship-tracker.js';
+
+// ── M6.2a: miner helper shapes ───────────────────────────────────────────────
+// Narrow structural interfaces so ChatModule can consume the three miners
+// without importing their full classes (avoids pulling claude/db-exec wiring
+// into unit tests and keeps circular-dep risk low).
+export interface IExpressionPromptSource {
+  formatForPrompt(groupId: string, limit?: number): string;
+}
+export interface IStylePromptSource {
+  formatStyleForPrompt(groupId: string, userId: string): string;
+}
+export interface IRelationshipPromptSource {
+  getRelevantRelations(groupId: string, userIds: string[]): SocialRelation[];
+  formatRelationsForPrompt(relations: SocialRelation[], nicknameMap: Map<string, string>): string;
+}
 
 export interface IChatModule {
   generateReply(groupId: string, triggerMessage: GroupMessage, _recentMessages: GroupMessage[]): Promise<string | null>;
@@ -720,6 +736,11 @@ export class ChatModule implements IChatModule {
   private readonly bandoriLiveRepo: IBandoriLiveRepository | null;
   private readonly loreLoader: ILoreLoader | null;
   private readonly deflectionEngine: IDeflectionEngine | null;
+  // M6.2a: optional miner sources; set via setter after construction to match
+  // index.ts wiring order (miners are built AFTER ChatModule today).
+  private expressionSource: IExpressionPromptSource | null = null;
+  private styleSource: IStylePromptSource | null = null;
+  private relationshipSource: IRelationshipPromptSource | null = null;
   // per-group: whether the last generateReply call returned an evasive reply
   private readonly lastEvasiveReply = new Map<string, boolean>();
   private readonly conversationState = new ConversationStateTracker();
@@ -1081,6 +1102,18 @@ export class ChatModule implements IChatModule {
   /** Inject meme graph repo into internal conversation state tracker. */
   setMemeGraphRepo(repo: IMemeGraphRepo | null): void {
     this.conversationState.setMemeGraphRepo(repo);
+  }
+
+  // M6.2a: wire miner helpers. No-op when null/undefined, so existing tests
+  // and setups that omit these work unchanged.
+  setExpressionSource(src: IExpressionPromptSource | null): void {
+    this.expressionSource = src;
+  }
+  setStyleSource(src: IStylePromptSource | null): void {
+    this.styleSource = src;
+  }
+  setRelationshipSource(src: IRelationshipPromptSource | null): void {
+    this.relationshipSource = src;
   }
 
   /** Return the key of the most recent sticker sent via sticker-first in this group, or null. */
@@ -1553,7 +1586,19 @@ export class ChatModule implements IChatModule {
     const convStateHint = this.conversationState.formatForPrompt(groupId);
     const convStateLine = convStateHint ? `\n${convStateHint}` : '';
 
-    const userContent = `${liveBlock}${replyContextBlock}${keywordSection}${wideSection}${mediumSection}${immediateSection}${avoidSection}以上语境里 [你(昵称)] 是你自己说过的，[别人昵称] 是群友说的。**不要把群友的话当成你自己说过的**。${atMentionDirective}${youAddressedDirective}${moodHint}${convStateLine}
+    // M6.2a: style-learner — per-user hint, user-role only (system must stay
+    // static). Fires only on direct triggers to keep ambient chat cheap and
+    // never when the trigger "user" is the bot itself.
+    const isDirectTrigger = isAtTrigger || this._isReplyToBot(triggerMessage);
+    const styleLine = (() => {
+      if (!this.styleSource || !isDirectTrigger) return '';
+      if (triggerMessage.userId === this.botUserId) return '';
+      const styleText = this.styleSource.formatStyleForPrompt(groupId, triggerMessage.userId);
+      if (!styleText) return '';
+      return `\n〔context 注释：${triggerMessage.nickname} 最近这么说话——${styleText.replace(/\n/g, ' ')}〕`;
+    })();
+
+    const userContent = `${liveBlock}${replyContextBlock}${keywordSection}${wideSection}${mediumSection}${immediateSection}${avoidSection}以上语境里 [你(昵称)] 是你自己说过的，[别人昵称] 是群友说的。**不要把群友的话当成你自己说过的**。${atMentionDirective}${youAddressedDirective}${moodHint}${convStateLine}${styleLine}
 
 ← 要接的这条 — 只输出一个：${isAtTrigger ? '一条自然反应（不能是 <skip>）' : '<skip> 或 一条自然反应'}。${distinctSpeakers >= 3 ? `\n最近 ${distinctSpeakers} 个群友同时聊，可以用"你们"集体称呼。` : ''}
 ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMessage.content) ? '\n**注意**: 这条消息有人直接骂你。**绝对不要回"自言自语吗"/"在骂谁"** — 那是 bot tell。要么硬怼回去，要么 <skip>。' : ''}`;
@@ -2959,7 +3004,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
   private _getGroupIdentityPrompt(
     groupId: string,
     triggerContent?: string,
-    immediateContext?: { nickname: string; content: string }[],
+    immediateContext?: { nickname: string; content: string; userId?: string }[],
   ): string {
     const lore = this._loadRelevantLore(groupId, triggerContent ?? '', immediateContext ?? []);
 
@@ -2969,9 +3014,13 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       ? this.loreLoader.hasPerMemberLore(groupId)
       : this.loreAliasIndex.has(groupId) && (this.loreAliasIndex.get(groupId)?.size ?? 0) > 0;
 
+    // Relationship section varies per-call (depends on immediate-context speakers),
+    // so treat it like per-member lore for cache purposes.
+    const hasRelationshipSource = this.relationshipSource !== null;
+
     // If per-member lore is active, we can't use the full cached result since
     // lore content varies per call. But we can still use cached base + fresh lore.
-    if (cached && Date.now() < cached.expiresAt && !hasPerMemberLore) {
+    if (cached && Date.now() < cached.expiresAt && !hasPerMemberLore && !hasRelationshipSource) {
       return cached.text;
     }
 
@@ -3018,6 +3067,34 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     const jargonEntries = loadGroupJargon(this.db.rawDb, groupId);
     const jargonSection = formatJargonBlock(jargonEntries);
 
+    // M6.2a: expression-learner — group-scoped past reply patterns. Helper
+    // returns '' when no rows; prepend a newline separator only when non-empty
+    // so we never emit a dangling header.
+    const expressionSection = (() => {
+      if (!this.expressionSource) return '';
+      const text = this.expressionSource.formatForPrompt(groupId);
+      return text ? `\n\n${text}` : '';
+    })();
+
+    // M6.2a: relationship-tracker — collect distinct speakers from immediate
+    // context (excluding bot), pull their relations, format with nickname map.
+    const relationshipSection = (() => {
+      if (!this.relationshipSource || !immediateContext || immediateContext.length === 0) return '';
+      const nicknameMap = new Map<string, string>();
+      const userIds: string[] = [];
+      for (const m of immediateContext) {
+        if (!m.userId || m.userId === this.botUserId) continue;
+        if (!nicknameMap.has(m.userId)) {
+          nicknameMap.set(m.userId, m.nickname);
+          userIds.push(m.userId);
+        }
+      }
+      if (userIds.length === 0) return '';
+      const relations = this.relationshipSource.getRelevantRelations(groupId, userIds);
+      const text = this.relationshipSource.formatRelationsForPrompt(relations, nicknameMap);
+      return text ? `\n\n${text}` : '';
+    })();
+
     const imageAwarenessLine = this.visionService
       ? '\n\n消息里 〔你看到那张图是：XXX〕 是你自己看到的图，就当你亲眼看到，顺嘴反应就行。'
       : '';
@@ -3033,10 +3110,11 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       ? '\n群友随口问群规，甩"自己看公告"/"不记得了"/"问 @管理"/"?"就行，别当 FAQ 机。只有管理员明确让你列规矩时再展开说。'
       : '';
 
-    const text = `${personaBase}${adminStyleSection}${loreSection}${jargonSection}${rulesBlock}${imageAwarenessLine}\n\n---\n简短自然（普通闲聊 1-3 句话；涉及列举 / 计数 / 时间线 / 多人信息且事实段落有料时允许 2-4 行展开）。群友提到群里的人名、梗、黑话，基于上面资料接一下；不知道的就"啥来的"，不要装懂。${rulesInstruction}${outputRules}`;
+    const text = `${personaBase}${adminStyleSection}${loreSection}${jargonSection}${expressionSection}${relationshipSection}${rulesBlock}${imageAwarenessLine}\n\n---\n简短自然（普通闲聊 1-3 句话；涉及列举 / 计数 / 时间线 / 多人信息且事实段落有料时允许 2-4 行展开）。群友提到群里的人名、梗、黑话，基于上面资料接一下；不知道的就"啥来的"，不要装懂。${rulesInstruction}${outputRules}`;
 
-    // Only cache the full text when NOT using per-member lore (lore varies per call)
-    if (!hasPerMemberLore) {
+    // Only cache the full text when NOT using per-member lore and NOT using
+    // per-call relationship data (both vary per call otherwise).
+    if (!hasPerMemberLore && !hasRelationshipSource) {
       this.groupIdentityCache.set(groupId, { text, expiresAt: Date.now() + this.groupIdentityCacheTtlMs });
     }
     this.logger.debug({ groupId, hasLore: !!lore, hasStickerSection: stickerSection.length > 0, perMemberLore: hasPerMemberLore }, 'Group identity prompt built');
