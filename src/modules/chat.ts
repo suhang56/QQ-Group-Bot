@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import type { IClaudeClient } from '../ai/claude.js';
 import type { GroupMessage } from '../adapter/napcat.js';
-import type { Database } from '../storage/db.js';
+import type { Database, GroupConfig } from '../storage/db.js';
 import type { SelfLearningModule, IMemeGraphRepo } from './self-learning.js';
 import { ClaudeApiError, ClaudeParseError } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
@@ -33,6 +33,7 @@ import { pickVariant, buildVariantSystemPrompt, type VariantContext, type Active
 import type { SocialRelation } from './relationship-tracker.js';
 import type { IFatigueSource } from './fatigue.js';
 import { FATIGUE_THRESHOLD } from './fatigue.js';
+import type { IPreChatJudge, PreChatContextMessage, PreChatVerdict } from './pre-chat-judge.js';
 
 // ── M6.2a: miner helper shapes ───────────────────────────────────────────────
 // Narrow structural interfaces so ChatModule can consume the three miners
@@ -774,6 +775,9 @@ export class ChatModule implements IChatModule {
   private affinitySource: IAffinitySource | null = null;
   // M6.3: fatigue source (per-group bot reply pacing). null-safe; no-op when unset.
   private fatigueSource: IFatigueSource | null = null;
+  // M7 (M7.1+M7.3+M7.4): pre-chat LLM judge (relevance + addressee + air-reading).
+  // null-safe; when unset, all three override signals default to safe values.
+  private preChatJudge: IPreChatJudge | null = null;
   // per-group: whether the last generateReply call returned an evasive reply
   private readonly lastEvasiveReply = new Map<string, boolean>();
   private readonly conversationState = new ConversationStateTracker();
@@ -1177,6 +1181,9 @@ export class ChatModule implements IChatModule {
   setFatigueSource(src: IFatigueSource | null): void {
     this.fatigueSource = src;
   }
+  setPreChatJudge(judge: IPreChatJudge | null): void {
+    this.preChatJudge = judge;
+  }
 
   /** Return the key of the most recent sticker sent via sticker-first in this group, or null. */
   getLastStickerKey(groupId: string): string | null {
@@ -1382,6 +1389,45 @@ export class ChatModule implements IChatModule {
     this._updateBotSpeechTracking(groupId, triggerMessage, now);
     const lastSpeechIgnored = this._isLastSpeechIgnored(groupId, now);
 
+    // ── M7: pre-chat LLM judge (relevance + addressee + air-reading) ──
+    // Skip when direct / adversarial / short-ack / meta / pic-bot / low-
+    // comprehension: the verdict adds no value on those paths and wastes
+    // a Flash call. Per-group opts gate M7.3/M7.4 independently; M7.1
+    // (engage/skip) runs whenever judge is set and skipJudge=false.
+    const isDirectForJudge = this._isMention(triggerMessage) || this._isReplyToBot(triggerMessage);
+    const skipJudge = isDirectForJudge
+      || isAdversarial
+      || isShortAck
+      || isMetaCommentary
+      || isPicBotCommand
+      || comprehensionScore < 0.3;
+    const groupCfgForJudge = this.db.groupConfig.get(groupId);
+    const airReadingEnabled = groupCfgForJudge?.airReadingEnabled ?? false;
+    const addresseeGraphEnabled = groupCfgForJudge?.addresseeGraphEnabled ?? false;
+    let preChatVerdict: PreChatVerdict | null = null;
+    if (!skipJudge && this.preChatJudge) {
+      preChatVerdict = await this._runPreChatJudge(
+        groupId, triggerMessage, groupCfgForJudge,
+        airReadingEnabled, addresseeGraphEnabled,
+      );
+    }
+    const relevanceOverride = preChatVerdict == null
+      ? null
+      : preChatVerdict.shouldEngage && preChatVerdict.engageConfidence >= 0.6
+      ? 'engage'
+      : !preChatVerdict.shouldEngage && preChatVerdict.engageConfidence >= 0.6
+      ? 'skip'
+      : null;
+    const addresseeIsOther = addresseeGraphEnabled
+      && preChatVerdict != null
+      && preChatVerdict.addressee !== 'bot'
+      && preChatVerdict.addressee !== 'group'
+      && preChatVerdict.addresseeConfidence >= 0.7;
+    const awkwardVeto = airReadingEnabled
+      && preChatVerdict != null
+      && preChatVerdict.awkward
+      && preChatVerdict.awkwardConfidence >= 0.7;
+
     // ── Engagement decision (decision BEFORE Claude call) ─────────────
     // Use the pre-trigger snapshot so the trigger itself doesn't bias its
     // own decision (see activityLevelPre comment above generateReply top).
@@ -1400,6 +1446,9 @@ export class ChatModule implements IChatModule {
       lastSpeechIgnored,
       consecutiveReplyCount: preResetConsecutive,
       activityLevel,
+      relevanceOverride,
+      addresseeIsOther,
+      awkwardVeto,
     };
     const engagementDecision = makeEngagementDecision(engagementSignals);
     const isDirectForLog = engagementSignals.isMention || engagementSignals.isReplyToBot;
@@ -2273,6 +2322,79 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
 
     // 14. Default: lurker-mode casual banter → fast path.
     return CHAT_QWEN_MODEL;
+  }
+
+  /**
+   * Build PreChatContext and invoke the judge. Wrapped so the generateReply
+   * hot path stays flat. All inputs come from data the chat module already
+   * has loaded (recent messages, group config, interest categories). Logs
+   * and swallows unexpected throws — the judge itself fails open, but a
+   * context-assembly bug should never block reply generation.
+   */
+  private async _runPreChatJudge(
+    groupId: string,
+    triggerMessage: GroupMessage,
+    groupConfig: GroupConfig | null | undefined,
+    airReadingEnabled: boolean,
+    addresseeGraphEnabled: boolean,
+  ): Promise<PreChatVerdict | null> {
+    if (!this.preChatJudge) return null;
+    try {
+      const recent = this.db.messages.getRecent(groupId, 4);
+      // getRecent returns newest-first; flip so trigger/newest is last
+      const ordered = recent.slice().reverse();
+      const mapped: PreChatContextMessage[] = ordered.map(m => ({
+        userId: m.userId,
+        role: m.userId === this.botUserId ? 'bot' : 'user',
+        content: m.content,
+        nickname: m.nickname,
+      }));
+      // Ensure the trigger message is present at the end. If ordered already
+      // includes it, replace; otherwise append.
+      const lastIdx = mapped.length - 1;
+      const triggerEntry: PreChatContextMessage = {
+        userId: triggerMessage.userId,
+        role: triggerMessage.userId === this.botUserId ? 'bot' : 'user',
+        content: triggerMessage.content,
+        nickname: triggerMessage.nickname,
+      };
+      if (
+        lastIdx >= 0
+        && mapped[lastIdx]!.userId === triggerEntry.userId
+        && mapped[lastIdx]!.content === triggerEntry.content
+      ) {
+        mapped[lastIdx] = triggerEntry;
+      } else {
+        mapped.push(triggerEntry);
+      }
+      const botInterests = (groupConfig?.chatInterestCategories ?? [])
+        .map(c => c.name);
+      const candidateUserIds = Array.from(new Set(
+        mapped.filter(m => m.role === 'user' && m.userId !== triggerMessage.userId).map(m => m.userId),
+      ));
+      const botIdentityHint = (groupConfig?.chatPersonaText ?? '')
+        .split(/\n/).find(line => line.trim().length > 0)
+        ?? '你是群里的一员，讲中文，随性不主动刷屏。';
+      return await this.preChatJudge.judge(
+        {
+          triggerMessage: {
+            userId: triggerMessage.userId,
+            content: triggerMessage.content,
+            nickname: triggerMessage.nickname,
+          },
+          recentMessages: mapped,
+          botUserId: this.botUserId,
+          botInterests,
+          botIdentityHint: botIdentityHint.slice(0, 120),
+          candidateUserIds,
+          interestTagsVersion: groupConfig?.updatedAt,
+        },
+        { airReadingEnabled, addresseeGraphEnabled },
+      );
+    } catch (err) {
+      this.logger.debug({ err, groupId }, 'pre-chat-judge context build failed — fail-open');
+      return null;
+    }
   }
 
   private _isMention(msg: GroupMessage): boolean {

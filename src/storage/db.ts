@@ -125,6 +125,10 @@ export interface GroupConfig {
   }>;
   /** Minimum number of interest-category matches required (default 1). */
   chatInterestMinHits: number;
+  /** M7.4: enable air-reading (awkward-moment veto) in the pre-chat judge. */
+  airReadingEnabled: boolean;
+  /** M7.3: enable speaker/addressee graph (addressee-is-other skip) in judge. */
+  addresseeGraphEnabled: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -680,6 +684,8 @@ interface GroupConfigRow {
   sticker_first_threshold: number;
   chat_interest_categories: string;
   chat_interest_min_hits: number;
+  air_reading_enabled: number;
+  addressee_graph_enabled: number;
   created_at: string; updated_at: string;
 }
 
@@ -784,6 +790,8 @@ function configFromRow(row: GroupConfigRow): GroupConfig {
       name: string; pattern: string; weight: number;
     }>,
     chatInterestMinHits: row.chat_interest_min_hits ?? 1,
+    airReadingEnabled: (row.air_reading_enabled ?? 0) !== 0,
+    addresseeGraphEnabled: (row.addressee_graph_enabled ?? 0) !== 0,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -1124,8 +1132,9 @@ class GroupConfigRepository implements IGroupConfigRepository {
         welcome_enabled, id_guard_enabled,
         sticker_first_enabled, sticker_first_threshold,
         chat_interest_categories, chat_interest_min_hits,
+        air_reading_enabled, addressee_graph_enabled,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(group_id) DO UPDATE SET
         enabled_modules = excluded.enabled_modules,
         auto_mod = excluded.auto_mod,
@@ -1161,6 +1170,8 @@ class GroupConfigRepository implements IGroupConfigRepository {
         sticker_first_threshold = excluded.sticker_first_threshold,
         chat_interest_categories = excluded.chat_interest_categories,
         chat_interest_min_hits = excluded.chat_interest_min_hits,
+        air_reading_enabled = excluded.air_reading_enabled,
+        addressee_graph_enabled = excluded.addressee_graph_enabled,
         updated_at = excluded.updated_at
     `).run(
       config.groupId,
@@ -1198,6 +1209,8 @@ class GroupConfigRepository implements IGroupConfigRepository {
       config.stickerFirstThreshold ?? 0.55,
       JSON.stringify(config.chatInterestCategories ?? []),
       config.chatInterestMinHits ?? 1,
+      (config.airReadingEnabled ?? false) ? 1 : 0,
+      (config.addresseeGraphEnabled ?? false) ? 1 : 0,
       config.createdAt,
       config.updatedAt,
     );
@@ -2722,6 +2735,11 @@ export class Database {
     // Snoopy-boundaries: interest-gating columns on group_config.
     try { this._db.exec(`ALTER TABLE group_config ADD COLUMN chat_interest_categories TEXT NOT NULL DEFAULT '[]'`); } catch { /* already exists */ }
     try { this._db.exec(`ALTER TABLE group_config ADD COLUMN chat_interest_min_hits INTEGER NOT NULL DEFAULT 1`); } catch { /* already exists */ }
+
+    // M7 pre-chat judge opt-in flags (M7.3 addressee graph, M7.4 air-reading).
+    // Both default OFF — the judge is opt-in per group to bound quota exposure.
+    try { this._db.exec(`ALTER TABLE group_config ADD COLUMN air_reading_enabled INTEGER NOT NULL DEFAULT 0`); } catch { /* already exists */ }
+    try { this._db.exec(`ALTER TABLE group_config ADD COLUMN addressee_graph_enabled INTEGER NOT NULL DEFAULT 0`); } catch { /* already exists */ }
 
     // local_stickers.blocked — banned stickers are excluded from top queries.
     try { this._db.exec(`ALTER TABLE local_stickers ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0`); } catch { /* already exists */ }

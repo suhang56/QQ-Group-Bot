@@ -76,7 +76,13 @@ const BASE_SIGNALS: EngagementSignals = {
   isPureAtMention: false,
   lastSpeechIgnored: false,
   consecutiveReplyCount: 0,
+<<<<<<< HEAD
   activityLevel: 'normal',
+=======
+  relevanceOverride: null,
+  addresseeIsOther: false,
+  awkwardVeto: false,
+>>>>>>> 6dc10b3 (feat(chat): pre-chat LLM judge — relevance/addressee/air-reading (M7.1+M7.3+M7.4))
 };
 
 function signals(overrides: Partial<EngagementSignals>): EngagementSignals {

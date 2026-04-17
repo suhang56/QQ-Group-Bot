@@ -43,6 +43,7 @@ import { StyleLearner } from './modules/style-learner.js';
 import { RelationshipTracker } from './modules/relationship-tracker.js';
 import { AffinityModule } from './modules/affinity.js';
 import { FatigueModule } from './modules/fatigue.js';
+import { PreChatJudge } from './modules/pre-chat-judge.js';
 import { JargonMiner } from './modules/jargon-miner.js';
 import { PhraseMiner } from './modules/phrase-miner.js';
 import { MemeClusterer } from './modules/meme-clusterer.js';
@@ -344,6 +345,13 @@ chat.setAffinitySource(affinity);
 // bot has replied heavily. Pure in-memory, no persistence.
 const fatigue = new FatigueModule();
 chat.setFatigueSource(fatigue);
+
+// M7 (M7.1+M7.3+M7.4): pre-chat LLM judge — routed through ModelRouter so
+// gemini-2.5-flash goes to the Google AI Studio provider. Module-level kill
+// switch via PRE_CHAT_JUDGE_DISABLED=1. When GEMINI provider is absent, the
+// router falls back to Claude Haiku; fail-open timeout still applies so a
+// mis-wired provider never blocks the chat path.
+chat.setPreChatJudge(new PreChatJudge(claude));
 
 const jargonMiner = new JargonMiner({
   db: db.rawDb,
