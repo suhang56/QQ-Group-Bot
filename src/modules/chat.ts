@@ -23,6 +23,7 @@ import { buildAliasMap, extractEntities, buildLorePayload } from './lore-retriev
 import type { ILoreLoader } from './lore-loader.js';
 import type { IDeflectionEngine } from './deflection-engine.js';
 import { tokenizeLore as _tokenizeLore, extractTokens as _extractTokens, extractKeywords as _extractKeywords } from '../utils/text-tokenize.js';
+import { BoundedMap } from '../utils/bounded-map.js';
 import { loadGroupJargon, formatJargonBlock } from './jargon-provider.js';
 import { makeEngagementDecision, type EngagementSignals } from './engagement-decision.js';
 import { scoreComprehensionSafe, type ComprehensionContext } from '../services/comprehension-scorer.js';
@@ -123,6 +124,8 @@ export interface ScoreFactors {
   adminBoost: number;
   stickerRequest: number;
   hasImage: number;
+  interestMatch: number;
+  noveltyPenalty: number;
 }
 
 // Signal A: bot alias keywords — always indicate a reference to the bot
@@ -136,6 +139,15 @@ const BOT_REACTION_RE = /变笨|变傻|抽风|死机|坏了|没反应|真的假�
 const IMPLICIT_BOT_REF_ALIAS_WINDOW_MS = 60_000;
 const IMPLICIT_BOT_REF_REACTION_WINDOW_MS = 30_000;
 const IMPLICIT_BOT_REF_REACTION_MAX_CHARS = 15;
+
+// Ignored-suppression gate (R3): bot spoke recently but got no engagement over
+// N messages — shut up until directly addressed.
+const IGNORED_SUPPRESSION_MS = 300_000;   // 5 min window
+const IGNORED_MSGS_THRESHOLD = 3;
+
+// Novelty: trigger tokens overlap this many with any recent bot output → penalty.
+const NOVELTY_TOKEN_OVERLAP_THRESHOLD = 2;
+const NOVELTY_PENALTY = -0.5;
 
 /** Fisher-Yates reservoir sample: pick k items from arr without replacement. */
 function _reservoirSample<T>(arr: T[], k: number): T[] {
@@ -673,6 +685,19 @@ export class ChatModule implements IChatModule {
   private readonly chatContextImmediate: number;
   // per-group: bot's last 5 outgoing reply texts (for "avoid repeating" injection)
   private readonly botRecentOutputs = new Map<string, string[]>();
+  // per-group: tracks whether the bot's most recent speech received any
+  // engagement (mention / reply-to-bot / implicit bot reference) from the
+  // group. Feeds engagement-decision Gate 5.5 (ignored-suppression).
+  private readonly botSpeechTracking = new BoundedMap<string, {
+    lastSpokeAt: number;
+    msgsSinceSpoke: number;
+    engagementReceived: boolean;
+  }>(200);
+  // per-group: compiled interest-category regex cache. Invalidated when config changes.
+  private readonly interestRegexCache = new Map<string, {
+    updatedAt: string;
+    compiled: Array<{ name: string; re: RegExp; weight: number }>;
+  }>();
   // per-group: key of the most recent sticker the bot sent via sticker-first.
   // Used by /sticker_ban to identify the target when admin says "don't use that one".
   private readonly lastStickerKeyByGroup = new Map<string, string>();
@@ -844,11 +869,115 @@ export class ChatModule implements IChatModule {
     if (arr.length > BOT_OUTPUT_WINDOW) arr = arr.slice(-BOT_OUTPUT_WINDOW);
     this.botRecentOutputs.set(groupId, arr);
 
+    // Reset ignored-suppression tracking: the bot just spoke, so start a fresh
+    // count of incoming peer messages until/unless someone engages.
+    this.botSpeechTracking.set(groupId, {
+      lastSpokeAt: Date.now(),
+      msgsSinceSpoke: 0,
+      engagementReceived: false,
+    });
+
     // Track mface keys for rotation cooldown (delegated to StickerFirstModule)
     const mfaceKeys = [...reply.matchAll(/\[CQ:mface,[^\]]*\bemoji_id=([^,\]]+)/g)].map(m => m[1]!.trim());
     if (mfaceKeys.length > 0 && this.stickerFirst) {
       this.stickerFirst.recordMfaceOutput(groupId, mfaceKeys);
     }
+  }
+
+  /**
+   * Compiled/memoized interest-category regex list for a group. Cache key
+   * includes config.updatedAt so an admin tweak invalidates automatically.
+   */
+  private _getInterestRegexes(groupId: string): Array<{ name: string; re: RegExp; weight: number }> {
+    const config = this.db.groupConfig.get(groupId);
+    if (!config) return [];
+    const cached = this.interestRegexCache.get(groupId);
+    if (cached && cached.updatedAt === config.updatedAt) return cached.compiled;
+
+    const compiled: Array<{ name: string; re: RegExp; weight: number }> = [];
+    for (const cat of config.chatInterestCategories ?? []) {
+      try {
+        compiled.push({ name: cat.name, re: new RegExp(cat.pattern, 'iu'), weight: cat.weight });
+      } catch (err) {
+        this.logger.warn({ groupId, category: cat.name, err }, 'invalid interest regex, skipped');
+      }
+    }
+    this.interestRegexCache.set(groupId, { updatedAt: config.updatedAt, compiled });
+    return compiled;
+  }
+
+  /**
+   * R1 interest gating: return the max category weight that matches `content`,
+   * or 0 if nothing hits. Non-direct messages rely on this to earn a score.
+   */
+  _matchesBotInterest(groupId: string, content: string): number {
+    const compiled = this._getInterestRegexes(groupId);
+    if (compiled.length === 0) return 0;
+    let best = 0;
+    for (const cat of compiled) {
+      if (cat.re.test(content)) {
+        if (cat.weight > best) best = cat.weight;
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Token-overlap between `content` and any of bot's last recent outputs.
+   * Used for novelty penalty: if ≥2 tokens recur, the bot's chiming on the
+   * same thing it already chimed on — stop.
+   */
+  _computeNoveltyOverlap(groupId: string, content: string): number {
+    const recent = this.botRecentOutputs.get(groupId) ?? [];
+    if (recent.length === 0) return 0;
+    const triggerTokens = _extractTokens(content);
+    if (triggerTokens.size === 0) return 0;
+    let best = 0;
+    // Check against the most recent 3 outputs — older ones have decayed attention.
+    const window = recent.slice(-3);
+    for (const out of window) {
+      const outTokens = _extractTokens(out);
+      let overlap = 0;
+      for (const t of triggerTokens) if (outTokens.has(t)) overlap++;
+      if (overlap > best) best = overlap;
+    }
+    return best;
+  }
+
+  /**
+   * R3 ignored-suppression: update the per-group tracker for every incoming
+   * message. Increments `msgsSinceSpoke` and flips `engagementReceived` to
+   * true when this message addresses the bot.
+   */
+  private _updateBotSpeechTracking(groupId: string, msg: GroupMessage, nowMs: number): void {
+    const prev = this.botSpeechTracking.get(groupId);
+    if (!prev || prev.lastSpokeAt === 0) return; // bot hasn't spoken yet in this group
+    // Ignore the bot's own messages (shouldn't reach here, but defense in depth).
+    if (msg.userId === this.botUserId) return;
+
+    const isMention = this._isMention(msg);
+    const isReplyToBot = this._isReplyToBot(msg);
+    const lastProactiveMs = prev.lastSpokeAt;
+    const isImplicit = this._isImplicitBotRef(msg.content.trim(), nowMs, lastProactiveMs, msg.rawContent);
+    const addressedBot = isMention || isReplyToBot || isImplicit;
+
+    this.botSpeechTracking.set(groupId, {
+      lastSpokeAt: prev.lastSpokeAt,
+      msgsSinceSpoke: prev.msgsSinceSpoke + 1,
+      engagementReceived: prev.engagementReceived || addressedBot,
+    });
+  }
+
+  /**
+   * True if the bot spoke recently, 3+ peer messages have flowed since, and
+   * none of them addressed the bot. Consumed by engagement-decision Gate 5.5.
+   */
+  private _isLastSpeechIgnored(groupId: string, nowMs: number): boolean {
+    const t = this.botSpeechTracking.get(groupId);
+    if (!t || t.lastSpokeAt === 0) return false;
+    if (t.engagementReceived) return false;
+    if (nowMs - t.lastSpokeAt >= IGNORED_SUPPRESSION_MS) return false;
+    return t.msgsSinceSpoke >= IGNORED_MSGS_THRESHOLD;
   }
 
   /**
@@ -1024,6 +1153,7 @@ export class ChatModule implements IChatModule {
     // Pure @-mention: skip full chat pipeline, return at_only deflection
     if (isPureAtMention) {
       this.lastProactiveReply.set(groupId, now);
+      this.botSpeechTracking.set(groupId, { lastSpokeAt: now, msgsSinceSpoke: 0, engagementReceived: false });
       return this._generateDeflection('at_only', triggerMessage);
     }
 
@@ -1126,6 +1256,13 @@ export class ChatModule implements IChatModule {
     };
     const { score: comprehensionScore } = scoreComprehensionSafe(triggerMessage.content, comprehensionCtx);
 
+    // ── Ignored-suppression bookkeeping (R3) ──────────────────────────
+    // Update tracker FIRST so we can read lastSpeechIgnored below. Do not
+    // update from short-ack / pic-bot / meta-commentary inbound messages:
+    // those should count toward silence too.
+    this._updateBotSpeechTracking(groupId, triggerMessage, now);
+    const lastSpeechIgnored = this._isLastSpeechIgnored(groupId, now);
+
     // ── Engagement decision (decision BEFORE Claude call) ─────────────
     const engagementSignals: EngagementSignals = {
       isMention: this._isMention(triggerMessage),
@@ -1138,6 +1275,7 @@ export class ChatModule implements IChatModule {
       comprehensionScore,
       isAdversarial,
       isPureAtMention: false, // already handled above
+      lastSpeechIgnored,
     };
     const engagementDecision = makeEngagementDecision(engagementSignals);
 
@@ -1156,6 +1294,8 @@ export class ChatModule implements IChatModule {
 
     // Record last-reply timestamp for silence factor (applies to all replies)
     this.lastProactiveReply.set(groupId, now);
+    // Reset ignored-suppression tracking: committing to reply counts as speech.
+    this.botSpeechTracking.set(groupId, { lastSpokeAt: now, msgsSinceSpoke: 0, engagementReceived: false });
 
     // React path: deflection without calling Claude
     if (engagementDecision.strength === 'react') {
@@ -1276,6 +1416,7 @@ export class ChatModule implements IChatModule {
 - 不懂话题 → "不懂" / "啥来的" / "?" / "听不懂"
 - 政治/宗教/敏感 → "不碰这个" / "我不懂这些" / "路过" / "?"
 - 就是懒 → "懒得说" / "没空" / "哈哈"
+- 例外:如果只是被 @ 但这条其实是群友之间在聊(例如「西瓜你看过 X 吗」是群友 A 问群友 B,不是在问你),可以简短 "?" / "没看" / "不清楚" 一句带过,不必展开。
 
 **唯一例外**：角色禁区话题（声优真实身份/你自己的 CV/meta 人格玩笑/攻击其他乐队角色声优/承认自己是 AI/bot/claude）即使被 @ 也不能展开讨论。具体来说——如果对方问的是"如何评价 [声优名 X]" / "X 是你的声优吗" / "你是相羽爱奈吗" / "你是 bot 吗" / "哪个 AI" 之类：
 - **绝对不要回答、不要夸、不要描述、不要承认也不要否认声优名字**
@@ -1696,6 +1837,8 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       adminBoost: 0,
       stickerRequest: 0,
       hasImage: 0,
+      interestMatch: 0,
+      noveltyPenalty: 0,
     };
 
     // +0.5 for admin/owner — their messages are trusted commands and should
@@ -1739,22 +1882,25 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       return { score, factors, isDirect: true };
     }
 
-    // +0.6 message ends with a question marker
+    // R1/R2 snoopy-boundaries: question marker alone no longer pulls the bot in.
+    // Questions belong to peers unless the bot was addressed (mention/replyToBot,
+    // which short-circuited above). Keep factor name for logging compatibility
+    // but flat zero for non-direct messages.
     const content = msg.content.trim();
-    if (QUESTION_ENDINGS.some(e => content.endsWith(e))) {
-      factors.question = 0.6;
-    }
+    void QUESTION_ENDINGS; // (retained for other code paths)
 
-    // +0.4 last bot proactive reply was > chatSilenceBonusSec ago
+    // +0.2 last bot proactive reply was > chatSilenceBonusSec ago (weakened from
+    // 0.4 per R1: silence alone shouldn't yank the bot into peer chatter).
     const lastProactive = this.lastProactiveReply.get(groupId) ?? 0;
     const silenceSec = (nowMs - lastProactive) / 1000;
     if (silenceSec > this.chatSilenceBonusSec) {
-      factors.silence = 0.4;
+      factors.silence = 0.2;
     }
 
-    // +0.4 trigger contains a lore keyword
+    // +0.2 trigger contains a lore keyword (weakened from 0.4: lore is grounding,
+    // not a standalone interest signal).
     if (this._hasLoreKeyword(groupId, content)) {
-      factors.loreKw = 0.4;
+      factors.loreKw = 0.2;
     }
 
     // G1: +0.15 bonus when image's vision description contains lore keywords
@@ -1762,9 +1908,22 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       factors.loreKw += 0.15;
     }
 
-    // +0.3 message is > 20 chars
+    // +0.1 message is > 20 chars (weakened from 0.3: length alone isn't interest).
     if (content.length > 20) {
-      factors.length = 0.3;
+      factors.length = 0.1;
+    }
+
+    // +interestMatch: configured interest categories (R1 — the real engagement
+    // signal for non-direct messages).
+    const interestWeight = this._matchesBotInterest(groupId, content);
+    if (interestWeight > 0) {
+      factors.interestMatch = interestWeight;
+    }
+
+    // Novelty penalty: trigger tokens overlap ≥ NOVELTY_TOKEN_OVERLAP_THRESHOLD
+    // with any recent bot output → suppress to avoid re-piling on the same topic.
+    if (this._computeNoveltyOverlap(groupId, content) >= NOVELTY_TOKEN_OVERLAP_THRESHOLD) {
+      factors.noveltyPenalty = NOVELTY_PENALTY;
     }
 
     // -0.3 last 3 messages were between exactly 2 non-bot users (private conversation)
@@ -1806,12 +1965,12 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       this.logger.debug({ groupId, userId: msg.userId, ageMs: replyAgeMs }, `continuity +${this.chatContinuityBoost}`);
     }
 
-    // +0.3 clarification follow-up (why/怎么/真的吗 etc.) — encourages engaging with "why" probes
-    if (CLARIFICATION_RE.test(msg.content.trim())) {
-      factors.clarification = 0.3;
-    }
+    // Clarification factor removed for non-direct messages (R2): "why/真的吗"
+    // aimed at peers shouldn't drag the bot into answering.
+    void CLARIFICATION_RE;
 
-    // topic stick: if bot recently replied on this topic, boost same-topic follow-ups
+    // topic stick: shortened to msgCount cap 3 with weaker weights (0.3/0.15
+    // from 0.4/0.2) per snoopy-boundaries — avoid hanging on a stale topic.
     const engaged = this.engagedTopic.get(groupId);
     if (engaged) {
       if (nowMs < engaged.until) {
@@ -1819,10 +1978,10 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
         let overlap = 0;
         for (const t of msgTokens) if (engaged.tokens.has(t)) overlap++;
         if (overlap >= 2) {
-          factors.topicStick = engaged.msgCount < 3 ? 0.4 : 0.2;
+          factors.topicStick = engaged.msgCount < 2 ? 0.3 : 0.15;
           engaged.msgCount++;
           engaged.until = Math.min(engaged.until + 60_000, nowMs + 300_000);
-          if (engaged.msgCount >= 5) this.engagedTopic.delete(groupId);
+          if (engaged.msgCount >= 3) this.engagedTopic.delete(groupId);
         }
       } else {
         this.engagedTopic.delete(groupId);
@@ -2182,6 +2341,13 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
   private async _sendProactive(groupId: string, text: string, nowMs: number, reason: string): Promise<void> {
     this.lastMoodProactive.set(groupId, nowMs);
     this.lastProactiveReply.set(groupId, nowMs);
+    // Reset ignored-suppression tracking: a proactive message also counts as
+    // "bot just spoke" for R3 purposes.
+    this.botSpeechTracking.set(groupId, {
+      lastSpokeAt: nowMs,
+      msgsSinceSpoke: 0,
+      engagementReceived: false,
+    });
     this.logger.info({ groupId, text, reason }, 'proactive message');
     if (this._proactiveAdapter) {
       const msgId = await this._proactiveAdapter(groupId, text);
@@ -2825,7 +2991,9 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     const stickerSection = this.stickerSectionCache.get(groupId) ?? '';
 
 
-    const outputRules = `\n\n输出规则：\n- **直接就是一条群聊发言**，禁止前缀/后缀/解释/元评论/第三人称分析\n- 禁止自我指涉词（AI、机器人、助手、模仿、风格、根据、无法）\n- 禁止助手式开场（"好的，"/"当然，"/"我来"/"让我"）\n- 多个意思用换行分开，每行一条消息（最多 3 行）。列举/计数/时间线问题允许 2-4 行\n- 表情独占一行，只用【当前语境下推荐使用的群表情】清单里的\n- 如果没兴趣、看不懂、不想接话，输出"..."，禁止解释\n\n标点习惯：不用句号、少逗号、感叹/问号可用但不叠、括号少用\n\n**想象你在 QQ 输入框里，只能打字发出去。** 脑子里的想法都不能打出来。`;
+    const outputRulesPrefix = `\n\n⚠️ 你在这个群里的身份是**普通水群群友**,不是答疑 bot。\n正常群友怎么水群:看到有人分享了好玩的/梗/活动消息,顺嘴接一句——"不错啊"/"牛"/"我也"/"awsl"/"?"/"草"——短、碎、反应,不是分析。看到没意思的就划过去,不接话。\n这翻译成规则:\n- 群友抛话题/提问 ≠ 你必须答。没兴趣、不感冒、不是你在意的点 → 直接 <skip>,不用解释。\n- 「句子里有你熟的词」不是开口的理由,只有**你真想顺嘴水一下**才说。\n- 沉默是默认。80%+ 的消息正常群友也不会接,你同步这个基线。别起助手式「为群友答疑」冲动,也别每条都认真回应。`;
+
+    const outputRules = `${outputRulesPrefix}\n\n输出规则：\n- **直接就是一条群聊发言**，禁止前缀/后缀/解释/元评论/第三人称分析\n- 禁止自我指涉词（AI、机器人、助手、模仿、风格、根据、无法）\n- 禁止助手式开场（"好的，"/"当然，"/"我来"/"让我"）\n- 多个意思用换行分开，每行一条消息（最多 3 行）。列举/计数/时间线问题允许 2-4 行\n- 表情独占一行，只用【当前语境下推荐使用的群表情】清单里的\n- 如果没兴趣、看不懂、不想接话，输出"..."，禁止解释\n\n标点习惯：不用句号、少逗号、感叹/问号可用但不叠、括号少用\n\n**想象你在 QQ 输入框里，只能打字发出去。** 脑子里的想法都不能打出来。`;
 
     // Persona: char mode > custom chatPersonaText > default 邦批 identity.
     // tuning.md is suppressed when char mode is active to avoid persona conflict.

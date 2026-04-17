@@ -104,8 +104,8 @@ describe('G1: hasImage weight and lore keyword bonus', () => {
     });
     const { factors } = getScore(chat, GROUP_ID, msg, Date.now());
     expect(factors.hasImage).toBe(0.40);
-    // loreKw = 0.4 (base) + 0.15 (image bonus) = 0.55
-    expect(factors.loreKw).toBe(0.55);
+    // Snoopy-boundaries: loreKw base 0.2 + 0.15 (image bonus) = 0.35
+    expect(factors.loreKw).toBeCloseTo(0.35, 10);
   });
 
   it('no loreKw bonus for image without lore keywords', () => {
@@ -133,7 +133,7 @@ describe('G1: hasImage weight and lore keyword bonus', () => {
     });
     const { factors } = getScore(chat, GROUP_ID, msg, Date.now());
     expect(factors.hasImage).toBe(0);
-    // loreKw = 0.4 (base, no image bonus since hasImage=0)
-    expect(factors.loreKw).toBe(0.4);
+    // Snoopy-boundaries: loreKw base 0.2 (no image bonus since hasImage=0)
+    expect(factors.loreKw).toBe(0.2);
   });
 });
