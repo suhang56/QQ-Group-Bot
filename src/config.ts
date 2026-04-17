@@ -1,4 +1,5 @@
 import type { GroupConfig } from './storage/db.js';
+import { parseIntOr, parseFloatOr } from './utils/config-parse.js';
 
 // ============================================================================
 // LLM routing — per-module model names
@@ -93,16 +94,16 @@ export const FACTS_RAG_DISABLED = (): boolean => process.env['FACTS_RAG_DISABLED
 // ============================================================================
 
 /** Days a pending proposal stays listable in /persona_review. */
-export const PERSONA_PATCH_TTL_DAYS = parseInt(process.env['PERSONA_PATCH_TTL_DAYS'] ?? '7', 10);
+export const PERSONA_PATCH_TTL_DAYS = parseIntOr(process.env['PERSONA_PATCH_TTL_DAYS'], 7, 'PERSONA_PATCH_TTL_DAYS');
 
 /** Max new proposals the scheduler may insert per group per UTC day. */
-export const PERSONA_PATCH_DAILY_CAP = parseInt(process.env['PERSONA_PATCH_DAILY_CAP'] ?? '1', 10);
+export const PERSONA_PATCH_DAILY_CAP = parseIntOr(process.env['PERSONA_PATCH_DAILY_CAP'], 1, 'PERSONA_PATCH_DAILY_CAP');
 
 /** Scheduler period — 24h by default. Offset from the hourly reflect loop avoids double-LLM ticks. */
-export const PERSONA_PATCH_PERIOD_MS = parseInt(process.env['PERSONA_PATCH_PERIOD_MS'] ?? `${24 * 60 * 60 * 1000}`, 10);
+export const PERSONA_PATCH_PERIOD_MS = parseIntOr(process.env['PERSONA_PATCH_PERIOD_MS'], 24 * 60 * 60 * 1000, 'PERSONA_PATCH_PERIOD_MS');
 
 /** Offset from self-reflection timer so the two LLM calls don't pile up. */
-export const PERSONA_PATCH_OFFSET_MS = parseInt(process.env['PERSONA_PATCH_OFFSET_MS'] ?? `${5 * 60 * 1000}`, 10);
+export const PERSONA_PATCH_OFFSET_MS = parseIntOr(process.env['PERSONA_PATCH_OFFSET_MS'], 5 * 60 * 1000, 'PERSONA_PATCH_OFFSET_MS');
 
 /** Kill switch: set PERSONA_PATCH_DISABLED=1 to disable the scheduler tick entirely. */
 export const PERSONA_PATCH_DISABLED = (): boolean => process.env['PERSONA_PATCH_DISABLED'] === '1';
@@ -126,25 +127,25 @@ export const PERSONA_PATCH_REASONING_MAX = 2000;
 // ============================================================================
 
 /** Max chars in weekly new_persona_text (daily=8000). */
-export const PERSONA_PATCH_WEEKLY_MAX_LEN = parseInt(process.env['PERSONA_PATCH_WEEKLY_MAX_LEN'] ?? '12000', 10);
+export const PERSONA_PATCH_WEEKLY_MAX_LEN = parseIntOr(process.env['PERSONA_PATCH_WEEKLY_MAX_LEN'], 12000, 'PERSONA_PATCH_WEEKLY_MAX_LEN');
 
 /** Min chars in weekly new_persona_text. */
-export const PERSONA_PATCH_WEEKLY_MIN_LEN = parseInt(process.env['PERSONA_PATCH_WEEKLY_MIN_LEN'] ?? '200', 10);
+export const PERSONA_PATCH_WEEKLY_MIN_LEN = parseIntOr(process.env['PERSONA_PATCH_WEEKLY_MIN_LEN'], 200, 'PERSONA_PATCH_WEEKLY_MIN_LEN');
 
 /** Max chars in weekly reasoning (daily=2000). Holds 4 bullet sections. */
-export const PERSONA_PATCH_WEEKLY_REASONING_MAX = parseInt(process.env['PERSONA_PATCH_WEEKLY_REASONING_MAX'] ?? '3000', 10);
+export const PERSONA_PATCH_WEEKLY_REASONING_MAX = parseIntOr(process.env['PERSONA_PATCH_WEEKLY_REASONING_MAX'], 3000, 'PERSONA_PATCH_WEEKLY_REASONING_MAX');
 
 /** Max lines in weekly diff_summary (daily=40). */
-export const PERSONA_PATCH_WEEKLY_DIFF_MAX_LINES = parseInt(process.env['PERSONA_PATCH_WEEKLY_DIFF_MAX_LINES'] ?? '60', 10);
+export const PERSONA_PATCH_WEEKLY_DIFF_MAX_LINES = parseIntOr(process.env['PERSONA_PATCH_WEEKLY_DIFF_MAX_LINES'], 60, 'PERSONA_PATCH_WEEKLY_DIFF_MAX_LINES');
 
 /** Days a weekly pending proposal stays listable (daily=PERSONA_PATCH_TTL_DAYS). */
-export const PERSONA_PATCH_WEEKLY_TTL_DAYS = parseInt(process.env['PERSONA_PATCH_WEEKLY_TTL_DAYS'] ?? '14', 10);
+export const PERSONA_PATCH_WEEKLY_TTL_DAYS = parseIntOr(process.env['PERSONA_PATCH_WEEKLY_TTL_DAYS'], 14, 'PERSONA_PATCH_WEEKLY_TTL_DAYS');
 
 /** Kill switch: set PERSONA_PATCH_WEEKLY_DISABLED=1 to skip weekly ticks (daily still runs). */
 export const PERSONA_PATCH_WEEKLY_DISABLED = (): boolean => process.env['PERSONA_PATCH_WEEKLY_DISABLED'] === '1';
 
 /** Min corpus size (messages in the 7d window) before a weekly tick runs. */
-export const PERSONA_PATCH_WEEKLY_MIN_CORPUS = parseInt(process.env['PERSONA_PATCH_WEEKLY_MIN_CORPUS'] ?? '50', 10);
+export const PERSONA_PATCH_WEEKLY_MIN_CORPUS = parseIntOr(process.env['PERSONA_PATCH_WEEKLY_MIN_CORPUS'], 50, 'PERSONA_PATCH_WEEKLY_MIN_CORPUS');
 
 /**
  * Jaccard bigram similarity floor between weekly new_persona_text[:200] and
@@ -152,7 +153,7 @@ export const PERSONA_PATCH_WEEKLY_MIN_CORPUS = parseInt(process.env['PERSONA_PAT
  * Default 0.3 — generous enough for tone/persona drift, strict enough to block
  * "you are now a pirate" style takeovers.
  */
-export const PERSONA_PATCH_WEEKLY_IDENTITY_FLOOR = parseFloat(process.env['PERSONA_PATCH_WEEKLY_IDENTITY_FLOOR'] ?? '0.3');
+export const PERSONA_PATCH_WEEKLY_IDENTITY_FLOOR = parseFloatOr(process.env['PERSONA_PATCH_WEEKLY_IDENTITY_FLOOR'], 0.3, 'PERSONA_PATCH_WEEKLY_IDENTITY_FLOOR');
 
 /** Kill switch for memes-v1 pipeline. Set MEMES_V1_DISABLED=1 to disable:
  * (a) phrase-miner scheduling in onCycleComplete, (b) meme-clusterer scheduling,
@@ -163,7 +164,7 @@ export const MEMES_V1_DISABLED = (): boolean => process.env['MEMES_V1_DISABLED']
 /** Cosine similarity threshold for meme variant clustering via embedding service.
  * Below this threshold, two term embeddings are not considered variants.
  * Default 0.78 balances substring matching with semantic synonym detection. */
-export const MEME_CLUSTER_THRESHOLD = parseFloat(process.env['MEME_CLUSTER_THRESHOLD'] ?? '0.78');
+export const MEME_CLUSTER_THRESHOLD = parseFloatOr(process.env['MEME_CLUSTER_THRESHOLD'], 0.78, 'MEME_CLUSTER_THRESHOLD');
 
 export const lurkerDefaults = {
   lurkerReplyChance: 0.12,

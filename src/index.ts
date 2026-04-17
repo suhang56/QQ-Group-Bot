@@ -11,6 +11,7 @@ import { GeminiClient } from './ai/providers/gemini-llm.js';
 import { DeepSeekClient } from './ai/providers/deepseek-llm.js';
 import { ModelRouter } from './ai/model-router.js';
 import { OLLAMA_ENABLED, OLLAMA_BASE_URL, GEMINI_ENABLED, DEEPSEEK_ENABLED } from './config.js';
+import { parseIntOr } from './utils/config-parse.js';
 import { RateLimiter } from './core/rateLimiter.js';
 import { Router } from './core/router.js';
 import { ChatModule } from './modules/chat.js';
@@ -238,7 +239,7 @@ const deflectionEngine = new DeflectionEngine(claude, { cacheEnabled: true });
 const bandoriEnabled = process.env['BANDORI_SCRAPE_ENABLED'] !== 'false';
 const bandoriScraper = new BandoriLiveScraper(db.bandoriLives, {
   enabled: bandoriEnabled,
-  intervalMs: parseInt(process.env['BANDORI_SCRAPE_INTERVAL_MS'] ?? '86400000', 10),
+  intervalMs: parseIntOr(process.env['BANDORI_SCRAPE_INTERVAL_MS'], 86_400_000, 'BANDORI_SCRAPE_INTERVAL_MS'),
 });
 bandoriScraper.start();
 deflectionEngine.start();
@@ -514,8 +515,13 @@ try {
 const ratingPortGroup = ACTIVE_GROUPS[0] ?? '';
 let ratingPortal: RatingPortalServer | null = null;
 if (ratingPortGroup) {
-  const ratingPort = parseInt(process.env['RATING_PORT'] ?? '4000', 10);
-  ratingPortal = new RatingPortalServer(db.botReplies, ratingPortGroup, db.moderation, db.messages, db.localStickers);
+  const ratingPort = parseIntOr(process.env['RATING_PORT'], 4000, 'RATING_PORT');
+  const ratingOrigins = (process.env['RATING_PORTAL_ORIGINS']?.split(',').map(s => s.trim()).filter(Boolean))
+    ?? [`http://localhost:${ratingPort}`];
+  ratingPortal = new RatingPortalServer(db.botReplies, ratingPortGroup, db.moderation, db.messages, db.localStickers, {
+    adminToken: process.env['RATING_PORTAL_TOKEN'],
+    allowedOrigins: ratingOrigins,
+  });
   ratingPortal.setMemeGraphRepo(db.memeGraph);
   ratingPortal.start(ratingPort);
 

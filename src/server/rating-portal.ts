@@ -60,9 +60,24 @@ function parseSeverityParam(raw: string): { min: number; max: number } | null {
   return { min: val, max: val };
 }
 
+export interface RatingPortalAuthOptions {
+  /** Shared secret required in the `X-Admin-Token` header on every request.
+   *  When undefined/empty the server runs in dev mode and logs a startup warning
+   *  (requests still go through). */
+  adminToken?: string;
+  /** Allow-list of Origin header values (exact match). State-changing requests
+   *  that carry a non-matching Origin are rejected 403. Default
+   *  ['http://localhost:4000']. Pass ['*'] to disable Origin checking
+   *  (NOT recommended in prod). */
+  allowedOrigins?: string[];
+}
+
 export class RatingPortalServer {
   private readonly server = createServer((req, res) => void this._handle(req, res));
   private memeGraphRepo: IMemeGraphRepo | null = null;
+  private readonly adminToken: string | null;
+  private readonly allowedOrigins: string[];
+  private readonly allowAnyOrigin: boolean;
 
   constructor(
     private readonly repo: IBotReplyRepository,
@@ -70,7 +85,20 @@ export class RatingPortalServer {
     private readonly moderation: IModerationRepository,
     private readonly messages: IMessageRepository,
     private readonly localStickers?: ILocalStickerRepository,
-  ) {}
+    authOptions?: RatingPortalAuthOptions,
+  ) {
+    const token = authOptions?.adminToken?.trim();
+    this.adminToken = token && token.length > 0 ? token : null;
+    const origins = authOptions?.allowedOrigins ?? ['http://localhost:4000'];
+    this.allowAnyOrigin = origins.includes('*');
+    this.allowedOrigins = this.allowAnyOrigin ? [] : origins;
+    if (!this.adminToken) {
+      logger.warn(
+        { hint: 'set RATING_PORTAL_TOKEN env to lock down the admin endpoints' },
+        'rating portal running UNAUTHENTICATED — development mode only',
+      );
+    }
+  }
 
   setMemeGraphRepo(repo: IMemeGraphRepo): void {
     this.memeGraphRepo = repo;
@@ -78,7 +106,7 @@ export class RatingPortalServer {
 
   start(port = 4000, host = '127.0.0.1'): void {
     this.server.listen(port, host, () => {
-      logger.info({ port, host }, 'rating portal listening');
+      logger.info({ port, host, authEnabled: !!this.adminToken }, 'rating portal listening');
     });
   }
 
@@ -86,11 +114,59 @@ export class RatingPortalServer {
     this.server.close();
   }
 
+  /** Returns true if request carries a valid admin token (or auth is disabled in dev mode). */
+  private _isAuthenticated(req: IncomingMessage): boolean {
+    if (!this.adminToken) return true; // dev mode — already warned at startup
+    const header = req.headers['x-admin-token'];
+    const token = Array.isArray(header) ? header[0] : header;
+    return typeof token === 'string' && token === this.adminToken;
+  }
+
+  /** Returns true if request Origin is allowed (state-changing routes only). */
+  private _isOriginAllowed(req: IncomingMessage): boolean {
+    if (this.allowAnyOrigin) return true;
+    const origin = req.headers.origin;
+    if (!origin) return true; // non-browser clients (curl, scripts) don't send Origin
+    return this.allowedOrigins.includes(origin);
+  }
+
+  /** Apply CORS headers: echo the Origin only when it's whitelisted. */
+  private _applyCors(req: IncomingMessage, res: ServerResponse): void {
+    const origin = req.headers.origin;
+    if (this.allowAnyOrigin) {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+    } else if (origin && this.allowedOrigins.includes(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Vary', 'Origin');
+    }
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Admin-Token');
+  }
+
   private async _handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
     const { pathname } = url;
 
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    this._applyCors(req, res);
+
+    // CORS preflight
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    // Auth gate: every non-OPTIONS request needs a valid token.
+    if (!this._isAuthenticated(req)) {
+      json(res, 401, { error: 'unauthorized: missing or invalid X-Admin-Token' });
+      return;
+    }
+
+    // CSRF defense on state-changing routes: reject cross-origin POST/PATCH.
+    if (req.method !== 'GET' && !this._isOriginAllowed(req)) {
+      json(res, 403, { error: 'forbidden: origin not allowed' });
+      return;
+    }
 
     // --- Moderation review routes (§13) ---
 

@@ -719,6 +719,16 @@ export class ChatModule implements IChatModule {
   private readonly atMentionSpamWindowMs = 10 * 60 * 1000; // 10 minutes
   private readonly atMentionSpamThreshold = 4;             // >= 4 @s in window → annoyed
 
+  // UR-C #4: per-group @-mention history. Closes the multi-account spam
+  // loophole where a coordinated group can chain @s from different userIds
+  // and each stay under the per-user threshold. If the group's total @-rate
+  // exceeds atMentionGroupThreshold within atMentionGroupWindowMs, the
+  // absolute "@必须回应" override is downgraded to the annoyance variant
+  // regardless of per-user count.
+  private readonly atMentionGroupHistory = new Map<string, number[]>();
+  private readonly atMentionGroupWindowMs = 5 * 60 * 1000; // 5 minutes
+  private readonly atMentionGroupThreshold = 6;            // >= 6 @s / 5min from any combination of users
+
   // M9.2: constructed in the ctor body so we can inject db.mood for persistence.
   // Left readonly (single assignment in ctor) — same contract as before.
   private readonly moodTracker: MoodTracker;
@@ -1730,7 +1740,15 @@ export class ChatModule implements IChatModule {
     const atSpamCount = isAtTrigger
       ? this._recordAtMention(groupId, triggerMessage.userId, now)
       : 0;
-    const atMentionSpamActive = atSpamCount >= this.atMentionSpamThreshold;
+    const atGroupSpamCount = isAtTrigger
+      ? this._recordGroupAtMention(groupId, now)
+      : 0;
+    // Per-user threshold OR per-group threshold triggers annoyance-mode,
+    // defending against both (a) single-user hammering and (b) coordinated
+    // multi-account @-spam that each stays under the per-user limit.
+    const atMentionSpamActive =
+      atSpamCount >= this.atMentionSpamThreshold ||
+      atGroupSpamCount >= this.atMentionGroupThreshold;
 
     const atMentionDirective = isAtTrigger && !atMentionSpamActive
       ? `\n\n⚠️⚠️ **这条消息是 @ 你的。默认禁止 <skip>。** 有人 @ 你 = 直接点名要你说话，完全沉默会被理解成 bot 坏了。即使话题你不熟 / 不想聊 / 是政治宗教 / 是敏感话题，也必须给一个反应：
@@ -1746,7 +1764,7 @@ export class ChatModule implements IChatModule {
 - 假装没看懂也可以: "啥" / "你说啥" (但不要反复装懂，一次就够)
 - 不要说"她是个出色的声优"这种。你**是**那个角色，不是在评价她。`
       : isAtTrigger && atMentionSpamActive
-      ? `\n\n⚠️ **这个人最近 10 分钟内 @ 了你 ${atSpamCount} 次，明显是在玩机器人/拷问你/想逼你说出角色禁区内容**。你已经进入"烦了"状态：
+      ? `\n\n⚠️ **最近一段时间群里有人在连续 @ 你（当前用户近10分钟 ${atSpamCount} 次，群内近5分钟共 ${atGroupSpamCount} 次），明显是在玩机器人/拷问你/想逼你说出角色禁区内容**。你已经进入"烦了"状态：
 - 允许 <skip>（不是禁止）
 - 允许一字/两字 dismissive 回复: "烦" / "又是你" / "别问了" / "滚" / "无聊" / "……" / "?" / "闭嘴" / "问完了没"
 - 允许模仿真人被骚扰时的反应：懒得搭理、装没看见、冷淡、讽刺
@@ -2611,6 +2629,25 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       this.logger.debug(
         { groupId, userId, atCountInWindow: arr.length, windowMs: this.atMentionSpamWindowMs },
         '@-mention spam detected — annoyance mode active',
+      );
+    }
+    return arr.length;
+  }
+
+  /**
+   * Per-group @-mention recorder — returns the count in the active window
+   * across ALL users. Closes the multi-account spam loophole on the per-user
+   * absolute-override (see atMentionGroupThreshold).
+   */
+  private _recordGroupAtMention(groupId: string, nowMs: number): number {
+    const cutoff = nowMs - this.atMentionGroupWindowMs;
+    const arr = (this.atMentionGroupHistory.get(groupId) ?? []).filter(t => t > cutoff);
+    arr.push(nowMs);
+    this.atMentionGroupHistory.set(groupId, arr);
+    if (arr.length >= this.atMentionGroupThreshold) {
+      this.logger.debug(
+        { groupId, groupAtCountInWindow: arr.length, windowMs: this.atMentionGroupWindowMs },
+        '@-mention spam (group-level) detected — annoyance mode active',
       );
     }
     return arr.length;

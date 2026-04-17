@@ -29,13 +29,23 @@ const MOD_DM_HOURLY_CAP = 20;
 const MOD_EXPIRY_SEC = 600; // 10 minutes
 // Users allowed to have free-form private chat with the bot.
 // These users hit the full ChatModule pipeline (using their configured group's knowledge base).
-const PRIVATE_CHAT_USERS = new Map<string, string>(
-  // userId → groupId (which group's lore/facts/persona to use)
-  (process.env['PRIVATE_CHAT_USERS']?.split(',').filter(Boolean).map(p => {
-    const [uid, gid] = p.split(':');
-    return [uid!, gid ?? '958751334'] as [string, string];
-  })) ?? [['1424791852', '958751334']]
-);
+// Empty by default; operators must opt users in explicitly via the env var
+// PRIVATE_CHAT_USERS="<uid1>:<groupId1>,<uid2>:<groupId2>,...". Entries missing
+// the `:<groupId>` component are dropped with a warning — every private-chat
+// user must be bound to a specific group's knowledge base.
+const PRIVATE_CHAT_USERS: Map<string, string> = (() => {
+  const raw = process.env['PRIVATE_CHAT_USERS'];
+  const map = new Map<string, string>();
+  if (!raw) return map;
+  for (const part of raw.split(',').map(s => s.trim()).filter(Boolean)) {
+    const idx = part.indexOf(':');
+    if (idx <= 0 || idx === part.length - 1) continue;
+    const uid = part.slice(0, idx).trim();
+    const gid = part.slice(idx + 1).trim();
+    if (uid.length > 0 && gid.length > 0) map.set(uid, gid);
+  }
+  return map;
+})();
 const APPEAL_HOURLY_CAP_PER_USER = 3;
 const PRIVATE_CHAT_HOURLY_CAP_PER_USER = 300;
 const SPLIT_DELAY_MIN_MS = 30;
@@ -1220,10 +1230,24 @@ ${ctxLine}
       await this.adapter.sendPrivateMessage(MOD_APPROVAL_ADMIN, t);
     };
 
+    // Shared rate-limit guard for low-stakes admin DM commands. Returns true
+    // when the caller exceeded the admin_mod bucket (and a cooldown notice was
+    // already sent). High-stakes commands (persona/bot_status/cross_group)
+    // keep their own dedicated buckets and bypass this guard.
+    const guardAdminMod = async (): Promise<boolean> => {
+      if (!this.rateLimiter.checkUser(msg.userId, 'admin_mod')) {
+        const cooldown = this.rateLimiter.cooldownSecondsUser(msg.userId, 'admin_mod');
+        await reply(`操作太频繁，请 ${cooldown}s 后再试。`);
+        return true;
+      }
+      return false;
+    };
+
     // Admin appeal commands
     const appealApproveMatch = /^\/appeal_approve\s+(\d+)$/i.exec(text);
     const appealRejectMatch = /^\/appeal_reject\s+(\d+)$/i.exec(text);
     if (appealApproveMatch ?? appealRejectMatch) {
+      if (await guardAdminMod()) return;
       const id = parseInt((appealApproveMatch ?? appealRejectMatch)![1]!, 10);
       const appeal = this.pendingAppeals.get(id);
       if (!appeal) { await reply(`找不到申诉 #${id}。`); return; }
@@ -1260,6 +1284,7 @@ ${ctxLine}
     }
 
     if (text === '/appeals') {
+      if (await guardAdminMod()) return;
       if (this.pendingAppeals.size === 0) {
         await reply('无待处理申诉。');
       } else {
@@ -1272,6 +1297,7 @@ ${ctxLine}
     }
 
     if (text === '/pending') {
+      if (await guardAdminMod()) return;
       const rows = this.db.pendingModeration.listPending(10);
       if (rows.length === 0) {
         await reply('无待处理审核。');
@@ -1290,6 +1316,7 @@ ${ctxLine}
     }
 
     if (text === '/mod_on' || text === '/mod_off') {
+      if (await guardAdminMod()) return;
       const enable = text === '/mod_on';
       const configs = this.db.groupConfig;
       // Fetch all known groups from messages table and update their config
@@ -1306,6 +1333,7 @@ ${ctxLine}
 
     const idGuardToggleMatch = /^\/idguard_(on|off)\s+(\S+)$/i.exec(text);
     if (idGuardToggleMatch) {
+      if (await guardAdminMod()) return;
       const enable = idGuardToggleMatch[1]!.toLowerCase() === 'on';
       const groupId = idGuardToggleMatch[2]!;
       const cfg = this.db.groupConfig.get(groupId);
@@ -1321,6 +1349,7 @@ ${ctxLine}
 
     const welcomeToggleMatch = /^\/welcome_(on|off)\s+(\S+)$/i.exec(text);
     if (welcomeToggleMatch) {
+      if (await guardAdminMod()) return;
       const enable = welcomeToggleMatch[1]!.toLowerCase() === 'on';
       const groupId = welcomeToggleMatch[2]!;
       const cfg = this.db.groupConfig.get(groupId);
@@ -1335,6 +1364,7 @@ ${ctxLine}
     }
 
     if (text === '/cache_clear_images') {
+      if (await guardAdminMod()) return;
       const purged = this.db.imageModCache.purgeOlderThan(Math.floor(Date.now() / 1000) + 1);
       await reply(`已清除 ${purged} 条图片审核缓存。`);
       logger.info({ purged }, 'image mod cache cleared by admin');
@@ -1624,6 +1654,7 @@ ${ctxLine}
     const rejectMatch = /^\/reject\s+(\d+)$/i.exec(text);
 
     if (approveMatch ?? rejectMatch) {
+      if (await guardAdminMod()) return;
       const id = parseInt((approveMatch ?? rejectMatch)![1]!, 10);
       const row = this.db.pendingModeration.getById(id);
 
