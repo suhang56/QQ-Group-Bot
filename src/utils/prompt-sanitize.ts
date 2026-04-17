@@ -61,7 +61,9 @@ export const JAILBREAK_PATTERNS: readonly RegExp[] = [
   /ignore\s+(all\s+|the\s+|any\s+)?previous\s+(instructions|prompts)/i,
   /<\|\s*system\s*\|>/i,
   /<\|\s*im_(start|end)\s*\|>/i,
-  /#\s*END\b/i,
+  // Only match #END when it's standalone on a line (e.g. jailbreak delimiter),
+  // not inside fandom phrases like "#END of arc" or "#ENDGAME".
+  /^\s*#\s*END\s*$/im,
   /你是一个(没有任何|不受)(限制|约束)的/,
   /^\s*system\s*[:：]/im,
   /```+\s*system\b/i,

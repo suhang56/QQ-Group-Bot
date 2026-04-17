@@ -71,4 +71,15 @@ describe('BoundedMap', () => {
     expect(m.has('a')).toBe(false);
     expect(m.get('b')).toBe(2);
   });
+
+  it('evicts even when oldest key is undefined', () => {
+    const m = new BoundedMap<string | undefined, number>(2);
+    m.set(undefined, 1);
+    m.set('b', 2);
+    m.set('c', 3); // undefined should be evicted as oldest
+    expect(m.has(undefined)).toBe(false);
+    expect(m.get('b')).toBe(2);
+    expect(m.get('c')).toBe(3);
+    expect(m.size).toBe(2);
+  });
 });

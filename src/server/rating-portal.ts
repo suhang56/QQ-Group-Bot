@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { timingSafeEqual } from 'node:crypto';
 import type { IBotReplyRepository, ILocalStickerRepository, IModerationRepository, IMessageRepository, IMemeGraphRepo } from '../storage/db.js';
 import { MEMES_V1_DISABLED } from '../config.js';
 import { createLogger } from '../utils/logger.js';
@@ -119,7 +120,13 @@ export class RatingPortalServer {
     if (!this.adminToken) return true; // dev mode — already warned at startup
     const header = req.headers['x-admin-token'];
     const token = Array.isArray(header) ? header[0] : header;
-    return typeof token === 'string' && token === this.adminToken;
+    if (typeof token !== 'string') return false;
+    // timingSafeEqual requires equal-length buffers; reject length mismatch
+    // explicitly rather than throwing, and compare byte-wise otherwise.
+    const expected = Buffer.from(this.adminToken, 'utf8');
+    const got = Buffer.from(token, 'utf8');
+    if (expected.length !== got.length) return false;
+    return timingSafeEqual(expected, got);
   }
 
   /** Returns true if request Origin is allowed (state-changing routes only). */

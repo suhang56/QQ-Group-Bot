@@ -114,6 +114,27 @@ describe('rating-portal auth (UR-C #1)', () => {
       expect(r.status).toBe(200);
     });
 
+    it('401 when token is shorter than expected (timing-safe length mismatch)', async () => {
+      const r = await f.req('GET', '/mod/stats', { 'X-Admin-Token': 'abc' });
+      expect(r.status).toBe(401);
+    });
+
+    it('401 when token is longer than expected (timing-safe length mismatch)', async () => {
+      const r = await f.req('GET', '/mod/stats', { 'X-Admin-Token': 'secret123extra' });
+      expect(r.status).toBe(401);
+    });
+
+    it('401 when token is same length but different content', async () => {
+      // 'secret124' is same length as 'secret123' -> exercises timingSafeEqual branch
+      const r = await f.req('GET', '/mod/stats', { 'X-Admin-Token': 'secret124' });
+      expect(r.status).toBe(401);
+    });
+
+    it('401 when token header empty string', async () => {
+      const r = await f.req('GET', '/mod/stats', { 'X-Admin-Token': '' });
+      expect(r.status).toBe(401);
+    });
+
     it('401 when no token on POST /mod/:id/review (mutating)', async () => {
       const r = await f.req('POST', '/mod/999/review', {}, { verdict: 'approved' });
       expect(r.status).toBe(401);

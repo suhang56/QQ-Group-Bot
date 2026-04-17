@@ -23,8 +23,9 @@ import { defaultGroupConfig, PERSONA_PATCH_TTL_DAYS, PERSONA_PATCH_WEEKLY_TTL_DA
 import { resolveAtTarget } from '../utils/cqcode.js';
 import { expandForwards, purgeExpiredForwardCache } from './forward-expand.js';
 
+import { MOD_APPROVAL_ADMIN } from './constants.js';
+
 const MAX_SPLIT_LINES = 3;
-const MOD_APPROVAL_ADMIN = process.env['MOD_APPROVAL_ADMIN'] ?? '2331924739';
 const MOD_DM_HOURLY_CAP = 20;
 const MOD_EXPIRY_SEC = 600; // 10 minutes
 // Users allowed to have free-form private chat with the bot.
