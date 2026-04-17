@@ -185,7 +185,7 @@ export const CHAT_META_TECH_RE =
 export const CHAT_POLITICAL_RE =
   /习\s*近平|毛(?![茸毯线])泽东|共产党|安拉|反动|法轮|文革|台独|藏独|六四|tiananmen/i;
 
-export const IDENTITY_DEFLECTIONS = ['啊？', '什么', '？？', '?', '我不明白', '啧'];
+export const IDENTITY_DEFLECTIONS = ['啊？', '什么', '？？', '?', '啧'];
 
 // Matches creative-work / labor exploitation attempts only — NOT conversational
 // asks and NOT peer-chat mentions of verbs. Every bare action verb must be
@@ -201,7 +201,7 @@ export const TASK_REQUEST =
 export const TASK_DEFLECTIONS = [
   '我不会', '你自己写', '想屁吃', '懒得', '不想',
   '写不出来', '不擅长这个', '？', '我又不是工具人', '想得美', '哈哈你自己搞',
-  '自己背', '我又不是AI', '烦死了', '你恩师是谁啊', '哈哈谁背这个', '你做梦', '无语', '不接', '想多了',
+  '自己背', '烦死了', '你恩师是谁啊', '哈哈谁背这个', '你做梦', '无语', '不接', '想多了',
 ];
 
 // Encoded sexual harassment — internet slang / transliterations that bypass
@@ -417,10 +417,6 @@ export const STATIC_CHAT_DIRECTIVES = `
 export function pickDeflection(pool: string[]): string {
   return pool[Math.floor(Math.random() * pool.length)]!;
 }
-
-const QUESTION_ENDINGS = ['?', '？', '吗', '嘛', '呢', '不'];
-// Matches clarification / follow-up probes (user asking bot to explain itself)
-const CLARIFICATION_RE = /^(why|为啥|为什么|怎么|咋|真的[吗嘛]?|你说啥|啥意思|什么意思)[?？]?$/i;
 
 // Re-export text-tokenize utilities for backward compatibility
 export const extractTokens = _extractTokens;
@@ -1893,7 +1889,6 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     // which short-circuited above). Keep factor name for logging compatibility
     // but flat zero for non-direct messages.
     const content = msg.content.trim();
-    void QUESTION_ENDINGS; // (retained for other code paths)
 
     // +0.2 last bot proactive reply was > chatSilenceBonusSec ago (weakened from
     // 0.4 per R1: silence alone shouldn't yank the bot into peer chatter).
@@ -1973,7 +1968,6 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
 
     // Clarification factor removed for non-direct messages (R2): "why/真的吗"
     // aimed at peers shouldn't drag the bot into answering.
-    void CLARIFICATION_RE;
 
     // topic stick: shortened to msgCount cap 3 with weaker weights (0.3/0.15
     // from 0.4/0.2) per snoopy-boundaries — avoid hanging on a stale topic.
@@ -3025,7 +3019,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     const jargonSection = formatJargonBlock(jargonEntries);
 
     const imageAwarenessLine = this.visionService
-      ? '\n\n如果消息里有 〔你看到那张图是：XXX〕 格式，那是**你自己看到的图的内容**，直接基于它做反应，不要反问"XXX 是什么"，不要说"描述"二字。'
+      ? '\n\n消息里 〔你看到那张图是：XXX〕 是你自己看到的图，就当你亲眼看到，顺嘴反应就行。'
       : '';
 
     const adminStyleSection = this._buildAdminStyleSection(groupId);
@@ -3039,7 +3033,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       ? '\n群友随口问群规，甩"自己看公告"/"不记得了"/"问 @管理"/"?"就行，别当 FAQ 机。只有管理员明确让你列规矩时再展开说。'
       : '';
 
-    const text = `${personaBase}${adminStyleSection}${loreSection}${jargonSection}${rulesBlock}${imageAwarenessLine}\n\n---\n简短自然（普通闲聊 1-3 句话；涉及列举 / 计数 / 时间线 / 多人信息且事实段落有料时允许 2-4 行展开）。群友提到群里的人名、梗、黑话，基于上面资料回答；不知道的就"啥来的"，不要装懂。${rulesInstruction}${outputRules}`;
+    const text = `${personaBase}${adminStyleSection}${loreSection}${jargonSection}${rulesBlock}${imageAwarenessLine}\n\n---\n简短自然（普通闲聊 1-3 句话；涉及列举 / 计数 / 时间线 / 多人信息且事实段落有料时允许 2-4 行展开）。群友提到群里的人名、梗、黑话，基于上面资料接一下；不知道的就"啥来的"，不要装懂。${rulesInstruction}${outputRules}`;
 
     // Only cache the full text when NOT using per-member lore (lore varies per call)
     if (!hasPerMemberLore) {

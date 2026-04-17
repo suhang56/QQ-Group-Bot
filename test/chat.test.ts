@@ -1234,6 +1234,20 @@ describe('ChatModule — image fallback marker (Fix 8 + Fix 9)', () => {
   it('BANGDREAM_PERSONA bans reflexive "X是什么意思" question on image content', () => {
     expect(BANGDREAM_PERSONA).toContain('绝对不要反问');
   });
+
+  it('imageAwarenessLine uses soft "就当你亲眼看到" phrasing, not prescriptive "不要反问"', async () => {
+    const db = new Database(':memory:');
+    const describeFromMessage = vi.fn().mockResolvedValue('一只猫');
+    const visionService = { describeFromMessage } as never;
+    const claude = makeMockClaude('嗯');
+    const chat = makePassthroughChat(claude, db, { visionService });
+    const msg = makeMsg({ content: '看看', rawContent: `[CQ:at,qq=${BOT_ID}] 看看` });
+    await chat.generateReply('g1', msg, []);
+    const call = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { system: Array<{ text: string }> };
+    const systemText = call.system.map((s: { text: string }) => s.text).join(' ');
+    expect(systemText).toContain('就当你亲眼看到');
+    expect(systemText).not.toContain('不要反问"XXX 是什么"');
+  });
 });
 
 describe('pickDeflection helper', () => {
