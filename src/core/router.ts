@@ -957,6 +957,9 @@ export class Router implements IRouter {
       try { await this.adapter.deleteMsg(msg.messageId); } catch (err) {
         this.logger.error({ err, messageId: msg.messageId }, 'image auto-delete failed');
       }
+      await this.adapter.send(msg.groupId, `@${msg.nickname} 你的图片因含完整泄露身份证号被删除。\n原因：${verdict.reason}\n如认为有误，可在24小时内发送 /appeal 申诉。`).catch(err =>
+        this.logger.error({ err }, 'image sev5 announce failed'),
+      );
       try {
         this.db.moderation.insert({
           msgId: msg.messageId, groupId: msg.groupId, userId: msg.userId,

@@ -569,6 +569,9 @@ watchlist 命中 → category: "watchlist"，components_seen 列出命中片段
     // Severity 5: Opus double-check before kick
     const confirmed = await this._opusKickConfirm(msg, reason, config);
     if (confirmed && confirmed.severity !== null && confirmed.severity >= 5) {
+      await this.adapter.send(msg.groupId,
+        `@${msg.nickname} 你因严重违规即将被移出群聊。\n原因：${reason}`);
+      await new Promise<void>(resolve => { const t = setTimeout(resolve, 3000); t.unref?.(); });
       try {
         await this.adapter.kick(msg.groupId, msg.userId);
       } catch {

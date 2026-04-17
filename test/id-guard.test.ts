@@ -152,6 +152,17 @@ describe('IdCardGuard — text path', () => {
     }));
   });
 
+  it('strictDelete announces in-group with @nickname + reason (transparency channel)', async () => {
+    const { guard, adapter } = makeGuard();
+    const msg = makeMsg({ content: '我的身份证是310110199701093724', rawContent: '我的身份证是310110199701093724' });
+    await guard.check(msg);
+
+    expect(adapter.send).toHaveBeenCalledWith(GROUP_ID, expect.stringContaining('@Alice'));
+    const callArgs = (adapter.send as ReturnType<typeof vi.fn>).mock.calls.find(c => c[0] === GROUP_ID);
+    expect(callArgs?.[1]).toContain('身份证');
+    expect(callArgs?.[1]).toContain('ID card detected');
+  });
+
   it('blocks text with 15-digit legacy ID', async () => {
     const { guard, adapter } = makeGuard();
     const msg = makeMsg({ content: '旧身份证: 310110970109372', rawContent: '旧身份证: 310110970109372' });
