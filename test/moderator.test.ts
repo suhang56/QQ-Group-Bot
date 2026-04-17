@@ -316,17 +316,26 @@ describe('ModeratorModule.assess — punishment ladder', () => {
 
   // executePunishment: sev 5 Opus confirms sev >= 5 → kick executed
   it('sev 5: kicks when Opus confirms severity 5', async () => {
-    const opusText = JSON.stringify({ violation: true, severity: 5, reason: 'confirmed', confidence: 0.99 });
-    const claude: IClaudeClient = {
-      complete: vi.fn().mockResolvedValue({ text: opusText, inputTokens: 50, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 }),
-    };
-    const adapter = makeAdapter();
-    const modRepo = makeModerationRepo();
-    const mod = makeModule(claude, adapter, makeConfig(), { moderation: modRepo });
-    await mod.executePunishment(makePending(5, 'kick'), makeConfig());
-    expect(adapter.kick).toHaveBeenCalledWith('g1', 'u1');
-    // Bug 3 fix: executePunishment now updates existing record via updateAction instead of inserting a duplicate
-    expect(modRepo.updateAction).toHaveBeenCalledWith('msg-1', 'kick');
+    vi.useFakeTimers();
+    try {
+      const opusText = JSON.stringify({ violation: true, severity: 5, reason: 'confirmed', confidence: 0.99 });
+      const claude: IClaudeClient = {
+        complete: vi.fn().mockResolvedValue({ text: opusText, inputTokens: 50, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 }),
+      };
+      const adapter = makeAdapter();
+      const modRepo = makeModerationRepo();
+      const mod = makeModule(claude, adapter, makeConfig(), { moderation: modRepo });
+
+      const promise = mod.executePunishment(makePending(5, 'kick'), makeConfig());
+      await vi.advanceTimersByTimeAsync(3100);
+      await promise;
+
+      expect(adapter.kick).toHaveBeenCalledWith('g1', 'u1');
+      // Bug 3 fix: executePunishment now updates existing record via updateAction instead of inserting a duplicate
+      expect(modRepo.updateAction).toHaveBeenCalledWith('msg-1', 'kick');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // M6.0.6: sev 5 kick announces @target warning BEFORE kick + third-person AFTER kick (transparency channel)
