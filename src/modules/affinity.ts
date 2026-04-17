@@ -1,13 +1,29 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { createLogger } from '../utils/logger.js';
 
-export type InteractionType = 'chat' | 'at_friendly' | 'reply_continue' | 'correction';
+export type InteractionType =
+  | 'chat'
+  | 'at_friendly'
+  | 'reply_continue'
+  | 'correction'
+  | 'praise'
+  | 'mock'
+  | 'joke_share'
+  | 'question_ask'
+  | 'thanks'
+  | 'farewell';
 
 const INTERACTION_DELTAS: Record<InteractionType, number> = {
   chat: 1,
   at_friendly: 2,
   reply_continue: 1,
   correction: 3,
+  praise: 2,
+  mock: -2,
+  joke_share: 1,
+  question_ask: 1,
+  thanks: 2,
+  farewell: 1,
 };
 
 const DEFAULT_SCORE = 30;
@@ -32,6 +48,70 @@ const CROSS_GROUP_HINT_MIN_GROUPS = 2;
 const CROSS_GROUP_LOCAL_KNOWN_CEILING = 70;
 /** M9.3: audit rows older than this are purged in dailyDecay. */
 const CROSS_GROUP_AUDIT_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+
+/** Anti-farm: 5-minute cooldown for repeatable social types. */
+const COOLDOWN_MS = 5 * 60 * 1000;
+const COOLDOWN_TYPES: ReadonlySet<InteractionType> = new Set<InteractionType>([
+  'praise',
+  'thanks',
+  'mock',
+  'farewell',
+]);
+/** Daily positive-gain cap per (group,user). mock is negative — never gated. */
+const DAILY_POSITIVE_CAP = 10;
+const DAY_MS = 86_400_000;
+
+export interface InteractionContext {
+  isMention: boolean;
+  isReplyToBot: boolean;
+  isAdversarial: boolean;
+  comprehensionScore: number;
+}
+
+// Regex overlays — short, case-insensitive, mixed Chinese + English.
+// Priority order (first match wins): mock > praise > thanks > farewell > joke_share > question_ask.
+const RE_PRAISE = /好棒|真棒|牛[批逼b]|绝了|强[啊爆]|awsl|yyds|太强|给力|优秀|厉害/i;
+const RE_MOCK_KW = /傻逼|蠢|sb|弱智|废物|滚/i;
+const RE_THANKS = /谢谢|多谢|感谢|thanks|thx|感恩/i;
+const RE_FAREWELL = /再见|拜拜|晚安|下线|睡了|goodnight|bye/i;
+const RE_QUESTION = /\?|？|怎么办|如何|啥意思|是什么/;
+const RE_JOKE = /哈哈|笑死|草|绷不住|乐|wwww/i;
+
+/**
+ * Classify a user message into one of the 10 InteractionType values.
+ *
+ * Overlay regex first (specific signal beats context); otherwise fall back to
+ * the conversation context. mock wins over everything so "你是傻逼" still
+ * scores as mock even in an adversarial correction flow.
+ *
+ * Content may be empty/null (e.g. sticker-only or image-only messages) — in
+ * that case overlays never match and we go straight to context.
+ */
+export function detectInteractionType(
+  content: string | null | undefined,
+  ctx: InteractionContext,
+): InteractionType {
+  const text = content ?? '';
+
+  // Overlay priority: mock before others. The RE_MOCK_KW check covers both
+  // the "insult keyword" and the "adversarial + insult keyword" clauses of
+  // the spec — either way the message is classified as mock.
+  if (RE_MOCK_KW.test(text)) return 'mock';
+
+  if (RE_PRAISE.test(text)) return 'praise';
+  if (RE_THANKS.test(text)) return 'thanks';
+  if (RE_FAREWELL.test(text)) return 'farewell';
+  if (RE_JOKE.test(text)) return 'joke_share';
+  if (RE_QUESTION.test(text)) return 'question_ask';
+
+  // Context fallback.
+  if (ctx.isReplyToBot) return 'reply_continue';
+  if (ctx.isMention && !ctx.isAdversarial && ctx.comprehensionScore >= 0.5) {
+    return 'at_friendly';
+  }
+  if (ctx.isAdversarial && ctx.comprehensionScore < 0.5) return 'correction';
+  return 'chat';
+}
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
@@ -84,6 +164,10 @@ export function _computeAggregated(
 export class AffinityModule {
   private readonly logger = createLogger('affinity');
   private readonly db: DatabaseSync;
+  /** key = `${gid}:${uid}:${type}`; value = last-applied timestamp (ms). */
+  private readonly cooldowns = new Map<string, number>();
+  /** key = `${gid}:${uid}`; tracks net positive gain per UTC-ish day. */
+  private readonly dailyGain = new Map<string, { day: number; net: number }>();
 
   constructor(db: DatabaseSync) {
     this.db = db;
@@ -97,9 +181,45 @@ export class AffinityModule {
   }
 
   recordInteraction(groupId: string, userId: string, type: InteractionType): void {
-    const delta = INTERACTION_DELTAS[type];
+    const baseDelta = INTERACTION_DELTAS[type];
     const now = Date.now();
 
+    // ── Anti-farm gates (compute effective delta) ─────────────────────────
+    let delta = baseDelta;
+
+    // 1) 5-minute cooldown on repeatable social types.
+    if (COOLDOWN_TYPES.has(type)) {
+      const cdKey = `${groupId}:${userId}:${type}`;
+      const last = this.cooldowns.get(cdKey);
+      if (last !== undefined && now - last < COOLDOWN_MS) {
+        delta = 0;
+      } else {
+        this.cooldowns.set(cdKey, now);
+      }
+    }
+
+    // 2) Daily positive-gain cap. mock is negative — always applies (never
+    // consumes or gates on the cap). Only gates strictly-positive deltas.
+    const dgKey = `${groupId}:${userId}`;
+    const today = Math.floor(now / DAY_MS);
+    const tracker = this.dailyGain.get(dgKey);
+    const active = tracker && tracker.day === today ? tracker : { day: today, net: 0 };
+    if (delta > 0) {
+      if (active.net >= DAILY_POSITIVE_CAP) {
+        delta = 0;
+      } else if (active.net + delta > DAILY_POSITIVE_CAP) {
+        delta = DAILY_POSITIVE_CAP - active.net;
+      }
+      if (delta > 0) {
+        this.dailyGain.set(dgKey, { day: today, net: active.net + delta });
+      } else {
+        this.dailyGain.set(dgKey, active);
+      }
+    } else if (delta < 0) {
+      this.dailyGain.set(dgKey, active);
+    }
+
+    // ── Persist row (always touch last_interaction, even on delta=0) ──────
     const existing = this.db.prepare(
       'SELECT score FROM user_affinity WHERE group_id = ? AND user_id = ?',
     ).get(groupId, userId) as { score: number } | undefined;
@@ -116,7 +236,7 @@ export class AffinityModule {
       ).run(groupId, userId, initialScore, now, now);
     }
 
-    this.logger.debug({ groupId, userId, type, delta }, 'affinity interaction recorded');
+    this.logger.debug({ groupId, userId, type, delta, baseDelta }, 'affinity interaction recorded');
   }
 
   dailyDecay(): void {

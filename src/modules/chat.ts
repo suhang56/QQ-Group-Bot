@@ -34,6 +34,7 @@ import type { SocialRelation } from './relationship-tracker.js';
 import type { IFatigueSource } from './fatigue.js';
 import { FATIGUE_THRESHOLD } from './fatigue.js';
 import type { IPreChatJudge, PreChatContextMessage, PreChatVerdict } from './pre-chat-judge.js';
+import { detectInteractionType, type InteractionContext, type InteractionType } from './affinity.js';
 
 // ── M6.2a: miner helper shapes ───────────────────────────────────────────────
 // Narrow structural interfaces so ChatModule can consume the three miners
@@ -49,7 +50,21 @@ export interface IStylePromptSource {
   formatGroupAggregateForPrompt(groupId: string): string;
 }
 export interface IAffinitySource {
-  recordInteraction(groupId: string, userId: string, type: 'chat' | 'at_friendly' | 'reply_continue' | 'correction'): void;
+  recordInteraction(
+    groupId: string,
+    userId: string,
+    type:
+      | 'chat'
+      | 'at_friendly'
+      | 'reply_continue'
+      | 'correction'
+      | 'praise'
+      | 'mock'
+      | 'joke_share'
+      | 'question_ask'
+      | 'thanks'
+      | 'farewell',
+  ): void;
   getAffinityFactor(groupId: string, userId: string): number;
   formatAffinityHint(groupId: string, userId: string, nickname: string): string | null;
   /** M9.3: current-group raw score for the cross-group hint gate. */
@@ -944,14 +959,39 @@ export class ChatModule implements IChatModule {
     }
   }
 
-  // M6.2b: record a 'chat' affinity interaction for the user the bot just
-  // replied to. Skipped when source unset, when the trigger author is the bot
-  // itself, or when triggerUserId is blank.
-  private _recordAffinityChat(groupId: string, triggerUserId: string): void {
+  // M6.2b: record an affinity interaction for the user the bot just replied
+  // to. Skipped when source unset, when the trigger author is the bot itself,
+  // or when triggerUserId is blank.
+  //
+  // M8.4: when `content` + `ctx` are supplied AND `skipOverlay` is false,
+  // detect specific overlay types (praise/mock/thanks/farewell/joke_share/
+  // question_ask). When `skipOverlay` is true, the engage-path producer
+  // above has already recorded the specific type for this same message —
+  // here we always record plain 'chat' so a single friendly-mention isn't
+  // counted twice. Cooldown masks the double-record for praise/thanks/mock/
+  // farewell, but joke_share and question_ask have no cooldown and would
+  // silently double (e.g. "哈哈" @-mention → +2 instead of spec'd +1).
+  private _recordAffinityChat(
+    groupId: string,
+    triggerUserId: string,
+    content?: string | null,
+    ctx?: InteractionContext,
+    skipOverlay = false,
+  ): void {
     if (!this.affinitySource) return;
     if (!triggerUserId || triggerUserId === this.botUserId) return;
-    try { this.affinitySource.recordInteraction(groupId, triggerUserId, 'chat'); }
-    catch (err) { this.logger.warn({ err, groupId, userId: triggerUserId }, 'affinity chat record failed'); }
+    let type: InteractionType = 'chat';
+    if (ctx && !skipOverlay) {
+      const detected = detectInteractionType(content, ctx);
+      if (
+        detected === 'praise' || detected === 'mock' || detected === 'thanks'
+        || detected === 'farewell' || detected === 'joke_share' || detected === 'question_ask'
+      ) {
+        type = detected;
+      }
+    }
+    try { this.affinitySource.recordInteraction(groupId, triggerUserId, type); }
+    catch (err) { this.logger.warn({ err, groupId, userId: triggerUserId, type }, 'affinity record failed'); }
   }
 
   private _recordOwnReply(groupId: string, reply: string): void {
@@ -1525,20 +1565,45 @@ export class ChatModule implements IChatModule {
     // Reset ignored-suppression tracking: committing to reply counts as speech.
     this.botSpeechTracking.set(groupId, { lastSpokeAt: now, msgsSinceSpoke: 0, engagementReceived: false });
 
-    // M6.2b: affinity producer — engage-path interactions. Record BEFORE
+    // M6.2b/M8.4: affinity producer — engage-path interactions. Record BEFORE
     // react-path deflection branch since the user still engaged with the bot.
     // Skip when trigger userId matches bot (defensive; peer flow never hits).
+    //
+    // Priority: specific-regex (praise/mock/thanks/farewell/joke_share/
+    // question_ask) > context-type (at_friendly/reply_continue) > chat.
+    // detectInteractionType() encodes this; we call it once and prefer the
+    // detected type over the raw context label.
+    let engagePathAffinityRecorded = false;
     if (this.affinitySource && triggerMessage.userId !== this.botUserId) {
+      const ctx: InteractionContext = {
+        isMention: engagementSignals.isMention,
+        isReplyToBot: engagementSignals.isReplyToBot,
+        isAdversarial: engagementSignals.isAdversarial,
+        comprehensionScore: engagementSignals.comprehensionScore,
+      };
+      const detected = detectInteractionType(triggerMessage.content, ctx);
       const isFriendlyMention = engagementSignals.isMention
         && !engagementSignals.isAdversarial
         && engagementSignals.comprehensionScore >= 0.5;
-      if (isFriendlyMention) {
-        try { this.affinitySource.recordInteraction(groupId, triggerMessage.userId, 'at_friendly'); }
-        catch (err) { this.logger.warn({ err, groupId, userId: triggerMessage.userId }, 'affinity at_friendly record failed'); }
+      // Only record on engage-path triggers: @-mention friendly OR reply-to-bot.
+      // If a specific overlay type fired, record it; otherwise record the
+      // context label (at_friendly / reply_continue).
+      const isSpecificOverlay = detected !== 'chat'
+        && detected !== 'at_friendly'
+        && detected !== 'reply_continue'
+        && detected !== 'correction';
+      let recordType: InteractionType | null = null;
+      if (isSpecificOverlay) {
+        if (isFriendlyMention || engagementSignals.isReplyToBot) recordType = detected;
+      } else if (isFriendlyMention) {
+        recordType = 'at_friendly';
+      } else if (engagementSignals.isReplyToBot) {
+        recordType = 'reply_continue';
       }
-      if (engagementSignals.isReplyToBot) {
-        try { this.affinitySource.recordInteraction(groupId, triggerMessage.userId, 'reply_continue'); }
-        catch (err) { this.logger.warn({ err, groupId, userId: triggerMessage.userId }, 'affinity reply_continue record failed'); }
+      if (recordType) {
+        try { this.affinitySource.recordInteraction(groupId, triggerMessage.userId, recordType); }
+        catch (err) { this.logger.warn({ err, groupId, userId: triggerMessage.userId, type: recordType }, 'affinity record failed'); }
+        engagePathAffinityRecorded = true;
       }
     }
 
@@ -2090,7 +2155,18 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
               this.stickerFirst.suppressSticker(groupId, choice.key);
               this.lastStickerKeyByGroup.set(groupId, choice.key);
               this._recordOwnReply(groupId, choice.cqCode);
-              this._recordAffinityChat(groupId, triggerMessage.userId);
+              this._recordAffinityChat(
+                groupId,
+                triggerMessage.userId,
+                triggerMessage.content,
+                {
+                  isMention: engagementSignals.isMention,
+                  isReplyToBot: engagementSignals.isReplyToBot,
+                  isAdversarial: engagementSignals.isAdversarial,
+                  comprehensionScore: engagementSignals.comprehensionScore,
+                },
+                engagePathAffinityRecorded,
+              );
               this.logger.info({ groupId, key: choice.key, score: choice.score }, 'sticker-first: sending sticker instead of text');
               return choice.cqCode;
             }
@@ -2104,7 +2180,18 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       // ────────────────────────────────────────────────────────────────────
 
       this._recordOwnReply(groupId, processed);
-      this._recordAffinityChat(groupId, triggerMessage.userId);
+      this._recordAffinityChat(
+        groupId,
+        triggerMessage.userId,
+        triggerMessage.content,
+        {
+          isMention: engagementSignals.isMention,
+          isReplyToBot: engagementSignals.isReplyToBot,
+          isAdversarial: engagementSignals.isAdversarial,
+          comprehensionScore: engagementSignals.comprehensionScore,
+        },
+        engagePathAffinityRecorded,
+      );
       this.engagedTopic.set(groupId, {
         tokens: extractTokens(triggerMessage.content),
         until: Date.now() + 90_000,
