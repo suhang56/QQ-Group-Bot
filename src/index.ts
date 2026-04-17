@@ -330,6 +330,11 @@ const relationshipTracker = new RelationshipTracker({
   dbQuery: <T>(sql: string, ...params: unknown[]) => (db.rawDb.prepare(sql) as unknown as { all(...a: unknown[]): T[] }).all(...params),
 });
 
+// M6.2a: wire miner helpers into chat prompt / userContent.
+chat.setExpressionSource(expressionLearner);
+chat.setStyleSource(styleLearner);
+chat.setRelationshipSource(relationshipTracker);
+
 const affinity = new AffinityModule(db.rawDb);
 
 const jargonMiner = new JargonMiner({
