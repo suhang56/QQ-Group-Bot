@@ -126,7 +126,7 @@ describe('Router — M6.6 persona admin commands', () => {
 
       await router.dispatchPrivate(makePrivate(`/persona_apply ${target}`));
       const replyText = (adapter.sendPrivateMessage as ReturnType<typeof vi.fn>).mock.calls.at(-1)![1] as string;
-      expect(replyText).toMatch(/已应用 persona 提案/);
+      expect(replyText).toMatch(/已应用 .*persona 提案/);
 
       expect(db.personaPatches.getById(target)!.status).toBe('approved');
       expect(db.personaPatches.getById(sibling)!.status).toBe('superseded');
@@ -165,7 +165,7 @@ describe('Router — M6.6 persona admin commands', () => {
 
       await router.dispatchPrivate(makePrivate(`/persona_apply ${id} confirm=yes`));
       replyText = (adapter.sendPrivateMessage as ReturnType<typeof vi.fn>).mock.calls.at(-1)![1] as string;
-      expect(replyText).toMatch(/已应用 persona 提案/);
+      expect(replyText).toMatch(/已应用 .*persona 提案/);
       expect(db.personaPatches.getById(id)!.status).toBe('approved');
     });
 

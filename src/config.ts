@@ -115,6 +115,45 @@ export const PERSONA_PATCH_MAX_LEN = 8000;
 export const PERSONA_PATCH_REASONING_MIN = 20;
 export const PERSONA_PATCH_REASONING_MAX = 2000;
 
+// ============================================================================
+// M8.1 — weekly-cadence persona reflection (extension of M6.6 daily cadence)
+// ----------------------------------------------------------------------------
+// Runs on the same patchTimer as daily: each tick first checks whether a
+// 'weekly' proposal exists within the last 7d for the group — if not and the
+// corpus is dense enough, a weekly is generated (consumes the daily slot that
+// tick). Weekly runs allow longer new_persona_text and reasoning, get a
+// longer TTL before expiry, and run through an extra identity-drift rail.
+// ============================================================================
+
+/** Max chars in weekly new_persona_text (daily=8000). */
+export const PERSONA_PATCH_WEEKLY_MAX_LEN = parseInt(process.env['PERSONA_PATCH_WEEKLY_MAX_LEN'] ?? '12000', 10);
+
+/** Min chars in weekly new_persona_text. */
+export const PERSONA_PATCH_WEEKLY_MIN_LEN = parseInt(process.env['PERSONA_PATCH_WEEKLY_MIN_LEN'] ?? '200', 10);
+
+/** Max chars in weekly reasoning (daily=2000). Holds 4 bullet sections. */
+export const PERSONA_PATCH_WEEKLY_REASONING_MAX = parseInt(process.env['PERSONA_PATCH_WEEKLY_REASONING_MAX'] ?? '3000', 10);
+
+/** Max lines in weekly diff_summary (daily=40). */
+export const PERSONA_PATCH_WEEKLY_DIFF_MAX_LINES = parseInt(process.env['PERSONA_PATCH_WEEKLY_DIFF_MAX_LINES'] ?? '60', 10);
+
+/** Days a weekly pending proposal stays listable (daily=PERSONA_PATCH_TTL_DAYS). */
+export const PERSONA_PATCH_WEEKLY_TTL_DAYS = parseInt(process.env['PERSONA_PATCH_WEEKLY_TTL_DAYS'] ?? '14', 10);
+
+/** Kill switch: set PERSONA_PATCH_WEEKLY_DISABLED=1 to skip weekly ticks (daily still runs). */
+export const PERSONA_PATCH_WEEKLY_DISABLED = (): boolean => process.env['PERSONA_PATCH_WEEKLY_DISABLED'] === '1';
+
+/** Min corpus size (messages in the 7d window) before a weekly tick runs. */
+export const PERSONA_PATCH_WEEKLY_MIN_CORPUS = parseInt(process.env['PERSONA_PATCH_WEEKLY_MIN_CORPUS'] ?? '50', 10);
+
+/**
+ * Jaccard bigram similarity floor between weekly new_persona_text[:200] and
+ * oldPersona[:200]. Below this, the proposal is rejected as identity_drift_excessive.
+ * Default 0.3 — generous enough for tone/persona drift, strict enough to block
+ * "you are now a pirate" style takeovers.
+ */
+export const PERSONA_PATCH_WEEKLY_IDENTITY_FLOOR = parseFloat(process.env['PERSONA_PATCH_WEEKLY_IDENTITY_FLOOR'] ?? '0.3');
+
 /** Kill switch for memes-v1 pipeline. Set MEMES_V1_DISABLED=1 to disable:
  * (a) phrase-miner scheduling in onCycleComplete, (b) meme-clusterer scheduling,
  * (c) meme_graph retrieval in formatFactsForPrompt, (d) meme_graph term tick in conversation-state.

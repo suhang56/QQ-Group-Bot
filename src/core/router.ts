@@ -19,7 +19,7 @@ import type { IFatigueSource } from '../modules/fatigue.js';
 import { extractTokens } from '../utils/text-tokenize.js';
 import { BotErrorCode } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
-import { defaultGroupConfig, PERSONA_PATCH_TTL_DAYS } from '../config.js';
+import { defaultGroupConfig, PERSONA_PATCH_TTL_DAYS, PERSONA_PATCH_WEEKLY_TTL_DAYS } from '../config.js';
 import { resolveAtTarget } from '../utils/cqcode.js';
 import { expandForwards, purgeExpiredForwardCache } from './forward-expand.js';
 
@@ -1352,24 +1352,35 @@ ${ctxLine}
       }
 
       const nowSec = Math.floor(Date.now() / 1000);
-      const ttlSec = PERSONA_PATCH_TTL_DAYS * 24 * 60 * 60;
+      // M8.1: weekly proposals keep a longer window (default 14d) than daily (7d).
+      // listPending uses the longer TTL so weekly rows survive a week past the
+      // daily cutoff; per-row age checks use kind-specific TTL for apply/diff.
+      const dailyTtlSec = PERSONA_PATCH_TTL_DAYS * 24 * 60 * 60;
+      const weeklyTtlSec = PERSONA_PATCH_WEEKLY_TTL_DAYS * 24 * 60 * 60;
+      const listTtlSec = Math.max(dailyTtlSec, weeklyTtlSec);
 
       if (sub === 'review') {
         // Default: admin's primary group (first ACTIVE_GROUPS entry) — matches
         // how /pending_list works. Admin can pass /persona_review <groupId> to override.
         const groupId = argsTail.length > 0 ? argsTail.split(/\s+/)[0]! : this._defaultReviewGroupId();
         if (!groupId) { await reply('无法确定要查看的群 ID；请用 /persona_review <groupId>。'); return; }
-        const pending = this.db.personaPatches.listPending(groupId, nowSec, ttlSec, 20);
-        if (pending.length === 0) {
+        const pending = this.db.personaPatches.listPending(groupId, nowSec, listTtlSec, 20);
+        // repo returns weekly-first; filter out per-kind-expired rows client-side.
+        const visible = pending.filter(p => {
+          const ttl = p.kind === 'weekly' ? weeklyTtlSec : dailyTtlSec;
+          return nowSec - p.createdAt <= ttl;
+        });
+        if (visible.length === 0) {
           await reply(`群 ${groupId} 没有待审 persona 调优提案。`);
           return;
         }
-        const lines = pending.map(p => {
+        const lines = visible.map(p => {
           const ageH = Math.floor((nowSec - p.createdAt) / 3600);
           const reasonShort = p.reasoning.split(/[。.!?！？\n]/)[0]!.slice(0, 40);
-          return `#${p.id} [${ageH}h前] ${reasonShort}`;
+          const tag = p.kind === 'weekly' ? '[周级]' : '[日级]';
+          return `${tag} #${p.id} [${ageH}h前] ${reasonShort}`;
         });
-        await reply(`待审 persona 提案（群 ${groupId}，共 ${pending.length} 条）：\n${lines.join('\n')}\n\n用 /persona_diff <id> 查看 diff，/persona_apply <id> 应用。`);
+        await reply(`待审 persona 提案（群 ${groupId}，共 ${visible.length} 条，周级优先）：\n${lines.join('\n')}\n\n用 /persona_diff <id> 查看 diff，/persona_apply <id> 应用。`);
         return;
       }
 
@@ -1380,11 +1391,14 @@ ${ctxLine}
         const p = this.db.personaPatches.getById(id);
         if (!p) { await reply(`找不到 persona 提案 #${id}。`); return; }
         const ageSec = nowSec - p.createdAt;
-        if (p.status === 'pending' && ageSec > ttlSec) {
-          await reply(`persona 提案 #${id} 已超过 ${PERSONA_PATCH_TTL_DAYS} 天过期，无法操作。`);
+        const ttlSecForKind = p.kind === 'weekly' ? weeklyTtlSec : dailyTtlSec;
+        const ttlDaysForKind = p.kind === 'weekly' ? PERSONA_PATCH_WEEKLY_TTL_DAYS : PERSONA_PATCH_TTL_DAYS;
+        if (p.status === 'pending' && ageSec > ttlSecForKind) {
+          await reply(`persona 提案 #${id} 已超过 ${ttlDaysForKind} 天过期，无法操作。`);
           return;
         }
-        await reply(`persona 提案 #${id}（状态：${p.status}）\n\n## 动机\n${p.reasoning}\n\n## diff\n${p.diffSummary}`);
+        const kindTag = p.kind === 'weekly' ? '[周级]' : '[日级]';
+        await reply(`${kindTag} persona 提案 #${id}（状态：${p.status}）\n\n## 动机\n${p.reasoning}\n\n## diff\n${p.diffSummary}`);
         return;
       }
 
@@ -1401,8 +1415,10 @@ ${ctxLine}
           return;
         }
         const ageSec = nowSec - p.createdAt;
-        if (ageSec > ttlSec) {
-          await reply(`persona 提案 #${id} 已超过 ${PERSONA_PATCH_TTL_DAYS} 天过期，无法应用。`);
+        const ttlSecForKind = p.kind === 'weekly' ? weeklyTtlSec : dailyTtlSec;
+        const ttlDaysForKind = p.kind === 'weekly' ? PERSONA_PATCH_WEEKLY_TTL_DAYS : PERSONA_PATCH_TTL_DAYS;
+        if (ageSec > ttlSecForKind) {
+          await reply(`persona 提案 #${id} 已超过 ${ttlDaysForKind} 天过期，无法应用。`);
           return;
         }
 
@@ -1430,8 +1446,19 @@ ${ctxLine}
           await reply(`persona 提案 #${id} 应用失败（可能并发状态已变），请 /persona_diff 重看。`);
           return;
         }
-        await reply(`已应用 persona 提案 #${id}：群 ${p.groupId} 的 chat_persona_text 已更新；同群其它待审提案已标记 superseded。`);
-        logger.info({ id, groupId: p.groupId, adminId: msg.userId }, 'persona patch applied by admin');
+        // M8.1: applying a weekly retires any pending daily proposals created
+        // against the now-stale persona baseline (before the weekly's created_at).
+        // Applies happen AFTER repo.apply supersedes siblings; we still call this
+        // to cover rare cases where a daily was inserted with exactly the same
+        // created_at — no-op if no rows match.
+        let staleRejected = 0;
+        if (p.kind === 'weekly') {
+          staleRejected = this.db.personaPatches.rejectStaleDailiesBefore(p.groupId, p.createdAt, msg.userId, nowSec);
+        }
+        const kindTag = p.kind === 'weekly' ? '[周级]' : '[日级]';
+        const staleMsg = staleRejected > 0 ? `；另 ${staleRejected} 条过期 daily 提案已 auto-reject` : '';
+        await reply(`已应用 ${kindTag} persona 提案 #${id}：群 ${p.groupId} 的 chat_persona_text 已更新；同群其它待审提案已标记 superseded${staleMsg}。`);
+        logger.info({ id, groupId: p.groupId, kind: p.kind, adminId: msg.userId, staleRejected }, 'ppp.applied');
         return;
       }
 
@@ -1465,9 +1492,10 @@ ${ctxLine}
         const lines = rows.map(p => {
           const dayAgo = Math.floor((nowSec - p.createdAt) / 86400);
           const reasonShort = p.reasoning.split(/[。.!?！？\n]/)[0]!.slice(0, 35);
-          return `#${p.id} [${p.status}] ${dayAgo}d前: ${reasonShort}`;
+          const tag = p.kind === 'weekly' ? '[周级]' : '[日级]';
+          return `${tag} #${p.id} [${p.status}] ${dayAgo}d前: ${reasonShort}`;
         });
-        await reply(`群 ${groupId} 过去 ${days} 天 persona 提案历史（${rows.length}）：\n${lines.join('\n')}`);
+        await reply(`群 ${groupId} 过去 ${days} 天 persona 提案历史（${rows.length}，周级优先）：\n${lines.join('\n')}`);
         return;
       }
     }
