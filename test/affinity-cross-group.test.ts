@@ -274,6 +274,26 @@ describe('AffinityModule — M9.3 cross-group recognition', () => {
       expect(auditCount.c).toBe(0);
     });
 
+    it('emits hint at the boundary currentGroupScore === 70 (ceiling is inclusive)', () => {
+      setGroupFlag(db, 'g-req', true);
+      setGroupFlag(db, 'g-a', true);
+      setGroupFlag(db, 'g-b', true);
+      seed(db, 'g-a', 'u1', 90, Date.now());
+      seedInteractions(db, 'g-a', 'u1', 20);
+      seed(db, 'g-b', 'u1', 85, Date.now());
+      seedInteractions(db, 'g-b', 'u1', 20);
+
+      // 70 is the well-known ceiling. Suppression is strict-> (score > 70),
+      // so exactly 70 still emits.
+      const hint = mod.formatCrossGroupHint('g-req', 'u1', 'x', 70);
+      expect(hint).not.toBeNull();
+      expect(hint).toContain('其它 2 个群');
+
+      // Audit row is written.
+      const auditCount = db.prepare('SELECT COUNT(*) as c FROM cross_group_audit').get() as { c: number };
+      expect(auditCount.c).toBe(1);
+    });
+
     it('renders SQL-unsafe nickname safely (no injection, no template break)', () => {
       setGroupFlag(db, 'g-req', true);
       setGroupFlag(db, 'g-a', true);

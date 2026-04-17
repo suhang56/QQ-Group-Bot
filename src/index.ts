@@ -167,6 +167,8 @@ const selfLearning = new SelfLearningModule({
   embeddingService: embedder,
 });
 
+const memesDisabled = process.env['MEMES_V1_DISABLED'] === '1';
+
 let factBackfillTimer: NodeJS.Timeout | null = null;
 let memeBackfillTimer: NodeJS.Timeout | null = null;
 void embedder.waitReady().then(() => {
@@ -382,7 +384,6 @@ const jargonMiner = new JargonMiner({
   activeGroups: ACTIVE_GROUPS,
 });
 
-const memesDisabled = process.env['MEMES_V1_DISABLED'] === '1';
 const phraseMiner = memesDisabled ? null : new PhraseMiner({
   messages: db.messages,
   claude,

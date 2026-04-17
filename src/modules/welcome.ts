@@ -60,7 +60,10 @@ export class WelcomeModule {
     const nickname = await this._fetchNickname(newUserId);
 
     const delay = this.minDelayMs + Math.random() * (this.maxDelayMs - this.minDelayMs);
-    await new Promise(r => setTimeout(r, delay));
+    await new Promise<void>(resolve => {
+      const t = setTimeout(resolve, delay);
+      t.unref?.();
+    });
 
     const prompt = `# 任务
 一个新人刚进群（QQ ${newUserId}，昵称 "${nickname}"）。生成一条欢迎消息：

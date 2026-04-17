@@ -125,7 +125,7 @@ export class NapCatAdapter extends EventEmitter implements INapCatAdapter {
   private reconnectAttempts = 0;
   private readonly maxReconnects = 3;
   private readonly reconnectDelays = [2000, 5000, 10000];
-  private pendingActions = new Map<string, { resolve: PendingResolve; reject: PendingReject; actionName: string }>();
+  private pendingActions = new Map<string, { resolve: PendingResolve; reject: PendingReject; actionName: string; timer: ReturnType<typeof setTimeout> }>();
   private echoCounter = 0;
   private disconnecting = false;
   private readonly logger = createLogger('adapter');
@@ -352,6 +352,7 @@ export class NapCatAdapter extends EventEmitter implements INapCatAdapter {
       const pending = this.pendingActions.get(frame.echo);
       if (pending) {
         this.pendingActions.delete(frame.echo);
+        clearTimeout(pending.timer);
         const resp = frame as OneBotActionResponse;
         if (resp.status === 'ok' || resp.retcode === 0) {
           pending.resolve(resp);
@@ -441,22 +442,25 @@ export class NapCatAdapter extends EventEmitter implements INapCatAdapter {
     const payload = JSON.stringify({ action, params, echo });
 
     return new Promise((resolve, reject) => {
-      this.pendingActions.set(echo, { resolve, reject, actionName: action });
-
-      this.ws!.send(payload, (err) => {
-        if (err) {
-          this.pendingActions.delete(echo);
-          reject(new NapCatActionError(action, err));
-        }
-      });
-
-      // Timeout after 10 seconds
-      setTimeout(() => {
+      // Timeout after 10 seconds. Handle is cleared in handleFrame on response
+      // so timers don't linger after success/error.
+      const timer = setTimeout(() => {
         if (this.pendingActions.has(echo)) {
           this.pendingActions.delete(echo);
           reject(new NapCatActionError(action, new Error('Action timed out')));
         }
       }, 10_000);
+      timer.unref?.();
+
+      this.pendingActions.set(echo, { resolve, reject, actionName: action, timer });
+
+      this.ws!.send(payload, (err) => {
+        if (err) {
+          this.pendingActions.delete(echo);
+          clearTimeout(timer);
+          reject(new NapCatActionError(action, err));
+        }
+      });
     });
   }
 
@@ -471,7 +475,10 @@ export class NapCatAdapter extends EventEmitter implements INapCatAdapter {
     this.reconnectAttempts++;
     this.logger.warn({ attempt: this.reconnectAttempts, delayMs: delay }, 'Scheduling reconnect');
 
-    await new Promise(r => setTimeout(r, delay));
+    await new Promise<void>(resolve => {
+      const t = setTimeout(resolve, delay);
+      t.unref?.();
+    });
 
     try {
       await this.connect();

@@ -82,7 +82,6 @@ const TOD_CACHE_TTL_MS = 24 * 3_600_000;
 const FAREWELL_RE = /睡了|下了|晚安|拜拜|明天见|不聊了|撤了|溜了|先走了/;
 const CONVERSATION_CLOSE_RE = /^(嗯|好的|好嘞|好哒|ok|收到|行吧|懂了)$/i;
 const DEAD_GROUP_MAX_AGE_MS = 4 * 3_600_000;
-const NIGHT_START_HOUR = 0;
 const NIGHT_END_HOUR = 7;
 const MIN_TICK_MS = 60_000;
 
@@ -182,8 +181,10 @@ export class ProactiveEngine {
 
     // Gate 2: night veto. Never fire between midnight and 07:00 local time.
     // Don't consume cooldown — a silent 3am should not delay a 10am fire.
+    // Night veto [00:00, 07:00); upper bound only since NIGHT_START_HOUR=0.
+    // For overnight wrap (e.g. 22-7), change to (hour >= START || hour < END).
     const hour = new Date(nowMs).getHours();
-    if (hour >= NIGHT_START_HOUR && hour < NIGHT_END_HOUR) return;
+    if (hour < NIGHT_END_HOUR) return;
 
     // Gate 3: daily cap. Reset on local-date rollover.
     const today = this._localDateString(nowMs);
