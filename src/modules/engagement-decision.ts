@@ -60,6 +60,13 @@ export interface EngagementSignals {
    * MAX_CONSECUTIVE_BOT_REPLIES.
    */
   readonly consecutiveReplyCount: number;
+  /**
+   * M7.2: observed group activity level from GroupActivityTracker. Gate 6
+   * scales the effective minScore: busy groups need a higher bar (1.4x) so
+   * the bot doesn't pile on, idle groups get a lower bar (0.75x) so one peer
+   * speaking into an empty room can still pull a reply.
+   */
+  readonly activityLevel: 'idle' | 'normal' | 'busy';
 }
 
 /**
@@ -138,18 +145,25 @@ export function makeEngagementDecision(signals: EngagementSignals): EngagementDe
     };
   }
 
-  // Gate 6: normal participation scoring
-  // Case 7 tuning: for non-direct (no @, no reply-to-bot) messages,
-  // apply a stricter threshold (1.5x minScore) so bot stays silent > 80%
-  // of the time in peer-to-peer chat without engagement signals.
-  const effectiveMinScore = isDirect ? signals.minScore : signals.minScore * 1.5;
+  // Gate 6: normal participation scoring with direct + activity multipliers.
+  // Direct-ness scales the bar: 1.0x if @ or reply-to-bot (already-engaged),
+  // 1.5x for peer-to-peer chat (Case 7 — bot stays silent > 80% of the time).
+  // M7.2 then layers an activity multiplier on top: 1.4x in busy groups (so
+  // the bot doesn't pile on during fast chat), 0.75x in idle groups (so one
+  // peer speaking into an empty room can still pull a reply). Direct
+  // triggers short-circuit below regardless of the scaled bar.
+  const directMultiplier = isDirect ? 1.0 : 1.5;
+  const activityMultiplier = signals.activityLevel === 'busy' ? 1.4
+                           : signals.activityLevel === 'idle' ? 0.75
+                           : 1.0;
+  const effectiveMinScore = signals.minScore * directMultiplier * activityMultiplier;
   if (isDirect || signals.participationScore >= effectiveMinScore) {
     return {
       shouldReply: true,
       strength: 'engage',
       reason: isDirect
         ? 'direct trigger (mention/reply)'
-        : `score ${signals.participationScore.toFixed(3)} >= ${effectiveMinScore.toFixed(3)}`,
+        : `score ${signals.participationScore.toFixed(3)} >= ${effectiveMinScore.toFixed(3)} [${signals.activityLevel}]`,
     };
   }
 
@@ -157,6 +171,6 @@ export function makeEngagementDecision(signals: EngagementSignals): EngagementDe
   return {
     shouldReply: false,
     strength: 'skip',
-    reason: `score ${signals.participationScore.toFixed(3)} < ${effectiveMinScore.toFixed(3)}`,
+    reason: `score ${signals.participationScore.toFixed(3)} < ${effectiveMinScore.toFixed(3)} [${signals.activityLevel}]`,
   };
 }

@@ -22,6 +22,7 @@ const BASE_SIGNALS: EngagementSignals = {
   isPureAtMention: false,
   lastSpeechIgnored: false,
   consecutiveReplyCount: 0,
+  activityLevel: 'normal',
 };
 
 function signals(overrides: Partial<EngagementSignals>): EngagementSignals {
@@ -286,5 +287,80 @@ describe('scoreComprehension', () => {
   it('normal English word is NOT flagged as abbreviation', () => {
     const score = scoreComprehension('fire bird is cool', emptyCtx);
     expect(score).toBeGreaterThanOrEqual(0.3);
+  });
+});
+
+// ── M7.2: activity-driven threshold (Gate 6) ───────────────────────────
+describe('makeEngagementDecision — M7.2 activity multiplier', () => {
+  it('busy + non-direct + borderline score → skip (1.4x bump over 1.5x)', () => {
+    // Non-direct base = 1.5x; busy adds 1.4x → effective = 2.1 * minScore = 1.05
+    // Score 0.9 < 1.05 → skip. Pre-M7.2 (normal) this would also skip at 0.75,
+    // so we pick a score that USED to pass normal but now fails busy.
+    // normal threshold = 1.5 * 0.5 = 0.75. score 0.9 → normal pass, busy skip.
+    const d = makeEngagementDecision(signals({
+      participationScore: 0.9,
+      minScore: 0.5,
+      activityLevel: 'busy',
+    }));
+    expect(d.shouldReply).toBe(false);
+    expect(d.strength).toBe('skip');
+  });
+
+  it('busy + non-direct + high enough score → engage', () => {
+    // effective 2.1 * 0.5 = 1.05; score 1.2 ≥ 1.05
+    const d = makeEngagementDecision(signals({
+      participationScore: 1.2,
+      minScore: 0.5,
+      activityLevel: 'busy',
+    }));
+    expect(d.shouldReply).toBe(true);
+    expect(d.strength).toBe('engage');
+  });
+
+  it('idle + non-direct + mid score → engage (0.75 softens bar)', () => {
+    // non-direct idle = 1.5 * 0.75 = 1.125x; effective = 1.125 * 0.5 = 0.5625
+    // score 0.6 < normal-bar (0.75) but ≥ idle-bar (0.5625) → engage only in idle
+    const dNormal = makeEngagementDecision(signals({
+      participationScore: 0.6,
+      minScore: 0.5,
+      activityLevel: 'normal',
+    }));
+    expect(dNormal.shouldReply).toBe(false);
+
+    const dIdle = makeEngagementDecision(signals({
+      participationScore: 0.6,
+      minScore: 0.5,
+      activityLevel: 'idle',
+    }));
+    expect(dIdle.shouldReply).toBe(true);
+    expect(dIdle.strength).toBe('engage');
+  });
+
+  it('busy + direct trigger bypasses the multiplier (direct always engages)', () => {
+    const d = makeEngagementDecision(signals({
+      isMention: true,
+      participationScore: 0,
+      minScore: 0.5,
+      activityLevel: 'busy',
+    }));
+    expect(d.shouldReply).toBe(true);
+    expect(d.strength).toBe('engage');
+  });
+
+  it('normal activity matches pre-M7.2 behavior (regression guard)', () => {
+    // Non-direct normal = 1.5x minScore = 0.75. Score 0.8 engages, 0.7 skips.
+    const dPass = makeEngagementDecision(signals({
+      participationScore: 0.8,
+      minScore: 0.5,
+      activityLevel: 'normal',
+    }));
+    expect(dPass.shouldReply).toBe(true);
+
+    const dSkip = makeEngagementDecision(signals({
+      participationScore: 0.7,
+      minScore: 0.5,
+      activityLevel: 'normal',
+    }));
+    expect(dSkip.shouldReply).toBe(false);
   });
 });

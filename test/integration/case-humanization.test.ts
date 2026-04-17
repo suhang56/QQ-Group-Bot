@@ -76,6 +76,7 @@ const BASE_SIGNALS: EngagementSignals = {
   isPureAtMention: false,
   lastSpeechIgnored: false,
   consecutiveReplyCount: 0,
+  activityLevel: 'normal',
 };
 
 function signals(overrides: Partial<EngagementSignals>): EngagementSignals {
