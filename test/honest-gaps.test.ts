@@ -453,6 +453,41 @@ describe('extractTokens — noise filters', () => {
   });
 });
 
+describe('extractTokens — CJK/ASCII boundary split', () => {
+  it('splits "ygfn是啥" into tokens including "ygfn"', () => {
+    const result = extractTokens('ygfn是啥');
+    expect(result).toContain('ygfn');
+  });
+
+  it('splits "xtt是啥意思" to include "xtt"', () => {
+    const result = extractTokens('xtt是啥意思');
+    expect(result).toContain('xtt');
+  });
+
+  it('"ygfn 是啥" with space still returns "ygfn"', () => {
+    const result = extractTokens('ygfn 是啥');
+    expect(result).toContain('ygfn');
+  });
+
+  it('pure ASCII unchanged', () => {
+    const result = extractTokens('pureASCII');
+    expect(result).toEqual(['pureASCII']);
+  });
+
+  it('pure CJK unchanged', () => {
+    const result = extractTokens('纯中文');
+    expect(result).toEqual(['纯中文']);
+  });
+
+  it('"hello世界test" splits into ["hello", "世界", "test"]', () => {
+    const result = extractTokens('hello世界test');
+    expect(result).toContain('hello');
+    expect(result).toContain('世界');
+    expect(result).toContain('test');
+    expect(result).not.toContain('hello世界test');
+  });
+});
+
 describe('extractTokens particle filter', () => {
   it('does not include 那你也来 (contains 也)', () => {
     const result = extractTokens('那你也来 弯曲');
