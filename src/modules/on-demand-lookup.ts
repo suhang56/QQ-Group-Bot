@@ -3,6 +3,8 @@ import { sanitizeForPrompt, hasJailbreakPattern } from '../utils/prompt-sanitize
 import { LEARN_MODEL } from '../config.js';
 import type { ILearnedFactsRepository, IMessageRepository } from '../storage/db.js';
 import type { Logger } from 'pino';
+import { validateFactForActive } from './fact-validator.js';
+import { GeminiGroundingProvider } from './web-lookup.js';
 
 export interface OnDemandLookupDeps {
   db: {
@@ -20,6 +22,8 @@ export interface OnDemandLookupDeps {
   model: string;
   logger: Logger;
   now?: () => number;
+  /** Injected for testing — overrides GeminiGroundingProvider */
+  groundingProvider?: { search(query: string): Promise<import('./web-lookup.js').SearchResult[]> };
 }
 
 // Internal LLM parse result
@@ -44,6 +48,7 @@ export class OnDemandLookup {
   private readonly model: string;
   private readonly logger: Logger;
   private readonly now: () => number;
+  private readonly groundingProvider: { search(query: string): Promise<import('./web-lookup.js').SearchResult[]> } | undefined;
 
   // Sliding-window rate limits (mirrors self-learning._allow pattern).
   // Map size bounded by unique user/group count — acceptable for QQ group cardinality.
@@ -56,6 +61,7 @@ export class OnDemandLookup {
     this.model = deps.model;
     this.logger = deps.logger;
     this.now = deps.now ?? (() => Date.now());
+    this.groundingProvider = deps.groundingProvider;
   }
 
   /**
@@ -117,7 +123,7 @@ export class OnDemandLookup {
       return { type: 'unknown' };
     }
 
-    this._cacheFact(groupId, term, result.meaning, result.confidence);
+    await this._cacheFact(groupId, term, result.meaning, result.confidence);
     this.logger.info({ groupId, term, meaning: result.meaning, confidence: result.confidence }, 'ondemand-lookup: cached');
     return { type: 'found', meaning: result.meaning };
   }
@@ -185,8 +191,12 @@ confidence含义：0-6=不确定，7-9=有把握，10=非常确定。若无法�
     return true;
   }
 
-  private _cacheFact(groupId: string, term: string, meaning: string, confidence: number): void {
+  private async _cacheFact(groupId: string, term: string, meaning: string, confidence: number): Promise<void> {
     const canonicalForm = `${term}的意思是${meaning}`;
+    const status = await validateFactForActive(
+      { term, meaning, speakerCount: 1, contextCount: 3, groupId },
+      { groundingProvider: this.groundingProvider ?? new GeminiGroundingProvider(), logger: this.logger },
+    );
     this.db.learnedFacts.insert({
       groupId,
       topic: 'ondemand-lookup',
@@ -198,7 +208,7 @@ confidence含义：0-6=不确定，7-9=有把握，10=非常确定。若无法�
       sourceMsgId: null,
       botReplyId: null,
       confidence: confidence / 10,
-      status: 'active',
+      status,
     });
   }
 

@@ -6,6 +6,8 @@ import { createLogger } from '../utils/logger.js';
 import { extractJson } from '../utils/json-extract.js';
 import { JARGON_MODEL } from '../config.js';
 import { sanitizeForPrompt, hasJailbreakPattern } from '../utils/prompt-sanitize.js';
+import { validateFactForActive } from './fact-validator.js';
+import { GeminiGroundingProvider } from './web-lookup.js';
 
 // ---- Constants ----
 
@@ -116,6 +118,8 @@ export interface JargonMinerOptions {
   windowMessages?: number;
   /** Injected for testing */
   now?: () => number;
+  /** Injected for testing — overrides GeminiGroundingProvider */
+  groundingProvider?: { search(query: string): Promise<import('./web-lookup.js').SearchResult[]> };
 }
 
 interface JargonCandidate {
@@ -194,6 +198,7 @@ export class JargonMiner {
   private readonly logger: Logger;
   private readonly windowMessages: number;
   private readonly now: () => number;
+  private readonly groundingProvider: { search(query: string): Promise<import('./web-lookup.js').SearchResult[]> } | undefined;
   private readonly _inFlight = new Map<string, Set<string>>();
 
   constructor(opts: JargonMinerOptions) {
@@ -205,6 +210,7 @@ export class JargonMiner {
     this.logger = opts.logger ?? createLogger('jargon-miner');
     this.windowMessages = opts.windowMessages ?? DEFAULT_WINDOW;
     this.now = opts.now ?? (() => Date.now());
+    this.groundingProvider = opts.groundingProvider;
     if (JARGON_MODEL.includes('claude')) {
       this.logger.warn({ model: JARGON_MODEL }, 'JARGON_MODEL is a Claude model — MAX_INFER_PER_CYCLE=8 may incur cost');
     }
@@ -217,7 +223,7 @@ export class JargonMiner {
   async run(groupId: string): Promise<void> {
     this.extractCandidates(groupId);
     await this.inferJargon(groupId);
-    this.promoteToFacts(groupId);
+    await this.promoteToFacts(groupId);
   }
 
   /**
@@ -349,7 +355,7 @@ export class JargonMiner {
   /**
    * Promote confirmed jargon (is_jargon=1) to learned_facts.
    */
-  promoteToFacts(groupId: string): void {
+  async promoteToFacts(groupId: string): Promise<void> {
     const rows = this.db.prepare(`
       SELECT * FROM jargon_candidates
       WHERE group_id = ? AND is_jargon = 1
@@ -380,6 +386,12 @@ export class JargonMiner {
         this.learnedFacts.markStatus(row.id, 'superseded');
       }
 
+      const speakerCount = new Set(candidate.contexts.map(ctx => ctx.user_id ?? 'unknown')).size;
+      const contextCount = candidate.contexts.length;
+      const status = await validateFactForActive(
+        { term: candidate.content, meaning: candidate.meaning ?? '', speakerCount, contextCount, groupId },
+        { groundingProvider: this.groundingProvider ?? new GeminiGroundingProvider(), logger: this.logger },
+      );
       this.learnedFacts.insert({
         groupId,
         topic: '群内黑话',
@@ -389,7 +401,7 @@ export class JargonMiner {
         sourceMsgId: null,
         botReplyId: null,
         confidence: 0.85,
-        status: 'active',
+        status,
       });
 
       this._markPromoted(groupId, candidate.content);

@@ -438,7 +438,8 @@ describe('SelfLearningModule.researchOnline', () => {
     const claude = stubClaude([
       JSON.stringify({ found: true, fact: 'fire bird 是 Roselia 的曲', source: 'bandori.fandom.com', confidence: 0.9 }),
     ]);
-    const learner = new SelfLearningModule({ db, claude });
+    const groundingProvider = { search: vi.fn().mockResolvedValue([{ snippet: 'fire bird Roselia', url: 'https://example.com' }]) };
+    const learner = new SelfLearningModule({ db, claude, groundingProvider });
     const evasiveId = seedEvasive('g1');
 
     const result = await learner.researchOnline({

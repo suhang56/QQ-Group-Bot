@@ -2342,6 +2342,38 @@ ${ctxLine}
       await this.adapter.send(msg.groupId, lines.join('\n'));
     });
 
+    this.commands.set('facts_stats', async (msg, args, _config) => {
+      if (msg.role !== 'admin' && msg.role !== 'owner') {
+        await this.adapter.send(msg.groupId, '没有权限。');
+        return;
+      }
+      const targetGroupId = args[0] ?? msg.groupId;
+      const rows = this.db.rawDb.prepare(`
+        SELECT status, source_user_nickname, COUNT(*) as cnt
+        FROM learned_facts
+        WHERE group_id = ?
+        GROUP BY status, source_user_nickname
+      `).all(targetGroupId) as { status: string; source_user_nickname: string | null; cnt: number }[];
+
+      const counts: Record<string, number> = { active: 0, pending: 0, rejected: 0, superseded: 0 };
+      const minerBreakdown: Record<string, number> = {};
+      for (const r of rows) {
+        counts[r.status] = (counts[r.status] ?? 0) + r.cnt;
+        if (r.status === 'active') {
+          const nick = r.source_user_nickname ?? '';
+          const label =
+            nick.startsWith('[jargon-miner]') ? 'jargon' :
+            nick.startsWith('[harvest:') ? 'harvest' :
+            nick.startsWith('[ondemand-lookup]') ? 'ondemand' :
+            nick.startsWith('[online:') ? 'online' : 'other';
+          minerBreakdown[label] = (minerBreakdown[label] ?? 0) + r.cnt;
+        }
+      }
+      const breakdown = Object.entries(minerBreakdown).map(([k, v]) => `${k}=${v}`).join(' ');
+      const line = `Active: ${counts['active'] ?? 0} (${breakdown}) | Pending: ${counts['pending'] ?? 0} | Rejected: ${counts['rejected'] ?? 0} | Superseded: ${counts['superseded'] ?? 0}`;
+      await this.adapter.send(msg.groupId, line);
+    });
+
     this.commands.set('fact_approve', async (msg, args, _config) => {
       if (msg.userId !== MOD_APPROVAL_ADMIN) {
         await this.adapter.send(msg.groupId, '没有权限。只有 bot 主人可以通过待审知识。');

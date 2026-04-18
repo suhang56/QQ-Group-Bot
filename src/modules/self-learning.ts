@@ -8,6 +8,8 @@ import { extractJson } from '../utils/json-extract.js';
 import { LEARN_MODEL, RESEARCH_MODEL, FACTS_RAG_DISABLED, MEMES_V1_DISABLED } from '../config.js';
 import { sanitizeNickname, sanitizeForPrompt, hasJailbreakPattern } from '../utils/prompt-sanitize.js';
 import { rrfFuse } from '../utils/rrf-fusion.js';
+import { validateFactForActive } from './fact-validator.js';
+import { GeminiGroundingProvider } from './web-lookup.js';
 
 /** Cosine similarity floor — facts below this are dropped unless pinned.
  * MiniLM-L6-v2 is noisier on Chinese text so we set a slightly higher
@@ -48,6 +50,8 @@ export interface SelfLearningOptions {
   researchEnabled?: boolean;
   /** Optional embedding service used for semantic fact retrieval. */
   embeddingService?: IEmbeddingService | null;
+  /** Injected for testing — overrides GeminiGroundingProvider */
+  groundingProvider?: { search(query: string): Promise<import('./web-lookup.js').SearchResult[]> };
 }
 
 /**
@@ -157,6 +161,7 @@ export class SelfLearningModule {
   private readonly researchMaxPerDayGlobal: number;
   private readonly researchEnabled: boolean;
   private readonly _embeddingService: IEmbeddingService | null;
+  private readonly _groundingProvider: { search(query: string): Promise<import('./web-lookup.js').SearchResult[]> } | undefined;
   private _memeGraphRepo: IMemeGraphRepo | null = null;
 
   private readonly correctionStamps: Map<string, number[]> = new Map();
@@ -183,6 +188,7 @@ export class SelfLearningModule {
     this.researchMaxPerDayGlobal = opts.researchMaxPerDayGlobal ?? 30;
     this.researchEnabled = opts.researchEnabled ?? true;
     this._embeddingService = opts.embeddingService ?? null;
+    this._groundingProvider = opts.groundingProvider;
   }
 
   /** Inject meme graph repo after construction (follows setEmbeddingService pattern). */
@@ -707,9 +713,14 @@ ${lines.join('\n')}
     }
 
     const sourceTag = `[online:${response.source ?? 'unknown'}]`;
+    const researchTerm = topic ?? trigger.slice(0, 10);
+    const researchStatus = await validateFactForActive(
+      { term: researchTerm, meaning: response.fact, speakerCount: 1, contextCount: 1, groupId },
+      { groundingProvider: this._groundingProvider ?? new GeminiGroundingProvider(), logger: this.logger },
+    );
     const factId = this.db.learnedFacts.insert({
       groupId,
-      topic: topic ?? trigger.slice(0, 10),
+      topic: researchTerm,
       fact: response.fact,
       canonicalForm: response.fact,
       personaForm: null,
@@ -718,6 +729,7 @@ ${lines.join('\n')}
       sourceMsgId: null,
       botReplyId: evasiveBotReplyId,
       confidence,
+      status: researchStatus,
     });
     this.logger.info({ groupId, factId, fact: response.fact, source: response.source }, 'learned fact (online)');
     return { factId, fact: response.fact };
