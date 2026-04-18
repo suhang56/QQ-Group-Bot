@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 // Read-only audit: surface active learned_facts whose topic is null, bare
 // prefix-only (no :term), or a known prefix with a dirty suffix. Does NOT
 // modify the DB. Output is JSON-lines for downstream piping.

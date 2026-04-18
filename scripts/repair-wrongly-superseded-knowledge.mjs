@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 // Repair wrongly-superseded rows left behind by the old canonical-substring
 // supersede. Decisions gate on structured-topic validation — dirty legacy
 // topics are never resurrected.
