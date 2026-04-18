@@ -1613,9 +1613,23 @@ export class ChatModule implements IChatModule {
     const isAdversarial = isProbe || isTask || isInject || isHarass;
 
     // ── Comprehension scoring (BEFORE Claude call) ────────────────────
+    // Include learned_fact term keys so the scorer recognises group-specific
+    // jargon (e.g. "xtt") and doesn't score the message as low-comprehension.
+    const learnedFactTerms: string[] = this.db.learnedFacts
+      ? this.db.learnedFacts.listActive(groupId, 500).flatMap(f => {
+          const terms: string[] = [];
+          if (f.canonicalForm) terms.push(f.canonicalForm.toLowerCase());
+          if (f.personaForm) terms.push(f.personaForm.toLowerCase());
+          if (f.topic) terms.push(f.topic.toLowerCase());
+          return terms;
+        })
+      : [];
     const comprehensionCtx: ComprehensionContext = {
       loreKeywords: this._getLoreKeywords(groupId),
-      jargonTerms: loadGroupJargon(this.db.rawDb, groupId).map(j => j.term.toLowerCase()),
+      jargonTerms: [
+        ...loadGroupJargon(this.db.rawDb, groupId).map(j => j.term.toLowerCase()),
+        ...learnedFactTerms,
+      ],
       aliasKeys: this._getAliasKeys(groupId),
     };
     const { score: comprehensionScore } = scoreComprehensionSafe(triggerMessage.content, comprehensionCtx);
