@@ -29,6 +29,10 @@ export const MAX_RENDERED_TERMS = 10;
 export const MAX_TERM_RENDER_CHARS = 40;
 
 const PURE_NUMBER_RE = /^\d+\.?\d*$/;
+// Intentionally narrow; extend as new QQ system placeholder strings are observed.
+export const CQ_PLACEHOLDER_TERMS: ReadonlySet<string> = new Set(['回复消息', '图片', '表情', '语音', '视频', '文件', '红包', '转账', '位置', '合并转发', '戳一戳']);
+// ZWJ sequences and skin-tone modifier variants are best-effort; unlikely to accumulate legitimately.
+export const EMOJI_ONLY_RE = /^\p{Emoji_Presentation}+$/u;
 
 export interface HonestGapsEntry {
   readonly term: string;
@@ -54,6 +58,9 @@ export function extractTokens(content: string): string[] {
     if (tok.length < MIN_TERM_LEN || tok.length > MAX_TERM_LEN) continue;
     if (PURE_NUMBER_RE.test(tok)) continue;
     if (tok.startsWith('/')) continue;
+    if (tok.startsWith('@')) continue;
+    if (CQ_PLACEHOLDER_TERMS.has(tok)) continue;
+    if (EMOJI_ONLY_RE.test(tok)) continue;
     if (COMMON_WORDS.has(tok)) continue;
     out.push(tok);
   }
