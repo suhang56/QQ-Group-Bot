@@ -3,8 +3,7 @@ import {
   WebLookup,
   WebLookupRateLimiter,
   shouldLookupTerm,
-  isPublicEntityTerm,
-  detectJargonQuestion,
+  DEFAULT_COMMON_WORDS,
 } from '../src/modules/web-lookup.js';
 import type { IWebLookupCacheRepository, WebLookupCacheRow } from '../src/storage/db.js';
 import type { ILearnedFactsRepository } from '../src/storage/db.js';
@@ -255,21 +254,6 @@ describe('WebLookup', () => {
     expect(result).toBeNull();
   });
 
-  // Test 12: shouldLookupTerm('MyGO') → true (romaji capitalized)
-  it('test 12: shouldLookupTerm returns true for romaji proper noun', () => {
-    expect(shouldLookupTerm('MyGO')).toBe(true);
-  });
-
-  // Test 13: shouldLookupTerm('今天') → false (common word)
-  it('test 13: shouldLookupTerm returns false for common Chinese word', () => {
-    expect(shouldLookupTerm('\u4eca\u5929')).toBe(false);
-  });
-
-  // Test 14: shouldLookupTerm('園田美遊') → true (CJK ≥2 chars, not common)
-  it('test 14: shouldLookupTerm returns true for CJK proper noun (4 chars)', () => {
-    expect(shouldLookupTerm('\u5712\u7530\u7f8e\u9057')).toBe(true);
-  });
-
   // Test 15: Pending fact written with status='pending', topic starts with 'web_lookup:'
   it('test 15: writes pending fact with correct status and topic prefix', async () => {
     setEnvEnabled();
@@ -310,44 +294,6 @@ describe('WebLookup', () => {
     expect(facts.insert).not.toHaveBeenCalled();
   });
 
-  // Test 17: Path A null → CSE is called (new A→C chain test)
-  it('test 17: Path A null term triggers CSE lookup via shouldLookupTerm', async () => {
-    setEnvEnabled();
-    const provider = makeProvider();
-    const wl = new WebLookup(makeCache(), makeFacts(), makeLlm(), provider);
-
-    // Simulate what chat.ts does: Path A returned null for 'MyGO'
-    const pathATerms = [{ term: 'MyGO', meaning: null as string | null }];
-    const snippetParts: string[] = [];
-    for (const { term, meaning } of pathATerms) {
-      if (meaning !== null) continue;
-      if (!shouldLookupTerm(term)) continue;
-      const webResult = await wl.lookupTerm('g1', term, 'user1');
-      if (webResult) snippetParts.push(`"${term}": ${webResult.answer}`);
-    }
-
-    expect(provider.search).toHaveBeenCalledOnce();
-    expect(snippetParts.length).toBe(1);
-    expect(snippetParts[0]).toContain('"MyGO"');
-  });
-
-  // Test 18: Path A non-null → CSE is NOT called (term already known)
-  it('test 18: Path A non-null term skips CSE (corpus hit)', async () => {
-    setEnvEnabled();
-    const provider = makeProvider();
-    const wl = new WebLookup(makeCache(), makeFacts(), makeLlm(), provider);
-
-    // Path A already found a meaning for this term
-    const pathATerms = [{ term: 'MyGO', meaning: '\u4e00\u652f\u4e50\u961f' as string | null }];
-    for (const { term, meaning } of pathATerms) {
-      if (meaning !== null) continue; // skip — corpus has it
-      if (!shouldLookupTerm(term)) continue;
-      await wl.lookupTerm('g1', term, 'user1');
-    }
-
-    expect(provider.search).not.toHaveBeenCalled();
-  });
-
   // Test 19: Cache write happens before return
   it('test 19: cache.put is called before lookupTerm returns', async () => {
     setEnvEnabled();
@@ -374,33 +320,112 @@ describe('shouldLookupTerm', () => {
     expect(shouldLookupTerm('Roselia')).toBe(true);
   });
 
+  it('returns true for romaji name (mixed case)', () => {
+    expect(shouldLookupTerm('MyGO')).toBe(true);
+  });
+
   it('returns true for CJK 2-char name', () => {
-    expect(shouldLookupTerm('\u51cc\u9633')).toBe(true); // 凌阳 — not a common word
+    expect(shouldLookupTerm('\u51cc\u9633')).toBe(true); // 凌阳
+  });
+
+  it('returns true for CJK 4-char proper name', () => {
+    expect(shouldLookupTerm('\u5712\u7530\u7f8e\u9057')).toBe(true); // 園田美遊
   });
 
   it('returns false for lowercase romaji', () => {
     expect(shouldLookupTerm('hello')).toBe(false);
   });
 
-  it('returns false for term in userAliases', () => {
-    expect(shouldLookupTerm('MyGO', new Set(['MyGO']))).toBe(false);
+  it('returns false for single CJK character', () => {
+    expect(shouldLookupTerm('\u4eba')).toBe(false); // 人
   });
 
-  it('isPublicEntityTerm is an alias for shouldLookupTerm', () => {
-    expect(isPublicEntityTerm('MyGO')).toBe(shouldLookupTerm('MyGO'));
-  });
-});
-
-// ── detectJargonQuestion unit tests (kept; function still exported) ───────────
-
-describe('detectJargonQuestion', () => {
-  it('test 17-compat: extracts term from "X是谁"', () => {
-    const term = detectJargonQuestion('\u56ed\u7530\u7f8e\u9057\u662f\u8c01');
-    expect(term).toBe('\u56ed\u7530\u7f8e\u9057');
+  it('returns false for non-name ASCII', () => {
+    expect(shouldLookupTerm('foo123')).toBe(false);
   });
 
-  it('test 18-compat: returns null for non-question content', () => {
-    expect(detectJargonQuestion('\u597d\u997f\u554a')).toBeNull();
+  it('returns false when term is in knownFacts', () => {
+    const knownFacts = new Set(['MyGO']);
+    expect(shouldLookupTerm('MyGO', knownFacts)).toBe(false);
+  });
+
+  it('returns false when term is in default commonWords', () => {
+    // 今天 is in DEFAULT_COMMON_WORDS
+    expect(shouldLookupTerm('\u4eca\u5929')).toBe(false);
+  });
+
+  it('returns false when term is in custom commonWords', () => {
+    const customCommon = new Set(['Roselia']);
+    expect(shouldLookupTerm('Roselia', new Set(), customCommon)).toBe(false);
+  });
+
+  it('knownFacts takes precedence over romaji match', () => {
+    const knownFacts = new Set(['Roselia']);
+    expect(shouldLookupTerm('Roselia', knownFacts, DEFAULT_COMMON_WORDS)).toBe(false);
+  });
+
+  it('empty knownFacts and empty commonWords — valid romaji passes', () => {
+    expect(shouldLookupTerm('Poppin', new Set(), new Set())).toBe(true);
+  });
+
+  // Path A chain: meaning=null → shouldLookupTerm → CSE called
+  it('Path A null term triggers CSE lookup via shouldLookupTerm', async () => {
+    process.env['WEB_LOOKUP_ENABLED'] = '1';
+    process.env['GOOGLE_CSE_API_KEY'] = 'test-key';
+    process.env['GOOGLE_CSE_CX'] = 'test-cx';
+    const provider: SearchProvider = {
+      search: vi.fn().mockResolvedValue([
+        { snippet: 'MyGO is a band from BanG Dream!', url: 'https://bandori.fandom.com' },
+        { snippet: 'MyGO!!! anime', url: 'https://bestdori.com' },
+        { snippet: 'Third', url: 'https://example.com' },
+      ]),
+    };
+    const wl = new WebLookup(
+      { get: vi.fn().mockReturnValue(null), put: vi.fn(), cleanupExpired: vi.fn().mockReturnValue(0) },
+      { insert: vi.fn().mockReturnValue(1), listActive: vi.fn().mockReturnValue([]), listActiveWithEmbeddings: vi.fn().mockReturnValue([]), listNullEmbeddingActive: vi.fn().mockReturnValue([]), listAllNullEmbeddingActive: vi.fn().mockReturnValue([]), updateEmbedding: vi.fn(), markStatus: vi.fn(), clearGroup: vi.fn().mockReturnValue(0), countActive: vi.fn().mockReturnValue(0), setEmbeddingService: vi.fn(), findSimilarActive: vi.fn().mockResolvedValue(null), searchByBM25: vi.fn().mockReturnValue([]), listPending: vi.fn().mockReturnValue([]), countPending: vi.fn().mockReturnValue(0), expirePendingOlderThan: vi.fn().mockReturnValue(0), approveAllPending: vi.fn().mockReturnValue(0), recordEmbeddingFailure: vi.fn().mockReturnValue(false), listActiveAliasFacts: vi.fn().mockReturnValue([]), listAliasFactsForMap: vi.fn().mockReturnValue([]) } as unknown as import('../src/storage/db.js').ILearnedFactsRepository,
+      { chat: vi.fn().mockResolvedValue({ text: 'MyGO\u662f\u4e00\u652f\u4e50\u961f\u3002' }) },
+      provider,
+    );
+
+    // Simulate chat.ts A→C chain
+    const pathATerms = [{ term: 'MyGO', meaning: null as string | null }];
+    const knownFacts = new Set(pathATerms.filter(r => r.meaning !== null).map(r => r.term));
+    const snippetParts: string[] = [];
+    for (const { term, meaning } of pathATerms) {
+      if (meaning !== null) continue;
+      if (!shouldLookupTerm(term, knownFacts, DEFAULT_COMMON_WORDS)) continue;
+      const webResult = await wl.lookupTerm('g1', term, 'user1');
+      if (webResult) snippetParts.push(`"${term}": ${webResult.answer}`);
+    }
+
+    expect(provider.search).toHaveBeenCalledOnce();
+    expect(snippetParts.length).toBe(1);
+    expect(snippetParts[0]).toContain('"MyGO"');
+
+    delete process.env['WEB_LOOKUP_ENABLED'];
+    delete process.env['GOOGLE_CSE_API_KEY'];
+    delete process.env['GOOGLE_CSE_CX'];
+  });
+
+  // Path A chain: meaning non-null → shouldLookupTerm excluded by knownFacts → CSE NOT called
+  it('Path A non-null term skips CSE (corpus hit)', async () => {
+    const provider: SearchProvider = { search: vi.fn().mockResolvedValue([]) };
+    const wl = new WebLookup(
+      { get: vi.fn().mockReturnValue(null), put: vi.fn(), cleanupExpired: vi.fn().mockReturnValue(0) },
+      { insert: vi.fn().mockReturnValue(1), listActive: vi.fn().mockReturnValue([]), listActiveWithEmbeddings: vi.fn().mockReturnValue([]), listNullEmbeddingActive: vi.fn().mockReturnValue([]), listAllNullEmbeddingActive: vi.fn().mockReturnValue([]), updateEmbedding: vi.fn(), markStatus: vi.fn(), clearGroup: vi.fn().mockReturnValue(0), countActive: vi.fn().mockReturnValue(0), setEmbeddingService: vi.fn(), findSimilarActive: vi.fn().mockResolvedValue(null), searchByBM25: vi.fn().mockReturnValue([]), listPending: vi.fn().mockReturnValue([]), countPending: vi.fn().mockReturnValue(0), expirePendingOlderThan: vi.fn().mockReturnValue(0), approveAllPending: vi.fn().mockReturnValue(0), recordEmbeddingFailure: vi.fn().mockReturnValue(false), listActiveAliasFacts: vi.fn().mockReturnValue([]), listAliasFactsForMap: vi.fn().mockReturnValue([]) } as unknown as import('../src/storage/db.js').ILearnedFactsRepository,
+      { chat: vi.fn().mockResolvedValue({ text: 'answer' }) },
+      provider,
+    );
+
+    const pathATerms = [{ term: 'MyGO', meaning: '\u4e00\u652f\u4e50\u961f' as string | null }];
+    const knownFacts = new Set(pathATerms.filter(r => r.meaning !== null).map(r => r.term));
+    for (const { term, meaning } of pathATerms) {
+      if (meaning !== null) continue;
+      if (!shouldLookupTerm(term, knownFacts, DEFAULT_COMMON_WORDS)) continue;
+      await wl.lookupTerm('g1', term, 'user1');
+    }
+
+    expect(provider.search).not.toHaveBeenCalled();
   });
 });
 

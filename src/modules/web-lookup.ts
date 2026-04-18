@@ -24,47 +24,32 @@ const BACKOFF_MS = [1000, 2000, 4000] as const;
 // ─── Term heuristics ─────────────────────────────────────────────────────────
 
 const ROMAJI_RE = /^[A-Z][a-zA-Z]{1,14}$/;
-// CJK ≥2 chars (no upper bound — names can be longer than 4 chars)
+// CJK ≥2 chars — proper names can exceed 4 chars
 const CJK_NAME_RE = /^[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]{2,}$/;
 
-// Common Chinese words that are NOT proper nouns.
-const COMMON_WORDS = new Set([
+// Default common Chinese function words that are never proper nouns.
+export const DEFAULT_COMMON_WORDS: ReadonlySet<string> = new Set([
   '\u4eca\u5929', '\u660e\u5929', '\u6628\u5929', '\u8fd9\u4e2a', '\u90a3\u4e2a', '\u4ec0\u4e48', '\u54ea\u91cc', '\u600e\u4e48', '\u4e3a\u4ec0\u4e48',
   '\u597d\u7684', '\u4e0d\u662f', '\u53ef\u4ee5', '\u6ca1\u6709', '\u77e5\u9053', '\u559c\u6b22', '\u89c9\u5f97', '\u611f\u89c9', '\u5e94\u8be5',
   '\u771f\u7684', '\u4e00\u8d77', '\u5927\u5bb6', '\u670b\u53cb', '\u6240\u4ee5', '\u56e0\u4e3a', '\u7136\u540e', '\u4f46\u662f', '\u8fd8\u662f',
 ]);
 
 /**
- * Returns true if `term` looks like a public proper noun worthy of a CSE lookup:
- * capitalised romaji OR CJK ≥2 chars that isn't a common function word.
- * `userAliases` optionally excludes terms already known as user nicknames.
+ * Returns true if `term` should be looked up via CSE:
+ * - Matches name pattern (romaji-cap OR CJK ≥2 chars)
+ * - NOT already in `knownFacts` (Path A or corpus resolved it)
+ * - NOT in `commonWords` (function words, defaults to DEFAULT_COMMON_WORDS)
  */
-export function shouldLookupTerm(term: string, userAliases: Set<string> = new Set()): boolean {
-  if (userAliases.has(term)) return false;
+export function shouldLookupTerm(
+  term: string,
+  knownFacts: ReadonlySet<string> = new Set(),
+  commonWords: ReadonlySet<string> = DEFAULT_COMMON_WORDS,
+): boolean {
+  if (knownFacts.has(term)) return false;
+  if (commonWords.has(term)) return false;
   if (ROMAJI_RE.test(term)) return true;
-  if (CJK_NAME_RE.test(term) && !COMMON_WORDS.has(term)) return true;
+  if (CJK_NAME_RE.test(term)) return true;
   return false;
-}
-
-/**
- * Legacy alias kept for backward compat and existing tests.
- * New code should use `shouldLookupTerm`.
- */
-export function isPublicEntityTerm(term: string, userAliases: Set<string> = new Set()): boolean {
-  return shouldLookupTerm(term, userAliases);
-}
-
-// ─── Question detector (kept for reference; no longer the main trigger path) ──
-
-const QUESTION_RE = /(?:\u8c01|\u554a|\u662f\u4ec0\u4e48|\u4ec0\u4e48\u662f|\u662f\u8c01|\u600e\u4e48\u4e86|\u554a\u610f\u601d|\u4ec0\u4e48\u610f\u601d)/;
-
-export function detectJargonQuestion(content: string): string | null {
-  if (!QUESTION_RE.test(content)) return null;
-  const cjkMatch = content.match(/[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]{2,4}(?=\u662f(?:\u4ec0\u4e48|\u8c01|\u554a))|(?<=(?:\u8c01\u662f|\u554a\u662f|\u4ec0\u4e48\u662f)\s*)[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]{2,4}/);
-  if (cjkMatch) return cjkMatch[0]!;
-  const romajiMatch = content.match(/[A-Z][a-zA-Z]{1,14}(?=\u662f(?:\u4ec0\u4e48|\u8c01|\u554a))|(?<=(?:\u8c01\u662f|\u554a\u662f|\u4ec0\u4e48\u662f)\s*)[A-Z][a-zA-Z]{1,14}/);
-  if (romajiMatch) return romajiMatch[0]!;
-  return null;
 }
 
 // ─── Types ───────────────────────────────────────────────────────────────────
