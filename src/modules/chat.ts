@@ -2233,7 +2233,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
             ...(contextStickerSection ? [{ text: contextStickerSection, cache: true as const }] : []),
             ...(rotatedStickerSection ? [{ text: rotatedStickerSection, cache: true as const }] : []),
             ...(factsBlock ? [{ text: factsBlock, cache: true as const }] : []),
-            ...(onDemandFactBlock ? [{ text: onDemandFactBlock, cache: true as const }] : []),
+            ...(onDemandFactBlock ? [{ text: onDemandFactBlock, cache: false }] : []),
             ...(tuningBlock ? [{ text: tuningBlock, cache: true as const }] : []),
             ...(fewShotBlock ? [{ text: fewShotBlock, cache: true as const }] : []),
           ],

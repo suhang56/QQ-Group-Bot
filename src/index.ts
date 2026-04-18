@@ -50,6 +50,7 @@ import { PreChatJudge } from './modules/pre-chat-judge.js';
 import { ProactiveEngine, loadProactiveEngineConfig } from './modules/proactive-engine.js';
 import { JargonMiner } from './modules/jargon-miner.js';
 import { HonestGapsTracker } from './modules/honest-gaps.js';
+import { OnDemandLookup, LEARN_MODEL } from './modules/on-demand-lookup.js';
 import { PhraseMiner } from './modules/phrase-miner.js';
 import { MemeClusterer } from './modules/meme-clusterer.js';
 import { RatingPortalServer } from './server/rating-portal.js';
@@ -356,6 +357,14 @@ const honestGapsTracker = new HonestGapsTracker(db.honestGaps, {
 });
 chat.setHonestGapsSource(honestGapsTracker);
 chat.setHonestGapsTracker(honestGapsTracker);
+
+const onDemandLookup = new OnDemandLookup({
+  db: { learnedFacts: db.learnedFacts, messages: db.messages },
+  llm: claude,
+  model: LEARN_MODEL,
+  logger: createLogger('on-demand-lookup'),
+});
+chat.setOnDemandLookup(onDemandLookup);
 
 const affinity = new AffinityModule(db.rawDb);
 // M6.2b: wire affinity producer + consumer into chat scoring / userContent.

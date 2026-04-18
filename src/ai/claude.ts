@@ -21,7 +21,7 @@ export type ClaudeModel =
 
 export interface CachedSystemBlock {
   text: string;
-  cache: true;
+  cache: boolean;
 }
 
 export interface ClaudeMessage {
