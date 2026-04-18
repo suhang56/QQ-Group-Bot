@@ -59,10 +59,10 @@ export function detectRelay(
     return { kind: 'claim', content: mostFrequent(raw3), chainLength: 3 };
   }
 
-  // Echo detection: last 3 normalized all equal, 1-2 chars (short tokens only)
+  // Echo detection: last 3 normalized all equal, 1-4 chars
   if (norm3[0] === norm3[1] && norm3[1] === norm3[2]) {
     const len = norm3[0].length;
-    if (len >= 1 && len <= 2) {
+    if (len >= 1 && len <= 4) {
       return { kind: 'echo', content: norm3[0], chainLength: 3 };
     }
   }

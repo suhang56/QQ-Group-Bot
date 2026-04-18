@@ -60,10 +60,10 @@ describe('detectRelay', () => {
     expect(detectRelay(msgs, BOT)).toEqual({ kind: 'claim', content: '抢', chainLength: 3 });
   });
 
-  it('9: content not matching claim regex returns null', () => {
-    // "来了吗" is 3 chars but does not match CLAIM_RE
+  it('9: 3-char non-claim echo chain fires as echo', () => {
+    // "来了吗" is 3 chars, not vote/claim, but should echo (len <= 4)
     const msgs = [makeMsg('u1', '来了吗'), makeMsg('u2', '来了吗'), makeMsg('u3', '来了吗')];
-    expect(detectRelay(msgs, BOT)).toBeNull();
+    expect(detectRelay(msgs, BOT)).toEqual({ kind: 'echo', content: '来了吗', chainLength: 3 });
   });
 
   it('10: empty array returns null', () => {
