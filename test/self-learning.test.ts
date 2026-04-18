@@ -663,3 +663,137 @@ describe('SelfLearningModule.researchOnline', () => {
     });
   });
 });
+
+describe('SelfLearningModule.formatFactsForPrompt — per-term dedup (cases 10, 11)', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = makeDb();
+  });
+
+  function insertStructuredFact(
+    groupId: string,
+    topic: string,
+    fact: string,
+    confidence = 1.0,
+  ): number {
+    return db.learnedFacts.insert({
+      groupId, topic, fact, canonicalForm: fact,
+      sourceUserId: null, sourceUserNickname: 'tester',
+      sourceMsgId: null, botReplyId: null,
+      confidence,
+      status: 'active',
+    });
+  }
+
+  it('case 10: three structured facts for "ygfn" → only user-taught survives', async () => {
+    const userTaughtId = insertStructuredFact('g1', 'user-taught:ygfn', 'ygfn=羊宫妃那', 0.9);
+    insertStructuredFact('g1', 'opus-classified:fandom:ygfn', '某种 ygfn guess', 0.85);
+    insertStructuredFact('g1', '群内黑话:ygfn', 'ygfn jargon variant', 0.85);
+
+    const learner = new SelfLearningModule({ db, claude: stubClaude([]) });
+    // Non-empty trigger forces the hybrid BM25 path (dedup lives there, not on
+    // the recency fallback — per DEV-READY §2.12 and prompt-cleanliness spec).
+    const out = await learner.formatFactsForPrompt('g1', 50, 'ygfn');
+    expect(out.factIds).toEqual([userTaughtId]);
+    expect(out.text).toContain('ygfn=羊宫妃那');
+    expect(out.text).not.toContain('ygfn guess');
+    expect(out.text).not.toContain('jargon variant');
+  });
+
+  it('case 11: two topic=null facts → both survive (keyed by id, not collapsed)', async () => {
+    const a = db.learnedFacts.insert({
+      groupId: 'g1', topic: null, fact: 'apples taste crunchy today',
+      sourceUserId: null, sourceUserNickname: 'x', sourceMsgId: null, botReplyId: null,
+      confidence: 1.0,
+    });
+    const b = db.learnedFacts.insert({
+      groupId: 'g1', topic: null, fact: 'apples grow on trees',
+      sourceUserId: null, sourceUserNickname: 'y', sourceMsgId: null, botReplyId: null,
+      confidence: 1.0,
+    });
+
+    const learner = new SelfLearningModule({ db, claude: stubClaude([]) });
+    const out = await learner.formatFactsForPrompt('g1', 50, 'apples');
+    expect(out.factIds).toEqual(expect.arrayContaining([a, b]));
+    expect(out.factIds).toHaveLength(2);
+  });
+});
+
+describe('call-site writers build structured topics (case 14 — spies)', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = makeDb();
+  });
+
+  function seedBotReplyEvasive(groupId: string, trigger: string): number {
+    const reply = db.botReplies.insert({
+      groupId, triggerMsgId: 'm1', triggerUserNickname: 'asker',
+      triggerContent: trigger, botReply: '不知道',
+      module: 'chat', sentAt: Math.floor(Date.now() / 1000),
+    });
+    db.botReplies.markEvasive(reply.id);
+    return reply.id;
+  }
+
+  it('self-learning correction → topic="user-taught:<term>"', async () => {
+    const botReplyId = db.botReplies.insert({
+      groupId: 'g1', triggerMsgId: 'm1', triggerUserNickname: 'asker',
+      triggerContent: 'ygfn是谁', botReply: 'wrong bot reply',
+      module: 'chat', sentAt: Math.floor(Date.now() / 1000),
+    }).id;
+
+    const claude = stubClaude([
+      JSON.stringify({ isCorrection: true, wrongFact: 'wrong', correctFact: 'ygfn是羊宫妃那', topic: null }),
+    ]);
+    const spy = vi.spyOn(db.learnedFacts, 'insertOrSupersede');
+    const learner = new SelfLearningModule({ db, claude });
+    await learner.detectCorrection({
+      groupId: 'g1',
+      correctionMsg: { userId: 'u1', nickname: 'corrector', messageId: 'mc1', content: '应该是ygfn是羊宫妃那' },
+      botReplyId,
+    });
+    expect(spy).toHaveBeenCalled();
+    const call = spy.mock.calls[0]![0];
+    expect(call.topic).toBe('user-taught:ygfn');
+  });
+
+  it('self-learning passive → topic="passive:<term>"', async () => {
+    const evasiveId = seedBotReplyEvasive('g1', 'xtt是啥');
+    const claude = stubClaude([
+      JSON.stringify({ hasAnswer: true, answer: 'xtt在波士顿读书', topic: null }),
+    ]);
+    const spy = vi.spyOn(db.learnedFacts, 'insertOrSupersede');
+    const learner = new SelfLearningModule({ db, claude });
+    await learner.harvestPassiveKnowledge({
+      groupId: 'g1',
+      evasiveBotReplyId: evasiveId,
+      originalTrigger: 'xtt是啥',
+      followups: [{ nickname: 'n', content: 'xtt在波士顿', userId: 'u', messageId: 'm' }],
+    });
+    expect(spy).toHaveBeenCalled();
+    const call = spy.mock.calls[0]![0];
+    expect(call.topic).toBe('passive:xtt');
+  });
+
+  it('self-learning researchOnline → topic="online-research:<term>"', async () => {
+    const evasiveId = seedBotReplyEvasive('g1', 'ygfn是谁');
+    const claude = stubClaude([
+      JSON.stringify({ found: true, fact: 'ygfn=羊宫妃那', source: 'source.example', confidence: 0.9 }),
+    ]);
+    const groundingProvider = {
+      search: vi.fn().mockResolvedValue([{ snippet: 'ygfn 羊宫妃那', url: 'https://example.com' }]),
+    };
+    const spy = vi.spyOn(db.learnedFacts, 'insertOrSupersede');
+    const learner = new SelfLearningModule({ db, claude, groundingProvider });
+    await learner.researchOnline({
+      groupId: 'g1',
+      evasiveBotReplyId: evasiveId,
+      originalTrigger: 'ygfn是谁',
+    });
+    expect(spy).toHaveBeenCalled();
+    const call = spy.mock.calls[0]![0];
+    expect(call.topic).toBe('online-research:ygfn');
+  });
+});

@@ -505,7 +505,7 @@ describe('JargonMiner', () => {
 
       expect(learnedFacts.insertOrSupersede).toHaveBeenCalledWith({
         groupId: 'g1',
-        topic: '群内黑话',
+        topic: '群内黑话:ykn',
         fact: 'ykn的意思是凑友希那',
         sourceUserId: null,
         sourceUserNickname: '[jargon-miner]',
@@ -513,7 +513,7 @@ describe('JargonMiner', () => {
         botReplyId: null,
         confidence: 0.85,
         status: 'active',
-      }, 'ykn');
+      });
 
       // Should mark as promoted (is_jargon=2)
       const candidates = getCandidates(db);
