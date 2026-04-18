@@ -1,5 +1,5 @@
 import type { IClaudeClient, ClaudeModel } from '../ai/claude.js';
-import type { IMessageRepository, IPhraseCandidatesRepo, PhraseCandidateRow } from '../storage/db.js';
+import type { IMessageRepository, IPhraseCandidatesRepo, PhraseCandidateRow, Message } from '../storage/db.js';
 import type { Logger } from 'pino';
 import { createLogger } from '../utils/logger.js';
 import { extractJson } from '../utils/json-extract.js';
@@ -77,13 +77,21 @@ export class PhraseMiner {
 
   /**
    * Extract n-gram phrase candidates from recent messages.
-   * For gram_len in 2..5, slide window across tokens and produce contiguous phrases.
+   * Thin wrapper over extractCandidatesFromMessages for the cron path.
    */
   extractCandidates(groupId: string): void {
     const recent = this.messages.getRecent(groupId, this.windowMessages);
+    this.extractCandidatesFromMessages(groupId, recent);
+  }
+
+  /**
+   * Pure-input variant used by bootstrap-corpus to feed chunked historical
+   * messages. Same n-gram + length + common-word rules as the cron path.
+   */
+  extractCandidatesFromMessages(groupId: string, msgs: ReadonlyArray<Message>): void {
     const nowSec = Math.floor(this.now() / 1000);
 
-    for (const msg of recent) {
+    for (const msg of msgs) {
       const cleaned = msg.content.replace(CQ_CODE_RE, ' ');
       const tokens = cleaned.split(TOKEN_SPLIT_RE).filter(Boolean);
 
