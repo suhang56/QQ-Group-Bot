@@ -18,7 +18,7 @@
 
 import { createLogger } from '../utils/logger.js';
 import { sanitizeForPrompt, hasJailbreakPattern } from '../utils/prompt-sanitize.js';
-import { TOKEN_SPLIT_RE, CQ_CODE_RE, COMMON_WORDS } from './jargon-miner.js';
+import { TOKEN_SPLIT_RE, CQ_CODE_RE, COMMON_WORDS, STRUCTURAL_PARTICLES } from './jargon-miner.js';
 import type { IHonestGapsRepository, ILearnedFactsRepository, IMemeGraphRepo, IMessageRepository } from '../storage/db.js';
 
 export const MIN_TERM_LEN = 2;
@@ -62,6 +62,11 @@ export function extractTokens(content: string): string[] {
     if (CQ_PLACEHOLDER_TERMS.has(tok)) continue;
     if (EMOJI_ONLY_RE.test(tok)) continue;
     if (COMMON_WORDS.has(tok)) continue;
+    let hasParticle = false;
+    for (const ch of tok) {
+      if (STRUCTURAL_PARTICLES.has(ch)) { hasParticle = true; break; }
+    }
+    if (hasParticle) continue;
     out.push(tok);
   }
   return out;
