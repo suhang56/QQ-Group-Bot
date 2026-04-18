@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ChatModule, extractKeywords, extractTopFaces, extractTokens, tokenizeLore, IDENTITY_PROBE, IDENTITY_DEFLECTIONS, TASK_REQUEST, TASK_DEFLECTIONS, MEMORY_INJECT, MEMORY_INJECT_DEFLECTIONS, pickDeflection, BANGDREAM_PERSONA, CURSE_DEFLECTIONS, DEFLECT_FALLBACKS, type DeflectCategory } from '../src/modules/chat.js';
+import { ChatModule, extractKeywords, extractTopFaces, extractTokens, tokenizeLore, IDENTITY_PROBE, IDENTITY_DEFLECTIONS, TASK_REQUEST, TASK_DEFLECTIONS, MEMORY_INJECT, MEMORY_INJECT_DEFLECTIONS, pickDeflection, BANGDREAM_PERSONA, CURSE_DEFLECTIONS, DEFLECT_FALLBACKS, isUngroundedNonDirectImageReply, type DeflectCategory } from '../src/modules/chat.js';
 import { lurkerDefaults, defaultGroupConfig } from '../src/config.js';
 import type { IClaudeClient, ClaudeResponse } from '../src/ai/claude.js';
 import type { GroupMessage } from '../src/adapter/napcat.js';
@@ -90,6 +90,36 @@ describe('ChatModule — core behavior', () => {
     const allContent = call.messages.map(m => m.content).join(' ');
     expect(allContent).toContain('sup');
     expect(allContent).toContain('yo');
+  });
+
+  it('adds grounded-only guidance for non-direct image replies', async () => {
+    await chat.generateReply('g1', makeMsg({
+      content: '我们淘宝店的客服工作实况',
+      rawContent: '[CQ:image,file=work.jpg] 我们淘宝店的客服工作实况',
+    }), []);
+
+    const call = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { messages: Array<{ content: string }> };
+    const promptText = call.messages.map(m => m.content).join('\n');
+    expect(promptText).toContain('这是一条没人 @ 你、也不是 reply 你的图片消息');
+    expect(promptText).toContain('禁止补出图里没明说的剧情');
+    expect(promptText).toContain('不要说 "你们这是在..."');
+  });
+
+  it('drops ungrounded story-like replies for non-direct images', async () => {
+    claude = makeMockClaude('你们这是在演连续剧吗');
+    chat = makePassthroughChat(claude, db);
+
+    const result = await chat.generateReply('g1', makeMsg({
+      content: '我们淘宝店的客服工作实况',
+      rawContent: '[CQ:image,file=work.jpg] 我们淘宝店的客服工作实况',
+    }), []);
+
+    expect(result).toBeNull();
+  });
+
+  it('allows story terms when the image caption itself grounds them', () => {
+    expect(isUngroundedNonDirectImageReply('你们这是在演连续剧吗', '今天真的在拍戏')).toBe(false);
+    expect(isUngroundedNonDirectImageReply('你们这是在演连续剧吗', '我们淘宝店的客服工作实况')).toBe(true);
   });
 
   it('returns null on ClaudeApiError (fail-safe)', async () => {
