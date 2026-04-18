@@ -3568,6 +3568,10 @@ export class Database {
       )
     `);
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_honest_gaps_group_count ON honest_gaps(group_id, seen_count DESC)`);
+    // Path B: stale-prune index on jargon_candidates(group_id, updated_at).
+    // Prune query filters by updated_at — without this index it table-scans.
+    // CREATE INDEX IF NOT EXISTS is idempotent on re-run.
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_jargon_updated ON jargon_candidates(group_id, updated_at)`);
   }
 
   /**

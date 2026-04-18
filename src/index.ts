@@ -37,7 +37,7 @@ import { WelcomeModule } from './modules/welcome.js';
 import { IdCardGuard } from './modules/id-guard.js';
 import { SequenceGuard } from './modules/sequence-guard.js';
 import { SelfReflectionLoop } from './modules/self-reflection.js';
-import { DiaryDistiller } from './modules/diary-distiller.js';
+import { DiaryDistiller, msUntilNextShanghaiHour } from './modules/diary-distiller.js';
 import { BandoriLiveScraper } from './modules/bandori-live-scraper.js';
 import { OpportunisticHarvest } from './modules/opportunistic-harvest.js';
 import { AliasMiner } from './modules/alias-miner.js';
@@ -398,6 +398,28 @@ const jargonMiner = new JargonMiner({
   claude,
   activeGroups: ACTIVE_GROUPS,
 });
+
+// Daily stale-candidate prune at 03:00 Asia/Shanghai.
+// Uses setTimeout chain so the interval self-corrects to wall-clock time.
+// .unref?.() on every handle so the process can exit cleanly.
+{
+  const PRUNE_HOUR_SHANGHAI = 3;
+  const schedulePruneCron = (): void => {
+    const delay = msUntilNextShanghaiHour(Date.now(), PRUNE_HOUR_SHANGHAI);
+    const t = setTimeout(async function pruneTick() {
+      for (const groupId of ACTIVE_GROUPS) {
+        try {
+          jargonMiner.pruneStale(groupId);
+        } catch (err) {
+          logger.warn({ err, groupId }, 'jargon stale prune failed');
+        }
+      }
+      schedulePruneCron();
+    }, delay);
+    t.unref?.();
+  };
+  schedulePruneCron();
+}
 
 const phraseMiner = memesDisabled ? null : new PhraseMiner({
   messages: db.messages,

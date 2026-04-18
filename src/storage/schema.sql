@@ -358,6 +358,7 @@ CREATE TABLE IF NOT EXISTS jargon_candidates (
   contexts              TEXT    NOT NULL DEFAULT '[]',
   last_inference_count  INTEGER NOT NULL DEFAULT 0,
   meaning               TEXT,
+  -- is_jargon sentinel: -1=stale-unknown, 0=pending, 1=confirmed-jargon, 2=promoted
   is_jargon             INTEGER NOT NULL DEFAULT 0,
   promoted              INTEGER NOT NULL DEFAULT 0,
   created_at            INTEGER NOT NULL,
@@ -365,6 +366,7 @@ CREATE TABLE IF NOT EXISTS jargon_candidates (
   PRIMARY KEY (group_id, content)
 );
 CREATE INDEX IF NOT EXISTS idx_jargon_group_count ON jargon_candidates(group_id, count DESC);
+CREATE INDEX IF NOT EXISTS idx_jargon_updated ON jargon_candidates(group_id, updated_at);
 
 -- phrase_candidates: multi-word (2-5 gram) jargon candidates mined via sliding window.
 -- Similar structure to jargon_candidates but tracks gram length separately.
