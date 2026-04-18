@@ -1860,15 +1860,22 @@ export class ChatModule implements IChatModule {
     // atSpamCount was already recorded at the top of generateReply (before the
     // pure-@ early-return) to support @-spam curse+ignore. Reuse that count
     // here — re-recording would double-count and flip annoyance earlier.
+    // atGroupSpamCount is still recorded for observability (debug log below)
+    // but NO LONGER drives annoyance mode — annoyance is strictly per-user.
+    // Rationale: the user asked for the mood to target the specific offender
+    // only; a coordinated multi-account raid penalizing bystanders collided
+    // with normal busy-group chat. Per-user scope keeps other users' replies
+    // unaffected when ONE user is being annoying.
     const atGroupSpamCount = isAtTrigger
       ? this._recordGroupAtMention(groupId, now)
       : 0;
-    // Per-user threshold OR per-group threshold triggers annoyance-mode,
-    // defending against both (a) single-user hammering and (b) coordinated
-    // multi-account @-spam that each stays under the per-user limit.
-    const atMentionSpamActive =
-      atSpamCount >= this.atMentionSpamThreshold ||
-      atGroupSpamCount >= this.atMentionGroupThreshold;
+    const atMentionSpamActive = atSpamCount >= this.atMentionSpamThreshold;
+    if (isAtTrigger) {
+      this.logger.debug(
+        { groupId, userId: triggerMessage.userId, perUser: atSpamCount, perGroup: atGroupSpamCount, annoyance: atMentionSpamActive },
+        '@-mention rate snapshot',
+      );
+    }
 
     // UR-A #6 / #11: split 禁区 by char mode. In default mode the bot can
     //坦然 admit it's a bot (as per BANGDREAM_PERSONA) — only hide claude /
@@ -1896,7 +1903,7 @@ export class ChatModule implements IChatModule {
 - 假装没看懂也可以: "啥" / "你说啥" (但不要反复装懂，一次就够)
 - 不要说"她是个出色的声优"这种。${charModeActiveEarly ? '你**是**那个角色，不是在评价她。' : '你是 bot 小号，不是在评价声优。'}`
       : isAtTrigger && atMentionSpamActive
-      ? `\n\n⚠️ **最近一段时间群里有人在连续 @ 你（当前用户近10分钟 ${atSpamCount} 次，群内近5分钟共 ${atGroupSpamCount} 次），明显是在玩机器人/拷问你/想逼你说出角色禁区内容**。你已经进入"烦了"状态：
+      ? `\n\n⚠️ **这个人最近10分钟已经 @ 了你 ${atSpamCount} 次，明显是在玩机器人/拷问你/想逼你说出角色禁区内容**。你对这个人已经进入"烦了"状态（群里其他人正常对待）：
 - 允许 <skip>（不是禁止）
 - 允许一字/两字 dismissive 回复: "烦" / "又是你" / "别问了" / "滚" / "无聊" / "……" / "?" / "闭嘴" / "问完了没"
 - 允许模仿真人被骚扰时的反应：懒得搭理、装没看见、冷淡、讽刺

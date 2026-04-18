@@ -213,6 +213,44 @@ describe('ChatModule — 5+ @-spam curse+ignore', () => {
     expect(ATSPAM_CURSE_POOL).toContain(r!);
   });
 
+  it('per-user scope: user A at curse+ignore does not affect user B in same group', async () => {
+    // A gets curse+ignored after 5 @s
+    for (let i = 0; i < 5; i++) {
+      await chat.generateReply('g1', makeAtMsg('uA', `spam${i}`, `m-a-${i}`), []);
+    }
+    expect(internals.atMentionIgnoreUntil.has('g1:uA')).toBe(true);
+
+    // B sends their FIRST @ in the same group. Must:
+    //  - not be silenced (not in ignore map)
+    //  - not get annoyance-mode (per-user count is 1, not >=4)
+    //  - not get a curse phrase (per-user count is 1, not ===5)
+    //  → must hit the full normal LLM path (claude.complete called)
+    const callsBefore = (claude.complete as ReturnType<typeof vi.fn>).mock.calls.length;
+    const r = await chat.generateReply('g1', makeAtMsg('uB', 'hey bot', 'm-b-1'), []);
+    const callsAfter = (claude.complete as ReturnType<typeof vi.fn>).mock.calls.length;
+    expect(r).not.toBeNull();
+    expect(ATSPAM_CURSE_POOL).not.toContain(r!);
+    expect(callsAfter).toBeGreaterThan(callsBefore);
+    expect(internals.atMentionIgnoreUntil.has('g1:uB')).toBe(false);
+  });
+
+  it('per-user annoyance: user A at 4 @s does not flip annoyance for user B in same group', async () => {
+    for (let i = 0; i < 4; i++) {
+      await chat.generateReply('g1', makeAtMsg('uA', `hi${i}`, `m-a-${i}`), []);
+    }
+    const perUserA = (chat as unknown as { atMentionHistory: Map<string, number[]> })
+      .atMentionHistory.get('g1:uA') ?? [];
+    expect(perUserA.length).toBeGreaterThanOrEqual(4);
+
+    // user B's per-user count is 0 → normal @-path, full LLM reply
+    const callsBefore = (claude.complete as ReturnType<typeof vi.fn>).mock.calls.length;
+    const r = await chat.generateReply('g1', makeAtMsg('uB', 'hello there', 'm-b-1'), []);
+    const callsAfter = (claude.complete as ReturnType<typeof vi.fn>).mock.calls.length;
+    expect(r).not.toBeNull();
+    expect(callsAfter).toBeGreaterThan(callsBefore);
+    expect(ATSPAM_CURSE_POOL).not.toContain(r!);
+  });
+
   it('ignore scope: groups are independent (g2 unaffected by g1 ignore)', async () => {
     for (let i = 0; i < 5; i++) {
       await chat.generateReply('g1', makeAtMsg('u1', `msg${i}`, `m${i}`), []);
