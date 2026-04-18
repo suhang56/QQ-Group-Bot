@@ -37,6 +37,7 @@ import { WelcomeModule } from './modules/welcome.js';
 import { IdCardGuard } from './modules/id-guard.js';
 import { SequenceGuard } from './modules/sequence-guard.js';
 import { SelfReflectionLoop } from './modules/self-reflection.js';
+import { DiaryDistiller } from './modules/diary-distiller.js';
 import { BandoriLiveScraper } from './modules/bandori-live-scraper.js';
 import { OpportunisticHarvest } from './modules/opportunistic-harvest.js';
 import { AliasMiner } from './modules/alias-miner.js';
@@ -445,6 +446,18 @@ const selfReflection = ACTIVE_GROUPS[0]
     })
   : null;
 
+// W-B: diary-distiller — daily/weekly/monthly group chatter rollup feeding
+// "群最近的事情" into the chat identity prompt. Off when DIARY_ENABLED=0.
+const diaryEnabled = process.env['DIARY_ENABLED'] !== '0';
+const diaryDistiller = diaryEnabled
+  ? new DiaryDistiller({
+      claude,
+      messages: db.messages,
+      groupDiary: db.groupDiary,
+      botUserId,
+    })
+  : null;
+
 // 5. Wire events
 adapter.on('error', (err) => {
   logger.fatal({ err }, 'Adapter fatal error');
@@ -486,6 +499,10 @@ try {
     logger.warn('no active groups configured, announcement sync disabled');
   }
   selfReflection?.start();
+  if (diaryDistiller) {
+    const diaryTimers = diaryDistiller.start();
+    for (const t of Object.values(diaryTimers)) t?.unref?.();
+  }
   harvest.start();
   aliasMiner.start();
   styleLearner.start();
@@ -537,6 +554,7 @@ const shutdown = async () => {
   logger.info('Shutting down...');
   announcementSync.stop();
   selfReflection?.dispose();
+  diaryDistiller?.dispose();
   harvest.dispose();
   aliasMiner.dispose();
   styleLearner.dispose();
