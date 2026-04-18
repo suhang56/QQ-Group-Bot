@@ -8,6 +8,7 @@ import { JARGON_MODEL } from '../config.js';
 import { sanitizeForPrompt, hasJailbreakPattern } from '../utils/prompt-sanitize.js';
 import { validateFactForActive } from './fact-validator.js';
 import { GeminiGroundingProvider } from './web-lookup.js';
+import { shouldAcceptFactCandidate } from './fact-candidate-validator.js';
 
 // ---- Constants ----
 
@@ -374,6 +375,24 @@ export class JargonMiner {
       // Skip if already in learned_facts
       if (existingFactTexts.has(factText)) {
         // Still mark as promoted so we don't check again
+        this._markPromoted(groupId, candidate.content);
+        continue;
+      }
+
+      const existingForTerm = this.learnedFacts.findActiveByTopicTerm(
+        groupId, candidate.content,
+      );
+      const gate = shouldAcceptFactCandidate(
+        {
+          canonical: factText,
+          topic: '群内黑话',
+          term: candidate.content,
+          groupId,
+          existingActiveRows: existingForTerm,
+        },
+        this.logger,
+      );
+      if (!gate.accept) {
         this._markPromoted(groupId, candidate.content);
         continue;
       }

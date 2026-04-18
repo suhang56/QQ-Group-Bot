@@ -78,6 +78,7 @@ function makeLearnedFactsRepo(facts: LearnedFact[] = []): ILearnedFactsRepositor
     }),
     insertOrSupersede: vi.fn().mockImplementation(() => ({ newId: stored.length + 1, supersededCount: 0 })),
     listActive: vi.fn().mockReturnValue(stored),
+    findActiveByTopicTerm: vi.fn().mockReturnValue([]),
     listActiveWithEmbeddings: vi.fn().mockReturnValue([]),
     listNullEmbeddingActive: vi.fn().mockReturnValue([]),
     listAllNullEmbeddingActive: vi.fn().mockReturnValue([]),

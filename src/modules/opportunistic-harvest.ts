@@ -6,6 +6,7 @@ import { createLogger } from '../utils/logger.js';
 import { extractJson } from '../utils/json-extract.js';
 import { HARVEST_MODEL } from '../config.js';
 import { sanitizeForPrompt, sanitizeNickname, hasJailbreakPattern } from '../utils/prompt-sanitize.js';
+import { shouldAcceptFactCandidate } from './fact-candidate-validator.js';
 
 const MIN_NEW_MESSAGES = 8;
 const MAX_FACTS_PER_RUN = 12;
@@ -363,6 +364,37 @@ export class OpportunisticHarvest {
       // confidence rows let an adversarial sample with a confident-sounding
       // LLM score bypass human approval and inject directly into chat.
       const status = 'pending';
+
+      // Miner self-poisoning filter: extract term from miner candidate topic
+      // and gate the insert via shouldAcceptFactCandidate. The term heuristic
+      // falls back to '' which skips Rule 1 (user-taught guard) but keeps
+      // Rules 2/3 (confusion pattern guards still fire).
+      const candidateTerm = (() => {
+        const t = (rawTopic ?? category ?? '').trim();
+        if (!t) return '';
+        const lastToken = t.split(/\s+/).pop() ?? '';
+        return lastToken.replace(/(的意思|是什么|是啥|是谁)$/u, '').trim();
+      })();
+
+      const existingForTerm = candidateTerm
+        ? this.learnedFacts.findActiveByTopicTerm(groupId, candidateTerm)
+        : [];
+
+      const gate = shouldAcceptFactCandidate(
+        {
+          canonical: canonicalText,
+          topic,
+          term: candidateTerm,
+          groupId,
+          existingActiveRows: existingForTerm,
+        },
+        this.logger,
+      );
+      if (!gate.accept) {
+        dedupped++;
+        continue;
+      }
+
       this.learnedFacts.insert({
         groupId,
         topic,

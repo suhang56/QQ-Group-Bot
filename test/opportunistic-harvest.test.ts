@@ -15,11 +15,15 @@ function makeMsgRepo(msgs: Array<{ nickname: string; content: string; timestamp:
   } as unknown as IMessageRepository;
 }
 
-function makeFactRepo(existing: LearnedFact[] = []): ILearnedFactsRepository & { inserted: Parameters<ILearnedFactsRepository['insert']>[0][] } {
+function makeFactRepo(
+  existing: LearnedFact[] = [],
+  perTermActive: LearnedFact[] = [],
+): ILearnedFactsRepository & { inserted: Parameters<ILearnedFactsRepository['insert']>[0][] } {
   const inserted: Parameters<ILearnedFactsRepository['insert']>[0][] = [];
   return {
     inserted,
     listActive: vi.fn().mockReturnValue(existing),
+    findActiveByTopicTerm: vi.fn().mockReturnValue(perTermActive),
     listActiveWithEmbeddings: vi.fn().mockReturnValue([]),
     findSimilarActive: vi.fn().mockResolvedValue(null),
     listPending: vi.fn().mockReturnValue([]),
@@ -629,5 +633,138 @@ describe('OpportunisticHarvest UR-N persona_fact voice anchor', () => {
       (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]![0].messages[0].content,
     );
     expect(prompt).toContain('群友自然语气');
+  });
+});
+
+describe('OpportunisticHarvest — fact-candidate validator gate', () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  it('rejects confusion-pattern candidate without definition marker', async () => {
+    const msgs = makeRecentMsgs(15);
+    const msgRepo = makeMsgRepo(msgs);
+    const factRepo = makeFactRepo();
+    const claude = makeClaudeWith(JSON.stringify([
+      {
+        category: '群内梗',
+        topic: 'ygfn的意思',
+        canonical_fact: '西瓜多次询问ygfn是谁，表明ygfn是群内不明缩写',
+        persona_fact: '西瓜问过ygfn',
+        sourceNickname: 'Alice',
+        confidence: 0.7,
+      },
+    ]));
+    const harvest = new OpportunisticHarvest({
+      messages: msgRepo, learnedFacts: factRepo, claude,
+      activeGroups: [GROUP], logger: silentLogger, enabled: true,
+    });
+    await harvest._run();
+    expect(factRepo.inserted).toHaveLength(0);
+    expect(silentLogger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ rejectReason: expect.stringContaining('confusion pattern') }),
+      'fact-candidate rejected',
+    );
+  });
+
+  it('accepts candidate with definitive marker', async () => {
+    const msgs = makeRecentMsgs(15);
+    const msgRepo = makeMsgRepo(msgs);
+    const factRepo = makeFactRepo();
+    const claude = makeClaudeWith(JSON.stringify([
+      {
+        category: '群内梗',
+        topic: 'ygfn',
+        canonical_fact: 'ygfn=羊宫妃那',
+        persona_fact: 'ygfn就是羊宫妃那',
+        sourceNickname: 'Alice',
+        confidence: 0.9,
+      },
+    ]));
+    const harvest = new OpportunisticHarvest({
+      messages: msgRepo, learnedFacts: factRepo, claude,
+      activeGroups: [GROUP], logger: silentLogger, enabled: true,
+    });
+    await harvest._run();
+    expect(factRepo.inserted).toHaveLength(1);
+    expect(factRepo.inserted[0]!.fact).toBe('ygfn=羊宫妃那');
+  });
+
+  it('definitive marker overrides confusion keyword', async () => {
+    const msgs = makeRecentMsgs(15);
+    const msgRepo = makeMsgRepo(msgs);
+    const factRepo = makeFactRepo();
+    const claude = makeClaudeWith(JSON.stringify([
+      {
+        category: '群内梗',
+        topic: 'ygfn',
+        canonical_fact: 'ygfn=羊宫妃那，西瓜也问过',
+        persona_fact: 'ygfn=羊宫妃那',
+        sourceNickname: 'Alice',
+        confidence: 0.9,
+      },
+    ]));
+    const harvest = new OpportunisticHarvest({
+      messages: msgRepo, learnedFacts: factRepo, claude,
+      activeGroups: [GROUP], logger: silentLogger, enabled: true,
+    });
+    await harvest._run();
+    expect(factRepo.inserted).toHaveLength(1);
+  });
+
+  it('blocks non-user-taught candidate when user-taught row exists', async () => {
+    const msgs = makeRecentMsgs(15);
+    const msgRepo = makeMsgRepo(msgs);
+    const existingUserTaught: LearnedFact = {
+      id: 4387, groupId: GROUP, topic: 'user-taught:xtt',
+      fact: 'xtt=小团体',
+      canonicalForm: 'xtt=小团体', personaForm: '小团体',
+      sourceUserId: 'u1', sourceUserNickname: 'testuser',
+      sourceMsgId: null, botReplyId: null,
+      confidence: 1.0, status: 'active',
+      createdAt: 0, updatedAt: 0,
+    };
+    // perTermActive = existing user-taught returned by findActiveByTopicTerm
+    const factRepo = makeFactRepo([], [existingUserTaught]);
+    const claude = makeClaudeWith(JSON.stringify([
+      {
+        category: '群内梗',
+        topic: 'xtt',
+        canonical_fact: 'xtt=某种东西，波士顿的',
+        persona_fact: 'xtt=某种东西',
+        sourceNickname: 'Bob',
+        confidence: 0.8,
+      },
+    ]));
+    const harvest = new OpportunisticHarvest({
+      messages: msgRepo, learnedFacts: factRepo, claude,
+      activeGroups: [GROUP], logger: silentLogger, enabled: true,
+    });
+    await harvest._run();
+    expect(factRepo.inserted).toHaveLength(0);
+    expect(silentLogger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ rejectReason: expect.stringContaining('existing user-taught fact') }),
+      'fact-candidate rejected',
+    );
+  });
+
+  it('rejects 可能 + no definition', async () => {
+    const msgs = makeRecentMsgs(15);
+    const msgRepo = makeMsgRepo(msgs);
+    const factRepo = makeFactRepo();
+    const claude = makeClaudeWith(JSON.stringify([
+      {
+        category: '群内梗',
+        topic: 'ygfn',
+        canonical_fact: 'ygfn可能是羊宫妃那的缩写',
+        persona_fact: 'ygfn可能是羊宫妃那',
+        sourceNickname: 'Alice',
+        confidence: 0.7,
+      },
+    ]));
+    const harvest = new OpportunisticHarvest({
+      messages: msgRepo, learnedFacts: factRepo, claude,
+      activeGroups: [GROUP], logger: silentLogger, enabled: true,
+    });
+    await harvest._run();
+    expect(factRepo.inserted).toHaveLength(0);
   });
 });

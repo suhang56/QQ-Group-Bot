@@ -28,6 +28,7 @@ function makeFactRepo(opts: {
   return {
     inserted,
     listActive: vi.fn().mockReturnValue(opts.existing ?? []),
+    findActiveByTopicTerm: vi.fn().mockReturnValue([]),
     listActiveWithEmbeddings: vi.fn().mockReturnValue([]),
     findSimilarActive,
     listPending: vi.fn().mockReturnValue([]),

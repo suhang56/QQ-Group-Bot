@@ -338,3 +338,192 @@ describe('Database migration: bot_replies.was_evasive on existing DBs', () => {
     expect(recentEvasive[0]!.id).toBe(b.id);
   });
 });
+
+describe('LearnedFactsRepository.findActiveByTopicTerm', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+  });
+
+  function insertFact(
+    groupId: string,
+    topic: string,
+    fact: string,
+    status: 'active' | 'pending' | 'superseded' | 'rejected' = 'active',
+  ): number {
+    return db.learnedFacts.insert({
+      groupId, topic, fact,
+      sourceUserId: null, sourceUserNickname: null,
+      sourceMsgId: null, botReplyId: null,
+      status,
+    });
+  }
+
+  it('returns all 6 rows when all topic prefixes active for term', () => {
+    insertFact('g1', 'user-taught:ygfn', '1');
+    insertFact('g1', 'opus-classified:slang:ygfn', '2');
+    insertFact('g1', 'opus-classified:fandom:ygfn', '3');
+    insertFact('g1', 'opus-rest-classified:slang:ygfn', '4');
+    insertFact('g1', 'opus-rest-classified:fandom:ygfn', '5');
+    insertFact('g1', '群内黑话:ygfn', '6');
+    const result = db.learnedFacts.findActiveByTopicTerm('g1', 'ygfn');
+    expect(result).toHaveLength(6);
+  });
+
+  it('excludes inactive rows (5 active + 1 superseded)', () => {
+    insertFact('g1', 'user-taught:ygfn', '1');
+    insertFact('g1', 'opus-classified:slang:ygfn', '2');
+    insertFact('g1', 'opus-classified:fandom:ygfn', '3');
+    insertFact('g1', 'opus-rest-classified:slang:ygfn', '4');
+    insertFact('g1', 'opus-rest-classified:fandom:ygfn', '5');
+    insertFact('g1', '群内黑话:ygfn', '6', 'superseded');
+    const result = db.learnedFacts.findActiveByTopicTerm('g1', 'ygfn');
+    expect(result).toHaveLength(5);
+    expect(result.every(r => r.topic !== '群内黑话:ygfn')).toBe(true);
+  });
+
+  it('returns only exact topic match — no substring leak', () => {
+    insertFact('g1', 'user-taught:xtt', 'xtt-fact');
+    insertFact('g1', 'user-taught:tt', 'tt-fact');
+    const result = db.learnedFacts.findActiveByTopicTerm('g1', 'tt');
+    expect(result).toHaveLength(1);
+    expect(result[0]!.topic).toBe('user-taught:tt');
+  });
+
+  it('returns empty array for absent term', () => {
+    insertFact('g1', 'user-taught:xtt', 'xtt-fact');
+    const result = db.learnedFacts.findActiveByTopicTerm('g1', 'absent');
+    expect(result).toEqual([]);
+  });
+
+  it('scopes by groupId', () => {
+    insertFact('g2', 'user-taught:ygfn', 'g2-fact');
+    const result = db.learnedFacts.findActiveByTopicTerm('g1', 'ygfn');
+    expect(result).toEqual([]);
+  });
+
+  it('orders by id DESC', () => {
+    const first = insertFact('g1', 'user-taught:ygfn', '1');
+    const second = insertFact('g1', 'opus-classified:slang:ygfn', '2');
+    const result = db.learnedFacts.findActiveByTopicTerm('g1', 'ygfn');
+    expect(result).toHaveLength(2);
+    expect(result[0]!.id).toBe(second);
+    expect(result[1]!.id).toBe(first);
+  });
+});
+
+describe('LearnedFactsRepository.insertOrSupersede — user-taught protection', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+  });
+
+  function insertFact(
+    groupId: string,
+    topic: string,
+    fact: string,
+    canonicalForm: string | null = null,
+    status: 'active' | 'pending' | 'superseded' | 'rejected' = 'active',
+  ): number {
+    return db.learnedFacts.insert({
+      groupId, topic, fact,
+      canonicalForm: canonicalForm ?? fact,
+      sourceUserId: null, sourceUserNickname: null,
+      sourceMsgId: null, botReplyId: null,
+      status,
+    });
+  }
+
+  function statusOf(id: number): string {
+    const row = db.rawDb.prepare(
+      'SELECT status FROM learned_facts WHERE id = ?',
+    ).get(id) as { status: string };
+    return row.status;
+  }
+
+  it('non-user-taught insert leaves existing user-taught row active', () => {
+    const userTaughtId = insertFact('g1', 'user-taught:ygfn', 'ygfn=羊宫妃那');
+    const opusOldId = insertFact('g1', 'opus-classified:slang:ygfn', 'ygfn可能是某缩写');
+
+    db.learnedFacts.insertOrSupersede(
+      {
+        groupId: 'g1', topic: 'opus-classified:slang:ygfn',
+        fact: 'ygfn新的推测内容',
+        canonicalForm: 'ygfn新的推测内容',
+        sourceUserId: null, sourceUserNickname: null,
+        sourceMsgId: null, botReplyId: null,
+        status: 'active',
+      },
+      'ygfn',
+    );
+
+    expect(statusOf(userTaughtId)).toBe('active');
+    expect(statusOf(opusOldId)).toBe('superseded');
+  });
+
+  it('user-taught insert supersedes all including other user-taught', () => {
+    const oldUserTaughtId = insertFact('g1', 'user-taught:ygfn', 'ygfn=旧内容');
+    const opusId = insertFact('g1', 'opus-classified:slang:ygfn', 'ygfn旧推测');
+
+    db.learnedFacts.insertOrSupersede(
+      {
+        groupId: 'g1', topic: 'user-taught:ygfn',
+        fact: 'ygfn=羊宫妃那',
+        canonicalForm: 'ygfn=羊宫妃那',
+        sourceUserId: null, sourceUserNickname: null,
+        sourceMsgId: null, botReplyId: null,
+        status: 'active',
+      },
+      'ygfn',
+    );
+
+    expect(statusOf(oldUserTaughtId)).toBe('superseded');
+    expect(statusOf(opusId)).toBe('superseded');
+    const active = db.learnedFacts.findActiveByTopicTerm('g1', 'ygfn');
+    expect(active).toHaveLength(1);
+    expect(active[0]!.topic).toBe('user-taught:ygfn');
+    expect(active[0]!.canonicalForm).toBe('ygfn=羊宫妃那');
+  });
+
+  it('no existing rows: inserts active, supersededCount=0', () => {
+    const { newId, supersededCount } = db.learnedFacts.insertOrSupersede(
+      {
+        groupId: 'g1', topic: 'opus-classified:slang:ygfn',
+        fact: 'ygfn新条目',
+        canonicalForm: 'ygfn新条目',
+        sourceUserId: null, sourceUserNickname: null,
+        sourceMsgId: null, botReplyId: null,
+        status: 'active',
+      },
+      'ygfn',
+    );
+    expect(newId).toBeGreaterThan(0);
+    expect(supersededCount).toBe(0);
+    expect(statusOf(newId)).toBe('active');
+  });
+
+  it('two user-taught rows: new user-taught supersedes both', () => {
+    const u1 = insertFact('g1', 'user-taught:ygfn', 'ygfn=第一条');
+    const u2 = insertFact('g1', 'user-taught:ygfn', 'ygfn=第二条');
+
+    db.learnedFacts.insertOrSupersede(
+      {
+        groupId: 'g1', topic: 'user-taught:ygfn',
+        fact: 'ygfn=第三条',
+        canonicalForm: 'ygfn=第三条',
+        sourceUserId: null, sourceUserNickname: null,
+        sourceMsgId: null, botReplyId: null,
+        status: 'active',
+      },
+      'ygfn',
+    );
+
+    expect(statusOf(u1)).toBe('superseded');
+    expect(statusOf(u2)).toBe('superseded');
+    const active = db.learnedFacts.findActiveByTopicTerm('g1', 'ygfn');
+    expect(active).toHaveLength(1);
+    expect(active[0]!.canonicalForm).toBe('ygfn=第三条');
+  });
+});
