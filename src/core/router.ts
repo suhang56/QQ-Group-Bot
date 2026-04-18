@@ -27,7 +27,7 @@ import { MOD_APPROVAL_ADMIN } from './constants.js';
 
 const MAX_SPLIT_LINES = 3;
 const MOD_DM_HOURLY_CAP = 20;
-const MOD_EXPIRY_SEC = 600; // 10 minutes
+const MOD_EXPIRY_SEC = 24 * 60 * 60; // 24h — admin may not be at DM within 10 min
 // Users allowed to have free-form private chat with the bot.
 // These users hit the full ChatModule pipeline (using their configured group's knowledge base).
 // Empty by default; operators must opt users in explicitly via the env var
@@ -1097,7 +1097,7 @@ export class Router implements IRouter {
 严重度 ${severity}/5
 建议处理：${actionLabel[proposedAction]}
 
-10 分钟内回复 /approve ${pendingId} 或 /reject ${pendingId} 决定，超时自动忽略。`;
+24 小时内回复 /approve ${pendingId} 或 /reject ${pendingId} 决定，超时自动忽略（/reject 仍可事后提交以登记误判样本）。`;
 
     try {
       const result = await this.adapter.sendPrivateMessage(MOD_APPROVAL_ADMIN, dmText);
@@ -1682,7 +1682,11 @@ ${ctxLine}
         await reply(`找不到审核 #${id}。`);
         return;
       }
-      if (row.status !== 'pending') {
+      // /reject allowed on pending OR expired (non-destructive — only logs a
+      // false-positive learning sample). /approve stays pending-only to avoid
+      // acting on stale cases. Already-rejected/approved rows reject as no-op.
+      const isRejectOnExpired = rejectMatch && row.status === 'expired';
+      if (row.status !== 'pending' && !isRejectOnExpired) {
         await reply(`审核 #${id} 已失效（状态：${row.status}）。`);
         return;
       }
