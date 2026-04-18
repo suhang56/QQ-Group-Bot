@@ -44,6 +44,9 @@ export interface IHonestGapsPromptSource {
   formatForPrompt(groupId: string): string;
 }
 
+// Splits at ASCII/CJK boundaries: "ygfn是啥" → ["ygfn", "是啥"]
+const ASCII_CJK_BOUNDARY = /(?<=[a-zA-Z0-9])(?=[\u4e00-\u9fff])|(?<=[\u4e00-\u9fff])(?=[a-zA-Z0-9])/g;
+
 /**
  * Extract candidate tokens from a raw message content string. Shared with the
  * tracker's `recordMessage` path; exported for test coverage of the pure tokenizer.
@@ -52,7 +55,18 @@ export function extractTokens(content: string): string[] {
   if (!content) return [];
   const cleaned = content.replace(CQ_CODE_RE, ' ');
   if (!cleaned.trim()) return [];
-  const raw = cleaned.split(TOKEN_SPLIT_RE).filter(Boolean);
+  const rawFirst = cleaned.split(TOKEN_SPLIT_RE).filter(Boolean);
+  const raw: string[] = [];
+  for (const tok of rawFirst) {
+    if (ASCII_CJK_BOUNDARY.test(tok)) {
+      ASCII_CJK_BOUNDARY.lastIndex = 0;
+      for (const sub of tok.split(ASCII_CJK_BOUNDARY)) {
+        if (sub) raw.push(sub);
+      }
+    } else {
+      raw.push(tok);
+    }
+  }
   const out: string[] = [];
   for (const tok of raw) {
     if (tok.length < MIN_TERM_LEN || tok.length > MAX_TERM_LEN) continue;
