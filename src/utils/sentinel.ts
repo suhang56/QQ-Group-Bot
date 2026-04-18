@@ -564,6 +564,12 @@ export function isOutsiderCommentatorTone(text: string): boolean {
   // "你们怎么都X" pattern
   if (/^你们怎么都/.test(trimmed)) return true;
 
+  // "你们X什么/怎么/呢/啊" — 旁观问询 (你们干嘛呢 / 你们聊啥 / 你们咋不说话)
+  if (/^你们(在|要|想|到底)?(干|聊|说|玩|吃|搞|弄|忙|看).{0,10}(什么|啥|呢|啊|嘛|吗|吧)?[？?。!！]?$/.test(trimmed)) return true;
+
+  // "你们X了吗/啊" — 对全群提泛问 (你们吃饭了吗 / 你们都回来了啊)
+  if (/^你们.{1,10}(了吗|了啊|了呢)[？?。!！]?$/.test(trimmed)) return true;
+
   return false;
 }
 

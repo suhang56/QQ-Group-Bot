@@ -774,12 +774,31 @@ export class Router implements IRouter {
         let reply = await this.chatModule.generateReply(groupId, item.msg, recentMsgs);
 
         // Safety net: @-mention must never result in total silence. If chat
-        // returned null (Claude skip / opt-out / echo), send a minimal
-        // deflection so the user who @-ed sees an ack instead of nothing.
+        // returned null (sentinel drop / dedup / opt-out), pick a fallback
+        // that ROUGHLY matches the trigger intent so the reply doesn't sound
+        // like the bot didn't read the message. Falls through to a generic
+        // short ack only when no intent pattern matches.
         if (!reply) {
-          const AT_FALLBACK = ['啊?', '咋了', '啥事', '?', '怎么了', '叫我干嘛', '什么'];
-          reply = AT_FALLBACK[Math.floor(Math.random() * AT_FALLBACK.length)]!;
-          this.logger.info({ groupId, userId: item.msg.userId }, '@-mention fallback deflection — chat returned null');
+          const triggerText = (item.msg.content ?? '').trim();
+          const AT_FALLBACK_POOLS = {
+            // Request/imperative — bot declines without agreeing
+            request: ['不想', '不帮', '想啥呢', '做梦', '别闹', '想得美', '不干', '不不不'],
+            // Interrogative — bot admits seeing the question but doesn't answer
+            question: ['不知道', '不清楚', '别问我', '懒得想', '问别人', '谁知道'],
+            // Exclamation/command — lazy ack
+            exclaim: ['嗯', '哦', '好', '收到', '行吧'],
+            // Generic short ack (matches old behavior, but now rarer)
+            generic: ['啊?', '咋了', '啥事', '?', '怎么了', '叫我干嘛', '什么'],
+          };
+          const requestRE = /^(@\S+\s*)?(帮|给我|替我|你来|快|去).+(吗|呀|啊|吧)?[。！!.]?$|霸凌|整|骂|教训|欺负/;
+          const questionRE = /[?？]|(怎么|为啥|为什么|咋|什么|哪|谁|几|多少).*[?？]?$/;
+          const exclaimRE = /[!！]$|好棒|牛|笑死|哈哈/;
+          const pool = requestRE.test(triggerText) ? AT_FALLBACK_POOLS.request
+                     : questionRE.test(triggerText) ? AT_FALLBACK_POOLS.question
+                     : exclaimRE.test(triggerText) ? AT_FALLBACK_POOLS.exclaim
+                     : AT_FALLBACK_POOLS.generic;
+          reply = pool[Math.floor(Math.random() * pool.length)]!;
+          this.logger.info({ groupId, userId: item.msg.userId, triggerText, fallbackPool: Object.entries(AT_FALLBACK_POOLS).find(([, v]) => v === pool)?.[0], reply }, '@-mention fallback deflection — chat returned null');
         }
 
         await this._sendReply(groupId, reply, item.sourceMsgId, {
