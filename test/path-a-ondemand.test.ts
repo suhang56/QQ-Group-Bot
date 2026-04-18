@@ -106,6 +106,8 @@ describe('extractCandidateTerms', () => {
 
   it('case 4b: filters question fragments from direct term questions', () => {
     expect(extractCandidateTerms('xtt是啥')).toEqual(['xtt']);
+    expect(extractCandidateTerms('什么是xtt')).toEqual(['xtt']);
+    expect(extractCandidateTerms('请问什么是xtt')).toEqual(['xtt']);
     expect(extractCandidateTerms('请问ygfn是谁')).toEqual(['ygfn']);
     expect(extractCandidateTerms('xtt什么意思')).toEqual(['xtt']);
   });
@@ -543,5 +545,33 @@ describe('OnDemandLookup.lookupTerm', () => {
     expect(result).toEqual({ type: 'found', meaning: 'x' });
     expect(factsRepo.findActiveByTopicTerm).toHaveBeenCalled();
     expect(messagesRepo.searchFts).toHaveBeenCalled();
+  });
+
+  it('case 27: learned_facts shortcut bypasses rate limits for repeated known questions', async () => {
+    const messagesRepo = makeMessageRepo([]);
+    const factsRepo = makeFactsRepo();
+    (factsRepo.findActiveByTopicTerm as ReturnType<typeof vi.fn>).mockImplementation((_groupId: string, term: string) => (
+      term === 'xtt'
+        ? [{
+            id: 4387, groupId: 'g1', topic: 'user-taught:xtt', fact: 'xtt的意思是小团体',
+            canonicalForm: 'xtt的意思是小团体', personaForm: 'xtt=小团体',
+            sourceUserId: null, sourceUserNickname: '[test]', sourceMsgId: null,
+            botReplyId: null, confidence: 0.9, status: 'active',
+            createdAt: 0, updatedAt: 0, embedding: null,
+          }]
+        : []
+    ));
+    const lookup = new OnDemandLookup({
+      db: { learnedFacts: factsRepo, messages: messagesRepo },
+      llm: { complete: vi.fn() },
+      model: 'test-model',
+      logger: makeLogger(),
+      now: () => 0,
+    });
+
+    expect(await lookup.lookupTerm('g1', 'aaa', 'u1')).toEqual({ type: 'unknown' });
+    expect(await lookup.lookupTerm('g1', 'bbb', 'u1')).toEqual({ type: 'unknown' });
+    expect(await lookup.lookupTerm('g1', 'xtt', 'u1')).toEqual({ type: 'found', meaning: 'xtt=小团体' });
+    expect(messagesRepo.searchFts).toHaveBeenCalledTimes(2);
   });
 });

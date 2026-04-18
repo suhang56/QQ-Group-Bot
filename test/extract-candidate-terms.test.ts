@@ -17,6 +17,8 @@ describe('extractCandidateTerms — knownFacts filter removed', () => {
     expect(extractCandidateTerms('xtt是啥')).toEqual(['xtt']);
     expect(extractCandidateTerms('xtt 是啥')).toEqual(['xtt']);
     expect(extractCandidateTerms('请问ygfn是谁')).toEqual(['ygfn']);
+    expect(extractCandidateTerms('什么是xtt')).toEqual(['xtt']);
+    expect(extractCandidateTerms('请问什么是xtt')).toEqual(['xtt']);
     expect(extractCandidateTerms('那个xtt是啥')).toEqual(['xtt']);
     expect(extractCandidateTerms('xtt什么意思')).toEqual(['xtt']);
   });

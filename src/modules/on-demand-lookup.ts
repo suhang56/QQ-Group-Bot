@@ -79,16 +79,9 @@ export class OnDemandLookup {
    * Never cache weak results — a cached wrong definition poisons the fact pool.
    */
   async lookupTerm(groupId: string, term: string, userId: string): Promise<TermLookupOutcome | null> {
-    if (!this._allowUser(userId)) {
-      this.logger.debug({ groupId, userId }, 'ondemand-lookup: per-user rate limit');
-      return null;
-    }
-    if (!this._allowGroup(groupId)) {
-      this.logger.debug({ groupId }, 'ondemand-lookup: per-group rate limit');
-      return null;
-    }
-
-    // Shortcut: check learned_facts for exact canonical match on term before hitting FTS
+    // Shortcut: check learned_facts for exact canonical match on term before
+    // hitting FTS or consuming rate-limit budget. Exact local facts are cheap
+    // and should still answer repeated direct questions.
     const normalizedTerm = term.trim();
     if (normalizedTerm.length >= 2) {
       try {
@@ -105,6 +98,15 @@ export class OnDemandLookup {
       } catch (err) {
         this.logger.warn({ err, term }, 'ondemand-lookup: learned_facts shortcut failed -- falling through');
       }
+    }
+
+    if (!this._allowUser(userId)) {
+      this.logger.debug({ groupId, userId }, 'ondemand-lookup: per-user rate limit');
+      return null;
+    }
+    if (!this._allowGroup(groupId)) {
+      this.logger.debug({ groupId }, 'ondemand-lookup: per-group rate limit');
+      return null;
     }
 
     const ftsQuery = sanitizeFtsQuery(term);
