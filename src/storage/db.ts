@@ -462,6 +462,24 @@ export interface ILearnedFactsRepository {
   listAliasFactsForMap(groupId: string): LearnedFact[];
 }
 
+// Path C: web_lookup_cache repository
+export interface WebLookupCacheRow {
+  id: number;
+  groupId: string;
+  term: string;
+  snippet: string;
+  sourceUrl: string;
+  confidence: number;
+  createdAt: number;
+  expiresAt: number;
+}
+
+export interface IWebLookupCacheRepository {
+  get(groupId: string, term: string, nowSec: number): WebLookupCacheRow | null;
+  put(row: Omit<WebLookupCacheRow, 'id'>): void;
+  cleanupExpired(nowSec: number): number;
+}
+
 export type ProposedAction = 'warn' | 'delete' | 'mute_10m' | 'mute_1h' | 'kick';
 export type PendingStatus = 'pending' | 'approved' | 'rejected' | 'expired';
 
@@ -2950,6 +2968,41 @@ class HonestGapsRepository implements IHonestGapsRepository {
   }
 }
 
+// ---- Path C: WebLookupCacheRepository ----
+
+class WebLookupCacheRepository implements IWebLookupCacheRepository {
+  constructor(private readonly _db: DatabaseSync) {}
+
+  get(groupId: string, term: string, nowSec: number): WebLookupCacheRow | null {
+    const row = this._db.prepare(
+      'SELECT * FROM web_lookup_cache WHERE group_id = ? AND term = ? AND expires_at > ? ORDER BY id DESC LIMIT 1'
+    ).get(groupId, term, nowSec) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return {
+      id: row['id'] as number,
+      groupId: row['group_id'] as string,
+      term: row['term'] as string,
+      snippet: row['snippet'] as string,
+      sourceUrl: row['source_url'] as string,
+      confidence: row['confidence'] as number,
+      createdAt: row['created_at'] as number,
+      expiresAt: row['expires_at'] as number,
+    };
+  }
+
+  put(row: Omit<WebLookupCacheRow, 'id'>): void {
+    this._db.prepare(
+      `INSERT INTO web_lookup_cache (group_id, term, snippet, source_url, confidence, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(row.groupId, row.term, row.snippet, row.sourceUrl, row.confidence, row.createdAt, row.expiresAt);
+  }
+
+  cleanupExpired(nowSec: number): number {
+    const info = this._db.prepare('DELETE FROM web_lookup_cache WHERE expires_at <= ?').run(nowSec) as { changes: number };
+    return info.changes;
+  }
+}
+
 // ---- Main Database class ----
 
 export class Database {
@@ -2980,6 +3033,7 @@ export class Database {
   readonly memeGraph: IMemeGraphRepo;
   readonly phraseCandidates: IPhraseCandidatesRepo;
   readonly groupDiary: IGroupDiaryRepository;
+  readonly webLookupCache: IWebLookupCacheRepository;
 
   private readonly _db: DatabaseSync;
 
@@ -3019,6 +3073,7 @@ export class Database {
     this.memeGraph = new MemeGraphRepository(this._db);
     this.phraseCandidates = new PhraseCandidatesRepository(this._db);
     this.groupDiary = new GroupDiaryRepository(this._db);
+    this.webLookupCache = new WebLookupCacheRepository(this._db);
   }
 
   /** Execute arbitrary SQL — intended for bulk-import scripts and migrations only. */
@@ -3650,6 +3705,23 @@ export class Database {
     // Prune query filters by updated_at — without this index it table-scans.
     // CREATE INDEX IF NOT EXISTS is idempotent on re-run.
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_jargon_updated ON jargon_candidates(group_id, updated_at)`);
+
+    // Path C: web_lookup_cache table (additive, feedback_sqlite_schema_migration)
+    this._db.exec(`
+      CREATE TABLE IF NOT EXISTS web_lookup_cache (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id    TEXT    NOT NULL,
+        term        TEXT    NOT NULL,
+        snippet     TEXT    NOT NULL,
+        source_url  TEXT    NOT NULL,
+        confidence  INTEGER NOT NULL,
+        created_at  INTEGER NOT NULL,
+        expires_at  INTEGER NOT NULL
+      )
+    `);
+    this._db.exec(
+      'CREATE INDEX IF NOT EXISTS idx_web_cache_term ON web_lookup_cache(group_id, term, expires_at DESC)'
+    );
   }
 
   /**

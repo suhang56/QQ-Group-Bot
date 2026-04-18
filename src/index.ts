@@ -10,7 +10,12 @@ import { OllamaClient } from './ai/providers/ollama-llm.js';
 import { GeminiClient } from './ai/providers/gemini-llm.js';
 import { DeepSeekClient } from './ai/providers/deepseek-llm.js';
 import { ModelRouter } from './ai/model-router.js';
-import { OLLAMA_ENABLED, OLLAMA_BASE_URL, GEMINI_ENABLED, DEEPSEEK_ENABLED } from './config.js';
+import {
+  OLLAMA_ENABLED, OLLAMA_BASE_URL, GEMINI_ENABLED, DEEPSEEK_ENABLED,
+  WEB_LOOKUP_ENABLED, GOOGLE_CSE_API_KEY, GOOGLE_CSE_CX, WEB_LOOKUP_MAX_PER_DAY,
+} from './config.js';
+import { WebLookup } from './modules/web-lookup.js';
+import type { ILLMClient } from './modules/web-lookup.js';
 import { parseIntOr } from './utils/config-parse.js';
 import { RateLimiter } from './core/rateLimiter.js';
 import { Router } from './core/router.js';
@@ -86,6 +91,15 @@ const ACTIVE_GROUPS = process.env['ACTIVE_GROUPS']
 if (!NAPCAT_WS_URL) {
   logger.fatal('Missing required env var: NAPCAT_WS_URL');
   process.exit(1);
+}
+
+// 2a. Web-lookup startup check
+if (WEB_LOOKUP_ENABLED) {
+  if (!GOOGLE_CSE_API_KEY || !GOOGLE_CSE_CX) {
+    logger.warn('web-lookup disabled: WEB_LOOKUP_ENABLED=1 but GOOGLE_CSE_API_KEY or GOOGLE_CSE_CX is empty');
+  } else {
+    logger.info(`web lookup enabled: ${WEB_LOOKUP_MAX_PER_DAY}/day budget, CSE CX set`);
+  }
 }
 
 // 2b. PID lock — prevent duplicate instances
@@ -500,6 +514,30 @@ const diaryDistiller = diaryEnabled
       botUserId,
     })
   : null;
+
+// Path C: WebSearch — adapt ModelRouter (IClaudeClient) to ILLMClient thin interface
+const modelRouterAsLlm: ILLMClient = {
+  chat: async (opts) => {
+    const resp = await claude.complete({
+      model: opts.model,
+      maxTokens: opts.maxTokens,
+      system: [],
+      messages: opts.messages,
+    });
+    return { text: resp.text };
+  },
+};
+const webLookup = new WebLookup(
+  db.webLookupCache,
+  db.learnedFacts,
+  modelRouterAsLlm,
+  undefined,
+  WEB_LOOKUP_ENABLED ? async (groupId: string) => {
+    await adapter.send(groupId, '\u7b49\u4e00\u4e0b\u6211\u67e5\u67e5');
+  } : undefined,
+);
+router.setWebLookup(webLookup);
+chat.setWebLookup(webLookup);
 
 // 5. Wire events
 adapter.on('error', (err) => {
