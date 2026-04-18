@@ -31,6 +31,7 @@ function makeFactsRepo(): ILearnedFactsRepository {
     insert: vi.fn().mockReturnValue(1),
     insertOrSupersede: vi.fn().mockReturnValue({ newId: 1, supersededCount: 0 }),
     listActive: vi.fn().mockReturnValue([]),
+    findActiveByTopicTerm: vi.fn().mockReturnValue([]),
     listActiveWithEmbeddings: vi.fn().mockReturnValue([]),
     listNullEmbeddingActive: vi.fn().mockReturnValue([]),
     listAllNullEmbeddingActive: vi.fn().mockReturnValue([]),
@@ -283,7 +284,7 @@ describe('OnDemandLookup.lookupTerm', () => {
   it('case 17: learned_facts shortcut: topic-term match -> returns found without FTS call', async () => {
     const messagesRepo = makeMessageRepo([]);
     const factsRepo = makeFactsRepo();
-    (factsRepo.listActive as ReturnType<typeof vi.fn>).mockReturnValue([
+    (factsRepo.findActiveByTopicTerm as ReturnType<typeof vi.fn>).mockReturnValue([
       {
         id: 4387, groupId: 'g1', topic: 'user-taught:xtt', fact: 'xtt的意思是小团体',
         canonicalForm: 'xtt的意思是小团体', personaForm: 'xtt=小团体',
@@ -325,7 +326,7 @@ describe('OnDemandLookup.lookupTerm', () => {
   it('case 19: learned_facts shortcut: opus-classified fandom topic-term match -> returns found', async () => {
     const messagesRepo = makeMessageRepo([]);
     const factsRepo = makeFactsRepo();
-    (factsRepo.listActive as ReturnType<typeof vi.fn>).mockReturnValue([
+    (factsRepo.findActiveByTopicTerm as ReturnType<typeof vi.fn>).mockReturnValue([
       {
         id: 9001, groupId: 'g1', topic: 'opus-classified:fandom:ygfn', fact: '羊宫妃那',
         canonicalForm: 'ygfn', personaForm: 'ygfn是羊宫妃那',
@@ -350,7 +351,7 @@ describe('OnDemandLookup.lookupTerm', () => {
   it('case 20: shortcut priority -- user-taught wins over opus-classified for same term', async () => {
     const messagesRepo = makeMessageRepo([]);
     const factsRepo = makeFactsRepo();
-    (factsRepo.listActive as ReturnType<typeof vi.fn>).mockReturnValue([
+    (factsRepo.findActiveByTopicTerm as ReturnType<typeof vi.fn>).mockReturnValue([
       {
         id: 6377, groupId: 'g1', topic: 'opus-classified:fandom:ygfn',
         fact: 'ygfn是某个meme copypasta定义',
@@ -383,7 +384,7 @@ describe('OnDemandLookup.lookupTerm', () => {
   it('case 21: shortcut priority -- user-taught with long persona still beats opus-classified with short persona', async () => {
     const messagesRepo = makeMessageRepo([]);
     const factsRepo = makeFactsRepo();
-    (factsRepo.listActive as ReturnType<typeof vi.fn>).mockReturnValue([
+    (factsRepo.findActiveByTopicTerm as ReturnType<typeof vi.fn>).mockReturnValue([
       {
         id: 101, groupId: 'g1', topic: 'opus-classified:slang:ykn',
         fact: 'ykn', canonicalForm: 'ykn', personaForm: 'ykn=友希那',
@@ -415,7 +416,7 @@ describe('OnDemandLookup.lookupTerm', () => {
   it('case 22: shortcut priority -- only opus-classified matches, picks shortest persona', async () => {
     const messagesRepo = makeMessageRepo([]);
     const factsRepo = makeFactsRepo();
-    (factsRepo.listActive as ReturnType<typeof vi.fn>).mockReturnValue([
+    (factsRepo.findActiveByTopicTerm as ReturnType<typeof vi.fn>).mockReturnValue([
       {
         id: 201, groupId: 'g1', topic: 'opus-classified:fandom:xtt',
         fact: 'xtt', canonicalForm: 'xtt', personaForm: 'xtt是小团体（详细解释：balabala...很长很长的内容）',
@@ -443,22 +444,14 @@ describe('OnDemandLookup.lookupTerm', () => {
     expect(llm.complete).not.toHaveBeenCalled();
   });
 
-  it('case 23: shortcut no-match -- fact mentions term in persona but topic-term is different phrase', async () => {
-    // topic suffix is "羊宫妃那到底在不在这个群" not "ygfn" -- should NOT match query "ygfn"
+  it('case 23: shortcut no-match -- findActiveByTopicTerm called with exact term, returns empty', async () => {
+    // The SQL IN clause in findActiveByTopicTerm only matches exact topic strings
+    // like "user-taught:ygfn", "opus-classified:slang:ygfn", etc. — NOT
+    // "opus-rest-classified:fandom:羊宫妃那到底在不在这个群". With exact-match SQL,
+    // the shortcut cleanly returns [] for the unrelated topic and falls through to FTS.
     const messagesRepo = makeMessageRepo([]);
     const factsRepo = makeFactsRepo();
-    (factsRepo.listActive as ReturnType<typeof vi.fn>).mockReturnValue([
-      {
-        id: 6377, groupId: 'g1',
-        topic: 'opus-rest-classified:fandom:羊宫妃那到底在不在这个群',
-        fact: '调侃声优羊宫妃那(ygfn)是否真的在群里',
-        canonicalForm: '羊宫妃那到底在不在这个群',
-        personaForm: '调侃声优羊宫妃那(ygfn)是否真的在群里，是个群内梗',
-        sourceUserId: null, sourceUserNickname: '[opus]', sourceMsgId: null,
-        botReplyId: null, confidence: 0.7, status: 'active',
-        createdAt: 0, updatedAt: 0, embedding: null,
-      },
-    ]);
+    // default findActiveByTopicTerm returns [] — simulates SQL IN finding no exact match
     const llm = makeLlm({ meaning: 'unknown', confidence: 0, hasAnswer: false });
     const lookup = new OnDemandLookup({
       db: { learnedFacts: factsRepo, messages: messagesRepo },
@@ -466,16 +459,16 @@ describe('OnDemandLookup.lookupTerm', () => {
       model: 'test-model',
       logger: makeLogger(),
     });
-    // shortcut should NOT fire; falls through to FTS which returns 0 rows -> unknown
     const result = await lookup.lookupTerm('g1', 'ygfn', 'u1');
     expect(result).toEqual({ type: 'unknown' });
     expect(messagesRepo.searchFts).toHaveBeenCalled();
+    expect(factsRepo.findActiveByTopicTerm).toHaveBeenCalledWith('g1', 'ygfn');
   });
 
   it('case 24: shortcut strict-equal -- user-taught:ygfn and opus:fandom:ygfn both match, user-taught wins', async () => {
     const messagesRepo = makeMessageRepo([]);
     const factsRepo = makeFactsRepo();
-    (factsRepo.listActive as ReturnType<typeof vi.fn>).mockReturnValue([
+    (factsRepo.findActiveByTopicTerm as ReturnType<typeof vi.fn>).mockReturnValue([
       {
         id: 6377, groupId: 'g1', topic: 'opus-classified:fandom:ygfn',
         fact: 'ygfn meme',
@@ -503,5 +496,47 @@ describe('OnDemandLookup.lookupTerm', () => {
     const result = await lookup.lookupTerm('g1', 'ygfn', 'u1');
     expect(result).toEqual({ type: 'found', meaning: 'ygfn 是羊宫妃那啊' });
     expect(llm.complete).not.toHaveBeenCalled();
+  });
+
+  it('case 25: lookupTerm uses findActiveByTopicTerm (not listActive) and passes exact term', async () => {
+    const messagesRepo = makeMessageRepo([]);
+    const factsRepo = makeFactsRepo();
+    (factsRepo.findActiveByTopicTerm as ReturnType<typeof vi.fn>).mockReturnValue([
+      {
+        id: 4387, groupId: 'g1', topic: 'user-taught:xtt', fact: 'xtt的意思是小团体',
+        canonicalForm: 'xtt的意思是小团体', personaForm: '小团体',
+        sourceUserId: null, sourceUserNickname: '[test]', sourceMsgId: null,
+        botReplyId: null, confidence: 0.9, status: 'active',
+        createdAt: 0, updatedAt: 0, embedding: null,
+      },
+    ]);
+    const llm = { complete: vi.fn() };
+    const lookup = new OnDemandLookup({
+      db: { learnedFacts: factsRepo, messages: messagesRepo },
+      llm,
+      model: 'test-model',
+      logger: makeLogger(),
+    });
+    const result = await lookup.lookupTerm('g1', 'xtt', 'u1');
+    expect(result).toEqual({ type: 'found', meaning: '小团体' });
+    expect(factsRepo.findActiveByTopicTerm).toHaveBeenCalledWith('g1', 'xtt');
+    expect(factsRepo.listActive).not.toHaveBeenCalled();
+  });
+
+  it('case 26: findActiveByTopicTerm returns empty -> falls through to FTS', async () => {
+    const messagesRepo = makeMessageRepo(FIVE_ROWS);
+    const factsRepo = makeFactsRepo();
+    // findActiveByTopicTerm returns [] by default
+    const llm = makeLlm({ meaning: 'x', confidence: 8, hasAnswer: true });
+    const lookup = new OnDemandLookup({
+      db: { learnedFacts: factsRepo, messages: messagesRepo },
+      llm,
+      model: 'test-model',
+      logger: makeLogger(),
+    });
+    const result = await lookup.lookupTerm('g1', 'newterm', 'u1');
+    expect(result).toEqual({ type: 'found', meaning: 'x' });
+    expect(factsRepo.findActiveByTopicTerm).toHaveBeenCalled();
+    expect(messagesRepo.searchFts).toHaveBeenCalled();
   });
 });

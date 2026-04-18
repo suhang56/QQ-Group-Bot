@@ -7,6 +7,7 @@ import { cosineSimilarity } from './embeddings.js';
 import { MemeGraphRepository, PhraseCandidatesRepository } from './meme-repos.js';
 import { sanitizeFtsQuery } from '../utils/text-tokenize.js';
 import { createLogger } from '../utils/logger.js';
+import { topicStringsForTerm } from '../modules/fact-topic-prefixes.js';
 
 const bm25Logger = createLogger('learned-facts-bm25');
 const supersededLogger = createLogger('learned-facts-supersede');
@@ -434,6 +435,14 @@ export interface ILearnedFactsRepository {
   insert(row: LearnedFactInsertShape): number;
   insertOrSupersede(row: LearnedFactInsertShape, termToSupersede: string): { newId: number; supersededCount: number };
   listActive(groupId: string, limit: number): LearnedFact[];
+  /**
+   * Return all active facts whose topic is one of the 6 canonical prefixes
+   * for this term. Result is tiny by construction (≤ 6 rows per term) — no
+   * LIMIT clause, no truncation risk. Returns empty array when no match.
+   * Exact topic match (no substring leak): `findActiveByTopicTerm(gid,'tt')`
+   * never returns `user-taught:xtt`.
+   */
+  findActiveByTopicTerm(groupId: string, term: string): LearnedFact[];
   listActiveWithEmbeddings(groupId: string): LearnedFact[];
   listNullEmbeddingActive(groupId: string, limit: number): LearnedFact[];
   listAllNullEmbeddingActive(limit: number): LearnedFact[];
@@ -1932,11 +1941,17 @@ class LearnedFactsRepository implements ILearnedFactsRepository {
     let supersededCount = 0;
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      const updateResult = this.db.prepare(
-        `UPDATE learned_facts SET status = 'superseded', updated_at = ?
-         WHERE group_id = ? AND status = 'active'
-         AND (canonical_form LIKE ? OR fact LIKE ?)`,
-      ).run(now, groupId, like, like) as { changes: number };
+      const isUserTaught = row.topic?.startsWith('user-taught:') ?? false;
+      const updateSql = isUserTaught
+        ? `UPDATE learned_facts SET status = 'superseded', updated_at = ?
+           WHERE group_id = ? AND status = 'active'
+           AND (canonical_form LIKE ? OR fact LIKE ?)`
+        : `UPDATE learned_facts SET status = 'superseded', updated_at = ?
+           WHERE group_id = ? AND status = 'active'
+           AND (topic IS NULL OR topic NOT LIKE 'user-taught:%')
+           AND (canonical_form LIKE ? OR fact LIKE ?)`;
+      const updateResult = this.db.prepare(updateSql)
+        .run(now, groupId, like, like) as { changes: number };
       supersededCount = updateResult.changes;
       newId = this.insert(row);
       this.db.exec('COMMIT');
@@ -1948,6 +1963,17 @@ class LearnedFactsRepository implements ILearnedFactsRepository {
       supersededLogger.info({ groupId, term, supersededCount, newId }, 'facts superseded');
     }
     return { newId, supersededCount };
+  }
+
+  findActiveByTopicTerm(groupId: string, term: string): LearnedFact[] {
+    const topics = topicStringsForTerm(term);
+    const rows = this.db.prepare(
+      `SELECT * FROM learned_facts
+       WHERE group_id = ? AND status = 'active'
+       AND topic IN (?, ?, ?, ?, ?, ?)
+       ORDER BY id DESC`
+    ).all(groupId, ...topics) as unknown as LearnedFactRow[];
+    return rows.map(learnedFactFromRow);
   }
 
   listActive(groupId: string, limit: number): LearnedFact[] {
