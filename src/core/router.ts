@@ -161,6 +161,11 @@ export class Router implements IRouter {
   private readonly appealCounts = new Map<string, number>();
   private appealCountHour = Math.floor(Date.now() / 3600000);
 
+  // Bot's display nickname used when persisting outbound replies into `messages`.
+  // Falls back to '机器人' when no group-specific nickname is configured; can be
+  // overridden at runtime via setBotNickname() — see src/index.ts wiring.
+  private botNickname: string = '机器人';
+
   constructor(
     private readonly db: Database,
     private readonly adapter: INapCatAdapter,
@@ -179,6 +184,11 @@ export class Router implements IRouter {
       if (purged > 0) this.logger.info({ purged }, 'forward cache entries purged');
     }, 3_600_000);
     this.forwardPurgeInterval.unref?.();
+  }
+
+  setBotNickname(nickname: string): void {
+    const trimmed = nickname.trim();
+    if (trimmed.length > 0) this.botNickname = trimmed;
   }
 
   setChat(chat: IChatModule): void {
@@ -716,6 +726,21 @@ export class Router implements IRouter {
       const msgId = await this.adapter.send(groupId, lines[i]!, i === 0 ? replyToMsgId : undefined);
       if (msgId !== null && this.chatModule) {
         this.chatModule.recordOutgoingMessage(groupId, msgId);
+      }
+      if (msgId !== null && this.botUserId) {
+        try {
+          this.db.messages.insert({
+            groupId,
+            userId: this.botUserId,
+            nickname: this.botNickname,
+            content: lines[i]!,
+            rawContent: lines[i]!,
+            timestamp: Math.floor(Date.now() / 1000),
+            deleted: false,
+          }, String(msgId));
+        } catch (err) {
+          this.logger.debug({ err, groupId, msgId }, 'bot reply persist failed (non-fatal)');
+        }
       }
     }
     if (logCtx) {

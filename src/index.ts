@@ -177,6 +177,8 @@ logger.info({ providers: (claude as ModelRouter).getRegisteredProviders() }, 'mo
 
 const rateLimiter = new RateLimiter();
 const router = new Router(db, adapter, rateLimiter, botUserId);
+const botNickname = process.env['BOT_QQ_NICKNAME']?.trim() || '机器人';
+router.setBotNickname(botNickname);
 // Embedding service: fire-and-forget init — bot must not block on model load
 const embedder = new EmbeddingService();
 
