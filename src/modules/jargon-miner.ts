@@ -10,11 +10,15 @@ import { sanitizeForPrompt, hasJailbreakPattern } from '../utils/prompt-sanitize
 // ---- Constants ----
 
 /** Count thresholds at which LLM inference is triggered. */
-const INFERENCE_THRESHOLDS = [3, 6, 10, 20, 40];
+const INFERENCE_THRESHOLDS = [2, 5, 8, 15, 30];
 /** Max candidates to infer per cycle (limit LLM calls). */
-const MAX_INFER_PER_CYCLE = 5;
+const MAX_INFER_PER_CYCLE = 8;
 /** Max context sentences stored per candidate. */
 const MAX_CONTEXTS = 10;
+/** Contexts to sample per inference call — spread evenly across stored history. */
+const CONTEXT_SAMPLE_SIZE = 7;
+/** Days without new occurrences before a pending candidate is marked stale. */
+const STALE_DAYS = 7;
 /** Min/max token length for candidate extraction. */
 const MIN_TOKEN_LEN = 2;
 const MAX_TOKEN_LEN = 8;
@@ -113,6 +117,22 @@ interface JargonCandidateRow {
   updated_at: number;
 }
 
+/**
+ * Pick k evenly-spaced elements from arr by index (chronological spread).
+ * Avoids head-only bias when contexts cluster in a single time window.
+ */
+export function diversifySample<T>(arr: readonly T[], k: number): T[] {
+  if (arr.length === 0) return [];
+  if (arr.length <= k) return [...arr];
+  if (k === 1) return [arr[Math.floor(arr.length / 2)]];
+  const result: T[] = [];
+  const len = arr.length;
+  for (let i = 0; i < k; i++) {
+    result.push(arr[Math.round(i * (len - 1) / (k - 1))]);
+  }
+  return result;
+}
+
 function rowToCandidate(row: JargonCandidateRow): JargonCandidate {
   let contexts: string[];
   try {
@@ -142,6 +162,7 @@ export class JargonMiner {
   private readonly logger: Logger;
   private readonly windowMessages: number;
   private readonly now: () => number;
+  private readonly _inFlight = new Map<string, Set<string>>();
 
   constructor(opts: JargonMinerOptions) {
     this.db = opts.db;
@@ -152,6 +173,9 @@ export class JargonMiner {
     this.logger = opts.logger ?? createLogger('jargon-miner');
     this.windowMessages = opts.windowMessages ?? DEFAULT_WINDOW;
     this.now = opts.now ?? (() => Date.now());
+    if (JARGON_MODEL.includes('claude')) {
+      this.logger.warn({ model: JARGON_MODEL }, 'JARGON_MODEL is a Claude model — MAX_INFER_PER_CYCLE=8 may incur cost');
+    }
   }
 
   /**
@@ -225,6 +249,7 @@ export class JargonMiner {
    * the token has a group-specific meaning (jargon).
    */
   async inferJargon(groupId: string): Promise<void> {
+    // TODO: MIN_DISTINCT_SPEAKERS gate needs sender_id in contexts -- deferred until jargon-miner context schema adds it
     // Find candidates at threshold boundaries that haven't been inferred yet
     const placeholders = INFERENCE_THRESHOLDS.map(() => '?').join(',');
     const rows = this.db.prepare(`
@@ -300,6 +325,29 @@ export class JargonMiner {
     }
   }
 
+  /**
+   * Check if an LLM inference is currently in-flight for the given group+term.
+   * Used by Path A to avoid double-infer on the same candidate.
+   */
+  isInferring(groupId: string, term: string): boolean {
+    return this._inFlight.get(groupId)?.has(term.toLowerCase()) ?? false;
+  }
+
+  /**
+   * Mark candidates that have not had new occurrences in STALE_DAYS as stale (is_jargon=-1).
+   * Stale rows are never deleted — if the term resurfaces, the upsert refreshes updated_at.
+   */
+  pruneStale(groupId: string): void {
+    const nowSec = Math.floor(this.now() / 1000);
+    const cutoff = nowSec - STALE_DAYS * 86400;
+    this.db.prepare(`
+      UPDATE jargon_candidates
+      SET is_jargon = -1, updated_at = ?
+      WHERE group_id = ? AND is_jargon = 0 AND updated_at < ?
+    `).run(nowSec, groupId, cutoff);
+    this.logger.debug({ groupId, cutoff }, 'jargon stale prune complete');
+  }
+
   // ---- Private helpers ----
 
   private _upsertCandidate(groupId: string, content: string, context: string, nowSec: number): void {
@@ -338,9 +386,23 @@ export class JargonMiner {
   }
 
   private async _inferSingle(candidate: JargonCandidate): Promise<void> {
+    const key = candidate.content.toLowerCase();
+    if (!this._inFlight.has(candidate.groupId)) {
+      this._inFlight.set(candidate.groupId, new Set());
+    }
+    const lock = this._inFlight.get(candidate.groupId)!;
+
+    // Bounded: if a group's lock set reaches 50, clear to prevent unbounded growth
+    // (only possible if pruneTick and inferJargon race on many simultaneous candidates)
+    if (lock.size >= 50) {
+      lock.clear();
+    }
+
+    if (lock.has(key)) return;
+    lock.add(key);
+    try {
     const safeContent = sanitizeForPrompt(candidate.content);
-    const contextBlock = candidate.contexts
-      .slice(0, 5)
+    const contextBlock = diversifySample(candidate.contexts, CONTEXT_SAMPLE_SIZE)
       .map((c, i) => `${i + 1}. ${sanitizeForPrompt(c)}`)
       .join('\n');
 
@@ -427,6 +489,9 @@ ${contextBlock}
       { groupId: candidate.groupId, content: candidate.content, isJargon, withContextMeaning, withoutContextMeaning },
       'jargon inference complete',
     );
+    } finally {
+      lock.delete(key);
+    }
   }
 
   /**

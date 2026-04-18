@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
 import type { IClaudeClient, ClaudeRequest, ClaudeResponse } from '../src/ai/claude.js';
 import type { IMessageRepository, ILearnedFactsRepository, Message, LearnedFact } from '../src/storage/db.js';
-import { JargonMiner, COMMON_WORDS } from '../src/modules/jargon-miner.js';
+import { JargonMiner, COMMON_WORDS, diversifySample } from '../src/modules/jargon-miner.js';
 import { initLogger } from '../src/utils/logger.js';
 
 initLogger({ level: 'silent' });
@@ -310,13 +310,13 @@ describe('JargonMiner', () => {
       expect(claude.complete).not.toHaveBeenCalled();
     });
 
-    it('triggers inference at count=3 threshold', async () => {
+    it('triggers inference at count=2 threshold', async () => {
       const db = makeDb();
       const nowSec = 1700000;
-      // Insert a candidate at count=3
+      // Insert a candidate at count=2 (new lower threshold)
       db.prepare(`
         INSERT INTO jargon_candidates (group_id, content, count, contexts, last_inference_count, meaning, is_jargon, created_at, updated_at)
-        VALUES ('g1', '梦之星', 3, '["ctx1","ctx2","ctx3"]', 0, NULL, 0, ?, ?)
+        VALUES ('g1', '梦之星', 2, '["ctx1","ctx2"]', 0, NULL, 0, ?, ?)
       `).run(nowSec, nowSec);
 
       const claude = makeClaude([
@@ -331,7 +331,7 @@ describe('JargonMiner', () => {
       const candidates = getCandidates(db);
       const target = candidates.find(c => c.content === '梦之星');
       expect(target!.meaning).toBe('群里的一首歌');
-      expect(target!.last_inference_count).toBe(3);
+      expect(target!.last_inference_count).toBe(2);
     });
 
     it('skips candidates already inferred at current count', async () => {
@@ -339,7 +339,7 @@ describe('JargonMiner', () => {
       const nowSec = 1700000;
       db.prepare(`
         INSERT INTO jargon_candidates (group_id, content, count, contexts, last_inference_count, meaning, is_jargon, created_at, updated_at)
-        VALUES ('g1', '梦之星', 3, '["ctx"]', 3, '已知含义', 0, ?, ?)
+        VALUES ('g1', '梦之星', 2, '["ctx"]', 2, '已知含义', 0, ?, ?)
       `).run(nowSec, nowSec);
 
       const claude = makeClaude();
@@ -355,7 +355,7 @@ describe('JargonMiner', () => {
       const nowSec = 1700000;
       db.prepare(`
         INSERT INTO jargon_candidates (group_id, content, count, contexts, last_inference_count, meaning, is_jargon, created_at, updated_at)
-        VALUES ('g1', 'ykn', 6, '["说ykn好厉害","ykn唱歌"]', 0, NULL, 0, ?, ?)
+        VALUES ('g1', 'ykn', 5, '["说ykn好厉害","ykn唱歌"]', 0, NULL, 0, ?, ?)
       `).run(nowSec, nowSec);
 
       const claude = makeClaude([
@@ -376,7 +376,7 @@ describe('JargonMiner', () => {
       const nowSec = 1700000;
       db.prepare(`
         INSERT INTO jargon_candidates (group_id, content, count, contexts, last_inference_count, meaning, is_jargon, created_at, updated_at)
-        VALUES ('g1', '手机', 3, '["手机没电了"]', 0, NULL, 0, ?, ?)
+        VALUES ('g1', '手机', 2, '["手机没电了"]', 0, NULL, 0, ?, ?)
       `).run(nowSec, nowSec);
 
       const claude = makeClaude([
@@ -392,24 +392,24 @@ describe('JargonMiner', () => {
       expect(target!.is_jargon).toBe(0);
     });
 
-    it('limits inference to MAX_INFER_PER_CYCLE (5)', async () => {
+    it('limits inference to MAX_INFER_PER_CYCLE (8)', async () => {
       const db = makeDb();
       const nowSec = 1700000;
-      // Insert 10 candidates at threshold count=3
-      for (let i = 0; i < 10; i++) {
+      // Insert 15 candidates at threshold count=2
+      for (let i = 0; i < 15; i++) {
         db.prepare(`
           INSERT INTO jargon_candidates (group_id, content, count, contexts, last_inference_count, meaning, is_jargon, created_at, updated_at)
-          VALUES ('g1', ?, 3, '["ctx"]', 0, NULL, 0, ?, ?)
+          VALUES ('g1', ?, 2, '["ctx"]', 0, NULL, 0, ?, ?)
         `).run(`word${i}`, nowSec, nowSec);
       }
 
-      const claude = makeClaude(Array(20).fill('{"meaning": "test"}'));
+      const claude = makeClaude(Array(32).fill('{"meaning": "test"}'));
       const { miner } = makeMiner({ db, claude });
 
       await miner.inferJargon('g1');
 
-      // 5 candidates * 2 calls each = 10
-      expect(claude.complete).toHaveBeenCalledTimes(10);
+      // 8 candidates * 2 calls each = 16
+      expect(claude.complete).toHaveBeenCalledTimes(16);
     });
 
     it('handles LLM returning unparseable JSON gracefully', async () => {
@@ -417,7 +417,7 @@ describe('JargonMiner', () => {
       const nowSec = 1700000;
       db.prepare(`
         INSERT INTO jargon_candidates (group_id, content, count, contexts, last_inference_count, meaning, is_jargon, created_at, updated_at)
-        VALUES ('g1', '梦之星', 3, '["ctx"]', 0, NULL, 0, ?, ?)
+        VALUES ('g1', '梦之星', 2, '["ctx"]', 0, NULL, 0, ?, ?)
       `).run(nowSec, nowSec);
 
       const claude = makeClaude(['not json at all', '{"meaning": "test"}']);
@@ -428,7 +428,7 @@ describe('JargonMiner', () => {
       // Should not crash, should update last_inference_count
       const candidates = getCandidates(db);
       const target = candidates.find(c => c.content === '梦之星');
-      expect(target!.last_inference_count).toBe(3);
+      expect(target!.last_inference_count).toBe(2);
     });
 
     it('handles LLM failure gracefully', async () => {
@@ -436,7 +436,7 @@ describe('JargonMiner', () => {
       const nowSec = 1700000;
       db.prepare(`
         INSERT INTO jargon_candidates (group_id, content, count, contexts, last_inference_count, meaning, is_jargon, created_at, updated_at)
-        VALUES ('g1', '梦之星', 3, '["ctx"]', 0, NULL, 0, ?, ?)
+        VALUES ('g1', '梦之星', 2, '["ctx"]', 0, NULL, 0, ?, ?)
       `).run(nowSec, nowSec);
 
       const claude: IClaudeClient = {
@@ -628,6 +628,42 @@ describe('JargonMiner', () => {
     });
   });
 
+  describe('diversifySample', () => {
+    it('empty array returns []', () => {
+      expect(diversifySample([], 5)).toEqual([]);
+    });
+
+    it('1-element array, k=3 returns that element', () => {
+      expect(diversifySample(['a'], 3)).toEqual(['a']);
+    });
+
+    it('k >= length returns full copy', () => {
+      expect(diversifySample([1, 2, 3], 5)).toEqual([1, 2, 3]);
+    });
+
+    it('5-element array k=3: result length=3, includes first and last', () => {
+      const result = diversifySample([0, 1, 2, 3, 4], 3);
+      expect(result).toHaveLength(3);
+      expect(result[0]).toBe(0);
+      expect(result[result.length - 1]).toBe(4);
+    });
+
+    it('10-element array k=7: spread covers index 0 and 9', () => {
+      const arr = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+      const result = diversifySample(arr, 7);
+      expect(result).toHaveLength(7);
+      expect(result[0]).toBe(0);
+      expect(result[result.length - 1]).toBe(9);
+    });
+
+    it('100-element array k=7: length=7, no duplicates', () => {
+      const arr = Array.from({ length: 100 }, (_, i) => i);
+      const result = diversifySample(arr, 7);
+      expect(result).toHaveLength(7);
+      expect(new Set(result).size).toBe(7);
+    });
+  });
+
   describe('COMMON_WORDS', () => {
     it('contains at least 100 entries', () => {
       expect(COMMON_WORDS.size).toBeGreaterThanOrEqual(100);
@@ -723,10 +759,10 @@ describe('JargonMiner', () => {
     it('multiple thresholds: re-infers when count reaches next threshold', async () => {
       const db = makeDb();
       const nowSec = 1700000;
-      // Candidate inferred at count=3, now at count=6
+      // Candidate inferred at count=2, now at count=5 (next threshold)
       db.prepare(`
         INSERT INTO jargon_candidates (group_id, content, count, contexts, last_inference_count, meaning, is_jargon, created_at, updated_at)
-        VALUES ('g1', '梦之星', 6, '["ctx"]', 3, '旧含义', 0, ?, ?)
+        VALUES ('g1', '梦之星', 5, '["ctx"]', 2, '旧含义', 0, ?, ?)
       `).run(nowSec, nowSec);
 
       const claude = makeClaude([
@@ -740,8 +776,74 @@ describe('JargonMiner', () => {
       expect(claude.complete).toHaveBeenCalledTimes(2);
       const candidates = getCandidates(db);
       const target = candidates.find(c => c.content === '梦之星');
-      expect(target!.last_inference_count).toBe(6);
+      expect(target!.last_inference_count).toBe(5);
       expect(target!.meaning).toBe('更新的含义');
     });
   });
+
+  describe('pruneStale', () => {
+    it('marks only stale is_jargon=0 rows as -1', () => {
+      const db = makeDb();
+      const now = Math.floor(Date.now() / 1000);
+      const stale = now - 8 * 86400; // 8 days ago
+      db.prepare(`INSERT INTO jargon_candidates (group_id, content, count, contexts, last_inference_count, meaning, is_jargon, created_at, updated_at) VALUES ('g1','stale-word',3,'[]',0,NULL,0,?,?)`).run(stale, stale);
+      db.prepare(`INSERT INTO jargon_candidates (group_id, content, count, contexts, last_inference_count, meaning, is_jargon, created_at, updated_at) VALUES ('g1','fresh-word',3,'[]',0,NULL,0,?,?)`).run(now, now);
+      db.prepare(`INSERT INTO jargon_candidates (group_id, content, count, contexts, last_inference_count, meaning, is_jargon, created_at, updated_at) VALUES ('g1','confirmed',5,'[]',5,NULL,1,?,?)`).run(stale, stale);
+
+      const { miner } = makeMiner({ db, now: () => Date.now() });
+      miner.pruneStale('g1');
+
+      const staleRow = db.prepare(`SELECT is_jargon FROM jargon_candidates WHERE content='stale-word'`).get() as { is_jargon: number };
+      const freshRow = db.prepare(`SELECT is_jargon FROM jargon_candidates WHERE content='fresh-word'`).get() as { is_jargon: number };
+      const confirmedRow = db.prepare(`SELECT is_jargon FROM jargon_candidates WHERE content='confirmed'`).get() as { is_jargon: number };
+      expect(staleRow.is_jargon).toBe(-1);
+      expect(freshRow.is_jargon).toBe(0);
+      expect(confirmedRow.is_jargon).toBe(1);
+    });
+
+    it('does not affect is_jargon=-1 (already stale) rows', () => {
+      const db = makeDb();
+      const now = Math.floor(Date.now() / 1000);
+      const stale = now - 10 * 86400;
+      db.prepare(`INSERT INTO jargon_candidates (group_id, content, count, contexts, last_inference_count, meaning, is_jargon, created_at, updated_at) VALUES ('g1','already-stale',3,'[]',0,NULL,-1,?,?)`).run(stale, stale);
+
+      const { miner } = makeMiner({ db, now: () => Date.now() });
+      miner.pruneStale('g1');
+
+      const row = db.prepare(`SELECT is_jargon FROM jargon_candidates WHERE content='already-stale'`).get() as { is_jargon: number };
+      expect(row.is_jargon).toBe(-1);
+    });
+
+    it('no candidates pruned when all are fresh', () => {
+      const db = makeDb();
+      const now = Math.floor(Date.now() / 1000);
+      db.prepare(`INSERT INTO jargon_candidates (group_id, content, count, contexts, last_inference_count, meaning, is_jargon, created_at, updated_at) VALUES ('g1','fresh',3,'[]',0,NULL,0,?,?)`).run(now, now);
+
+      const { miner } = makeMiner({ db, now: () => Date.now() });
+      miner.pruneStale('g1');
+
+      const row = db.prepare(`SELECT is_jargon FROM jargon_candidates WHERE content='fresh'`).get() as { is_jargon: number };
+      expect(row.is_jargon).toBe(0);
+    });
+  });
+
+  describe('isInferring', () => {
+    it('returns false when no inference in-flight', () => {
+      const { miner } = makeMiner();
+      expect(miner.isInferring('g1', 'ykn')).toBe(false);
+    });
+
+    it('returns false for unknown group', () => {
+      const { miner } = makeMiner();
+      expect(miner.isInferring('unknown-group', 'test')).toBe(false);
+    });
+
+    it('normalizes term to lowercase', () => {
+      const { miner } = makeMiner();
+      // Before any inference, both cases return false
+      expect(miner.isInferring('g1', 'YKN')).toBe(false);
+      expect(miner.isInferring('g1', 'ykn')).toBe(false);
+    });
+  });
 });
+
