@@ -1,5 +1,6 @@
 import { createLogger } from '../utils/logger.js';
 import { sanitizeForPrompt, hasJailbreakPattern } from '../utils/prompt-sanitize.js';
+import { isDirectQuestion } from '../utils/is-direct-question.js';
 import type { IWebLookupCacheRepository } from '../storage/db.js';
 import type { ILearnedFactsRepository } from '../storage/db.js';
 
@@ -8,7 +9,6 @@ function cfg() {
   return {
     enabled: process.env['WEB_LOOKUP_ENABLED'] === '1',
     maxPerDay: parseInt(process.env['WEB_LOOKUP_MAX_PER_DAY'] ?? '50', 10) || 50,
-    placeholderMs: parseInt(process.env['WEB_LOOKUP_PLACEHOLDER_MS'] ?? '3000', 10) || 3000,
     reflectionModel: process.env['REFLECTION_MODEL'] ?? 'gemini-2.5-flash',
   };
 }
@@ -34,15 +34,18 @@ export const DEFAULT_COMMON_WORDS: ReadonlySet<string> = new Set([
 
 /**
  * Returns true if `term` should be looked up via web grounding:
+ * - The original message is a direct question (X是啥/什么是X/etc.)
  * - Matches name pattern (romaji-cap OR CJK ≥2 chars)
  * - NOT already in `knownFacts` (Path A or corpus resolved it)
  * - NOT in `commonWords` (function words, defaults to DEFAULT_COMMON_WORDS)
  */
 export function shouldLookupTerm(
   term: string,
+  messageContent: string,
   knownFacts: ReadonlySet<string> = new Set(),
   commonWords: ReadonlySet<string> = DEFAULT_COMMON_WORDS,
 ): boolean {
+  if (!isDirectQuestion(messageContent)) return false;
   if (knownFacts.has(term)) return false;
   if (commonWords.has(term)) return false;
   if (ROMAJI_RE.test(term)) return true;
@@ -263,7 +266,6 @@ export class WebLookup {
     private readonly _factsRepo: ILearnedFactsRepository,
     private readonly _llm: ILLMClient,                          // retained for test injection / rollback
     private readonly _provider: SearchProvider = new GeminiGroundingProvider(),
-    private readonly _sendPlaceholder?: (groupId: string) => Promise<void>,
   ) {
     void this._llm; // kept for rollback; grounding provider handles its own LLM call
   }
@@ -306,20 +308,11 @@ export class WebLookup {
       return null;
     }
 
-    // Grounding call — with placeholder timer
+    // Grounding call
     const start = Date.now();
-    let placeholderSent = false;
-    const placeholderTimer = this._sendPlaceholder
-      ? setTimeout(async () => {
-          placeholderSent = true;
-          await this._sendPlaceholder!(groupId);
-        }, c.placeholderMs)
-      : null;
-    if (placeholderTimer) placeholderTimer.unref?.();
 
     try {
       const results = await this._provider.search(term);
-      if (placeholderTimer) clearTimeout(placeholderTimer);
 
       if (!results.length) return null;
 
@@ -373,11 +366,10 @@ export class WebLookup {
       }
 
       const elapsed = Date.now() - start;
-      logger.info({ term, confidence, elapsed, placeholderSent }, 'web-lookup complete');
+      logger.info({ term, confidence, elapsed }, 'web-lookup complete');
 
       return { answer, sourceUrl, confidence, snippets };
     } catch (err) {
-      if (placeholderTimer) clearTimeout(placeholderTimer);
       logger.warn({ err, term }, 'web-lookup: unexpected error');
       return null;
     }
