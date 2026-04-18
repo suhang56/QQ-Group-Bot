@@ -9,7 +9,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Database } from '../src/storage/db.js';
-import { DiaryDistiller, yesterdayShanghaiWindow } from '../src/modules/diary-distiller.js';
+import { DiaryDistiller, yesterdayShanghaiWindow, hasReporterVoice } from '../src/modules/diary-distiller.js';
 import type { IClaudeClient } from '../src/ai/claude.js';
 import { initLogger } from '../src/utils/logger.js';
 
@@ -236,5 +236,119 @@ describe('DiaryDistiller', () => {
     const b = db.groupDiary.findLatestByKind(GROUP_B, 'daily');
     expect(b).not.toBeNull();
     expect(b!.summary.length).toBeGreaterThan(0);
+  });
+});
+
+// UR-N: voice fixes — first-person prompt, reporter-voice post-filter, 200-char cap
+describe('DiaryDistiller UR-N groupmate voice', () => {
+  let db: Database;
+
+  beforeEach(() => { db = new Database(':memory:'); });
+  afterEach(() => { db.close(); });
+
+  it('system prompt uses first-person groupmate voice and bans report-voice markers', async () => {
+    const { startSec } = yesterdayShanghaiWindow(FROZEN_NOW_MS);
+    for (let i = 0; i < 5; i++) {
+      seedMessage(db, GROUP, `u${i}`, `user${i}`, `hello ${i}`, startSec + 3600 + i * 60);
+    }
+    const claude = makeClaudeReturning(validJsonResponse());
+    const distiller = new DiaryDistiller({
+      claude, messages: db.messages, groupDiary: db.groupDiary, botUserId: BOT,
+      nowMs: () => FROZEN_NOW_MS,
+    });
+    await distiller.generateDaily(GROUP, FROZEN_NOW_MS);
+
+    const call = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as {
+      system: Array<{ text: string }>;
+    };
+    const sysText = call.system.map(s => s.text).join('\n');
+    // first-person markers present
+    expect(sysText).toContain('群友');
+    expect(sysText).toContain('我们群');
+    // examples present
+    expect(sysText).toContain('✓');
+    expect(sysText).toContain('✗');
+    // banned markers are called out in the prompt (as things to avoid)
+    expect(sysText).toContain('该群');
+    expect(sysText).toContain('聊天记录显示');
+    // 70-150 cap mentioned, not 120-300
+    expect(sysText).toContain('70-150');
+    expect(sysText).not.toContain('120-300');
+  });
+
+  it('drops LLM output whose summary contains reporter-voice markers', async () => {
+    const { startSec } = yesterdayShanghaiWindow(FROZEN_NOW_MS);
+    for (let i = 0; i < 5; i++) {
+      seedMessage(db, GROUP, `u${i}`, `user${i}`, `hi ${i}`, startSec + 3600 + i * 60);
+    }
+    const reporterOutput = JSON.stringify({
+      summary: '该群昨日主要讨论了 Poppin Party 新曲',
+      top_topics: [], top_speakers: [], mood: '',
+    });
+    const claude = makeClaudeReturning(reporterOutput);
+    const distiller = new DiaryDistiller({
+      claude, messages: db.messages, groupDiary: db.groupDiary, botUserId: BOT,
+      nowMs: () => FROZEN_NOW_MS,
+    });
+    const id = await distiller.generateDaily(GROUP, FROZEN_NOW_MS);
+    expect(id).toBe(0);
+    expect(db.groupDiary.findLatestByKind(GROUP, 'daily')).toBeNull();
+  });
+
+  it('accepts LLM output with proper first-person groupmate voice', async () => {
+    const { startSec } = yesterdayShanghaiWindow(FROZEN_NOW_MS);
+    for (let i = 0; i < 5; i++) {
+      seedMessage(db, GROUP, `u${i}`, `user${i}`, `hi ${i}`, startSec + 3600 + i * 60);
+    }
+    const goodOutput = JSON.stringify({
+      summary: '昨天群里在聊 Poppin Party 新曲，气氛还挺活跃',
+      top_topics: ['Poppin Party'], top_speakers: [], mood: '开心',
+    });
+    const claude = makeClaudeReturning(goodOutput);
+    const distiller = new DiaryDistiller({
+      claude, messages: db.messages, groupDiary: db.groupDiary, botUserId: BOT,
+      nowMs: () => FROZEN_NOW_MS,
+    });
+    const id = await distiller.generateDaily(GROUP, FROZEN_NOW_MS);
+    expect(id).toBeGreaterThan(0);
+    const row = db.groupDiary.findLatestByKind(GROUP, 'daily');
+    expect(row!.summary).toContain('昨天');
+  });
+
+  it('caps summary at 200 chars on insert (was 2000)', async () => {
+    const { startSec } = yesterdayShanghaiWindow(FROZEN_NOW_MS);
+    for (let i = 0; i < 5; i++) {
+      seedMessage(db, GROUP, `u${i}`, `user${i}`, `hi ${i}`, startSec + 3600 + i * 60);
+    }
+    // 400-char first-person summary (no reporter markers)
+    const longSummary = '昨天群里' + 'a'.repeat(400);
+    const resp = JSON.stringify({
+      summary: longSummary, top_topics: [], top_speakers: [], mood: '',
+    });
+    const claude = makeClaudeReturning(resp);
+    const distiller = new DiaryDistiller({
+      claude, messages: db.messages, groupDiary: db.groupDiary, botUserId: BOT,
+      nowMs: () => FROZEN_NOW_MS,
+    });
+    const id = await distiller.generateDaily(GROUP, FROZEN_NOW_MS);
+    expect(id).toBeGreaterThan(0);
+    const row = db.groupDiary.findLatestByKind(GROUP, 'daily');
+    expect(row!.summary.length).toBe(200);
+  });
+});
+
+describe('hasReporterVoice (UR-N)', () => {
+  it('matches canonical report markers', () => {
+    expect(hasReporterVoice('该群昨日讨论')).toBe(true);
+    expect(hasReporterVoice('群内成员对...')).toBe(true);
+    expect(hasReporterVoice('该用户发言')).toBe(true);
+    expect(hasReporterVoice('聊天记录显示...')).toBe(true);
+    expect(hasReporterVoice('据悉，最近')).toBe(true);
+    expect(hasReporterVoice('综上所述')).toBe(true);
+  });
+  it('does not match legitimate groupmate voice', () => {
+    expect(hasReporterVoice('昨天群里聊了邦多利')).toBe(false);
+    expect(hasReporterVoice('我们群最近在嗑 cp')).toBe(false);
+    expect(hasReporterVoice('群友们都在讨论')).toBe(false);
   });
 });

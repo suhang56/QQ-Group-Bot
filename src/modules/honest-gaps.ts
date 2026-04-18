@@ -19,7 +19,7 @@
 import { createLogger } from '../utils/logger.js';
 import { sanitizeForPrompt, hasJailbreakPattern } from '../utils/prompt-sanitize.js';
 import { TOKEN_SPLIT_RE, CQ_CODE_RE, COMMON_WORDS } from './jargon-miner.js';
-import type { IHonestGapsRepository } from '../storage/db.js';
+import type { IHonestGapsRepository, ILearnedFactsRepository, IMemeGraphRepo } from '../storage/db.js';
 
 export const MIN_TERM_LEN = 2;
 export const MAX_TERM_LEN = 12;
@@ -60,17 +60,33 @@ export function extractTokens(content: string): string[] {
   return out;
 }
 
+export interface HonestGapsKnownSources {
+  /** Used to exclude terms bot already has as learned facts / aliases. */
+  learnedFacts?: ILearnedFactsRepository | null;
+  /** Used to exclude terms already in the meme graph (canonical + variants). */
+  memeGraph?: IMemeGraphRepo | null;
+}
+
 export class HonestGapsTracker implements IHonestGapsPromptSource {
   private readonly logger = createLogger('honest-gaps');
   private readonly minSeen: number;
   private readonly topLimit: number;
+  // UR-N: when provided, formatForPrompt suppresses rows whose term is already
+  // grounded elsewhere — avoids the contradictory signal where the same term
+  // appears in `honest_gaps` ("不懂这个") and in `learned_facts` / alias-map /
+  // meme_graph ("我们已经学过"). Repos are optional so the old single-arg
+  // constructor stays source-compatible.
+  private readonly knownLearnedFacts: ILearnedFactsRepository | null;
+  private readonly knownMemeGraph: IMemeGraphRepo | null;
 
   constructor(
     private readonly repo: IHonestGapsRepository,
-    opts: { minSeen?: number; topLimit?: number } = {},
+    opts: { minSeen?: number; topLimit?: number; known?: HonestGapsKnownSources } = {},
   ) {
     this.minSeen = opts.minSeen ?? DEFAULT_MIN_SEEN;
     this.topLimit = opts.topLimit ?? DEFAULT_TOP_LIMIT;
+    this.knownLearnedFacts = opts.known?.learnedFacts ?? null;
+    this.knownMemeGraph = opts.known?.memeGraph ?? null;
   }
 
   /**
@@ -103,8 +119,65 @@ export class HonestGapsTracker implements IHonestGapsPromptSource {
       this.logger.warn({ err, groupId }, 'honest_gaps getTopTerms failed');
       return '';
     }
-    const entries: HonestGapsEntry[] = rows.map(r => ({ term: r.term, seenCount: r.seenCount }));
+    let entries: HonestGapsEntry[] = rows.map(r => ({ term: r.term, seenCount: r.seenCount }));
+    // UR-N M5: suppress terms bot already has grounding for.
+    entries = this._filterAlreadyKnown(groupId, entries);
     return formatHonestGapsBlock(entries);
+  }
+
+  /**
+   * UR-N: drop rows whose term is already present in learned_facts (fact text,
+   * canonical/persona, source nickname) or in meme_graph (canonical + variants).
+   * Substring + case-insensitive — if `xtt` appears anywhere in any fact we
+   * consider the term grounded. Pool is bounded (listActive has a limit arg,
+   * meme canonicals via listActive), so this is O(rows × pool) on one path.
+   */
+  private _filterAlreadyKnown(groupId: string, entries: HonestGapsEntry[]): HonestGapsEntry[] {
+    if (entries.length === 0) return entries;
+    if (!this.knownLearnedFacts && !this.knownMemeGraph) return entries;
+
+    const knownHaystack: string[] = [];
+    try {
+      if (this.knownLearnedFacts) {
+        for (const f of this.knownLearnedFacts.listActive(groupId, 500)) {
+          if (f.fact) knownHaystack.push(f.fact.toLowerCase());
+          if (f.canonicalForm) knownHaystack.push(f.canonicalForm.toLowerCase());
+          if (f.personaForm) knownHaystack.push(f.personaForm.toLowerCase());
+          if (f.sourceUserNickname) knownHaystack.push(f.sourceUserNickname.toLowerCase());
+        }
+      }
+    } catch (err) {
+      this.logger.warn({ err, groupId }, 'honest_gaps: learnedFacts.listActive failed — skipping that filter');
+    }
+    try {
+      if (this.knownMemeGraph) {
+        for (const m of this.knownMemeGraph.listActive(groupId, 200)) {
+          if (m.canonical) knownHaystack.push(m.canonical.toLowerCase());
+          for (const v of m.variants) {
+            if (v) knownHaystack.push(v.toLowerCase());
+          }
+        }
+      }
+    } catch (err) {
+      this.logger.warn({ err, groupId }, 'honest_gaps: memeGraph.listActive failed — skipping that filter');
+    }
+
+    if (knownHaystack.length === 0) return entries;
+
+    const kept: HonestGapsEntry[] = [];
+    const dropped: string[] = [];
+    for (const e of entries) {
+      const needle = e.term.toLowerCase();
+      if (knownHaystack.some(h => h.includes(needle))) {
+        dropped.push(e.term);
+        continue;
+      }
+      kept.push(e);
+    }
+    if (dropped.length > 0) {
+      this.logger.debug({ groupId, dropped }, 'honest_gaps: filtered terms already known');
+    }
+    return kept;
   }
 }
 

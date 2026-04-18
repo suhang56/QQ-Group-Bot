@@ -582,3 +582,51 @@ describe('OpportunisticHarvest UR-H injection guards', () => {
     expect(unknownPrompt).not.toContain('<script>');
   });
 });
+
+// UR-N: harvest prompt contains persona_fact voice few-shot examples
+describe('OpportunisticHarvest UR-N persona_fact voice anchor', () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  it('prompt contains persona_fact groupmate-voice examples (✓ and ✗)', async () => {
+    const msgs = makeRecentMsgs(15);
+    const msgRepo = makeMsgRepo(msgs);
+    const factRepo = makeFactRepo();
+    const claude = makeClaudeWith('[]');
+
+    const harvest = new OpportunisticHarvest({
+      messages: msgRepo, learnedFacts: factRepo, claude,
+      activeGroups: [GROUP], logger: silentLogger, enabled: true,
+    });
+    await harvest._run();
+
+    const prompt = String(
+      (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]![0].messages[0].content,
+    );
+    expect(prompt).toContain('persona_fact voice 规范');
+    expect(prompt).toContain('✓');
+    expect(prompt).toContain('✗');
+    // banned markers called out
+    expect(prompt).toContain('该群友');
+    expect(prompt).toContain('聊天记录显示');
+    // groupmate-voice verb
+    expect(prompt).toContain('群友口吻');
+  });
+
+  it('persona_fact description mentions 群友 voice, not generic "bot 自然语气"', async () => {
+    const msgs = makeRecentMsgs(15);
+    const msgRepo = makeMsgRepo(msgs);
+    const factRepo = makeFactRepo();
+    const claude = makeClaudeWith('[]');
+
+    const harvest = new OpportunisticHarvest({
+      messages: msgRepo, learnedFacts: factRepo, claude,
+      activeGroups: [GROUP], logger: silentLogger, enabled: true,
+    });
+    await harvest._run();
+
+    const prompt = String(
+      (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]![0].messages[0].content,
+    );
+    expect(prompt).toContain('群友自然语气');
+  });
+});
