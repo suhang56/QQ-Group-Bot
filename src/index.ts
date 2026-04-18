@@ -367,7 +367,7 @@ chat.setRelationshipSource(relationshipTracker);
 // UR-N M5: pass learned_facts + meme_graph so the tracker drops terms the bot
 // already has grounding for — avoids "honest gap" + "learned fact" on same term.
 const honestGapsTracker = new HonestGapsTracker(db.honestGaps, {
-  known: { learnedFacts: db.learnedFacts, memeGraph: db.memeGraph },
+  known: { learnedFacts: db.learnedFacts, memeGraph: db.memeGraph, messagesRepo: db.messages },
 });
 chat.setHonestGapsSource(honestGapsTracker);
 chat.setHonestGapsTracker(honestGapsTracker);

@@ -19,7 +19,7 @@
 import { createLogger } from '../utils/logger.js';
 import { sanitizeForPrompt, hasJailbreakPattern } from '../utils/prompt-sanitize.js';
 import { TOKEN_SPLIT_RE, CQ_CODE_RE, COMMON_WORDS } from './jargon-miner.js';
-import type { IHonestGapsRepository, ILearnedFactsRepository, IMemeGraphRepo } from '../storage/db.js';
+import type { IHonestGapsRepository, ILearnedFactsRepository, IMemeGraphRepo, IMessageRepository } from '../storage/db.js';
 
 export const MIN_TERM_LEN = 2;
 export const MAX_TERM_LEN = 12;
@@ -72,6 +72,8 @@ export interface HonestGapsKnownSources {
   learnedFacts?: ILearnedFactsRepository | null;
   /** Used to exclude terms already in the meme graph (canonical + variants). */
   memeGraph?: IMemeGraphRepo | null;
+  /** Used to exclude terms that are group member nicknames. */
+  messagesRepo?: Pick<IMessageRepository, 'listDistinctNicknames'> | null;
 }
 
 export class HonestGapsTracker implements IHonestGapsPromptSource {
@@ -85,6 +87,8 @@ export class HonestGapsTracker implements IHonestGapsPromptSource {
   // constructor stays source-compatible.
   private readonly knownLearnedFacts: ILearnedFactsRepository | null;
   private readonly knownMemeGraph: IMemeGraphRepo | null;
+  private readonly knownMessagesRepo: Pick<IMessageRepository, 'listDistinctNicknames'> | null;
+  private nicknameCache: { expiresAt: number; nicknames: Set<string> } | null = null;
 
   constructor(
     private readonly repo: IHonestGapsRepository,
@@ -94,6 +98,7 @@ export class HonestGapsTracker implements IHonestGapsPromptSource {
     this.topLimit = opts.topLimit ?? DEFAULT_TOP_LIMIT;
     this.knownLearnedFacts = opts.known?.learnedFacts ?? null;
     this.knownMemeGraph = opts.known?.memeGraph ?? null;
+    this.knownMessagesRepo = opts.known?.messagesRepo ?? null;
   }
 
   /**
@@ -141,7 +146,7 @@ export class HonestGapsTracker implements IHonestGapsPromptSource {
    */
   private _filterAlreadyKnown(groupId: string, entries: HonestGapsEntry[]): HonestGapsEntry[] {
     if (entries.length === 0) return entries;
-    if (!this.knownLearnedFacts && !this.knownMemeGraph) return entries;
+    if (!this.knownLearnedFacts && !this.knownMemeGraph && !this.knownMessagesRepo) return entries;
 
     const knownHaystack: string[] = [];
     try {
@@ -167,6 +172,23 @@ export class HonestGapsTracker implements IHonestGapsPromptSource {
       }
     } catch (err) {
       this.logger.warn({ err, groupId }, 'honest_gaps: memeGraph.listActive failed — skipping that filter');
+    }
+    try {
+      if (this.knownMessagesRepo) {
+        const now = Date.now();
+        if (!this.nicknameCache || now >= this.nicknameCache.expiresAt) {
+          const names = this.knownMessagesRepo.listDistinctNicknames(groupId, 2000);
+          this.nicknameCache = {
+            expiresAt: now + 5 * 60 * 1000,
+            nicknames: new Set(names.map(n => n.toLowerCase())),
+          };
+        }
+        for (const nick of this.nicknameCache.nicknames) {
+          knownHaystack.push(nick);
+        }
+      }
+    } catch (err) {
+      this.logger.warn({ err, groupId }, 'honest_gaps: messagesRepo.listDistinctNicknames failed — skipping nickname filter');
     }
 
     if (knownHaystack.length === 0) return entries;
