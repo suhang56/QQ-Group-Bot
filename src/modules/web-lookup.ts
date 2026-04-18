@@ -90,13 +90,14 @@ export class GoogleCseProvider implements SearchProvider {
     for (let attempt = 0; attempt < 3; attempt++) {
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), 3000);
+      timer.unref?.();
       try {
         const res = await fetch(url, { signal: ctrl.signal });
         clearTimeout(timer);
         if (res.status === 429) {
           const delay = BACKOFF_MS[attempt] ?? 4000;
           logger.warn({ attempt, delay }, 'CSE 429 — backing off');
-          await new Promise(r => setTimeout(r, delay));
+          await new Promise(r => { const t = setTimeout(r, delay); t.unref?.(); });
           continue;
         }
         if (!res.ok) {
@@ -116,7 +117,7 @@ export class GoogleCseProvider implements SearchProvider {
           return [];
         }
         const delay = BACKOFF_MS[attempt] ?? 4000;
-        await new Promise(r => setTimeout(r, delay));
+        await new Promise(r => { const t = setTimeout(r, delay); t.unref?.(); });
       }
     }
     return [];
