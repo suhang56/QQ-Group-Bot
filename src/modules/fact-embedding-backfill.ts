@@ -4,6 +4,7 @@ import type { IEmbeddingService } from '../storage/embeddings.js';
 import { createLogger } from '../utils/logger.js';
 
 const BATCH_SIZE = 100;
+const SKIP_CAP = 500;
 const SLEEP_MS = 50;
 /** Periodic re-run interval for the backfill worker. Defense in depth against
  * insert-time races where the model wasn't ready or the embed call failed. */
@@ -36,6 +37,7 @@ export async function runFactEmbeddingBackfill(
   // Track ids that already failed so the next listAllNullEmbeddingActive call
   // can skip them — without this, a permanently-broken row would loop forever.
   const skip = new Set<number>();
+  let hitSkipCap = false;
   logger.info('fact embedding backfill: start');
   // eslint-disable-next-line no-constant-condition
   while (true) {
@@ -50,11 +52,17 @@ export async function runFactEmbeddingBackfill(
       } catch (err) {
         failed++;
         skip.add(fact.id);
+        if (skip.size >= SKIP_CAP) {
+          logger.warn('fact embedding backfill: skip cap reached, deferring remainder');
+          hitSkipCap = true;
+          break;
+        }
         const markedFailed = db.learnedFacts.recordEmbeddingFailure(fact.id);
         logger.warn({ err, factId: fact.id, permanentlyFailed: markedFailed }, 'fact embedding backfill: row failed');
       }
     }
     await sleep(SLEEP_MS);
+    if (hitSkipCap) break;
   }
   logger.info({ filled, failed }, 'fact embedding backfill: done');
   return { filled, failed };

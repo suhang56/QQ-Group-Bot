@@ -187,6 +187,7 @@ export class ModeratorModule implements IModeratorModule {
     // do-not-follow wrapper as defense-in-depth against admin misinput /
     // attacker-controlled rule rows.
     const allRules = this.rules.getAll(msg.groupId);
+    // count is dynamic — never hardcode
     const rulesText = allRules.length > 0
       ? allRules.map((r, i) => `${i + 1}. ${sanitizeForPrompt(r.content, 500)}`).join('\n')
       : '（暂无配置群规）';
