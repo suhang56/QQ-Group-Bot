@@ -92,12 +92,30 @@ export class OnDemandLookup {
     if (normalizedTerm.length >= 2) {
       try {
         const factRows = this.db.learnedFacts.listActive(groupId, 500);
-        const match = factRows.find(r => {
+        const t = normalizedTerm.toLowerCase();
+        const matches = factRows.filter(r => {
           const canonical = (r.canonicalForm ?? r.fact ?? '').toLowerCase();
           const persona = (r.personaForm ?? '').toLowerCase();
-          const t = normalizedTerm.toLowerCase();
           return canonical.includes(t) || persona.includes(t) || (r.topic ?? '').toLowerCase().includes(t);
         });
+
+        const priorityRank = (topic: string | null): number => {
+          if (!topic) return 99;
+          if (topic.startsWith('user-taught:')) return 0;
+          if (topic.startsWith('opus-classified:slang') || topic.startsWith('opus-rest-classified:slang')) return 1;
+          if (topic.startsWith('opus-classified:fandom') || topic.startsWith('opus-rest-classified:fandom')) return 2;
+          return 10;
+        };
+        matches.sort((a, b) => {
+          const pa = priorityRank(a.topic);
+          const pb = priorityRank(b.topic);
+          if (pa !== pb) return pa - pb;
+          const lenA = (a.personaForm ?? a.fact ?? '').length;
+          const lenB = (b.personaForm ?? b.fact ?? '').length;
+          return lenA - lenB;
+        });
+
+        const match = matches[0];
         if (match) {
           const meaning = match.personaForm ?? match.fact ?? '';
           this.logger.info({ groupId, term, factId: match.id }, 'ondemand-lookup: learned_facts shortcut hit');
