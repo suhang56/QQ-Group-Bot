@@ -10,6 +10,7 @@ import {
   appendProgress,
   iterChunksBy,
   runDryRun,
+  registerShutdownHandlers,
   STALE_LOCK_HOURS,
 } from '../scripts/bootstrap-corpus.js';
 import type { Message } from '../src/storage/db.js';
@@ -307,5 +308,79 @@ describe('bootstrap-corpus progress.jsonl', () => {
     })];
     const ids = chunks.flat().map(m => m.id);
     expect(ids).toEqual([3]);
+  });
+});
+
+// ============================================================================
+// UR-N M1: SIGINT / SIGTERM release lockfile + DB before exit
+// ============================================================================
+
+describe('bootstrap-corpus registerShutdownHandlers (UR-N M1)', () => {
+  it('SIGINT invokes onShutdown and exits 130', () => {
+    const handlers: Record<string, () => void> = {};
+    let exitCode: number | null = null;
+    let shutdownCalled = 0;
+    registerShutdownHandlers({
+      onShutdown: () => { shutdownCalled++; },
+      target: {
+        on: (sig, listener) => { handlers[sig] = listener; },
+        exit: (code) => { exitCode = code; },
+      },
+    });
+    expect(handlers.SIGINT).toBeDefined();
+    expect(handlers.SIGTERM).toBeDefined();
+
+    handlers.SIGINT!();
+    expect(shutdownCalled).toBe(1);
+    expect(exitCode).toBe(130);
+  });
+
+  it('SIGTERM invokes onShutdown and exits 143', () => {
+    const handlers: Record<string, () => void> = {};
+    let exitCode: number | null = null;
+    let shutdownCalled = 0;
+    registerShutdownHandlers({
+      onShutdown: () => { shutdownCalled++; },
+      target: {
+        on: (sig, listener) => { handlers[sig] = listener; },
+        exit: (code) => { exitCode = code; },
+      },
+    });
+    handlers.SIGTERM!();
+    expect(shutdownCalled).toBe(1);
+    expect(exitCode).toBe(143);
+  });
+
+  it('double signal fires onShutdown once (idempotent)', () => {
+    const handlers: Record<string, () => void> = {};
+    const exitCodes: number[] = [];
+    let shutdownCalled = 0;
+    registerShutdownHandlers({
+      onShutdown: () => { shutdownCalled++; },
+      target: {
+        on: (sig, listener) => { handlers[sig] = listener; },
+        exit: (code) => { exitCodes.push(code); },
+      },
+    });
+    handlers.SIGINT!();
+    handlers.SIGINT!();
+    handlers.SIGTERM!();
+    expect(shutdownCalled).toBe(1);
+    // still only one exit call — once signaled, later signals no-op
+    expect(exitCodes).toEqual([130]);
+  });
+
+  it('onShutdown throwing does not prevent exit', () => {
+    const handlers: Record<string, () => void> = {};
+    let exitCode: number | null = null;
+    registerShutdownHandlers({
+      onShutdown: () => { throw new Error('release failed'); },
+      target: {
+        on: (sig, listener) => { handlers[sig] = listener; },
+        exit: (code) => { exitCode = code; },
+      },
+    });
+    expect(() => handlers.SIGINT!()).not.toThrow();
+    expect(exitCode).toBe(130);
   });
 });

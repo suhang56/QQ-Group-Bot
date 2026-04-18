@@ -349,7 +349,11 @@ chat.setRelationshipSource(relationshipTracker);
 // W-A: honest-gaps tracker — streamed per-message from router.dispatch via
 // chat.recordHonestGapsMessage, and read back in _buildGroupIdentityPrompt via
 // chat.honestGapsSource. Same instance handles both interfaces.
-const honestGapsTracker = new HonestGapsTracker(db.honestGaps);
+// UR-N M5: pass learned_facts + meme_graph so the tracker drops terms the bot
+// already has grounding for — avoids "honest gap" + "learned fact" on same term.
+const honestGapsTracker = new HonestGapsTracker(db.honestGaps, {
+  known: { learnedFacts: db.learnedFacts, memeGraph: db.memeGraph },
+});
 chat.setHonestGapsSource(honestGapsTracker);
 chat.setHonestGapsTracker(honestGapsTracker);
 

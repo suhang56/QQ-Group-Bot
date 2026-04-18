@@ -1,7 +1,11 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
 import { HonestGapsTracker, formatHonestGapsBlock, MAX_TERM_LEN } from '../src/modules/honest-gaps.js';
-import type { IHonestGapsRepository, HonestGapsRow } from '../src/storage/db.js';
+import type {
+  IHonestGapsRepository, HonestGapsRow,
+  ILearnedFactsRepository, LearnedFact,
+  IMemeGraphRepo, MemeGraphEntry,
+} from '../src/storage/db.js';
 import { initLogger } from '../src/utils/logger.js';
 
 initLogger({ level: 'silent' });
@@ -132,6 +136,138 @@ describe('HonestGapsTracker.recordMessage', () => {
     const g2 = repo.getTopTerms('g2', 1, 10);
     expect(g1[0]!.seenCount).toBe(2);
     expect(g2[0]!.seenCount).toBe(1);
+  });
+});
+
+// UR-N M5: filter terms already grounded in learned_facts / meme_graph
+describe('HonestGapsTracker.formatForPrompt UR-N filter', () => {
+  function makeLearnedFactsRepo(facts: LearnedFact[]): ILearnedFactsRepository {
+    return {
+      listActive: (_g: string, _l: number) => facts,
+    } as unknown as ILearnedFactsRepository;
+  }
+
+  function makeMemeRepo(entries: MemeGraphEntry[]): IMemeGraphRepo {
+    return {
+      listActive: (_g: string, _l: number) => entries,
+    } as unknown as IMemeGraphRepo;
+  }
+
+  function mkFact(fact: string, extra: Partial<LearnedFact> = {}): LearnedFact {
+    return {
+      id: 1, groupId: 'g1', topic: null, fact,
+      canonicalForm: null, personaForm: null,
+      sourceUserId: null, sourceUserNickname: null, sourceMsgId: null,
+      botReplyId: null, confidence: 0.9, status: 'active',
+      createdAt: 0, updatedAt: 0, embedding: null,
+      ...extra,
+    } as LearnedFact;
+  }
+
+  function mkMeme(canonical: string, variants: string[] = []): MemeGraphEntry {
+    return {
+      id: 1, groupId: 'g1', canonical, variants, meaning: 'm',
+      originEvent: null, originMsgId: null, originUserId: null, originTs: null,
+      firstSeenCount: 1, totalCount: 1, confidence: 0.9, status: 'active',
+      embeddingVec: null, createdAt: 0, updatedAt: 0,
+    } as MemeGraphEntry;
+  }
+
+  it('drops term that is substring of an existing learned fact', () => {
+    const repo = new FakeRepo();
+    // record "xtt" 10 times so it passes minSeen
+    for (let i = 0; i < 10; i++) repo.upsert('g1', 'xtt', 1_700_000_000 + i);
+    // record "unrelated" 10 times — should survive
+    for (let i = 0; i < 10; i++) repo.upsert('g1', 'unrelated', 1_700_000_000 + i);
+
+    const tracker = new HonestGapsTracker(repo, {
+      minSeen: 5,
+      known: {
+        learnedFacts: makeLearnedFactsRepo([
+          mkFact('xtt 在波士顿读书'),
+        ]),
+      },
+    });
+    const out = tracker.formatForPrompt('g1');
+    expect(out).toContain('unrelated');
+    expect(out).not.toContain('xtt');
+  });
+
+  it('drops term that is substring of canonical_form or persona_form', () => {
+    const repo = new FakeRepo();
+    for (let i = 0; i < 10; i++) repo.upsert('g1', 'ygfn', 1_700_000_000 + i);
+    for (let i = 0; i < 10; i++) repo.upsert('g1', 'survives', 1_700_000_000 + i);
+
+    const tracker = new HonestGapsTracker(repo, {
+      minSeen: 5,
+      known: {
+        learnedFacts: makeLearnedFactsRepo([
+          mkFact('abc', { canonicalForm: '羊宫妃那(ygfn)给凑友希那配音', personaForm: null }),
+        ]),
+      },
+    });
+    const out = tracker.formatForPrompt('g1');
+    expect(out).toContain('survives');
+    expect(out).not.toContain('ygfn');
+  });
+
+  it('drops term that matches a meme_graph canonical or variant', () => {
+    const repo = new FakeRepo();
+    for (let i = 0; i < 10; i++) repo.upsert('g1', 'jtty', 1_700_000_000 + i);
+    for (let i = 0; i < 10; i++) repo.upsert('g1', '智械危机', 1_700_000_000 + i);
+    for (let i = 0; i < 10; i++) repo.upsert('g1', 'safe', 1_700_000_000 + i);
+
+    const tracker = new HonestGapsTracker(repo, {
+      minSeen: 5,
+      known: {
+        memeGraph: makeMemeRepo([
+          mkMeme('jtty'),
+          mkMeme('X曲', ['智械危机', 'SoulWave']),
+        ]),
+      },
+    });
+    const out = tracker.formatForPrompt('g1');
+    expect(out).toContain('safe');
+    expect(out).not.toContain('jtty');
+    expect(out).not.toContain('智械危机');
+  });
+
+  it('case-insensitive substring match across known haystack', () => {
+    const repo = new FakeRepo();
+    for (let i = 0; i < 10; i++) repo.upsert('g1', 'ROSELIA', 1_700_000_000 + i);
+    const tracker = new HonestGapsTracker(repo, {
+      minSeen: 5,
+      known: {
+        learnedFacts: makeLearnedFactsRepo([mkFact('roselia 是一个乐队')]),
+      },
+    });
+    const out = tracker.formatForPrompt('g1');
+    expect(out).not.toContain('ROSELIA');
+    expect(out).not.toContain('roselia');
+  });
+
+  it('no known sources → old behavior preserved', () => {
+    const repo = new FakeRepo();
+    for (let i = 0; i < 10; i++) repo.upsert('g1', 'unknown', 1_700_000_000 + i);
+    const tracker = new HonestGapsTracker(repo, { minSeen: 5 });
+    const out = tracker.formatForPrompt('g1');
+    expect(out).toContain('unknown');
+  });
+
+  it('learnedFacts throwing does not break formatForPrompt', () => {
+    const repo = new FakeRepo();
+    for (let i = 0; i < 10; i++) repo.upsert('g1', 'term', 1_700_000_000 + i);
+    const throwingRepo = {
+      listActive: () => { throw new Error('db down'); },
+    } as unknown as ILearnedFactsRepository;
+    const tracker = new HonestGapsTracker(repo, {
+      minSeen: 5,
+      known: { learnedFacts: throwingRepo },
+    });
+    expect(() => tracker.formatForPrompt('g1')).not.toThrow();
+    const out = tracker.formatForPrompt('g1');
+    // fallback: since haystack is empty after the catch, term still rendered
+    expect(out).toContain('term');
   });
 });
 

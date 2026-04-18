@@ -262,6 +262,39 @@ export async function runDryRun(db: DatabaseSync, groupId: string, opts: DryRunO
   return { messageCount, chunkCount };
 }
 
+// ---- Shutdown handlers (UR-N M1) ----
+
+export interface ShutdownOpts {
+  onShutdown: () => void;
+  /** Injection point for tests — defaults to the real process. */
+  target?: {
+    on: (signal: 'SIGINT' | 'SIGTERM', listener: () => void) => void;
+    exit: (code: number) => void;
+  };
+}
+
+/**
+ * Wire SIGINT + SIGTERM to invoke `onShutdown` (idempotent) and then exit
+ * with POSIX-conventional codes (130 for SIGINT, 143 for SIGTERM). Exported
+ * so tests can drive it against a fake `target`.
+ */
+export function registerShutdownHandlers(opts: ShutdownOpts): void {
+  const target = opts.target ?? {
+    on: (sig, listener) => { process.on(sig, listener); },
+    exit: (code) => { process.exit(code); },
+  };
+  let signaled = false;
+  const handleSignal = (code: number): void => {
+    if (signaled) return;
+    signaled = true;
+    console.error(`[INFO] received signal ${code}; releasing resources and exiting`);
+    try { opts.onShutdown(); } catch { /* noop */ }
+    target.exit(code);
+  };
+  target.on('SIGINT', () => handleSignal(130));
+  target.on('SIGTERM', () => handleSignal(143));
+}
+
 // ---- Main (live path) ----
 
 async function sleep(ms: number): Promise<void> {
@@ -339,6 +372,16 @@ async function main(): Promise<void> {
     database.close();
     process.exit(3);
   }
+
+  // UR-N quality M1: Ctrl-C / SIGTERM must release the lockfile and close the
+  // DB before exit; otherwise the next run trips on a stale lock until the
+  // 6-hour timeout.
+  registerShutdownHandlers({
+    onShutdown: () => {
+      try { lock.release(); } catch { /* noop */ }
+      try { database.close(); } catch { /* noop */ }
+    },
+  });
 
   try {
     const progress = opts.resume ? readProgress(opts.group, { dataRoot }) : { entries: [], latestByStep: new Map<string, ProgressEntry>() };
