@@ -403,6 +403,14 @@ export class Router implements IRouter {
         role: msg.role ?? 'member',
       });
 
+      // W-A: honest-gaps — stream per-message token counts. Skip bot's own
+      // messages so the signal reflects the group's vocabulary, not the bot's.
+      // Optional-call: older chat-module stubs in tests don't implement the
+      // method, so guard with a typeof check instead of bare `?.call`.
+      if (msg.userId !== (this.botUserId ?? '') && typeof this.chatModule?.recordHonestGapsMessage === 'function') {
+        this.chatModule.recordHonestGapsMessage(msg.groupId, msg.content, Date.now());
+      }
+
       // Live sticker capture: record mface + image stickers (sub_type=1) seen in the wild
       if (config.liveStickerCaptureEnabled) {
         this._captureLiveStickers(msg);

@@ -543,3 +543,17 @@ CREATE TABLE IF NOT EXISTS group_diary (
   UNIQUE(group_id, period_start, period_end, kind)
 );
 CREATE INDEX IF NOT EXISTS idx_group_diary_lookup ON group_diary(group_id, kind, period_end DESC);
+
+-- honest_gaps (W-A): per-group tracker of terms the group uses often but that
+-- the bot isn't grounded on. Streamed from every incoming group message; hot
+-- terms (seen_count >= threshold) are formatted into the chat system prompt so
+-- the bot can answer "啥来的" honestly instead of confabulating.
+CREATE TABLE IF NOT EXISTS honest_gaps (
+  group_id    TEXT    NOT NULL,
+  term        TEXT    NOT NULL,
+  seen_count  INTEGER NOT NULL DEFAULT 1,
+  first_seen  INTEGER NOT NULL,
+  last_seen   INTEGER NOT NULL,
+  PRIMARY KEY (group_id, term)
+);
+CREATE INDEX IF NOT EXISTS idx_honest_gaps_group_count ON honest_gaps(group_id, seen_count DESC);

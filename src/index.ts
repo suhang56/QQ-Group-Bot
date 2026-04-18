@@ -49,6 +49,7 @@ import { FatigueModule } from './modules/fatigue.js';
 import { PreChatJudge } from './modules/pre-chat-judge.js';
 import { ProactiveEngine, loadProactiveEngineConfig } from './modules/proactive-engine.js';
 import { JargonMiner } from './modules/jargon-miner.js';
+import { HonestGapsTracker } from './modules/honest-gaps.js';
 import { PhraseMiner } from './modules/phrase-miner.js';
 import { MemeClusterer } from './modules/meme-clusterer.js';
 import { RatingPortalServer } from './server/rating-portal.js';
@@ -344,6 +345,13 @@ const relationshipTracker = new RelationshipTracker({
 chat.setExpressionSource(expressionLearner);
 chat.setStyleSource(styleLearner);
 chat.setRelationshipSource(relationshipTracker);
+
+// W-A: honest-gaps tracker — streamed per-message from router.dispatch via
+// chat.recordHonestGapsMessage, and read back in _buildGroupIdentityPrompt via
+// chat.honestGapsSource. Same instance handles both interfaces.
+const honestGapsTracker = new HonestGapsTracker(db.honestGaps);
+chat.setHonestGapsSource(honestGapsTracker);
+chat.setHonestGapsTracker(honestGapsTracker);
 
 const affinity = new AffinityModule(db.rawDb);
 // M6.2b: wire affinity producer + consumer into chat scoring / userContent.
