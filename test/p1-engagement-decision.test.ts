@@ -27,6 +27,7 @@ const BASE_SIGNALS: EngagementSignals = {
   addresseeIsOther: false,
   awkwardVeto: false,
   moodLevel: 'normal',
+  metaIdentityBonus: 0,
 };
 
 function signals(overrides: Partial<EngagementSignals>): EngagementSignals {
@@ -279,15 +280,27 @@ describe('makeEngagementDecision', () => {
   });
 
   // ── Gate 3.5c (M7.1) + Gate 6: relevance override ──────────────────────
-  it('M7.1: relevanceOverride=engage forces engage when score is below minScore', () => {
+  it('M7.1: relevanceOverride=engage adds +0.2 bonus, cannot rescue far-below-threshold score', () => {
+    // non-direct bar = 0.5 * 1.5 = 0.75. 0.1 + 0.2 = 0.3 < 0.75 → skip
     const d = makeEngagementDecision(signals({
       relevanceOverride: 'engage',
       participationScore: 0.1,
       minScore: 0.5,
     }));
+    expect(d.shouldReply).toBe(false);
+    expect(d.strength).toBe('skip');
+  });
+
+  it('M7.1: relevanceOverride=engage +0.2 bonus tips borderline score over bar', () => {
+    // non-direct bar = 0.5 * 1.5 = 0.75. 0.55 + 0.2 = 0.75 >= 0.75 → engage
+    const d = makeEngagementDecision(signals({
+      relevanceOverride: 'engage',
+      participationScore: 0.55,
+      minScore: 0.5,
+    }));
     expect(d.shouldReply).toBe(true);
     expect(d.strength).toBe('engage');
-    expect(d.reason).toContain('pre-chat judge');
+    expect(d.reason).toContain('llm-bonus');
   });
 
   it('M7.1: relevanceOverride=skip + not direct → skip', () => {
@@ -314,7 +327,7 @@ describe('makeEngagementDecision', () => {
     const d = makeEngagementDecision(signals({
       relevanceOverride: 'engage',
       lastSpeechIgnored: true,
-      participationScore: 0.1,
+      participationScore: 0.6,   // 0.6 + 0.2 = 0.8 would pass Gate 6, but 5.5 fires first
     }));
     expect(d.shouldReply).toBe(false);
     expect(d.reason).toContain('ignored');
@@ -324,7 +337,7 @@ describe('makeEngagementDecision', () => {
     const d = makeEngagementDecision(signals({
       relevanceOverride: 'engage',
       consecutiveReplyCount: MAX_CONSECUTIVE_BOT_REPLIES,
-      participationScore: 0.1,
+      participationScore: 0.6,   // 0.6 + 0.2 = 0.8 would pass Gate 6, but 5.6 fires first
     }));
     expect(d.shouldReply).toBe(false);
     expect(d.reason).toContain('consecutive-reply cap');
@@ -340,12 +353,14 @@ describe('makeEngagementDecision', () => {
     expect(d.shouldReply).toBe(false);
   });
 
-  it('M7.1: relevanceOverride=engage reason uses "pre-chat judge: engage"', () => {
+  it('M7.1: relevanceOverride=engage reason mentions "llm-bonus" when bonus tips score', () => {
+    // 0.6 + 0.2 = 0.8 >= 0.75 bar
     const d = makeEngagementDecision(signals({
       relevanceOverride: 'engage',
-      participationScore: 0.1,
+      participationScore: 0.6,
     }));
-    expect(d.reason).toBe('pre-chat judge: engage');
+    expect(d.shouldReply).toBe(true);
+    expect(d.reason).toContain('llm-bonus 0.2');
   });
 
   it('M7.1: relevanceOverride=skip reason uses "pre-chat judge: skip"', () => {
@@ -353,6 +368,65 @@ describe('makeEngagementDecision', () => {
       relevanceOverride: 'skip',
     }));
     expect(d.reason).toBe('pre-chat judge: skip');
+  });
+
+  // ── M3: metaIdentityBonus semi-direct threshold ──────────────────────────
+  it('M3: metaIdentityBonus=0.6, chatMinScore=0.5, non-direct → engage (semi-direct bar)', () => {
+    // Effective bar = 0.5 * 1.0 (semi-direct) * 1.0 * 1.0 = 0.5. score 0.6 >= 0.5.
+    const d = makeEngagementDecision(signals({
+      participationScore: 0.6,
+      metaIdentityBonus: 0.6,
+      minScore: 0.5,
+    }));
+    expect(d.shouldReply).toBe(true);
+    expect(d.strength).toBe('engage');
+  });
+
+  it('M3: metaIdentityBonus=0 (bot inactive), chatMinScore=0.5, non-direct → skip (full 1.5x bar)', () => {
+    // Effective bar = 0.5 * 1.5 = 0.75. score 0.6 < 0.75 → skip.
+    // Simulates the lastProactiveReply > 3min path where factors.metaIdentityProbe=0.
+    const d = makeEngagementDecision(signals({
+      participationScore: 0.6,
+      metaIdentityBonus: 0,
+      minScore: 0.5,
+    }));
+    expect(d.shouldReply).toBe(false);
+    expect(d.strength).toBe('skip');
+  });
+
+  it('M3: metaIdentityBonus > 0 does NOT bypass Gate 5.5 (ignored)', () => {
+    const d = makeEngagementDecision(signals({
+      participationScore: 0.6,
+      metaIdentityBonus: 0.6,
+      lastSpeechIgnored: true,
+    }));
+    expect(d.shouldReply).toBe(false);
+    expect(d.reason).toContain('ignored');
+  });
+
+  // ── Lurker-default regression guard ──────────────────────────────────────
+  it('lurker default: non-direct casual chat with no special signals → skip', () => {
+    const d = makeEngagementDecision(signals({
+      participationScore: 0.2,    // well below any bar
+      minScore: 0.5,
+      metaIdentityBonus: 0,
+      relevanceOverride: null,
+    }));
+    expect(d.shouldReply).toBe(false);
+    expect(d.strength).toBe('skip');
+  });
+
+  // ── M2 bonus interaction with M3 semi-direct ─────────────────────────────
+  it('M2+M3: engage bonus + metaIdentityBonus both apply independently', () => {
+    // semi-direct bar = 0.5; 0.3 + 0.2 bonus = 0.5 >= 0.5 → engage
+    const d = makeEngagementDecision(signals({
+      participationScore: 0.3,
+      metaIdentityBonus: 0.3,
+      relevanceOverride: 'engage',
+      minScore: 0.5,
+    }));
+    expect(d.shouldReply).toBe(true);
+    expect(d.reason).toContain('llm-bonus');
   });
 });
 

@@ -81,6 +81,7 @@ const BASE_SIGNALS: EngagementSignals = {
   addresseeIsOther: false,
   awkwardVeto: false,
   moodLevel: 'normal',
+  metaIdentityBonus: 0,
 };
 
 function signals(overrides: Partial<EngagementSignals>): EngagementSignals {
