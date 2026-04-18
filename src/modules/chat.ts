@@ -1794,8 +1794,34 @@ export class ChatModule implements IChatModule {
       }
     }
 
+    // Early Path A check: if message contains a known learned_fact term, upgrade
+    // react → generate so the bot can answer rather than deflecting confused.
+    let hasKnownFactMatch = false;
+    if (engagementDecision.strength === 'react' && this.db.learnedFacts && !isAdversarial) {
+      try {
+        const candidates = extractCandidateTerms(triggerMessage.content);
+        if (candidates.length > 0) {
+          const activeFacts = this.db.learnedFacts.listActive(groupId, 500);
+          hasKnownFactMatch = candidates.some(term => {
+            const t = term.toLowerCase();
+            return activeFacts.some(f => {
+              const canonical = (f.canonicalForm ?? f.fact ?? '').toLowerCase();
+              const persona = (f.personaForm ?? '').toLowerCase();
+              const topic = (f.topic ?? '').toLowerCase();
+              return canonical.includes(t) || persona.includes(t) || topic.includes(t);
+            });
+          });
+          if (hasKnownFactMatch) {
+            this.logger.info({ groupId, candidates }, 'chat: react->generate override (known fact match)');
+          }
+        }
+      } catch (err) {
+        this.logger.warn({ err, groupId }, 'chat: react-override pre-check failed');
+      }
+    }
+
     // React path: deflection without calling Claude
-    if (engagementDecision.strength === 'react') {
+    if (engagementDecision.strength === 'react' && !hasKnownFactMatch) {
       // M6.4: deflections do not flow through _recordOwnReply, so bump the
       // consecutive-reply counter explicitly here. Covers all 6 deflection
       // branches below (curse/harass/probe/task/recite/memory/confused).
