@@ -23,7 +23,8 @@ import {
   prevWeekShanghaiWindow,
   prevMonthShanghaiWindow,
 } from '../src/modules/diary-distiller.js';
-import { REFLECTION_MODEL } from '../src/config.js';
+
+export const DEFAULT_MODEL = 'claude-sonnet-4-6[1m]';
 
 const DAY_MS = 86_400_000;
 
@@ -40,7 +41,7 @@ export function parseArgs(argv: string[]): Args {
     group: '',
     days: 7,
     kind: 'daily',
-    model: REFLECTION_MODEL,
+    model: DEFAULT_MODEL,
     dryRun: false,
   };
 
@@ -55,7 +56,7 @@ export function parseArgs(argv: string[]): Args {
     } else if (flag === '--kind') {
       args.kind = (argv[++i] ?? 'daily') as Args['kind'];
     } else if (flag === '--model') {
-      args.model = argv[++i] ?? REFLECTION_MODEL;
+      args.model = argv[++i] ?? DEFAULT_MODEL;
     }
   }
 
@@ -205,6 +206,21 @@ export async function runMonthly(
   }
 }
 
+export function buildDistiller(opts: {
+  claude: InstanceType<typeof ClaudeClient>;
+  db: Database;
+  botUserId: string;
+  model: string;
+}): DiaryDistiller {
+  return new DiaryDistiller({
+    claude: opts.claude,
+    messages: opts.db.messages,
+    groupDiary: opts.db.groupDiary,
+    botUserId: opts.botUserId,
+    model: opts.model,
+  });
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   checkRequiredEnv();
@@ -218,19 +234,27 @@ async function main(): Promise<void> {
   try {
     const claude = new ClaudeClient();
     const botUserId = process.env['BOT_QQ_ID']!;
-    const distiller = new DiaryDistiller({
-      claude,
-      messages: db.messages,
-      groupDiary: db.groupDiary,
-      botUserId,
-      model: args.model,
-    });
+    const distiller = buildDistiller({ claude, db, botUserId, model: args.model });
     const windows = buildDayWindows(args.days);
 
     if (args.dryRun) {
-      for (const w of windows) {
-        const existing = db.groupDiary.findByPeriod(args.group, 'daily', w.startSec, w.endSec);
-        console.log(`[DRY]  ${w.label} daily would generate (window ${w.startSec}-${w.endSec}, ${existing.length} existing rows)`);
+      if (args.kind === 'daily' || args.kind === 'all') {
+        for (const w of windows) {
+          const existing = db.groupDiary.findByPeriod(args.group, 'daily', w.startSec, w.endSec);
+          console.log(`[DRY]  ${w.label} daily would generate (window ${w.startSec}-${w.endSec}, ${existing.length} existing rows)`);
+        }
+      }
+      if (args.kind === 'weekly' || args.kind === 'all') {
+        const { startSec: ws, endSec: we } = prevWeekShanghaiWindow(Date.now());
+        const existingW = db.groupDiary.findByPeriod(args.group, 'weekly', ws, we);
+        const dailiesW = db.groupDiary.findByPeriod(args.group, 'daily', ws, we);
+        console.log(`[DRY]  week ${shanghaiDateLabel(ws)}-${shanghaiDateLabel(we)} weekly would generate (${dailiesW.length}/7 daily rows, ${existingW.length} existing)`);
+      }
+      if (args.kind === 'monthly' || args.kind === 'all') {
+        const { startSec: ms, endSec: me } = prevMonthShanghaiWindow(Date.now());
+        const existingM = db.groupDiary.findByPeriod(args.group, 'monthly', ms, me);
+        const weekliesM = db.groupDiary.findByPeriod(args.group, 'weekly', ms, me);
+        console.log(`[DRY]  month ${shanghaiDateLabel(ms)}-${shanghaiDateLabel(me)} monthly would generate (${weekliesM.length} weekly rows, ${existingM.length} existing)`);
       }
       return;
     }

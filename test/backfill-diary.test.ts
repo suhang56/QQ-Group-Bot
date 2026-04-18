@@ -2,8 +2,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   parseArgs,
   buildDayWindows,
+  buildDistiller,
   shanghaiDateLabel,
   runDaily,
+  DEFAULT_MODEL,
   Args,
 } from '../scripts/backfill-diary.js';
 import type { DiaryDistiller } from '../src/modules/diary-distiller.js';
@@ -152,11 +154,24 @@ describe('runDaily idempotency', () => {
 // ============================================================================
 
 describe('model override', () => {
-  it('--model gemini-2.5-flash is parsed and available for DiaryDistiller construction', () => {
+  it('default model is claude-sonnet-4-6[1m]', () => {
+    const args = parseArgs(['--group', 'g1']);
+    expect(args.model).toBe('claude-sonnet-4-6[1m]');
+    expect(args.model).toBe(DEFAULT_MODEL);
+  });
+
+  it('--model gemini-2.5-flash plumbs into buildDistiller and returns a DiaryDistiller', () => {
     const args = parseArgs(['--group', 'g1', '--model', 'gemini-2.5-flash']);
     expect(args.model).toBe('gemini-2.5-flash');
-    // DiaryDistiller receives args.model — verified by construction in main()
-    // This test confirms parseArgs plumbs it through correctly
+
+    // buildDistiller is a thin wrapper — verify it forwards opts.model by
+    // inspecting the constructed DiaryDistiller's private model field via cast
+    const mockDb = makeMockDb() as unknown as Database;
+    const mockClaude = {} as Parameters<typeof buildDistiller>[0]['claude'];
+    const distiller = buildDistiller({ claude: mockClaude, db: mockDb, botUserId: 'bot1', model: args.model });
+
+    // Cast to access private field — this verifies the value reaches the constructor
+    expect((distiller as unknown as Record<string, unknown>)['model']).toBe('gemini-2.5-flash');
   });
 });
 
