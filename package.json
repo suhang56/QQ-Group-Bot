@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "cross-env NODE_OPTIONS=--experimental-sqlite tsx src/index.ts",
     "start": "cross-env NODE_OPTIONS=--experimental-sqlite node dist/index.js",
-    "build": "tsc",
+    "build": "tsc && node -e \"const fs=require('fs'),path=require('path');const src='src/server',dst='dist/server';fs.mkdirSync(dst,{recursive:true});for(const f of fs.readdirSync(src))if(f.endsWith('.html'))fs.copyFileSync(path.join(src,f),path.join(dst,f));\"",
     "test": "cross-env NODE_OPTIONS=--experimental-sqlite vitest run --coverage",
     "test:watch": "cross-env NODE_OPTIONS=--experimental-sqlite vitest",
     "test:integration": "cross-env NODE_OPTIONS=--experimental-sqlite vitest run --testPathPattern=integration",
