@@ -1613,9 +1613,22 @@ export class ChatModule implements IChatModule {
     const isAdversarial = isProbe || isTask || isInject || isHarass;
 
     // ── Comprehension scoring (BEFORE Claude call) ────────────────────
+    const extraJargon: string[] = [];
+    try {
+      if (this.db.learnedFacts) {
+        for (const f of this.db.learnedFacts.listActive(groupId, 500)) {
+          if (f.topic) {
+            const m = f.topic.match(/(?:user-taught|opus-classified:slang|opus-rest-classified:slang|opus-classified:fandom|opus-rest-classified:fandom):([^:]+)/);
+            if (m && m[1] && m[1].length <= 15) extraJargon.push(m[1].toLowerCase());
+          }
+        }
+      }
+    } catch (err) {
+      this.logger.warn({ err, groupId }, 'ComprehensionCtx: learned_facts extract failed');
+    }
     const comprehensionCtx: ComprehensionContext = {
       loreKeywords: this._getLoreKeywords(groupId),
-      jargonTerms: loadGroupJargon(this.db.rawDb, groupId).map(j => j.term.toLowerCase()),
+      jargonTerms: [...loadGroupJargon(this.db.rawDb, groupId).map(j => j.term.toLowerCase()), ...extraJargon],
       aliasKeys: this._getAliasKeys(groupId),
     };
     const { score: comprehensionScore } = scoreComprehensionSafe(triggerMessage.content, comprehensionCtx);
