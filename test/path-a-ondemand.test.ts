@@ -279,4 +279,71 @@ describe('OnDemandLookup.lookupTerm', () => {
     const result = await lookup.lookupTerm('g1', 'xtt', 'u1');
     expect(result).toEqual({ type: 'unknown' });
   });
+
+  it('case 17: learned_facts shortcut: canonical match -> returns found without FTS call', async () => {
+    const messagesRepo = makeMessageRepo([]);
+    const factsRepo = makeFactsRepo();
+    (factsRepo.listActive as ReturnType<typeof vi.fn>).mockReturnValue([
+      {
+        id: 4387, groupId: 'g1', topic: 'jargon', fact: 'xtt的意思是小团体',
+        canonicalForm: 'xtt的意思是小团体', personaForm: null,
+        sourceUserId: null, sourceUserNickname: '[test]', sourceMsgId: null,
+        botReplyId: null, confidence: 0.9, status: 'active',
+        createdAt: 0, updatedAt: 0, embedding: null,
+      },
+    ]);
+    const llm = { complete: vi.fn() };
+    const lookup = new OnDemandLookup({
+      db: { learnedFacts: factsRepo, messages: messagesRepo },
+      llm,
+      model: 'test-model',
+      logger: makeLogger(),
+    });
+    const result = await lookup.lookupTerm('g1', 'xtt', 'u1');
+    expect(result).toEqual({ type: 'found', meaning: 'xtt的意思是小团体' });
+    expect(messagesRepo.searchFts).not.toHaveBeenCalled();
+    expect(llm.complete).not.toHaveBeenCalled();
+  });
+
+  it('case 18: learned_facts shortcut: no match -> falls through to FTS and LLM', async () => {
+    const factsRepo = makeFactsRepo();
+    // listActive already returns [] by default from makeFactsRepo
+    const llm = makeLlm({ meaning: 'someone', confidence: 8, hasAnswer: true });
+    const messagesRepo = makeMessageRepo(FIVE_ROWS);
+    const lookup = new OnDemandLookup({
+      db: { learnedFacts: factsRepo, messages: messagesRepo },
+      llm,
+      model: 'test-model',
+      logger: makeLogger(),
+    });
+    const result = await lookup.lookupTerm('g1', 'xtt', 'u1');
+    expect(result).toEqual({ type: 'found', meaning: 'someone' });
+    expect(messagesRepo.searchFts).toHaveBeenCalled();
+    expect(llm.complete).toHaveBeenCalled();
+  });
+
+  it('case 19: learned_facts shortcut: persona_form match -> returns found', async () => {
+    const messagesRepo = makeMessageRepo([]);
+    const factsRepo = makeFactsRepo();
+    (factsRepo.listActive as ReturnType<typeof vi.fn>).mockReturnValue([
+      {
+        id: 9001, groupId: 'g1', topic: 'alias', fact: '羊宫妃那',
+        canonicalForm: '羊宫妃那', personaForm: 'ygfn是羊宫妃那',
+        sourceUserId: null, sourceUserNickname: '[test]', sourceMsgId: null,
+        botReplyId: null, confidence: 0.9, status: 'active',
+        createdAt: 0, updatedAt: 0, embedding: null,
+      },
+    ]);
+    const llm = { complete: vi.fn() };
+    const lookup = new OnDemandLookup({
+      db: { learnedFacts: factsRepo, messages: messagesRepo },
+      llm,
+      model: 'test-model',
+      logger: makeLogger(),
+    });
+    const result = await lookup.lookupTerm('g1', 'ygfn', 'u1');
+    expect(result).toEqual({ type: 'found', meaning: 'ygfn是羊宫妃那' });
+    expect(messagesRepo.searchFts).not.toHaveBeenCalled();
+    expect(llm.complete).not.toHaveBeenCalled();
+  });
 });

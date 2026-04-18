@@ -87,6 +87,27 @@ export class OnDemandLookup {
       return null;
     }
 
+    // Shortcut: check learned_facts for exact canonical match on term before hitting FTS
+    const normalizedTerm = term.trim();
+    if (normalizedTerm.length >= 2) {
+      try {
+        const factRows = this.db.learnedFacts.listActive(groupId, 500);
+        const match = factRows.find(r => {
+          const canonical = (r.canonicalForm ?? r.fact ?? '').toLowerCase();
+          const persona = (r.personaForm ?? '').toLowerCase();
+          const t = normalizedTerm.toLowerCase();
+          return canonical.includes(t) || persona.includes(t) || (r.topic ?? '').toLowerCase().includes(t);
+        });
+        if (match) {
+          const meaning = match.personaForm ?? match.fact ?? '';
+          this.logger.info({ groupId, term, factId: match.id }, 'ondemand-lookup: learned_facts shortcut hit');
+          return { type: 'found', meaning };
+        }
+      } catch (err) {
+        this.logger.warn({ err, term }, 'ondemand-lookup: learned_facts shortcut failed -- falling through');
+      }
+    }
+
     const ftsQuery = sanitizeFtsQuery(term);
     if (!ftsQuery) return null;
 
