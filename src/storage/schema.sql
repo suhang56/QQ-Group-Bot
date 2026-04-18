@@ -522,3 +522,24 @@ CREATE TABLE IF NOT EXISTS mood_state (
   arousal     REAL    NOT NULL DEFAULT 0,
   last_update INTEGER NOT NULL
 );
+
+-- group_diary (W-B): daily/weekly/monthly rollup of group chatter, generated
+-- by DiaryDistiller via REFLECTION_MODEL. Daily rows are produced nightly and
+-- consumed by weekly rollup (which deletes them); weeklies by monthly rollup.
+-- period_start/period_end are unix seconds marking Asia/Shanghai local-day
+-- boundaries. UNIQUE(group_id, period_start, period_end, kind) makes duplicate
+-- cron ticks idempotent.
+CREATE TABLE IF NOT EXISTS group_diary (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id      TEXT    NOT NULL,
+  period_start  INTEGER NOT NULL,
+  period_end    INTEGER NOT NULL,
+  kind          TEXT    NOT NULL CHECK (kind IN ('daily','weekly','monthly')),
+  summary       TEXT    NOT NULL,
+  top_topics    TEXT    NOT NULL DEFAULT '[]',
+  top_speakers  TEXT    NOT NULL DEFAULT '[]',
+  mood          TEXT,
+  created_at    INTEGER NOT NULL,
+  UNIQUE(group_id, period_start, period_end, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_group_diary_lookup ON group_diary(group_id, kind, period_end DESC);

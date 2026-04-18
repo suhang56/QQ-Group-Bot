@@ -187,6 +187,44 @@ export interface IMessageRepository {
   findNearTimestamp(groupId: string, userId: string, timestamp: number, windowSec: number): Message | null;
   /** Get messages around a timestamp in a group (±windowSec, up to limit). For mod-review context. */
   getAroundTimestamp(groupId: string, timestamp: number, windowSec: number, limit: number): Message[];
+  /** Messages inside [startSec, endSec] (both inclusive). Used by diary-distiller for per-day windows. */
+  getByTimeRange(groupId: string, startSec: number, endSec: number): Message[];
+  /** Distinct group_ids with any non-deleted message since sinceSec. Used by DiaryDistiller.runForAllGroups. */
+  listActiveGroupIds(sinceSec: number): string[];
+}
+
+// ---- Diary types (W-B) ----
+
+export type DiaryKind = 'daily' | 'weekly' | 'monthly';
+
+export interface DiaryTopSpeaker {
+  userId: string;
+  nickname: string;
+  count: number;
+}
+
+export interface DiaryEntry {
+  id: number;
+  groupId: string;
+  periodStart: number;
+  periodEnd: number;
+  kind: DiaryKind;
+  summary: string;
+  /** JSON-encoded array of topic strings, as stored. */
+  topTopics: string;
+  /** JSON-encoded array of DiaryTopSpeaker entries, as stored. */
+  topSpeakers: string;
+  mood: string | null;
+  createdAt: number;
+}
+
+export interface IGroupDiaryRepository {
+  /** Returns newly-inserted row id, or 0 if the UNIQUE constraint swallowed the insert. */
+  insert(entry: Omit<DiaryEntry, 'id'>): number;
+  findLatestByKind(groupId: string, kind: DiaryKind): DiaryEntry | null;
+  findByPeriod(groupId: string, kind: DiaryKind, periodStart: number, periodEnd: number): DiaryEntry[];
+  findByGroupSince(groupId: string, sinceSec: number, limit: number): DiaryEntry[];
+  deleteByIds(ids: number[]): void;
 }
 
 export interface IUserRepository {
@@ -979,6 +1017,20 @@ class MessageRepository implements IMessageRepository {
       `SELECT * FROM messages WHERE group_id = ? AND ABS(timestamp - ?) <= ? AND deleted = 0 ORDER BY timestamp ASC LIMIT ?`
     ).all(groupId, timestamp, windowSec, limit) as unknown as MessageRow[];
     return rows.map(msgFromRow);
+  }
+
+  getByTimeRange(groupId: string, startSec: number, endSec: number): Message[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM messages WHERE group_id = ? AND timestamp >= ? AND timestamp <= ? AND deleted = 0 ORDER BY timestamp ASC`
+    ).all(groupId, startSec, endSec) as unknown as MessageRow[];
+    return rows.map(msgFromRow);
+  }
+
+  listActiveGroupIds(sinceSec: number): string[] {
+    const rows = this.db.prepare(
+      `SELECT DISTINCT group_id FROM messages WHERE timestamp >= ? AND deleted = 0`
+    ).all(sinceSec) as Array<{ group_id: string }>;
+    return rows.map(r => r.group_id);
   }
 }
 
@@ -2689,6 +2741,89 @@ class MoodRepository implements IMoodRepository {
   }
 }
 
+// ---- Group diary repository (W-B) ----
+
+interface GroupDiaryRow {
+  id: number;
+  group_id: string;
+  period_start: number;
+  period_end: number;
+  kind: DiaryKind;
+  summary: string;
+  top_topics: string;
+  top_speakers: string;
+  mood: string | null;
+  created_at: number;
+}
+
+function diaryFromRow(row: GroupDiaryRow): DiaryEntry {
+  return {
+    id: row.id,
+    groupId: row.group_id,
+    periodStart: row.period_start,
+    periodEnd: row.period_end,
+    kind: row.kind,
+    summary: row.summary,
+    topTopics: row.top_topics,
+    topSpeakers: row.top_speakers,
+    mood: row.mood,
+    createdAt: row.created_at,
+  };
+}
+
+class GroupDiaryRepository implements IGroupDiaryRepository {
+  constructor(private readonly db: DatabaseSync) {}
+
+  insert(entry: Omit<DiaryEntry, 'id'>): number {
+    const result = this.db.prepare(
+      `INSERT OR IGNORE INTO group_diary
+       (group_id, period_start, period_end, kind, summary, top_topics, top_speakers, mood, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      entry.groupId,
+      entry.periodStart,
+      entry.periodEnd,
+      entry.kind,
+      entry.summary,
+      entry.topTopics,
+      entry.topSpeakers,
+      entry.mood,
+      entry.createdAt,
+    ) as { changes: number; lastInsertRowid: number | bigint };
+    return result.changes > 0 ? Number(result.lastInsertRowid) : 0;
+  }
+
+  findLatestByKind(groupId: string, kind: DiaryKind): DiaryEntry | null {
+    const row = this.db.prepare(
+      `SELECT * FROM group_diary WHERE group_id = ? AND kind = ? ORDER BY period_end DESC LIMIT 1`
+    ).get(groupId, kind) as GroupDiaryRow | undefined;
+    return row ? diaryFromRow(row) : null;
+  }
+
+  findByPeriod(groupId: string, kind: DiaryKind, periodStart: number, periodEnd: number): DiaryEntry[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM group_diary
+       WHERE group_id = ? AND kind = ? AND period_start >= ? AND period_end <= ?
+       ORDER BY period_start ASC`
+    ).all(groupId, kind, periodStart, periodEnd) as unknown as GroupDiaryRow[];
+    return rows.map(diaryFromRow);
+  }
+
+  findByGroupSince(groupId: string, sinceSec: number, limit: number): DiaryEntry[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM group_diary WHERE group_id = ? AND period_end >= ?
+       ORDER BY period_end DESC LIMIT ?`
+    ).all(groupId, sinceSec, limit) as unknown as GroupDiaryRow[];
+    return rows.map(diaryFromRow);
+  }
+
+  deleteByIds(ids: number[]): void {
+    if (ids.length === 0) return;
+    const placeholders = ids.map(() => '?').join(',');
+    this.db.prepare(`DELETE FROM group_diary WHERE id IN (${placeholders})`).run(...ids);
+  }
+}
+
 // ---- Main Database class ----
 
 export class Database {
@@ -2717,6 +2852,7 @@ export class Database {
   readonly mood: IMoodRepository;
   readonly memeGraph: IMemeGraphRepo;
   readonly phraseCandidates: IPhraseCandidatesRepo;
+  readonly groupDiary: IGroupDiaryRepository;
 
   private readonly _db: DatabaseSync;
 
@@ -2754,6 +2890,7 @@ export class Database {
     this.mood = new MoodRepository(this._db);
     this.memeGraph = new MemeGraphRepository(this._db);
     this.phraseCandidates = new PhraseCandidatesRepository(this._db);
+    this.groupDiary = new GroupDiaryRepository(this._db);
   }
 
   /** Execute arbitrary SQL — intended for bulk-import scripts and migrations only. */
@@ -3239,6 +3376,26 @@ export class Database {
         last_update INTEGER NOT NULL
       )
     `);
+
+    // group_diary (W-B): daily/weekly/monthly rollup. Same dual-write rationale
+    // as other newer tables — schema.sql covers fresh installs, this migration
+    // covers existing DBs (see feedback_sqlite_schema_migration.md).
+    this._db.exec(`
+      CREATE TABLE IF NOT EXISTS group_diary (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id      TEXT    NOT NULL,
+        period_start  INTEGER NOT NULL,
+        period_end    INTEGER NOT NULL,
+        kind          TEXT    NOT NULL CHECK (kind IN ('daily','weekly','monthly')),
+        summary       TEXT    NOT NULL,
+        top_topics    TEXT    NOT NULL DEFAULT '[]',
+        top_speakers  TEXT    NOT NULL DEFAULT '[]',
+        mood          TEXT,
+        created_at    INTEGER NOT NULL,
+        UNIQUE(group_id, period_start, period_end, kind)
+      )
+    `);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_group_diary_lookup ON group_diary(group_id, kind, period_end DESC)`);
   }
 
   /**
