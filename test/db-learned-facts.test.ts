@@ -209,6 +209,24 @@ describe('LearnedFactsRepository.insertOrSupersede', () => {
     expect(countByStatus('g1', 'active')).toBe(2);
   });
 
+  it('T6b: rollback — UPDATE succeeds but INSERT fails; superseded rows restored to active', () => {
+    // Insert a row matching the term so the UPDATE step will mark it superseded.
+    insertRaw('g1', 'xtt是某人', 'active', 'xtt的意思是某人');
+    expect(countByStatus('g1', 'active')).toBe(1);
+
+    // Pass null for fact (NOT NULL column) — this causes the INSERT to throw after UPDATE ran.
+    expect(() =>
+      db.learnedFacts.insertOrSupersede(
+        { groupId: 'g1', topic: null, fact: null as unknown as string, sourceUserId: null, sourceUserNickname: null, sourceMsgId: null, botReplyId: null, status: 'active' },
+        'xtt',
+      )
+    ).toThrow();
+
+    // ROLLBACK must have fired — original row still active, no superseded rows.
+    expect(countByStatus('g1', 'active')).toBe(1);
+    expect(countByStatus('g1', 'superseded')).toBe(0);
+  });
+
   it('T7: cross-group isolation — does not supersede other group rows', () => {
     insertRaw('g2', 'xtt是g2成员', 'active', 'xtt是g2成员');
     db.learnedFacts.insertOrSupersede(

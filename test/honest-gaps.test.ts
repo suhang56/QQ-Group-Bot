@@ -145,6 +145,7 @@ describe('HonestGapsTracker.formatForPrompt UR-N filter', () => {
   function makeLearnedFactsRepo(facts: LearnedFact[]): ILearnedFactsRepository {
     return {
       listActive: (_g: string, _l: number) => facts,
+      insertOrSupersede: () => ({ newId: 1, supersededCount: 0 }),
     } as unknown as ILearnedFactsRepository;
   }
 
@@ -260,6 +261,7 @@ describe('HonestGapsTracker.formatForPrompt UR-N filter', () => {
     for (let i = 0; i < 10; i++) repo.upsert('g1', 'term', 1_700_000_000 + i);
     const throwingRepo = {
       listActive: () => { throw new Error('db down'); },
+      insertOrSupersede: () => ({ newId: 1, supersededCount: 0 }),
     } as unknown as ILearnedFactsRepository;
     const tracker = new HonestGapsTracker(repo, {
       minSeen: 5,
