@@ -280,13 +280,13 @@ describe('OnDemandLookup.lookupTerm', () => {
     expect(result).toEqual({ type: 'unknown' });
   });
 
-  it('case 17: learned_facts shortcut: canonical match -> returns found without FTS call', async () => {
+  it('case 17: learned_facts shortcut: topic-term match -> returns found without FTS call', async () => {
     const messagesRepo = makeMessageRepo([]);
     const factsRepo = makeFactsRepo();
     (factsRepo.listActive as ReturnType<typeof vi.fn>).mockReturnValue([
       {
-        id: 4387, groupId: 'g1', topic: 'jargon', fact: 'xtt的意思是小团体',
-        canonicalForm: 'xtt的意思是小团体', personaForm: null,
+        id: 4387, groupId: 'g1', topic: 'user-taught:xtt', fact: 'xtt的意思是小团体',
+        canonicalForm: 'xtt的意思是小团体', personaForm: 'xtt=小团体',
         sourceUserId: null, sourceUserNickname: '[test]', sourceMsgId: null,
         botReplyId: null, confidence: 0.9, status: 'active',
         createdAt: 0, updatedAt: 0, embedding: null,
@@ -300,7 +300,7 @@ describe('OnDemandLookup.lookupTerm', () => {
       logger: makeLogger(),
     });
     const result = await lookup.lookupTerm('g1', 'xtt', 'u1');
-    expect(result).toEqual({ type: 'found', meaning: 'xtt的意思是小团体' });
+    expect(result).toEqual({ type: 'found', meaning: 'xtt=小团体' });
     expect(messagesRepo.searchFts).not.toHaveBeenCalled();
     expect(llm.complete).not.toHaveBeenCalled();
   });
@@ -322,13 +322,13 @@ describe('OnDemandLookup.lookupTerm', () => {
     expect(llm.complete).toHaveBeenCalled();
   });
 
-  it('case 19: learned_facts shortcut: persona_form match -> returns found', async () => {
+  it('case 19: learned_facts shortcut: opus-classified fandom topic-term match -> returns found', async () => {
     const messagesRepo = makeMessageRepo([]);
     const factsRepo = makeFactsRepo();
     (factsRepo.listActive as ReturnType<typeof vi.fn>).mockReturnValue([
       {
-        id: 9001, groupId: 'g1', topic: 'alias', fact: '羊宫妃那',
-        canonicalForm: '羊宫妃那', personaForm: 'ygfn是羊宫妃那',
+        id: 9001, groupId: 'g1', topic: 'opus-classified:fandom:ygfn', fact: '羊宫妃那',
+        canonicalForm: 'ygfn', personaForm: 'ygfn是羊宫妃那',
         sourceUserId: null, sourceUserNickname: '[test]', sourceMsgId: null,
         botReplyId: null, confidence: 0.9, status: 'active',
         createdAt: 0, updatedAt: 0, embedding: null,
@@ -440,6 +440,68 @@ describe('OnDemandLookup.lookupTerm', () => {
     });
     const result = await lookup.lookupTerm('g1', 'xtt', 'u1');
     expect(result).toEqual({ type: 'found', meaning: 'xtt=小团体' });
+    expect(llm.complete).not.toHaveBeenCalled();
+  });
+
+  it('case 23: shortcut no-match -- fact mentions term in persona but topic-term is different phrase', async () => {
+    // topic suffix is "羊宫妃那到底在不在这个群" not "ygfn" -- should NOT match query "ygfn"
+    const messagesRepo = makeMessageRepo([]);
+    const factsRepo = makeFactsRepo();
+    (factsRepo.listActive as ReturnType<typeof vi.fn>).mockReturnValue([
+      {
+        id: 6377, groupId: 'g1',
+        topic: 'opus-rest-classified:fandom:羊宫妃那到底在不在这个群',
+        fact: '调侃声优羊宫妃那(ygfn)是否真的在群里',
+        canonicalForm: '羊宫妃那到底在不在这个群',
+        personaForm: '调侃声优羊宫妃那(ygfn)是否真的在群里，是个群内梗',
+        sourceUserId: null, sourceUserNickname: '[opus]', sourceMsgId: null,
+        botReplyId: null, confidence: 0.7, status: 'active',
+        createdAt: 0, updatedAt: 0, embedding: null,
+      },
+    ]);
+    const llm = makeLlm({ meaning: 'unknown', confidence: 0, hasAnswer: false });
+    const lookup = new OnDemandLookup({
+      db: { learnedFacts: factsRepo, messages: messagesRepo },
+      llm,
+      model: 'test-model',
+      logger: makeLogger(),
+    });
+    // shortcut should NOT fire; falls through to FTS which returns 0 rows -> unknown
+    const result = await lookup.lookupTerm('g1', 'ygfn', 'u1');
+    expect(result).toEqual({ type: 'unknown' });
+    expect(messagesRepo.searchFts).toHaveBeenCalled();
+  });
+
+  it('case 24: shortcut strict-equal -- user-taught:ygfn and opus:fandom:ygfn both match, user-taught wins', async () => {
+    const messagesRepo = makeMessageRepo([]);
+    const factsRepo = makeFactsRepo();
+    (factsRepo.listActive as ReturnType<typeof vi.fn>).mockReturnValue([
+      {
+        id: 6377, groupId: 'g1', topic: 'opus-classified:fandom:ygfn',
+        fact: 'ygfn meme',
+        canonicalForm: 'ygfn', personaForm: 'ygfn某meme（garbage copypasta）',
+        sourceUserId: null, sourceUserNickname: '[opus]', sourceMsgId: null,
+        botReplyId: null, confidence: 0.6, status: 'active',
+        createdAt: 0, updatedAt: 0, embedding: null,
+      },
+      {
+        id: 4573, groupId: 'g1', topic: 'user-taught:ygfn',
+        fact: 'ygfn 是羊宫妃那啊',
+        canonicalForm: 'ygfn', personaForm: 'ygfn 是羊宫妃那啊',
+        sourceUserId: 'u1', sourceUserNickname: 'testuser', sourceMsgId: null,
+        botReplyId: null, confidence: 1.0, status: 'active',
+        createdAt: 0, updatedAt: 0, embedding: null,
+      },
+    ]);
+    const llm = { complete: vi.fn() };
+    const lookup = new OnDemandLookup({
+      db: { learnedFacts: factsRepo, messages: messagesRepo },
+      llm,
+      model: 'test-model',
+      logger: makeLogger(),
+    });
+    const result = await lookup.lookupTerm('g1', 'ygfn', 'u1');
+    expect(result).toEqual({ type: 'found', meaning: 'ygfn 是羊宫妃那啊' });
     expect(llm.complete).not.toHaveBeenCalled();
   });
 });

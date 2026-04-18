@@ -92,11 +92,15 @@ export class OnDemandLookup {
     if (normalizedTerm.length >= 2) {
       try {
         const factRows = this.db.learnedFacts.listActive(groupId, 500);
-        const t = normalizedTerm.toLowerCase();
+        // Match only on the TERM extracted from the topic, not on substring of canonical/persona.
+        // Topic format: `<prefix>:<...>:<TERM>` — we extract the final segment.
+        const TOPIC_TERM_RE = /(?:user-taught|opus-classified:slang|opus-rest-classified:slang|opus-classified:fandom|opus-rest-classified:fandom|群内黑话):([^:]+)$/;
+        const normalizedLower = normalizedTerm.toLowerCase();
         const matches = factRows.filter(r => {
-          const canonical = (r.canonicalForm ?? r.fact ?? '').toLowerCase();
-          const persona = (r.personaForm ?? '').toLowerCase();
-          return canonical.includes(t) || persona.includes(t) || (r.topic ?? '').toLowerCase().includes(t);
+          if (!r.topic) return false;
+          const m = r.topic.match(TOPIC_TERM_RE);
+          if (!m) return false;
+          return m[1].toLowerCase().trim() === normalizedLower;
         });
 
         const priorityRank = (topic: string | null): number => {
