@@ -122,8 +122,8 @@ describe('OnDemandLookup.lookupTerm', () => {
     expect(llm.complete).not.toHaveBeenCalled();
   });
 
-  it('case 6: FTS hits < 3 -> type=unknown, no LLM call', async () => {
-    const llm = { complete: vi.fn() };
+  it('case 6: FTS hits 1-2 -> LLM runs, type=weak (not unknown)', async () => {
+    const llm = makeLlm({ meaning: 'probably someone', confidence: 7, hasAnswer: true });
     const lookup = new OnDemandLookup({
       db: {
         learnedFacts: makeFactsRepo(),
@@ -137,8 +137,8 @@ describe('OnDemandLookup.lookupTerm', () => {
       logger: makeLogger(),
     });
     const result = await lookup.lookupTerm('g1', 'xtt', 'u1');
-    expect(result).toEqual({ type: 'unknown' });
-    expect(llm.complete).not.toHaveBeenCalled();
+    expect(result).toEqual({ type: 'weak', guess: 'probably someone' });
+    expect(llm.complete).toHaveBeenCalledOnce();
   });
 
   it('case 7: LLM confidence=6 -> type=unknown, no cache', async () => {
@@ -212,10 +212,17 @@ describe('OnDemandLookup.lookupTerm', () => {
     );
   });
 
-  it('case 13: 0 hits -> ask_term path (type=unknown, caller builds ask block)', async () => {
-    const result = await makeOnDemandLookup([], { meaning: '', confidence: 0, hasAnswer: false })
-      .lookupTerm('g1', 'xtt', 'u1');
+  it('case 13: 0 hits -> type=unknown, no LLM call (ask_term path)', async () => {
+    const llm = { complete: vi.fn() };
+    const lookup = new OnDemandLookup({
+      db: { learnedFacts: makeFactsRepo(), messages: makeMessageRepo([]) },
+      llm,
+      model: 'test-model',
+      logger: makeLogger(),
+    });
+    const result = await lookup.lookupTerm('g1', 'xtt', 'u1');
     expect(result).toEqual({ type: 'unknown' });
+    expect(llm.complete).not.toHaveBeenCalled();
   });
 
   it('case 14: mixed -- found for xtt (5 hits), unknown for ygfn (0 hits)', async () => {
@@ -234,5 +241,41 @@ describe('OnDemandLookup.lookupTerm', () => {
     }).lookupTerm('g1', 'ygfn', 'u1');
     expect(r1).toEqual({ type: 'found', meaning: 'someone' });
     expect(r2).toEqual({ type: 'unknown' });
+  });
+
+  it('case 15: 2 hits + LLM hasAnswer=true -> type=weak, NOT cached', async () => {
+    const factsRepo = makeFactsRepo();
+    const lookup = new OnDemandLookup({
+      db: {
+        learnedFacts: factsRepo,
+        messages: makeMessageRepo([
+          { content: 'xtt001', timestamp: 1 },
+          { content: 'xtt002', timestamp: 2 },
+        ]),
+      },
+      llm: makeLlm({ meaning: 'probably a person', confidence: 8, hasAnswer: true }),
+      model: 'test-model',
+      logger: makeLogger(),
+    });
+    const result = await lookup.lookupTerm('g1', 'xtt', 'u1');
+    expect(result).toEqual({ type: 'weak', guess: 'probably a person' });
+    expect(factsRepo.insert).not.toHaveBeenCalled();
+  });
+
+  it('case 16: 2 hits + LLM hasAnswer=false -> type=unknown (downgrade from weak)', async () => {
+    const lookup = new OnDemandLookup({
+      db: {
+        learnedFacts: makeFactsRepo(),
+        messages: makeMessageRepo([
+          { content: 'xtt001', timestamp: 1 },
+          { content: 'xtt002', timestamp: 2 },
+        ]),
+      },
+      llm: makeLlm({ meaning: '', confidence: 0, hasAnswer: false }),
+      model: 'test-model',
+      logger: makeLogger(),
+    });
+    const result = await lookup.lookupTerm('g1', 'xtt', 'u1');
+    expect(result).toEqual({ type: 'unknown' });
   });
 });

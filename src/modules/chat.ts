@@ -1604,14 +1604,15 @@ export class ChatModule implements IChatModule {
 
     // Path A: on-demand jargon lookup. Scans every reply-target message for unknown terms.
     // Must complete before system prompt build so found meanings are available for injection.
-    // Three outcome paths per term: found (inject fact), unknown (inject ask directive).
-    // null outcome (rate-limited) = term silently skipped.
+    // Three outcome paths per term: found → inject fact; weak → ask-confirm; unknown → ask openly.
+    // null (rate-limited/jailbreak) = term silently skipped.
     let onDemandFactBlock = '';
     if (this.onDemandLookup) {
       const knownTerms = this._getKnownTermsSet(groupId);
       const candidates = extractCandidateTerms(triggerMessage.content, knownTerms);
       if (candidates.length > 0) {
         const foundLines: string[] = [];
+        const weakLines: string[] = [];
         const unknownTerms: string[] = [];
         for (const term of candidates) {
           const outcome = await this.onDemandLookup.lookupTerm(
@@ -1624,14 +1625,19 @@ export class ChatModule implements IChatModule {
             const safeMeaning = sanitizeForPrompt(outcome.meaning, 100);
             foundLines.push(`已知: ${safeTerm} = ${safeMeaning}`);
             this.logger.info({ groupId, term, meaning: outcome.meaning }, 'ondemand-lookup: meaning injected');
-          } else if (outcome?.type === 'unknown' || outcome === null) {
-            // null (rate-limited) also treated as unknown — bot may ask naturally
+          } else if (outcome?.type === 'weak') {
+            const safeTerm = sanitizeForPrompt(term, 60);
+            const safeGuess = sanitizeForPrompt(outcome.guess, 100);
+            weakLines.push(`你猜 ${safeTerm} 可能是指 ${safeGuess}，可以反问 "${safeTerm}是指${safeGuess}吗"`);
+          } else {
+            // unknown or null (rate-limited) — bot asks openly
             unknownTerms.push(sanitizeForPrompt(term, 60));
           }
         }
-        if (foundLines.length > 0 || unknownTerms.length > 0) {
+        if (foundLines.length > 0 || weakLines.length > 0 || unknownTerms.length > 0) {
           const parts: string[] = [];
           if (foundLines.length > 0) parts.push(foundLines.join('\n'));
+          if (weakLines.length > 0) parts.push(weakLines.join('\n'));
           if (unknownTerms.length > 0) {
             const termList = unknownTerms.join('、');
             parts.push(

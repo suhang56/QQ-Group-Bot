@@ -33,7 +33,8 @@ interface LlmResult {
 // null = rate-limited or unrecoverable error (caller treats as unknown).
 export type TermLookupOutcome =
   | { type: 'found'; meaning: string }   // ≥3 FTS hits + LLM confidence ≥7, cached to learnedFacts
-  | { type: 'unknown' };                  // 0 FTS hits — bot should ask
+  | { type: 'weak'; guess: string }       // 1-2 FTS hits, LLM ran, NOT cached — ask-confirm
+  | { type: 'unknown' };                  // 0 FTS hits or LLM returned no answer — bot asks openly
 
 export { LEARN_MODEL };
 
@@ -61,14 +62,14 @@ export class OnDemandLookup {
    * Main entry. Returns a TermLookupOutcome, or null on rate-limit/error.
    *
    * Outcome rules:
-   * - null            : rate-limited or sanitizeFtsQuery returned empty
-   * - type='found'    : ≥3 FTS hits + LLM confidence ≥7 + gates pass → cached + returned
-   * - type='unknown'  : 0 FTS hits (no corpus evidence at all) → bot should ask naturally
+   * - null           : rate-limited or sanitizeFtsQuery returned empty or jailbreak in term/meaning
+   * - type='found'   : ≥3 FTS hits + LLM confidence ≥7 + gates pass → cached to learnedFacts
+   * - type='weak'    : 1-2 FTS hits → LLM ran, result NOT cached (poison_pool risk). Even if LLM
+   *                    confidence ≥7, still 'weak' — hit count is the "real knowledge" gate.
+   *                    If LLM hasAnswer=false → downgraded to 'unknown'.
+   * - type='unknown' : 0 FTS hits, or LLM returned hasAnswer=false, or confidence<7 with ≥3 hits
    *
-   * When hits=1-2 or confidence<7: treated as unknown (insufficient evidence).
-   * Do NOT cache partial matches — a cached wrong definition is worse than asking.
-   *
-   * Jailbreak in term or meaning: null (same as rate-limit — silent reject).
+   * Never cache weak results — a cached wrong definition poisons the fact pool.
    */
   async lookupTerm(groupId: string, term: string, userId: string): Promise<TermLookupOutcome | null> {
     if (!this._allowUser(userId)) {
@@ -90,22 +91,30 @@ export class OnDemandLookup {
       return { type: 'unknown' };
     }
 
-    if (rows.length < 3) {
-      this.logger.debug({ groupId, term, hits: rows.length }, 'ondemand-lookup: insufficient FTS evidence → unknown');
-      return { type: 'unknown' };
-    }
-
     const contexts = rows.map(r => sanitizeForPrompt(r.content, 200));
+    const isWeak = rows.length < 3;
+
     const result = await this._inferMeaning(term, contexts);
 
-    if (!result || !result.hasAnswer || result.confidence < 7) {
-      this.logger.debug({ groupId, term, confidence: result?.confidence }, 'ondemand-lookup: low confidence → unknown');
+    if (!result || !result.hasAnswer) {
+      this.logger.debug({ groupId, term, hits: rows.length }, 'ondemand-lookup: LLM no answer → unknown');
       return { type: 'unknown' };
     }
 
     if (!this._checkGates(term, result.meaning)) {
       this.logger.warn({ groupId, term }, 'ondemand-lookup: jailbreak gate rejected result');
       return null;
+    }
+
+    if (isWeak) {
+      // 1-2 hits: surface as ask-confirm guess, never cache
+      this.logger.debug({ groupId, term, hits: rows.length, confidence: result.confidence }, 'ondemand-lookup: weak → ask-confirm');
+      return { type: 'weak', guess: result.meaning };
+    }
+
+    if (result.confidence < 7) {
+      this.logger.debug({ groupId, term, confidence: result.confidence }, 'ondemand-lookup: low confidence → unknown');
+      return { type: 'unknown' };
     }
 
     this._cacheFact(groupId, term, result.meaning, result.confidence);
