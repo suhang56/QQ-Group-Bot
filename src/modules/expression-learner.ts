@@ -1,4 +1,4 @@
-import type { IMessageRepository, IExpressionPatternRepository, ExpressionPattern } from '../storage/db.js';
+import type { IMessageRepository, IExpressionPatternRepository, ExpressionPattern, Message } from '../storage/db.js';
 import { createLogger } from '../utils/logger.js';
 import { sanitizeForPrompt, hasJailbreakPattern } from '../utils/prompt-sanitize.js';
 import type { Logger } from 'pino';
@@ -47,7 +47,14 @@ export class ExpressionLearner {
     const recent = this.messages.getRecent(groupId, 500);
     // getRecent returns DESC order — reverse to chronological
     const msgs = [...recent].reverse();
+    this.scanOnMessages(groupId, msgs);
+  }
 
+  /**
+   * Pure-input variant used by bootstrap-corpus. Caller must pass messages in
+   * chronological (ASC) order. Returns the number of (user → bot) pairs upserted.
+   */
+  scanOnMessages(groupId: string, msgs: ReadonlyArray<Message>): number {
     let inserted = 0;
     for (let i = 0; i < msgs.length - 1; i++) {
       const userMsg = msgs[i]!;
@@ -67,6 +74,7 @@ export class ExpressionLearner {
     }
 
     this.logger.debug({ groupId, scannedPairs: inserted }, 'expression scan complete');
+    return inserted;
   }
 
   applyDecay(groupId: string): void {

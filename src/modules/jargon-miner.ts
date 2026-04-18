@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { IClaudeClient, ClaudeModel } from '../ai/claude.js';
-import type { IMessageRepository, ILearnedFactsRepository } from '../storage/db.js';
+import type { IMessageRepository, ILearnedFactsRepository, Message } from '../storage/db.js';
 import type { Logger } from 'pino';
 import { createLogger } from '../utils/logger.js';
 import { extractJson } from '../utils/json-extract.js';
@@ -179,12 +179,23 @@ export class JargonMiner {
 
   /**
    * Extract candidate tokens from recent messages and upsert into jargon_candidates.
+   * Thin wrapper over extractCandidatesFromMessages for backwards compatibility
+   * with the opportunistic cron path.
    */
   extractCandidates(groupId: string): void {
     const recent = this.messages.getRecent(groupId, this.windowMessages);
+    this.extractCandidatesFromMessages(groupId, recent);
+  }
+
+  /**
+   * Pure-input variant used by bootstrap-corpus to feed chunked historical
+   * messages without going through IMessageRepository.getRecent. Identical
+   * token-filter rules as the legacy path.
+   */
+  extractCandidatesFromMessages(groupId: string, msgs: ReadonlyArray<Message>): void {
     const nowSec = Math.floor(this.now() / 1000);
 
-    for (const msg of recent) {
+    for (const msg of msgs) {
       // Strip CQ codes from content before tokenizing
       const cleaned = msg.content.replace(CQ_CODE_RE, ' ');
       const tokens = cleaned.split(TOKEN_SPLIT_RE).filter(Boolean);

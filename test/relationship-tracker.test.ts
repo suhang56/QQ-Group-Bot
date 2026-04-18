@@ -383,6 +383,34 @@ describe('RelationshipTracker.inferRelationships', () => {
     expect(insertCall!.params).not.toContain('普通群友');
   });
 
+  // W-D: 13 new relation types accepted by _inferPair's validator.
+  it.each([
+    '师徒', '同乡', '同行', '同好',
+    '情敌', '老冤家', '新朋友', '工具人',
+    '意见相左', '共患难', '数据党友', '玩家搭子', '八卦伙伴',
+  ])('accepts W-D relation type %s without falling back to 普通群友', async (relType) => {
+    const db = makeMockDb();
+    db.queryResults.set('interaction_stats', [
+      { from_user: 'u1', to_user: 'u2', reply_count: 10, mention_count: 0, name_ref_count: 0 },
+    ]);
+    const msgs = [
+      makeMsg('u1', 'Alice', 'm1', NOW_SEC),
+      makeMsg('u2', 'Bob', 'm2', NOW_SEC + 10),
+      makeMsg('u1', 'Alice', 'm3', NOW_SEC + 20),
+      makeMsg('u2', 'Bob', 'm4', NOW_SEC + 30),
+      makeMsg('u1', 'Alice', 'm5', NOW_SEC + 40),
+    ];
+    const llmResponse = JSON.stringify({
+      fromUser: 'u1', toUser: 'u2', type: relType, strength: 0.7, evidence: 'sample',
+    });
+    const { tracker, db: mockDb } = makeTracker({ msgs, claudeResponse: llmResponse, db });
+    await tracker.inferRelationships(GROUP);
+    const insertCall = mockDb.execCalls.find(c => c.sql.includes('social_relations'));
+    expect(insertCall).toBeDefined();
+    expect(insertCall!.params).toContain(relType);
+    expect(insertCall!.params).not.toContain('普通群友');
+  });
+
   it('clamps strength to [0, 1] range', async () => {
     const db = makeMockDb();
     db.queryResults.set('interaction_stats', [

@@ -1,5 +1,5 @@
 import type { IClaudeClient } from '../ai/claude.js';
-import type { IMessageRepository, IUserRepository } from '../storage/db.js';
+import type { IMessageRepository, IUserRepository, Message } from '../storage/db.js';
 import type { Logger } from 'pino';
 import { createLogger } from '../utils/logger.js';
 import { extractJson } from '../utils/json-extract.js';
@@ -28,9 +28,14 @@ export interface SocialRelation {
   updatedAt: number;
 }
 
-const VALID_RELATION_TYPES = [
+export const VALID_RELATION_TYPES = [
+  // Existing 8
   '铁磁/密友', '互怼/欢喜冤家', 'CP/暧昧', '前辈后辈',
   '普通群友', '冷淡', '敌对', '崇拜/粉丝',
+  // W-D: 13 new types (total 21)
+  '师徒', '同乡', '同行', '同好',
+  '情敌', '老冤家', '新朋友', '工具人',
+  '意见相左', '共患难', '数据党友', '玩家搭子', '八卦伙伴',
 ] as const;
 
 interface LlmRelationResult {
@@ -50,6 +55,12 @@ export interface RelationshipTrackerOptions {
   statsIntervalMs?: number;
   inferenceIntervalMs?: number;
   enabled?: boolean;
+  /**
+   * Inter-pair LLM backoff when iterating inferRelationships. Default 0 for
+   * cron path (rate-limited by inferenceIntervalMs). bootstrap-corpus passes
+   * 400ms to avoid bursting the LLM provider.
+   */
+  interPairDelayMs?: number;
   /** Injected for testing */
   now?: () => number;
   /** Injected for testing — wraps db.exec */
@@ -83,6 +94,7 @@ export class RelationshipTracker {
   private readonly statsIntervalMs: number;
   private readonly inferenceIntervalMs: number;
   private readonly enabled: boolean;
+  private readonly interPairDelayMs: number;
   private readonly now: () => number;
   private readonly dbExec: (sql: string, ...params: unknown[]) => void;
   private readonly dbQuery: <T>(sql: string, ...params: unknown[]) => T[];
@@ -101,6 +113,7 @@ export class RelationshipTracker {
     this.statsIntervalMs = opts.statsIntervalMs ?? 60 * 60_000; // 1 hour
     this.inferenceIntervalMs = opts.inferenceIntervalMs ?? 24 * 60 * 60_000; // 24 hours
     this.enabled = opts.enabled ?? true;
+    this.interPairDelayMs = opts.interPairDelayMs ?? 0;
     this.now = opts.now ?? (() => Date.now());
     this.dbExec = opts.dbExec;
     this.dbQuery = opts.dbQuery;
@@ -153,12 +166,21 @@ export class RelationshipTracker {
     }
   }
 
-  updateStats(groupId: string): void {
-    const recent = this.messages.getRecent(groupId, 500);
-    if (recent.length === 0) return;
-
-    // getRecent returns DESC — reverse to chronological order
-    const msgs = [...recent].reverse();
+  /**
+   * Update interaction counts. If `providedMsgs` is given (bootstrap-corpus path),
+   * skip the getRecent call and treat the array as already-chronological.
+   */
+  updateStats(groupId: string, providedMsgs?: ReadonlyArray<Message>): void {
+    let msgs: Message[];
+    if (providedMsgs !== undefined) {
+      if (providedMsgs.length === 0) return;
+      msgs = [...providedMsgs];
+    } else {
+      const recent = this.messages.getRecent(groupId, 500);
+      if (recent.length === 0) return;
+      // getRecent returns DESC — reverse to chronological order
+      msgs = [...recent].reverse();
+    }
 
     // Build nickname map: userId -> nickname (from message data)
     const nicknameMap = new Map<string, string>();
@@ -278,12 +300,20 @@ export class RelationshipTracker {
       if (user) nicknameMap.set(uid, user.nickname);
     }
 
-    // Process each pair
-    for (const pair of pairs) {
+    // Process each pair. Inter-pair delay (default 0) spaces LLM calls
+    // when bootstrap-corpus is running a long inference batch.
+    for (let i = 0; i < pairs.length; i++) {
+      const pair = pairs[i]!;
       try {
         await this._inferPair(groupId, pair.from_user, pair.to_user, nicknameMap);
       } catch (err) {
         this.logger.warn({ err, groupId, from: pair.from_user, to: pair.to_user }, 'pair inference failed');
+      }
+      if (this.interPairDelayMs > 0 && i < pairs.length - 1) {
+        await new Promise<void>(resolve => {
+          const t = setTimeout(resolve, this.interPairDelayMs);
+          t.unref?.();
+        });
       }
     }
 
@@ -337,6 +367,19 @@ ${msgText}
 - 冷淡：很少互动
 - 敌对：真的不合
 - 崇拜/粉丝：一方崇拜另一方
+- 师徒：明确教学或带新手关系
+- 同乡：同一地域出身
+- 同行：同一职业或行业
+- 同好：共享具体兴趣爱好（非宽泛）
+- 情敌：为同一对象竞争
+- 老冤家：多次冲突但仍互动
+- 新朋友：最近开始熟起来
+- 工具人：一方为另一方跑腿/代劳
+- 意见相左：观点常常对立但非敌对
+- 共患难：一起经历过低谷/困难
+- 数据党友：共同讨论数据/统计
+- 玩家搭子：共同玩某款游戏
+- 八卦伙伴：经常一起吃瓜/传小道消息
 
 输出 JSON（不要其他内容）：
 {
