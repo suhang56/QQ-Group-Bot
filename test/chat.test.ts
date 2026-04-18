@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ChatModule, extractKeywords, extractTopFaces, extractTokens, tokenizeLore, IDENTITY_PROBE, IDENTITY_DEFLECTIONS, TASK_REQUEST, TASK_DEFLECTIONS, MEMORY_INJECT, MEMORY_INJECT_DEFLECTIONS, pickDeflection, BANGDREAM_PERSONA, CURSE_DEFLECTIONS, DEFLECT_FALLBACKS, isUngroundedNonDirectImageReply, type DeflectCategory } from '../src/modules/chat.js';
+import { ChatModule, extractKeywords, extractTopFaces, extractTokens, tokenizeLore, IDENTITY_PROBE, IDENTITY_DEFLECTIONS, TASK_REQUEST, TASK_DEFLECTIONS, MEMORY_INJECT, MEMORY_INJECT_DEFLECTIONS, pickDeflection, BANGDREAM_PERSONA, CURSE_DEFLECTIONS, DEFLECT_FALLBACKS, isUngroundedNonDirectImageReply, isAdminBotMetaCommentary, type DeflectCategory } from '../src/modules/chat.js';
 import { lurkerDefaults, defaultGroupConfig } from '../src/config.js';
 import type { IClaudeClient, ClaudeResponse } from '../src/ai/claude.js';
 import type { GroupMessage } from '../src/adapter/napcat.js';
@@ -1327,6 +1327,26 @@ describe('ChatModule — implicit bot reference detection', () => {
       ...overrides,
     });
   }
+
+  it('classifies admin third-person bot status comments as meta-commentary', () => {
+    expect(isAdminBotMetaCommentary('她已经能查资料了', 'owner', false)).toBe(true);
+    expect(isAdminBotMetaCommentary('小号现在能查资料了', 'admin', false)).toBe(true);
+    expect(isAdminBotMetaCommentary('她已经能查资料了吗', 'owner', true)).toBe(false);
+    expect(isAdminBotMetaCommentary('她已经能查资料了', 'member', false)).toBe(false);
+  });
+
+  it('skips admin third-person bot capability comments even after recent bot activity', async () => {
+    const chat = makeChat({ lurkerReplyChance: 0 });
+    chat['lastProactiveReply'].set('g1', Date.now() - 10_000);
+
+    const result = await chat.generateReply('g1', makeMsg({
+      content: '她已经能查资料了',
+      role: 'admin',
+    }), []);
+
+    expect(result).toBeNull();
+    expect(claude.complete).not.toHaveBeenCalled();
+  });
 
   it('"现在又变笨了" within 30s of bot post → replies', async () => {
     const chat = makeChat();
@@ -2788,7 +2808,7 @@ describe('ChatModule — metaIdentityProbe scoring factor', () => {
   }
 
   it('meta-identity probe + bot active < 3min → metaIdentityProbe = 0.6, score passes threshold', async () => {
-    const chat = makeScoringChat({ chatMinScore: 0.5 });
+    const chat = makeScoringChat({ chatMinScore: 0.3 });
     // Set lastProactiveReply to 1 min ago
     chat['lastProactiveReply'].set('g1', Date.now() - 60_000);
 
