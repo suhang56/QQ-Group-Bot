@@ -56,6 +56,31 @@ export function extractTokens(content: string): Set<string> {
   return result;
 }
 
+/**
+ * Sanitize raw user text into a FTS5-safe MATCH query.
+ * Strategy: strip FTS5 operator chars, split on whitespace, drop bare
+ * boolean keywords, wrap each remaining token in double quotes (phrase-literal
+ * so unicode61 tokenizer never interprets them as operators), join with space
+ * (implicit AND).
+ *
+ *   '偶像大师'       -> '"偶像大师"'
+ *   'foo-bar baz'   -> '"foobar" "baz"'   // hyphen stripped
+ *   'live "ticket"' -> '"live" "ticket"'
+ *   '*'             -> ''                  // empty after strip
+ */
+export function sanitizeFtsQuery(raw: string): string {
+  if (!raw || typeof raw !== 'string') return '';
+  // Strip FTS5 operator chars: " * : ^ ( ) - +
+  const cleaned = raw.replace(/["*:^()\-+]/g, '').trim();
+  if (!cleaned) return '';
+  const tokens = cleaned
+    .split(/\s+/)
+    .map(t => t.replace(/^(AND|OR|NOT|NEAR)$/i, ''))
+    .filter(t => t.length > 0);
+  if (tokens.length === 0) return '';
+  return tokens.map(t => `"${t}"`).join(' ');
+}
+
 /** Extract meaningful keywords from a message for corpus retrieval. */
 export function extractKeywords(text: string): string[] {
   const stripped = text.replace(/\[CQ:[^\]]+\]/g, ' ');

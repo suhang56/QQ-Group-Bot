@@ -246,6 +246,7 @@ ${messagesList}
         id: 0, groupId,
         topic: `${ALIAS_TOPIC_PREFIX}${alias}`,
         fact: factText,
+        canonicalForm: null, personaForm: null,
         sourceUserId: null, sourceUserNickname: '[alias-miner]',
         sourceMsgId: null, botReplyId: null,
         confidence, status: 'pending',

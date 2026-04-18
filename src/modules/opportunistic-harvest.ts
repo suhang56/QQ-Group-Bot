@@ -21,7 +21,11 @@ const SEMANTIC_DEDUP_THRESHOLD = 0.88;
 interface HarvestItem {
   category?: string;
   topic: string;
-  fact: string;
+  // W-C: preferred dual fields. Legacy `fact` retained — LLM on old prompts or
+  // mid-deploy may still emit under old schema; treat as canonical fallback.
+  canonical_fact?: string;
+  persona_fact?: string;
+  fact?: string;
   sourceNickname: string;
   confidence?: number;
 }
@@ -93,7 +97,8 @@ ${msgList}
   {
     "category": "<上面 1-8 之一的中文标签>",
     "topic": "<10 字内简短主题>",
-    "fact": "<具体事实陈述，中文，最多 100 字>",
+    "canonical_fact": "<客观中性陈述，去除群内黑话/语气词，便于检索匹配，中文，最多 100 字>",
+    "persona_fact": "<同一事实用 bot 自然语气表达，可以带群内黑话/口语，中文，最多 100 字>",
     "sourceNickname": "<提供该信息的群友昵称，多人就写主要的那一个>",
     "confidence": 0.0-1.0
   }
@@ -275,19 +280,25 @@ export class OpportunisticHarvest {
     let dedupped = 0;
 
     for (const item of items.slice(0, maxFacts)) {
-      if (typeof item.fact !== 'string' || !item.fact.trim()) continue;
-      const factText = item.fact.trim();
+      // W-C: prefer dual canonical/persona; legacy `fact` falls back to both.
+      const canonicalText = (item.canonical_fact ?? item.fact ?? '').trim();
+      const personaText   = (item.persona_fact   ?? item.fact ?? '').trim();
+      if (!canonicalText) continue;
+      // factText is the primary key for dedup + the `fact` column; canonical
+      // is the cleaner retrieval string, so use it as the primary.
+      const factText = canonicalText;
 
       // Defense-in-depth: reject LLM-distilled fact rows whose text, topic,
       // category, or sourceNickname carries a jailbreak signature. Harvest
       // rows can later graduate from pending → active and be re-injected
       // into chat prompts via formatFactsForPrompt, so a payload landing
-      // here is persistent persona-takeover bait. Keep the check aligned
-      // with the self-learning distill rails.
+      // here is persistent persona-takeover bait. Both canonical and persona
+      // are LLM-inferred from untrusted group messages — check both rails.
       const rawCategory = (item.category ?? '').toString();
       const rawTopicRaw = (item.topic ?? '').toString();
       const rawSrcNick = (item.sourceNickname ?? '').toString();
-      if (hasJailbreakPattern(factText)
+      if (hasJailbreakPattern(canonicalText)
+        || hasJailbreakPattern(personaText)
         || hasJailbreakPattern(rawCategory)
         || hasJailbreakPattern(rawTopicRaw)
         || hasJailbreakPattern(rawSrcNick)) {
@@ -342,7 +353,10 @@ export class OpportunisticHarvest {
       this.learnedFacts.insert({
         groupId,
         topic,
-        fact: factText,
+        // Legacy `fact` column = canonical so old text-match queries keep working.
+        fact: canonicalText,
+        canonicalForm: canonicalText,
+        personaForm: personaText || null,
         sourceUserId: null,
         sourceUserNickname: `[harvest:${(item.sourceNickname ?? '').trim()}]`,
         sourceMsgId: null,
@@ -351,7 +365,8 @@ export class OpportunisticHarvest {
         status,
       });
       existing.push({
-        id: 0, groupId, topic, fact: factText,
+        id: 0, groupId, topic, fact: canonicalText,
+        canonicalForm: canonicalText, personaForm: personaText || null,
         sourceUserId: null, sourceUserNickname: null, sourceMsgId: null,
         botReplyId: null, confidence, status,
         createdAt: 0, updatedAt: 0,
