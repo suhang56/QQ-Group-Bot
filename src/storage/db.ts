@@ -201,6 +201,8 @@ export interface IMessageRepository {
    * Returns [] on FTS syntax error or missing table.
    */
   searchFts(groupId: string, ftsQuery: string, limit: number): Pick<Message, 'content' | 'timestamp'>[];
+  /** Returns distinct non-empty nicknames seen in a group. Used by HonestGapsTracker nickname filter. */
+  listDistinctNicknames(groupId: string, limit?: number): string[];
 }
 
 // ---- Diary types (W-B) ----
@@ -988,7 +990,11 @@ function announcementFromRow(row: AnnouncementRow): GroupAnnouncement {
 // ---- Repository implementations ----
 
 class MessageRepository implements IMessageRepository {
-  constructor(private readonly db: DatabaseSync) {}
+  constructor(private readonly db: DatabaseSync) {
+    this.db.exec(
+      'CREATE INDEX IF NOT EXISTS idx_messages_group_nickname ON messages(group_id, nickname)'
+    );
+  }
 
   insert(msg: Omit<Message, 'id'>, sourceMessageId?: string): Message {
     const sid = sourceMessageId ?? null;
@@ -1105,6 +1111,15 @@ class MessageRepository implements IMessageRepository {
     } catch {
       return [];
     }
+  }
+
+  listDistinctNicknames(groupId: string, limit = 2000): string[] {
+    const rows = this.db.prepare(
+      `SELECT DISTINCT nickname FROM messages
+       WHERE group_id = ? AND nickname IS NOT NULL AND nickname != ''
+       ORDER BY nickname LIMIT ?`
+    ).all(groupId, limit) as Array<{ nickname: string }>;
+    return rows.map(r => r.nickname);
   }
 }
 

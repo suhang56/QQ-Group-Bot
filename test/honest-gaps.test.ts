@@ -271,6 +271,97 @@ describe('HonestGapsTracker.formatForPrompt UR-N filter', () => {
   });
 });
 
+describe('HonestGapsTracker nickname filter', () => {
+  function makeMessagesRepo(nicknames: string[], callCounter = { n: 0 }) {
+    return {
+      listDistinctNicknames: (_groupId: string) => { callCounter.n++; return nicknames; },
+    };
+  }
+
+  it('nickname_filter_exact_match_is_filtered', () => {
+    const repo = new FakeRepo();
+    for (let i = 0; i < 10; i++) repo.upsert('g1', 'kisa', 1_700_000_000 + i);
+    const tracker = new HonestGapsTracker(repo, {
+      minSeen: 5,
+      known: { messagesRepo: makeMessagesRepo(['kisa']) },
+    });
+    const out = tracker.formatForPrompt('g1');
+    expect(out).not.toContain('kisa');
+  });
+
+  it('nickname_filter_nickname_substring_of_term_term_kept', () => {
+    const repo = new FakeRepo();
+    for (let i = 0; i < 10; i++) repo.upsert('g1', 'ksmma', 1_700_000_000 + i);
+    const tracker = new HonestGapsTracker(repo, {
+      minSeen: 5,
+      known: { messagesRepo: makeMessagesRepo(['ksm']) },
+    });
+    const out = tracker.formatForPrompt('g1');
+    // nick 'ksm' does not include term 'ksmma' — term is kept
+    expect(out).toContain('ksmma');
+  });
+
+  it('nickname_filter_term_substring_of_nickname_term_dropped', () => {
+    const repo = new FakeRepo();
+    for (let i = 0; i < 10; i++) repo.upsert('g1', '园田', 1_700_000_000 + i);
+    const tracker = new HonestGapsTracker(repo, {
+      minSeen: 5,
+      known: { messagesRepo: makeMessagesRepo(['园田美遊']) },
+    });
+    const out = tracker.formatForPrompt('g1');
+    // nick '园田美遊' includes term '园田' — term is dropped
+    expect(out).not.toContain('园田');
+  });
+
+  it('nickname_filter_no_messages_repo_existing_behavior_unchanged', () => {
+    const repo = new FakeRepo();
+    for (let i = 0; i < 10; i++) repo.upsert('g1', 'alpha', 1_700_000_000 + i);
+    for (let i = 0; i < 10; i++) repo.upsert('g1', 'beta', 1_700_000_000 + i);
+    for (let i = 0; i < 10; i++) repo.upsert('g1', 'gamma', 1_700_000_000 + i);
+    const tracker = new HonestGapsTracker(repo, { minSeen: 5, known: {} });
+    const out = tracker.formatForPrompt('g1');
+    expect(out).toContain('alpha');
+    expect(out).toContain('beta');
+    expect(out).toContain('gamma');
+  });
+
+  it('nickname_filter_cache_ttl_hit_then_miss', async () => {
+    const repo = new FakeRepo();
+    // add term 'd' that will appear after cache miss
+    for (let i = 0; i < 10; i++) repo.upsert('g1', 'alpha', 1_700_000_000 + i);
+    for (let i = 0; i < 10; i++) repo.upsert('g1', 'd', 1_700_000_000 + i);
+
+    const callCounter = { n: 0 };
+    const messagesRepo = makeMessagesRepo(['a', 'b', 'c'], callCounter);
+    const tracker = new HonestGapsTracker(repo, {
+      minSeen: 5,
+      known: { messagesRepo },
+    });
+
+    // First call — cold cache — DB hit
+    tracker.formatForPrompt('g1');
+    expect(callCounter.n).toBe(1);
+
+    // Second call within TTL — cache hit — no DB call
+    tracker.formatForPrompt('g1');
+    expect(callCounter.n).toBe(1);
+
+    // Advance Date.now past 5 minutes
+    const origDateNow = Date.now;
+    Date.now = () => origDateNow() + 6 * 60 * 1000;
+    try {
+      // Third call — TTL expired — DB re-queried; new nickname 'd' filters out term 'd'
+      messagesRepo.listDistinctNicknames = (_: string) => { callCounter.n++; return ['a', 'b', 'c', 'd']; };
+      const out = tracker.formatForPrompt('g1');
+      expect(callCounter.n).toBe(2);
+      // term 'd' should now be filtered (matches nickname 'd')
+      expect(out).not.toContain('\nd ');
+    } finally {
+      Date.now = origDateNow;
+    }
+  });
+});
+
 describe('formatHonestGapsBlock', () => {
   it('returns empty string for no entries', () => {
     expect(formatHonestGapsBlock([])).toBe('');
