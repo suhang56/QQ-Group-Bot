@@ -1948,7 +1948,7 @@ class LearnedFactsRepository implements ILearnedFactsRepository {
   updateEmbedding(id: number, embedding: number[]): void {
     const buf = embeddingToBuffer(embedding);
     this.db.prepare(
-      'UPDATE learned_facts SET embedding_vec = ? WHERE id = ?'
+      "UPDATE learned_facts SET embedding_vec = ?, embedding_status = 'done' WHERE id = ?"
     ).run(buf, id);
   }
 

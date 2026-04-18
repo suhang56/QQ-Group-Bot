@@ -91,6 +91,36 @@ describe('LearnedFactsRepository', () => {
     db.learnedFacts.markStatus(a, 'rejected');
     expect(db.learnedFacts.countActive('g1')).toBe(2);
   });
+
+  it('updateEmbedding sets embedding_status to done', () => {
+    const id = insert('g1', 'fact-embed');
+    db.learnedFacts.updateEmbedding(id, [0.1, 0.2, 0.3]);
+    const raw = (db as any)._db.prepare(
+      'SELECT embedding_status FROM learned_facts WHERE id = ?'
+    ).get(id) as { embedding_status: string };
+    expect(raw.embedding_status).toBe('done');
+  });
+
+  it('recordEmbeddingFailure cycles pending->fail_1->fail_2->failed independently', () => {
+    const id = insert('g1', 'fact-fail');
+    db.learnedFacts.recordEmbeddingFailure(id);
+    let raw = (db as any)._db.prepare(
+      'SELECT embedding_status FROM learned_facts WHERE id = ?'
+    ).get(id) as { embedding_status: string };
+    expect(raw.embedding_status).toBe('fail_1');
+
+    db.learnedFacts.recordEmbeddingFailure(id);
+    raw = (db as any)._db.prepare(
+      'SELECT embedding_status FROM learned_facts WHERE id = ?'
+    ).get(id) as { embedding_status: string };
+    expect(raw.embedding_status).toBe('fail_2');
+
+    db.learnedFacts.recordEmbeddingFailure(id);
+    raw = (db as any)._db.prepare(
+      'SELECT embedding_status FROM learned_facts WHERE id = ?'
+    ).get(id) as { embedding_status: string };
+    expect(raw.embedding_status).toBe('failed');
+  });
 });
 
 describe('Database migration: bot_replies.was_evasive on existing DBs', () => {
