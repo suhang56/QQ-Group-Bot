@@ -7,6 +7,7 @@ import { createLogger } from '../utils/logger.js';
 import { extractJson } from '../utils/json-extract.js';
 import { LEARN_MODEL, RESEARCH_MODEL, FACTS_RAG_DISABLED, MEMES_V1_DISABLED } from '../config.js';
 import { sanitizeNickname, sanitizeForPrompt, hasJailbreakPattern } from '../utils/prompt-sanitize.js';
+import { rrfFuse } from '../utils/rrf-fusion.js';
 
 /** Cosine similarity floor — facts below this are dropped unless pinned.
  * MiniLM-L6-v2 is noisier on Chinese text so we set a slightly higher
@@ -240,6 +241,8 @@ export class SelfLearningModule {
       groupId,
       topic: distilled.topic ?? null,
       fact: distilled.correctFact,
+      canonicalForm: distilled.correctFact,
+      personaForm: null,
       sourceUserId: correctionMsg.userId,
       sourceUserNickname: correctionMsg.nickname,
       sourceMsgId: correctionMsg.messageId,
@@ -284,6 +287,8 @@ export class SelfLearningModule {
       groupId,
       topic: distilled.topic ?? null,
       fact: distilled.answer,
+      canonicalForm: distilled.answer,
+      personaForm: null,
       sourceUserId: null,
       sourceUserNickname: sourceNicks,
       sourceMsgId: null,
@@ -310,53 +315,83 @@ export class SelfLearningModule {
     limit: number,
     triggerText: string = '',
   ): Promise<FormattedFacts> {
-    const svc = this._embeddingService;
-    const semanticEnabled = !FACTS_RAG_DISABLED() && svc !== null && svc.isReady && triggerText.length > 0;
-
-    if (!semanticEnabled) {
-      const reason = FACTS_RAG_DISABLED() ? 'killSwitch' : (svc === null || !svc.isReady ? 'noService' : 'noTrigger');
-      return this._formatFactsRecency(groupId, limit, reason);
+    // FACTS_RAG_DISABLED is the outermost short-circuit — kill switch disables
+    // ALL hybrid retrieval (BM25 + semantic). Without a trigger we have nothing
+    // to match against either path, so recency fallback.
+    if (FACTS_RAG_DISABLED()) {
+      return this._formatFactsRecency(groupId, limit, 'killSwitch');
+    }
+    if (triggerText.length === 0) {
+      return this._formatFactsRecency(groupId, limit, 'noTrigger');
     }
 
+    // BM25 and semantic are independently gated:
+    //   - BM25 runs whenever we have a trigger (FTS5 prepared statement, no embedder needed).
+    //   - Semantic runs only when the embedder is ready.
+    // rrfFuse handles an empty semantic list, so when the embedder is down we
+    // still benefit from BM25 lexical recall instead of degrading to recency.
+    const svc = this._embeddingService;
+    const semanticEnabled = svc !== null && svc.isReady;
+
     // Order: listActiveWithEmbeddings → Feature B (hedge+confidence) →
-    // score → 0.30 cutoff → sort desc → take top (limit-pinned) → union with
-    // pinned-newest → dedupe → format. Filter BEFORE scoring (cheaper +
-    // semantically correct: junk facts cannot leak in regardless of similarity).
+    // vector score + BM25 keyword rank in parallel → RRF fuse → pinned-newest
+    // prepended → dedupe → format. Filter BEFORE scoring on the vector side;
+    // BM25 candidates come from FTS5 over canonical_form and are filtered once
+    // returned. Pinned-newest guarantees fresh facts survive fusion.
     const embedded = this.db.learnedFacts.listActiveWithEmbeddings(groupId);
     const filteredEmbedded = this._applyHedgeAndConfidenceFilter(embedded);
 
-    let triggerEmbedding: number[];
-    try {
-      triggerEmbedding = await svc!.embed(triggerText);
-    } catch (err) {
-      this.logger.warn({ err, groupId }, 'formatFactsForPrompt: trigger embed failed — recency fallback');
-      return this._formatFactsRecency(groupId, limit, 'embedError');
+    let triggerEmbedding: number[] | null = null;
+    if (semanticEnabled) {
+      try {
+        triggerEmbedding = await svc!.embed(triggerText);
+      } catch (err) {
+        // Embed failure only disables the semantic path; BM25 still runs below.
+        this.logger.warn({ err, groupId }, 'formatFactsForPrompt: trigger embed failed — BM25-only');
+        triggerEmbedding = null;
+      }
     }
 
-    // listActiveWithEmbeddings returns created_at DESC, so filteredEmbedded
-    // is already newest-first. Take the first K as the pinned set.
+    const BM25_TOP_K = 20;
+    const VECTOR_TOP_K = 20;
+
+    // BM25 is a sync prepared statement; wrap in Promise.resolve so Promise.all
+    // parallelism is semantically honest and the two paths read the same way.
+    const [bm25RowsRaw, scoredVector] = await Promise.all([
+      Promise.resolve(this.db.learnedFacts.searchByBM25(groupId, triggerText, BM25_TOP_K)),
+      Promise.resolve(
+        triggerEmbedding === null
+          ? []
+          : filteredEmbedded
+              .map(f => ({ fact: f, sim: f.embedding ? cosineSimilarity(triggerEmbedding!, f.embedding) : 0 }))
+              .sort((a, b) => b.sim - a.sim)
+              .filter(s => s.sim >= FACT_SIMILARITY_FLOOR)
+              .slice(0, VECTOR_TOP_K),
+      ),
+    ]);
+
+    // BM25 rows arrive un-filtered by hedge/confidence — apply same rail as vector.
+    const filteredBm25 = this._applyHedgeAndConfidenceFilter(bm25RowsRaw);
+
+    // If the embedder is down AND BM25 produced nothing, both ranked paths are
+    // dry — recency is a better surface than empty. (When embedder is up but
+    // both paths are empty, fall through to the meme-block check below.)
+    if (triggerEmbedding === null && filteredBm25.length === 0) {
+      return this._formatFactsRecency(groupId, limit, 'noServiceNoBm25');
+    }
+
+    const fused = rrfFuse<LearnedFact>(
+      [
+        { items: filteredBm25 },
+        { items: scoredVector.map(s => s.fact) },
+      ],
+      { k: 60, limit: limit * 2 }, // over-fetch — pinned-newest + dedupe consume slots.
+    );
+
+    // Pinned-newest: listActiveWithEmbeddings returns created_at DESC, so
+    // filteredEmbedded is already newest-first. Take first K.
     const pinnedFacts = filteredEmbedded.slice(0, SelfLearningModule.PINNED_NEWEST_K);
-    const pinnedIds = new Set(pinnedFacts.map(f => f.id));
 
-    const scored: Array<{ fact: LearnedFact; sim: number }> = filteredEmbedded.map(f => ({
-      fact: f,
-      sim: f.embedding ? cosineSimilarity(triggerEmbedding, f.embedding) : 0,
-    }));
-    scored.sort((a, b) => b.sim - a.sim);
-
-    // Drop below-floor facts (unless pinned). No padding from recency —
-    // padding reintroduces the dilution bug we are trying to fix.
-    let droppedLowSim = 0;
-    const survivors = scored.filter(s => {
-      if (pinnedIds.has(s.fact.id)) return true;
-      if (s.sim < FACT_SIMILARITY_FLOOR) {
-        droppedLowSim++;
-        return false;
-      }
-      return true;
-    });
-
-    // Build final list: pinned first, then top-by-similarity to fill `limit`.
     const finalFacts: LearnedFact[] = [];
     const seen = new Set<number>();
     for (const f of pinnedFacts) {
@@ -365,24 +400,28 @@ export class SelfLearningModule {
       finalFacts.push(f);
       seen.add(f.id);
     }
-    for (const s of survivors) {
+    for (const r of fused) {
       if (finalFacts.length >= limit) break;
-      if (seen.has(s.fact.id)) continue;
-      finalFacts.push(s.fact);
-      seen.add(s.fact.id);
+      if (seen.has(r.item.id)) continue;
+      finalFacts.push(r.item);
+      seen.add(r.item.id);
     }
 
-    const topSimilarity = scored[0]?.sim ?? 0;
     this.logger.debug(
       {
         groupId,
-        embeddedTotal: embedded.length,
-        kept: finalFacts.length,
-        droppedLowSim,
-        topSimilarity,
+        bm25Count: filteredBm25.length,
+        vectorCount: scoredVector.length,
+        fusedCount: fused.length,
         pinnedCount: pinnedFacts.length,
+        kept: finalFacts.length,
+        topContributions: fused.slice(0, 3).map(r => ({
+          id: r.item.id,
+          score: r.score,
+          sources: r.contributions.map(c => c.listIndex),
+        })),
       },
-      'facts filtered for prompt (semantic)',
+      'facts filtered for prompt (hybrid BM25+vector RRF)',
     );
 
     if (finalFacts.length === 0) {
@@ -495,14 +534,18 @@ export class SelfLearningModule {
     const keptFactIds: number[] = [];
     const lines: string[] = [];
     for (const f of facts) {
+      // W-C: prefer persona_form for injection; fall back to legacy fact.
+      // persona_form is LLM-inferred from untrusted group messages, same risk
+      // surface as fact, so jailbreak-check the injected text.
+      const injectText = f.personaForm ?? f.fact;
       if (
-        hasJailbreakPattern(f.fact)
+        hasJailbreakPattern(injectText)
         || (f.sourceUserNickname && hasJailbreakPattern(f.sourceUserNickname))
       ) {
         filteredFactIds.push(f.id);
         continue;
       }
-      const safeFact = sanitizeForPrompt(f.fact, 200);
+      const safeFact = sanitizeForPrompt(injectText, 200);
       if (!safeFact) continue;
       const safeNick = f.sourceUserNickname ? sanitizeNickname(f.sourceUserNickname) : '';
       const src = safeNick ? `（被 ${safeNick} 纠正过）` : '';
@@ -668,6 +711,8 @@ ${lines.join('\n')}
       groupId,
       topic: topic ?? trigger.slice(0, 10),
       fact: response.fact,
+      canonicalForm: response.fact,
+      personaForm: null,
       sourceUserId: null,
       sourceUserNickname: sourceTag,
       sourceMsgId: null,

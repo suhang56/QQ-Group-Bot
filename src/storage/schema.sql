@@ -222,7 +222,9 @@ CREATE TABLE IF NOT EXISTS learned_facts (
   updated_at           INTEGER NOT NULL,
   embedding_vec        BLOB,
   embedding_status     TEXT    DEFAULT 'pending',
-  last_attempt_at      INTEGER
+  last_attempt_at      INTEGER,
+  canonical_form       TEXT,
+  persona_form         TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_learned_facts_group_active
@@ -231,6 +233,35 @@ CREATE INDEX IF NOT EXISTS idx_learned_facts_group_pending
   ON learned_facts(group_id, status) WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS idx_learned_facts_null_embedding
   ON learned_facts(id) WHERE status = 'active' AND embedding_vec IS NULL;
+
+-- FTS5 virtual table for BM25 hybrid retrieval. trigram tokenizer required for CJK:
+-- unicode61 treats contiguous CJK runs as a single token, so MATCH '"偶像大师"' against
+-- INSERT '偶像大师是另一款手游' returns 0 rows. trigram matches any 3-char substring.
+CREATE VIRTUAL TABLE IF NOT EXISTS learned_facts_fts USING fts5(
+  canonical_form,
+  fact,
+  group_id UNINDEXED,
+  content='learned_facts',
+  content_rowid='id',
+  tokenize='trigram'
+);
+
+CREATE TRIGGER IF NOT EXISTS learned_facts_ai AFTER INSERT ON learned_facts BEGIN
+  INSERT INTO learned_facts_fts(rowid, canonical_form, fact, group_id)
+  VALUES (new.id, new.canonical_form, new.fact, new.group_id);
+END;
+
+CREATE TRIGGER IF NOT EXISTS learned_facts_ad AFTER DELETE ON learned_facts BEGIN
+  INSERT INTO learned_facts_fts(learned_facts_fts, rowid, canonical_form, fact, group_id)
+  VALUES ('delete', old.id, old.canonical_form, old.fact, old.group_id);
+END;
+
+CREATE TRIGGER IF NOT EXISTS learned_facts_au AFTER UPDATE ON learned_facts BEGIN
+  INSERT INTO learned_facts_fts(learned_facts_fts, rowid, canonical_form, fact, group_id)
+  VALUES ('delete', old.id, old.canonical_form, old.fact, old.group_id);
+  INSERT INTO learned_facts_fts(rowid, canonical_form, fact, group_id)
+  VALUES (new.id, new.canonical_form, new.fact, new.group_id);
+END;
 
 -- Archive tables for messages and bot_replies (3+ months old data)
 CREATE TABLE IF NOT EXISTS messages_archive (

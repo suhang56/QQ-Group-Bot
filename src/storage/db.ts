@@ -5,6 +5,10 @@ import type { ClaudeModel } from '../ai/claude.js';
 import type { IEmbeddingService } from './embeddings.js';
 import { cosineSimilarity } from './embeddings.js';
 import { MemeGraphRepository, PhraseCandidatesRepository } from './meme-repos.js';
+import { sanitizeFtsQuery } from '../utils/text-tokenize.js';
+import { createLogger } from '../utils/logger.js';
+
+const bm25Logger = createLogger('learned-facts-bm25');
 
 // ---- Domain types ----
 
@@ -390,6 +394,8 @@ export interface LearnedFact {
   groupId: string;
   topic: string | null;
   fact: string;
+  canonicalForm: string | null;
+  personaForm: string | null;
   sourceUserId: string | null;
   sourceUserNickname: string | null;
   sourceMsgId: string | null;
@@ -406,6 +412,8 @@ export interface ILearnedFactsRepository {
     groupId: string;
     topic: string | null;
     fact: string;
+    canonicalForm?: string | null;
+    personaForm?: string | null;
     sourceUserId: string | null;
     sourceUserNickname: string | null;
     sourceMsgId: string | null;
@@ -430,6 +438,12 @@ export interface ILearnedFactsRepository {
   findSimilarActive(
     groupId: string, text: string, threshold: number
   ): Promise<{ fact: LearnedFact; cosine: number } | null>;
+  /**
+   * BM25 keyword search over canonical_form + fact for a group, best first.
+   * Raw query is sanitized via sanitizeFtsQuery. Returns [] on empty query,
+   * parse error, or missing FTS table (degrades to vector-only in hybrid caller).
+   */
+  searchByBM25(groupId: string, query: string, limit: number): LearnedFact[];
   listPending(groupId: string, limit: number, offset: number): LearnedFact[];
   countPending(groupId: string): number;
   expirePendingOlderThan(cutoffTimestamp: number): number;
@@ -1744,6 +1758,7 @@ class BotReplyRepository implements IBotReplyRepository {
 
 interface LearnedFactRow {
   id: number; group_id: string; topic: string | null; fact: string;
+  canonical_form: string | null; persona_form: string | null;
   source_user_id: string | null; source_user_nickname: string | null;
   source_msg_id: string | null; bot_reply_id: number | null;
   confidence: number; status: string;
@@ -1763,6 +1778,8 @@ function learnedFactFromRow(r: LearnedFactRow): LearnedFact {
   }
   return {
     id: r.id, groupId: r.group_id, topic: r.topic, fact: r.fact,
+    canonicalForm: r.canonical_form ?? null,
+    personaForm: r.persona_form ?? null,
     sourceUserId: r.source_user_id, sourceUserNickname: r.source_user_nickname,
     sourceMsgId: r.source_msg_id, botReplyId: r.bot_reply_id,
     confidence: r.confidence,
@@ -1791,6 +1808,8 @@ class LearnedFactsRepository implements ILearnedFactsRepository {
     groupId: string;
     topic: string | null;
     fact: string;
+    canonicalForm?: string | null;
+    personaForm?: string | null;
     sourceUserId: string | null;
     sourceUserNickname: string | null;
     sourceMsgId: string | null;
@@ -1807,11 +1826,13 @@ class LearnedFactsRepository implements ILearnedFactsRepository {
     const status: LearnedFact['status'] = row.status ?? 'active';
     const result = this.db.prepare(`
       INSERT INTO learned_facts
-        (group_id, topic, fact, source_user_id, source_user_nickname,
+        (group_id, topic, fact, canonical_form, persona_form,
+         source_user_id, source_user_nickname,
          source_msg_id, bot_reply_id, confidence, status, created_at, updated_at, embedding_vec)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       row.groupId, row.topic, row.fact,
+      row.canonicalForm ?? null, row.personaForm ?? null,
       row.sourceUserId, row.sourceUserNickname, row.sourceMsgId,
       row.botReplyId, row.confidence ?? 1.0, status, now, now, embBuf,
     );
@@ -1925,6 +1946,28 @@ class LearnedFactsRepository implements ILearnedFactsRepository {
     }
     if (best === null || best.cosine < threshold) return null;
     return best;
+  }
+
+  searchByBM25(groupId: string, query: string, limit: number): LearnedFact[] {
+    const sanitized = sanitizeFtsQuery(query);
+    if (!sanitized) return [];
+    try {
+      const rows = this.db.prepare(`
+        SELECT lf.*
+        FROM learned_facts_fts fts
+        JOIN learned_facts lf ON lf.id = fts.rowid
+        WHERE learned_facts_fts MATCH ?
+          AND fts.group_id = ?
+          AND lf.status = 'active'
+        ORDER BY bm25(learned_facts_fts)
+        LIMIT ?
+      `).all(sanitized, groupId, limit) as unknown as LearnedFactRow[];
+      return rows.map(learnedFactFromRow);
+    } catch (err) {
+      // FTS syntax error or missing table -> empty, hybrid caller degrades to vector-only.
+      bm25Logger.warn({ err: String(err) }, 'BM25 search failed');
+      return [];
+    }
   }
 
   listPending(groupId: string, limit: number, offset: number): LearnedFact[] {
@@ -3068,8 +3111,62 @@ export class Database {
     // embedding_status: 'pending' | 'done' | 'failed' | 'skipped' — for backfill tracking
     try { this._db.exec(`ALTER TABLE learned_facts ADD COLUMN embedding_status TEXT DEFAULT 'pending'`); } catch { /* already exists */ }
     try { this._db.exec(`ALTER TABLE learned_facts ADD COLUMN last_attempt_at INTEGER`); } catch { /* already exists */ }
+    // W-C: canonical_form (retrieval-indexed neutral phrasing) + persona_form
+    // (bot-voice injection phrasing). Nullable — legacy rows fall back to `fact`.
+    try { this._db.exec(`ALTER TABLE learned_facts ADD COLUMN canonical_form TEXT`); } catch { /* already exists */ }
+    try { this._db.exec(`ALTER TABLE learned_facts ADD COLUMN persona_form   TEXT`); } catch { /* already exists */ }
     // Partial index for backfill queries on learned_facts with null embeddings
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_learned_facts_null_embedding ON learned_facts(id) WHERE status = 'active' AND embedding_vec IS NULL`);
+
+    // W-C: FTS5 virtual table + triggers for BM25 hybrid retrieval. trigram
+    // tokenizer is required for CJK — unicode61 collapses contiguous CJK runs
+    // into a single token so phrase-literal MATCH returns 0 rows.
+    // If an existing DB has the table under a different tokenizer, drop and
+    // recreate; the backfill below repopulates rowids from learned_facts.
+    try {
+      const existingSql = this._db.prepare(
+        `SELECT sql FROM sqlite_master WHERE type='table' AND name='learned_facts_fts'`,
+      ).get() as { sql?: string } | undefined;
+      if (existingSql?.sql && !/tokenize\s*=\s*['"]?trigram/i.test(existingSql.sql)) {
+        this._db.exec(`DROP TABLE learned_facts_fts`);
+      }
+    } catch { /* table absent — CREATE below handles fresh install */ }
+
+    this._db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS learned_facts_fts USING fts5(
+        canonical_form, fact, group_id UNINDEXED,
+        content='learned_facts', content_rowid='id', tokenize='trigram'
+      );
+      CREATE TRIGGER IF NOT EXISTS learned_facts_ai AFTER INSERT ON learned_facts BEGIN
+        INSERT INTO learned_facts_fts(rowid, canonical_form, fact, group_id)
+        VALUES (new.id, new.canonical_form, new.fact, new.group_id);
+      END;
+      CREATE TRIGGER IF NOT EXISTS learned_facts_ad AFTER DELETE ON learned_facts BEGIN
+        INSERT INTO learned_facts_fts(learned_facts_fts, rowid, canonical_form, fact, group_id)
+        VALUES ('delete', old.id, old.canonical_form, old.fact, old.group_id);
+      END;
+      CREATE TRIGGER IF NOT EXISTS learned_facts_au AFTER UPDATE ON learned_facts BEGIN
+        INSERT INTO learned_facts_fts(learned_facts_fts, rowid, canonical_form, fact, group_id)
+        VALUES ('delete', old.id, old.canonical_form, old.fact, old.group_id);
+        INSERT INTO learned_facts_fts(rowid, canonical_form, fact, group_id)
+        VALUES (new.id, new.canonical_form, new.fact, new.group_id);
+      END;
+    `);
+
+    // W-C: backfill FTS index for rows that predate the triggers. Deferred via
+    // setImmediate so large DBs don't block boot. Triggers cover post-boot inserts.
+    const ftsLogger = createLogger('learned-facts-fts');
+    setImmediate(() => {
+      try {
+        const ftsCount = this._db.prepare(`SELECT COUNT(*) as n FROM learned_facts_fts`).get() as { n: number };
+        const tblCount = this._db.prepare(`SELECT COUNT(*) as n FROM learned_facts`).get() as { n: number };
+        if (ftsCount.n < tblCount.n) {
+          this._db.exec(`INSERT INTO learned_facts_fts(learned_facts_fts) VALUES('rebuild')`);
+        }
+      } catch (e) {
+        ftsLogger.warn({ err: String(e) }, 'FTS rebuild failed — vector-only fallback');
+      }
+    });
 
     // pending_moderation table — Batch D human-in-loop approval flow.
     this._db.exec(`
