@@ -76,6 +76,7 @@ describe('Path A routing glue -- 3-outcome matrix', () => {
       '[termA] 是什么',
       'u1',
     );
+    expect(block).toContain('必须用下面“已知”内容直接回答');
     expect(block).toContain('已知: termA = X');
   });
 
@@ -99,5 +100,23 @@ describe('Path A routing glue -- 3-outcome matrix', () => {
       'u1',
     );
     expect(block).toContain('你没听过');
+  });
+
+  it('found term suppresses ask-back for leftover unknown candidates', async () => {
+    mockLookup.lookupTerm.mockImplementation(async (_groupId: string, term: string) => (
+      term === 'xtt'
+        ? { type: 'found', meaning: '小团体' }
+        : { type: 'unknown' }
+    ));
+    vi.spyOn(chat as never, '_getKnownTermsSet').mockReturnValue(new Set());
+    const block = await (chat as never)._buildOnDemandBlock(
+      'g1',
+      'xtt foo 是啥',
+      'u1',
+    );
+    expect(block).toContain('已知: xtt = 小团体');
+    expect(block).toContain('不能装不知道');
+    expect(block).not.toContain('你没听过');
+    expect(block).not.toContain('foo');
   });
 });

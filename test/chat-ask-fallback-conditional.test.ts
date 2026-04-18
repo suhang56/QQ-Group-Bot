@@ -81,6 +81,7 @@ describe('chat-ask-fallback-conditional wiring', () => {
     if (!spy.mock.calls.length) return;
     const call = spy.mock.calls[0][0];
     const systemText = (call.system as Array<{ text: string }>).map(s => s.text).join('\n');
+    expect(systemText).toContain('必须用下面“已知”内容直接回答');
     expect(systemText).toContain('已知');
     expect(systemText).not.toContain('你没听过');
   });
