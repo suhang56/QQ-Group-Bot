@@ -120,6 +120,7 @@ function makeMiner(overrides: Partial<{
   activeGroups: string[];
   now: () => number;
   windowMessages: number;
+  groundingProvider: { search(query: string): Promise<{ snippet: string; url: string }[]> };
 }> = {}): { miner: JargonMiner; db: DatabaseSync; messages: IMessageRepository; learnedFacts: ILearnedFactsRepository; claude: IClaudeClient } {
   const db = overrides.db ?? makeDb();
   const messages = overrides.messages ?? makeMessageRepo();
@@ -133,6 +134,7 @@ function makeMiner(overrides: Partial<{
     activeGroups: overrides.activeGroups ?? ['g1'],
     now: overrides.now ?? (() => 1700000000000),
     windowMessages: overrides.windowMessages,
+    groundingProvider: overrides.groundingProvider,
   });
   return { miner, db, messages, learnedFacts, claude };
 }
@@ -485,7 +487,7 @@ describe('JargonMiner', () => {
   });
 
   describe('promoteToFacts', () => {
-    it('promotes is_jargon=1 candidates to learned_facts', () => {
+    it('promotes is_jargon=1 candidates to learned_facts', async () => {
       const db = makeDb();
       const nowSec = 1700000;
       db.prepare(`
@@ -494,9 +496,10 @@ describe('JargonMiner', () => {
       `).run(nowSec, nowSec);
 
       const learnedFacts = makeLearnedFactsRepo();
-      const { miner } = makeMiner({ db, learnedFacts });
+      const groundingProvider = { search: vi.fn().mockResolvedValue([{ snippet: '凑友希那 ykn', url: 'https://example.com' }]) };
+      const { miner } = makeMiner({ db, learnedFacts, groundingProvider });
 
-      miner.promoteToFacts('g1');
+      await miner.promoteToFacts('g1');
 
       expect(learnedFacts.insert).toHaveBeenCalledWith({
         groupId: 'g1',
@@ -516,7 +519,7 @@ describe('JargonMiner', () => {
       expect(target!.is_jargon).toBe(2);
     });
 
-    it('does not promote already-promoted candidates (is_jargon=2)', () => {
+    it('does not promote already-promoted candidates (is_jargon=2)', async () => {
       const db = makeDb();
       const nowSec = 1700000;
       db.prepare(`
@@ -527,12 +530,12 @@ describe('JargonMiner', () => {
       const learnedFacts = makeLearnedFactsRepo();
       const { miner } = makeMiner({ db, learnedFacts });
 
-      miner.promoteToFacts('g1');
+      await miner.promoteToFacts('g1');
 
       expect(learnedFacts.insert).not.toHaveBeenCalled();
     });
 
-    it('does not promote is_jargon=0 candidates', () => {
+    it('does not promote is_jargon=0 candidates', async () => {
       const db = makeDb();
       const nowSec = 1700000;
       db.prepare(`
@@ -543,12 +546,12 @@ describe('JargonMiner', () => {
       const learnedFacts = makeLearnedFactsRepo();
       const { miner } = makeMiner({ db, learnedFacts });
 
-      miner.promoteToFacts('g1');
+      await miner.promoteToFacts('g1');
 
       expect(learnedFacts.insert).not.toHaveBeenCalled();
     });
 
-    it('skips duplicate facts already in learned_facts', () => {
+    it('skips duplicate facts already in learned_facts', async () => {
       const db = makeDb();
       const nowSec = 1700000;
       db.prepare(`
@@ -565,7 +568,7 @@ describe('JargonMiner', () => {
       const learnedFacts = makeLearnedFactsRepo([existingFact]);
       const { miner } = makeMiner({ db, learnedFacts });
 
-      miner.promoteToFacts('g1');
+      await miner.promoteToFacts('g1');
 
       expect(learnedFacts.insert).not.toHaveBeenCalled();
       // Should still mark as promoted
@@ -573,11 +576,11 @@ describe('JargonMiner', () => {
       expect(candidates.find(c => c.content === 'ykn')!.is_jargon).toBe(2);
     });
 
-    it('handles empty jargon_candidates table', () => {
+    it('handles empty jargon_candidates table', async () => {
       const learnedFacts = makeLearnedFactsRepo();
       const { miner } = makeMiner({ learnedFacts });
 
-      miner.promoteToFacts('g1');
+      await miner.promoteToFacts('g1');
 
       expect(learnedFacts.insert).not.toHaveBeenCalled();
     });
