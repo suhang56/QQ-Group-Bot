@@ -1,7 +1,8 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   WebLookup,
   WebLookupRateLimiter,
+  shouldLookupTerm,
   isPublicEntityTerm,
   detectJargonQuestion,
 } from '../src/modules/web-lookup.js';
@@ -89,7 +90,7 @@ describe('WebLookup', () => {
     vi.restoreAllMocks();
   });
 
-  // Test 1: Cache hit (29 days old, not expired) — provider must NOT be called
+  // Test 1: Cache hit (29 days old, expires_at > now) — provider must NOT be called
   it('test 1: returns cached result without calling provider', async () => {
     setEnvEnabled();
     const nowSec = Math.floor(Date.now() / 1000);
@@ -101,7 +102,7 @@ describe('WebLookup', () => {
       sourceUrl: 'https://bandori.fandom.com',
       confidence: 8,
       createdAt: nowSec - 29 * 24 * 3600,
-      expiresAt: nowSec + 24 * 3600, // still valid
+      expiresAt: nowSec + 24 * 3600,
     };
     const cache = makeCache({ get: vi.fn().mockReturnValue(cachedRow) });
     const provider = makeProvider();
@@ -114,23 +115,10 @@ describe('WebLookup', () => {
     expect(provider.search).not.toHaveBeenCalled();
   });
 
-  // Test 2: Cache miss (31 days old, expired) — provider IS called
+  // Test 2: Cache miss (expired) — provider IS called
   it('test 2: calls provider on cache miss (expired entry)', async () => {
     setEnvEnabled();
-    const nowSec = Math.floor(Date.now() / 1000);
-    const expiredRow: WebLookupCacheRow = {
-      id: 2,
-      groupId: 'g1',
-      term: 'MyGO',
-      snippet: 'old answer',
-      sourceUrl: 'https://bandori.fandom.com',
-      confidence: 8,
-      createdAt: nowSec - 31 * 24 * 3600,
-      expiresAt: nowSec - 24 * 3600, // expired
-    };
-    // get() returns null because expires_at check fails (repo filters by expires_at > nowSec)
     const cache = makeCache({ get: vi.fn().mockReturnValue(null) });
-    void expiredRow; // satisfies that we'd pass nowSec to get()
     const provider = makeProvider();
     const wl = new WebLookup(cache, makeFacts(), makeLlm(), provider);
 
@@ -173,39 +161,34 @@ describe('WebLookup', () => {
     expect(result).toBeNull();
   });
 
-  // Test 6: 4th user call within same hour — allowUser returns false, returns null before CSE
+  // Test 6: 4th user call within same hour — rate limit blocks before CSE
   it('test 6: blocks 4th user call in same hour', async () => {
     setEnvEnabled();
     const provider = makeProvider();
     const wl = new WebLookup(makeCache(), makeFacts(), makeLlm(), provider);
-    const nowMs = Date.now();
 
-    // Exhaust per-user limit (3 calls)
     await wl.lookupTerm('g1', 'A', 'user1');
     await wl.lookupTerm('g1', 'B', 'user1');
     await wl.lookupTerm('g1', 'C', 'user1');
     provider.search = vi.fn().mockResolvedValue([]);
 
-    // 4th call
     const result = await wl.lookupTerm('g1', 'D', 'user1');
 
     expect(result).toBeNull();
     expect(provider.search).not.toHaveBeenCalled();
   });
 
-  // Test 7: 51st global call (max=50) — allowGlobal returns false
-  it('test 7: blocks 51st global call when daily budget is 50', async () => {
+  // Test 7: Over daily budget — allowGlobal returns false
+  it('test 7: blocks calls when daily budget is exhausted', async () => {
     setEnvEnabled();
     process.env['WEB_LOOKUP_MAX_PER_DAY'] = '2';
     const provider = makeProvider();
-    // Use different userIds to avoid per-user limit
     const wl = new WebLookup(makeCache(), makeFacts(), makeLlm(), provider);
 
     await wl.lookupTerm('g1', 'A', 'u1');
     await wl.lookupTerm('g1', 'B', 'u2');
     provider.search = vi.fn().mockResolvedValue([]);
 
-    // 3rd call exceeds budget of 2
     const result = await wl.lookupTerm('g1', 'C', 'u3');
 
     expect(result).toBeNull();
@@ -215,7 +198,6 @@ describe('WebLookup', () => {
 
   // Test 8: WEB_LOOKUP_ENABLED=false — returns null immediately
   it('test 8: returns null immediately when feature disabled', async () => {
-    // Do NOT call setEnvEnabled() — WEB_LOOKUP_ENABLED defaults to '0' / missing
     const provider = makeProvider();
     const wl = new WebLookup(makeCache(), makeFacts(), makeLlm(), provider);
 
@@ -229,7 +211,6 @@ describe('WebLookup', () => {
   it('test 9: returns null when API key is missing (soft-disable)', async () => {
     process.env['WEB_LOOKUP_ENABLED'] = '1';
     process.env['GOOGLE_CSE_CX'] = 'test-cx';
-    // Intentionally omit GOOGLE_CSE_API_KEY
     delete process.env['GOOGLE_CSE_API_KEY'];
     const provider = makeProvider();
     const wl = new WebLookup(makeCache(), makeFacts(), makeLlm(), provider);
@@ -240,31 +221,20 @@ describe('WebLookup', () => {
     expect(provider.search).not.toHaveBeenCalled();
   });
 
-  // Test 10: CSE 429 → retry → success on attempt 2
-  it('test 10: retries on 429 and returns result on success', async () => {
+  // Test 10: Provider first call returns empty, second call returns results
+  it('test 10: second call succeeds after first call returned empty', async () => {
     setEnvEnabled();
     let callCount = 0;
     const provider: SearchProvider = {
       search: vi.fn().mockImplementation(async () => {
         callCount++;
-        if (callCount === 1) {
-          // Simulate 429 by returning empty (the real provider handles 429 internally)
-          // We test the retry by having first call empty, second call real results
-          return [];
-        }
-        return [
-          { snippet: 'MyGO is a band', url: 'https://bandori.fandom.com' },
-        ];
+        if (callCount === 1) return [];
+        return [{ snippet: 'MyGO is a band', url: 'https://bandori.fandom.com' }];
       }),
     };
-    // The actual 429 retry loop is inside GoogleCseProvider, not WebLookup.
-    // For testing the WebLookup retry integration, we test via a provider that
-    // succeeds on attempt 2.
     const wl = new WebLookup(makeCache(), makeFacts(), makeLlm(), provider);
 
-    // First call returns empty (simulating 429 exhaustion) — null
     const result1 = await wl.lookupTerm('g1', 'MyGO', 'user1');
-    // Second call succeeds
     const result2 = await wl.lookupTerm('g1', 'Other', 'user1');
 
     expect(result1).toBeNull();
@@ -272,34 +242,32 @@ describe('WebLookup', () => {
     expect(callCount).toBe(2);
   });
 
-  // Test 11: CSE 429 x3 — give up, return null, no throw
-  it('test 11: returns null when all CSE attempts fail, no throw', async () => {
+  // Test 11: CSE always returns empty — returns null without throw
+  it('test 11: returns null when CSE always fails, no throw', async () => {
     setEnvEnabled();
     const provider: SearchProvider = {
-      search: vi.fn().mockResolvedValue([]), // always empty = simulated failure
+      search: vi.fn().mockResolvedValue([]),
     };
     const wl = new WebLookup(makeCache(), makeFacts(), makeLlm(), provider);
 
     const result = await wl.lookupTerm('g1', 'MyGO', 'user1');
 
     expect(result).toBeNull();
-    // No throw means we reach here
   });
 
-  // Test 12: isPublicEntityTerm('MyGO') → true
-  it('test 12: MyGO is a public entity term (romaji)', () => {
-    expect(isPublicEntityTerm('MyGO')).toBe(true);
+  // Test 12: shouldLookupTerm('MyGO') → true (romaji capitalized)
+  it('test 12: shouldLookupTerm returns true for romaji proper noun', () => {
+    expect(shouldLookupTerm('MyGO')).toBe(true);
   });
 
-  // Test 13: isPublicEntityTerm('今天') → false (common word)
-  it('test 13: 今天 is not a public entity term (common word)', () => {
-    expect(isPublicEntityTerm('\u4eca\u5929')).toBe(false);
+  // Test 13: shouldLookupTerm('今天') → false (common word)
+  it('test 13: shouldLookupTerm returns false for common Chinese word', () => {
+    expect(shouldLookupTerm('\u4eca\u5929')).toBe(false);
   });
 
-  // Test 14: isPublicEntityTerm('園田美遊') → true (CJK 4 chars)
-  it('test 14: 園田美遊 is a public entity term (CJK 4-char boundary)', () => {
-    // 園田美遊 has 4 CJK chars and is not in COMMON_WORDS
-    expect(isPublicEntityTerm('\u5712\u7530\u7f8e\u9057')).toBe(true);
+  // Test 14: shouldLookupTerm('園田美遊') → true (CJK ≥2 chars, not common)
+  it('test 14: shouldLookupTerm returns true for CJK proper noun (4 chars)', () => {
+    expect(shouldLookupTerm('\u5712\u7530\u7f8e\u9057')).toBe(true);
   });
 
   // Test 15: Pending fact written with status='pending', topic starts with 'web_lookup:'
@@ -329,7 +297,6 @@ describe('WebLookup', () => {
   it('test 16: does not write pending fact for low confidence / term-absent snippets', async () => {
     setEnvEnabled();
     const term = 'MyGO';
-    // 1 snippet, does not contain term → confidence=3, term absent → no fact
     const provider: SearchProvider = {
       search: vi.fn().mockResolvedValue([
         { snippet: 'A totally unrelated result', url: 'https://example.com' },
@@ -343,15 +310,42 @@ describe('WebLookup', () => {
     expect(facts.insert).not.toHaveBeenCalled();
   });
 
-  // Test 17: detectJargonQuestion('园田美遊是谁') → '园田美遊'
-  it('test 17: detectJargonQuestion extracts term from "X是谁"', () => {
-    const term = detectJargonQuestion('\u56ed\u7530\u7f8e\u9057\u662f\u8c01');
-    expect(term).toBe('\u56ed\u7530\u7f8e\u9057');
+  // Test 17: Path A null → CSE is called (new A→C chain test)
+  it('test 17: Path A null term triggers CSE lookup via shouldLookupTerm', async () => {
+    setEnvEnabled();
+    const provider = makeProvider();
+    const wl = new WebLookup(makeCache(), makeFacts(), makeLlm(), provider);
+
+    // Simulate what chat.ts does: Path A returned null for 'MyGO'
+    const pathATerms = [{ term: 'MyGO', meaning: null as string | null }];
+    const snippetParts: string[] = [];
+    for (const { term, meaning } of pathATerms) {
+      if (meaning !== null) continue;
+      if (!shouldLookupTerm(term)) continue;
+      const webResult = await wl.lookupTerm('g1', term, 'user1');
+      if (webResult) snippetParts.push(`"${term}": ${webResult.answer}`);
+    }
+
+    expect(provider.search).toHaveBeenCalledOnce();
+    expect(snippetParts.length).toBe(1);
+    expect(snippetParts[0]).toContain('"MyGO"');
   });
 
-  // Test 18: detectJargonQuestion('好饿啊') → null
-  it('test 18: detectJargonQuestion returns null for non-question content', () => {
-    expect(detectJargonQuestion('\u597d\u997f\u554a')).toBeNull();
+  // Test 18: Path A non-null → CSE is NOT called (term already known)
+  it('test 18: Path A non-null term skips CSE (corpus hit)', async () => {
+    setEnvEnabled();
+    const provider = makeProvider();
+    const wl = new WebLookup(makeCache(), makeFacts(), makeLlm(), provider);
+
+    // Path A already found a meaning for this term
+    const pathATerms = [{ term: 'MyGO', meaning: '\u4e00\u652f\u4e50\u961f' as string | null }];
+    for (const { term, meaning } of pathATerms) {
+      if (meaning !== null) continue; // skip — corpus has it
+      if (!shouldLookupTerm(term)) continue;
+      await wl.lookupTerm('g1', term, 'user1');
+    }
+
+    expect(provider.search).not.toHaveBeenCalled();
   });
 
   // Test 19: Cache write happens before return
@@ -373,6 +367,43 @@ describe('WebLookup', () => {
   });
 });
 
+// ── shouldLookupTerm unit tests ───────────────────────────────────────────────
+
+describe('shouldLookupTerm', () => {
+  it('returns true for romaji capitalized name', () => {
+    expect(shouldLookupTerm('Roselia')).toBe(true);
+  });
+
+  it('returns true for CJK 2-char name', () => {
+    expect(shouldLookupTerm('\u51cc\u9633')).toBe(true); // 凌阳 — not a common word
+  });
+
+  it('returns false for lowercase romaji', () => {
+    expect(shouldLookupTerm('hello')).toBe(false);
+  });
+
+  it('returns false for term in userAliases', () => {
+    expect(shouldLookupTerm('MyGO', new Set(['MyGO']))).toBe(false);
+  });
+
+  it('isPublicEntityTerm is an alias for shouldLookupTerm', () => {
+    expect(isPublicEntityTerm('MyGO')).toBe(shouldLookupTerm('MyGO'));
+  });
+});
+
+// ── detectJargonQuestion unit tests (kept; function still exported) ───────────
+
+describe('detectJargonQuestion', () => {
+  it('test 17-compat: extracts term from "X是谁"', () => {
+    const term = detectJargonQuestion('\u56ed\u7530\u7f8e\u9057\u662f\u8c01');
+    expect(term).toBe('\u56ed\u7530\u7f8e\u9057');
+  });
+
+  it('test 18-compat: returns null for non-question content', () => {
+    expect(detectJargonQuestion('\u597d\u997f\u554a')).toBeNull();
+  });
+});
+
 // ── WebLookupRateLimiter unit tests ──────────────────────────────────────────
 
 describe('WebLookupRateLimiter', () => {
@@ -382,7 +413,7 @@ describe('WebLookupRateLimiter', () => {
     expect(rl.allowUser('u1', now)).toBe(true);
     expect(rl.allowUser('u1', now + 1000)).toBe(true);
     expect(rl.allowUser('u1', now + 2000)).toBe(true);
-    expect(rl.allowUser('u1', now + 3000)).toBe(false); // 4th
+    expect(rl.allowUser('u1', now + 3000)).toBe(false);
   });
 
   it('resets user count after 1 hour', () => {
@@ -391,7 +422,6 @@ describe('WebLookupRateLimiter', () => {
     rl.allowUser('u1', now);
     rl.allowUser('u1', now + 1000);
     rl.allowUser('u1', now + 2000);
-    // 1 hour + 1s later
     expect(rl.allowUser('u1', now + 3_601_000)).toBe(true);
   });
 });

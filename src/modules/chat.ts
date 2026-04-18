@@ -42,6 +42,13 @@ import { OnDemandLookup } from './on-demand-lookup.js';
 import { extractCandidateTerms } from '../utils/extract-candidate-terms.js';
 import { WebLookup, shouldLookupTerm, DEFAULT_COMMON_WORDS } from './web-lookup.js';
 
+// Path A stub: { term, meaning } pairs extracted from user message.
+// Path A dev replaces null meanings with corpus results when merged.
+export interface ITermLookupResult {
+  term: string;
+  meaning: string | null;
+}
+
 // ── M6.2a: miner helper shapes ───────────────────────────────────────────────
 // Narrow structural interfaces so ChatModule can consume the three miners
 // without importing their full classes (avoids pulling claude/db-exec wiring
