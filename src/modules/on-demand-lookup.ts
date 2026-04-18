@@ -22,11 +22,18 @@ export interface OnDemandLookupDeps {
   now?: () => number;
 }
 
-export interface LookupResult {
+// Internal LLM parse result
+interface LlmResult {
   meaning: string;
   confidence: number;
   hasAnswer: boolean;
 }
+
+// Discriminated union returned to callers.
+// null = rate-limited or unrecoverable error (caller treats as unknown).
+export type TermLookupOutcome =
+  | { type: 'found'; meaning: string }   // ≥3 FTS hits + LLM confidence ≥7, cached to learnedFacts
+  | { type: 'unknown' };                  // 0 FTS hits — bot should ask
 
 export { LEARN_MODEL };
 
@@ -51,17 +58,19 @@ export class OnDemandLookup {
   }
 
   /**
-   * Main entry. Returns the inferred meaning string, or null.
+   * Main entry. Returns a TermLookupOutcome, or null on rate-limit/error.
    *
-   * Null cases (intentional — do not "fix"):
-   * - Rate limit hit (per-user or per-group).
-   * - FTS returns < 3 hits: insufficient evidence. Falls through to honest-gaps path.
-   *   This is correct behavior: a groupmate who doesn't know also says "不太懂".
-   * - LLM confidence < 7: uncertain inference, not cached.
-   * - Jailbreak pattern in term or meaning: rejected for safety.
-   * - LLM returns hasAnswer=false: corpus has term but no interpretable context.
+   * Outcome rules:
+   * - null            : rate-limited or sanitizeFtsQuery returned empty
+   * - type='found'    : ≥3 FTS hits + LLM confidence ≥7 + gates pass → cached + returned
+   * - type='unknown'  : 0 FTS hits (no corpus evidence at all) → bot should ask naturally
+   *
+   * When hits=1-2 or confidence<7: treated as unknown (insufficient evidence).
+   * Do NOT cache partial matches — a cached wrong definition is worse than asking.
+   *
+   * Jailbreak in term or meaning: null (same as rate-limit — silent reject).
    */
-  async lookupTerm(groupId: string, term: string, userId: string): Promise<string | null> {
+  async lookupTerm(groupId: string, term: string, userId: string): Promise<TermLookupOutcome | null> {
     if (!this._allowUser(userId)) {
       this.logger.debug({ groupId, userId }, 'ondemand-lookup: per-user rate limit');
       return null;
@@ -74,16 +83,24 @@ export class OnDemandLookup {
     const ftsQuery = sanitizeFtsQuery(term);
     if (!ftsQuery) return null;
 
-    const contexts = await this._searchContexts(groupId, ftsQuery, 30);
-    if (contexts.length < 3) {
-      this.logger.debug({ groupId, term, hits: contexts.length }, 'ondemand-lookup: insufficient FTS evidence');
-      return null;
+    const rows = this.db.messages.searchFts(groupId, ftsQuery, 30);
+
+    if (rows.length === 0) {
+      this.logger.debug({ groupId, term }, 'ondemand-lookup: 0 FTS hits → unknown');
+      return { type: 'unknown' };
     }
 
+    if (rows.length < 3) {
+      this.logger.debug({ groupId, term, hits: rows.length }, 'ondemand-lookup: insufficient FTS evidence → unknown');
+      return { type: 'unknown' };
+    }
+
+    const contexts = rows.map(r => sanitizeForPrompt(r.content, 200));
     const result = await this._inferMeaning(term, contexts);
+
     if (!result || !result.hasAnswer || result.confidence < 7) {
-      this.logger.debug({ groupId, term, confidence: result?.confidence }, 'ondemand-lookup: low confidence or no answer');
-      return null;
+      this.logger.debug({ groupId, term, confidence: result?.confidence }, 'ondemand-lookup: low confidence → unknown');
+      return { type: 'unknown' };
     }
 
     if (!this._checkGates(term, result.meaning)) {
@@ -93,22 +110,13 @@ export class OnDemandLookup {
 
     this._cacheFact(groupId, term, result.meaning, result.confidence);
     this.logger.info({ groupId, term, meaning: result.meaning, confidence: result.confidence }, 'ondemand-lookup: cached');
-    return result.meaning;
-  }
-
-  private async _searchContexts(
-    groupId: string,
-    ftsQuery: string,
-    limit: number,
-  ): Promise<string[]> {
-    const rows = this.db.messages.searchFts(groupId, ftsQuery, limit);
-    return rows.map(r => sanitizeForPrompt(r.content, 200));
+    return { type: 'found', meaning: result.meaning };
   }
 
   private async _inferMeaning(
     term: string,
     contexts: string[],
-  ): Promise<LookupResult | null> {
+  ): Promise<LlmResult | null> {
     const contextBlock = contexts.map((c, i) => `[${i + 1}] ${c}`).join('\n');
     const safeTerm = sanitizeForPrompt(term, 60);
 
@@ -139,7 +147,7 @@ confidence含义：0-6=不确定，7-9=有把握，10=非常确定。若无法�
     }
   }
 
-  private _parseResponse(text: string): LookupResult | null {
+  private _parseResponse(text: string): LlmResult | null {
     try {
       // Strip markdown fences if model wraps in ```json
       const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
@@ -152,7 +160,7 @@ confidence含义：0-6=不确定，7-9=有把握，10=非常确定。若无法�
       ) {
         return null;
       }
-      const r = parsed as LookupResult;
+      const r = parsed as LlmResult;
       // Clamp confidence to valid range
       r.confidence = Math.max(0, Math.min(10, Math.round(r.confidence)));
       return r;
