@@ -116,14 +116,14 @@ describe('makeEngagementDecision', () => {
     expect(d.reason).toContain('adversarial');
   });
 
-  it('boundary: comprehension exactly at threshold (0.3) passes', () => {
-    const d = makeEngagementDecision(signals({ comprehensionScore: 0.3 }));
+  it('boundary: comprehension exactly at threshold (0.15) passes', () => {
+    const d = makeEngagementDecision(signals({ comprehensionScore: 0.15 }));
     expect(d.shouldReply).toBe(true);
     expect(d.strength).toBe('engage');
   });
 
-  it('boundary: comprehension just below threshold (0.29) fails', () => {
-    const d = makeEngagementDecision(signals({ comprehensionScore: 0.29 }));
+  it('boundary: comprehension just below threshold (0.14) fails', () => {
+    const d = makeEngagementDecision(signals({ comprehensionScore: 0.14 }));
     expect(d.shouldReply).toBe(false);
     expect(d.strength).toBe('skip');
   });
