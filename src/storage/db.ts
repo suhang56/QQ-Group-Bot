@@ -3244,7 +3244,7 @@ export class Database {
       } catch (e) {
         msgsFtsLogger.warn({ err: String(e) }, 'messages-fts rebuild failed');
       }
-    });
+    }).unref?.();
 
     // pending_moderation table — Batch D human-in-loop approval flow.
     this._db.exec(`
