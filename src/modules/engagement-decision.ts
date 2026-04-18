@@ -159,7 +159,7 @@ export function makeEngagementDecision(signals: EngagementSignals): EngagementDe
   }
 
   // Gate 4-5: comprehension-based decision
-  const LOW_COMPREHENSION_THRESHOLD = 0.3;
+  const LOW_COMPREHENSION_THRESHOLD = 0.15;
   if (signals.comprehensionScore < LOW_COMPREHENSION_THRESHOLD) {
     if (isDirect) {
       return {
