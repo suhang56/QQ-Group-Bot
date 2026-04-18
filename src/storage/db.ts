@@ -9,6 +9,7 @@ import { sanitizeFtsQuery } from '../utils/text-tokenize.js';
 import { createLogger } from '../utils/logger.js';
 
 const bm25Logger = createLogger('learned-facts-bm25');
+const supersededLogger = createLogger('learned-facts-supersede');
 
 // ---- Domain types ----
 
@@ -415,20 +416,23 @@ export interface LearnedFact {
   embedding: number[] | null;
 }
 
+export type LearnedFactInsertShape = {
+  groupId: string;
+  topic: string | null;
+  fact: string;
+  canonicalForm?: string | null;
+  personaForm?: string | null;
+  sourceUserId: string | null;
+  sourceUserNickname: string | null;
+  sourceMsgId: string | null;
+  botReplyId: number | null;
+  confidence?: number;
+  status?: LearnedFact['status'];
+};
+
 export interface ILearnedFactsRepository {
-  insert(row: {
-    groupId: string;
-    topic: string | null;
-    fact: string;
-    canonicalForm?: string | null;
-    personaForm?: string | null;
-    sourceUserId: string | null;
-    sourceUserNickname: string | null;
-    sourceMsgId: string | null;
-    botReplyId: number | null;
-    confidence?: number;
-    status?: LearnedFact['status'];
-  }): number;
+  insert(row: LearnedFactInsertShape): number;
+  insertOrSupersede(row: LearnedFactInsertShape, termToSupersede: string): { newId: number; supersededCount: number };
   listActive(groupId: string, limit: number): LearnedFact[];
   listActiveWithEmbeddings(groupId: string): LearnedFact[];
   listNullEmbeddingActive(groupId: string, limit: number): LearnedFact[];
@@ -1862,19 +1866,7 @@ class LearnedFactsRepository implements ILearnedFactsRepository {
     this._embeddingSvc = svc;
   }
 
-  insert(row: {
-    groupId: string;
-    topic: string | null;
-    fact: string;
-    canonicalForm?: string | null;
-    personaForm?: string | null;
-    sourceUserId: string | null;
-    sourceUserNickname: string | null;
-    sourceMsgId: string | null;
-    botReplyId: number | null;
-    confidence?: number;
-    status?: LearnedFact['status'];
-  }): number {
+  insert(row: LearnedFactInsertShape): number {
     const now = Math.floor(Date.now() / 1000);
     // insert() is sync; the embed call is async. Store NULL on the row and
     // schedule a fire-and-forget update below — the backfill loop is the
@@ -1915,6 +1907,47 @@ class LearnedFactsRepository implements ILearnedFactsRepository {
       );
     }
     return id;
+  }
+
+  insertOrSupersede(
+    row: LearnedFactInsertShape,
+    termToSupersede: string,
+  ): { newId: number; supersededCount: number } {
+    const term = termToSupersede.trim();
+    if (term.length < 3) {
+      const newId = this.insert(row);
+      return { newId, supersededCount: 0 };
+    }
+    const like = `%${term}%`;
+    const groupId = row.groupId;
+    const matches = this.db.prepare(
+      `SELECT id FROM learned_facts WHERE group_id = ? AND status = 'active'
+       AND (canonical_form LIKE ? OR fact LIKE ?) LIMIT 51`,
+    ).all(groupId, like, like) as Array<{ id: number }>;
+    if (matches.length > 50) {
+      throw new Error(`insertOrSupersede: term "${term}" matches >50 active rows — aborting to prevent bulk wipe`);
+    }
+    const now = Math.floor(Date.now() / 1000);
+    let newId = 0;
+    let supersededCount = 0;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const updateResult = this.db.prepare(
+        `UPDATE learned_facts SET status = 'superseded', updated_at = ?
+         WHERE group_id = ? AND status = 'active'
+         AND (canonical_form LIKE ? OR fact LIKE ?)`,
+      ).run(now, groupId, like, like) as { changes: number };
+      supersededCount = updateResult.changes;
+      newId = this.insert(row);
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+    if (supersededCount > 0) {
+      supersededLogger.info({ groupId, term, supersededCount, newId }, 'facts superseded');
+    }
+    return { newId, supersededCount };
   }
 
   listActive(groupId: string, limit: number): LearnedFact[] {

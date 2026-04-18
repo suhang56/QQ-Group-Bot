@@ -76,6 +76,7 @@ function makeLearnedFactsRepo(facts: LearnedFact[] = []): ILearnedFactsRepositor
       const id = stored.length + 1;
       return id;
     }),
+    insertOrSupersede: vi.fn().mockImplementation(() => ({ newId: stored.length + 1, supersededCount: 0 })),
     listActive: vi.fn().mockReturnValue(stored),
     listActiveWithEmbeddings: vi.fn().mockReturnValue([]),
     listNullEmbeddingActive: vi.fn().mockReturnValue([]),
@@ -501,7 +502,7 @@ describe('JargonMiner', () => {
 
       await miner.promoteToFacts('g1');
 
-      expect(learnedFacts.insert).toHaveBeenCalledWith({
+      expect(learnedFacts.insertOrSupersede).toHaveBeenCalledWith({
         groupId: 'g1',
         topic: '群内黑话',
         fact: 'ykn的意思是凑友希那',
@@ -511,7 +512,7 @@ describe('JargonMiner', () => {
         botReplyId: null,
         confidence: 0.85,
         status: 'active',
-      });
+      }, 'ykn');
 
       // Should mark as promoted (is_jargon=2)
       const candidates = getCandidates(db);
@@ -532,7 +533,7 @@ describe('JargonMiner', () => {
 
       await miner.promoteToFacts('g1');
 
-      expect(learnedFacts.insert).not.toHaveBeenCalled();
+      expect(learnedFacts.insertOrSupersede).not.toHaveBeenCalled();
     });
 
     it('does not promote is_jargon=0 candidates', async () => {
@@ -548,7 +549,7 @@ describe('JargonMiner', () => {
 
       await miner.promoteToFacts('g1');
 
-      expect(learnedFacts.insert).not.toHaveBeenCalled();
+      expect(learnedFacts.insertOrSupersede).not.toHaveBeenCalled();
     });
 
     it('skips duplicate facts already in learned_facts', async () => {
@@ -570,7 +571,7 @@ describe('JargonMiner', () => {
 
       await miner.promoteToFacts('g1');
 
-      expect(learnedFacts.insert).not.toHaveBeenCalled();
+      expect(learnedFacts.insertOrSupersede).not.toHaveBeenCalled();
       // Should still mark as promoted
       const candidates = getCandidates(db);
       expect(candidates.find(c => c.content === 'ykn')!.is_jargon).toBe(2);
@@ -582,7 +583,7 @@ describe('JargonMiner', () => {
 
       await miner.promoteToFacts('g1');
 
-      expect(learnedFacts.insert).not.toHaveBeenCalled();
+      expect(learnedFacts.insertOrSupersede).not.toHaveBeenCalled();
     });
   });
 

@@ -60,6 +60,7 @@ function makeMessageRepo(messages: Message[] = []): IMessageRepository {
 function makeLearnedFactsRepo(): ILearnedFactsRepository {
   return {
     insert: vi.fn().mockReturnValue(1),
+    insertOrSupersede: vi.fn().mockReturnValue({ newId: 1, supersededCount: 0 }),
     listActive: vi.fn().mockReturnValue([]),
     listActiveWithEmbeddings: vi.fn().mockReturnValue([]),
     listNullEmbeddingActive: vi.fn().mockReturnValue([]),

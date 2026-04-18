@@ -123,6 +123,132 @@ describe('LearnedFactsRepository', () => {
   });
 });
 
+describe('LearnedFactsRepository.insertOrSupersede', () => {
+  let db: Database;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+  });
+
+  function insertRaw(groupId: string, fact: string, status: string = 'active', canonicalForm?: string): number {
+    return db.learnedFacts.insert({
+      groupId, topic: null, fact,
+      canonicalForm: canonicalForm ?? null,
+      sourceUserId: null, sourceUserNickname: null,
+      sourceMsgId: null, botReplyId: null,
+      status: status as 'active' | 'pending' | 'superseded' | 'rejected',
+    });
+  }
+
+  function countByStatus(groupId: string, status: string): number {
+    const row = db.rawDb.prepare(
+      'SELECT COUNT(*) as n FROM learned_facts WHERE group_id = ? AND status = ?'
+    ).get(groupId, status) as { n: number };
+    return row.n;
+  }
+
+  it('T1: new term inserts without superseding anything', () => {
+    const { newId, supersededCount } = db.learnedFacts.insertOrSupersede(
+      { groupId: 'g1', topic: null, fact: 'xtt的意思是某人', canonicalForm: 'xtt的意思是某人', sourceUserId: null, sourceUserNickname: null, sourceMsgId: null, botReplyId: null, status: 'active' },
+      'xtt',
+    );
+    expect(newId).toBeGreaterThan(0);
+    expect(supersededCount).toBe(0);
+    expect(countByStatus('g1', 'active')).toBe(1);
+  });
+
+  it('T2: single existing row is superseded and new row inserted', () => {
+    insertRaw('g1', 'xtt的意思是旧含义', 'active', 'xtt的意思是旧含义');
+    const { supersededCount } = db.learnedFacts.insertOrSupersede(
+      { groupId: 'g1', topic: null, fact: 'xtt的意思是新含义', canonicalForm: 'xtt的意思是新含义', sourceUserId: null, sourceUserNickname: null, sourceMsgId: null, botReplyId: null, status: 'active' },
+      'xtt',
+    );
+    expect(supersededCount).toBe(1);
+    expect(countByStatus('g1', 'superseded')).toBe(1);
+    expect(countByStatus('g1', 'active')).toBe(1);
+    expect(db.learnedFacts.listActive('g1', 10)[0]!.fact).toBe('xtt的意思是新含义');
+  });
+
+  it('T3: multiple existing rows all superseded atomically', () => {
+    insertRaw('g1', 'xtt是好人', 'active', 'xtt是好人');
+    insertRaw('g1', 'xtt是学生', 'active', 'xtt是学生');
+    const { supersededCount } = db.learnedFacts.insertOrSupersede(
+      { groupId: 'g1', topic: null, fact: 'xtt的最新含义', sourceUserId: null, sourceUserNickname: null, sourceMsgId: null, botReplyId: null, status: 'active' },
+      'xtt',
+    );
+    expect(supersededCount).toBe(2);
+    expect(countByStatus('g1', 'superseded')).toBe(2);
+    expect(countByStatus('g1', 'active')).toBe(1);
+  });
+
+  it('T4: fact text substring match triggers supersede', () => {
+    insertRaw('g1', '大家知道xtt是群里的人', 'active');
+    const { supersededCount } = db.learnedFacts.insertOrSupersede(
+      { groupId: 'g1', topic: null, fact: 'xtt的意思是某人', sourceUserId: null, sourceUserNickname: null, sourceMsgId: null, botReplyId: null, status: 'active' },
+      'xtt',
+    );
+    expect(supersededCount).toBe(1);
+  });
+
+  it('T5: canonical_form-only match triggers supersede', () => {
+    insertRaw('g1', '不相关的fact文字', 'active', 'xtt的意思是旧内容');
+    const { supersededCount } = db.learnedFacts.insertOrSupersede(
+      { groupId: 'g1', topic: null, fact: 'xtt的意思是新内容', canonicalForm: 'xtt的意思是新内容', sourceUserId: null, sourceUserNickname: null, sourceMsgId: null, botReplyId: null, status: 'active' },
+      'xtt',
+    );
+    expect(supersededCount).toBe(1);
+  });
+
+  it('T6: term shorter than 3 chars skips supersede and just inserts', () => {
+    insertRaw('g1', 'ab相关的事实', 'active', 'ab相关');
+    const { supersededCount } = db.learnedFacts.insertOrSupersede(
+      { groupId: 'g1', topic: null, fact: '新内容', sourceUserId: null, sourceUserNickname: null, sourceMsgId: null, botReplyId: null, status: 'active' },
+      'ab',
+    );
+    expect(supersededCount).toBe(0);
+    expect(countByStatus('g1', 'active')).toBe(2);
+  });
+
+  it('T6b: rollback — UPDATE succeeds but INSERT fails; superseded rows restored to active', () => {
+    // Insert a row matching the term so the UPDATE step will mark it superseded.
+    insertRaw('g1', 'xtt是某人', 'active', 'xtt的意思是某人');
+    expect(countByStatus('g1', 'active')).toBe(1);
+
+    // Pass null for fact (NOT NULL column) — this causes the INSERT to throw after UPDATE ran.
+    expect(() =>
+      db.learnedFacts.insertOrSupersede(
+        { groupId: 'g1', topic: null, fact: null as unknown as string, sourceUserId: null, sourceUserNickname: null, sourceMsgId: null, botReplyId: null, status: 'active' },
+        'xtt',
+      )
+    ).toThrow();
+
+    // ROLLBACK must have fired — original row still active, no superseded rows.
+    expect(countByStatus('g1', 'active')).toBe(1);
+    expect(countByStatus('g1', 'superseded')).toBe(0);
+  });
+
+  it('T7: cross-group isolation — does not supersede other group rows', () => {
+    insertRaw('g2', 'xtt是g2成员', 'active', 'xtt是g2成员');
+    db.learnedFacts.insertOrSupersede(
+      { groupId: 'g1', topic: null, fact: 'xtt的新内容', sourceUserId: null, sourceUserNickname: null, sourceMsgId: null, botReplyId: null, status: 'active' },
+      'xtt',
+    );
+    expect(countByStatus('g2', 'active')).toBe(1);
+    expect(countByStatus('g2', 'superseded')).toBe(0);
+  });
+
+  it('T8: already-superseded rows are not re-superseded', () => {
+    insertRaw('g1', 'xtt旧事实', 'superseded', 'xtt旧事实');
+    const { supersededCount } = db.learnedFacts.insertOrSupersede(
+      { groupId: 'g1', topic: null, fact: 'xtt的意思是新内容', sourceUserId: null, sourceUserNickname: null, sourceMsgId: null, botReplyId: null, status: 'active' },
+      'xtt',
+    );
+    expect(supersededCount).toBe(0);
+    expect(countByStatus('g1', 'active')).toBe(1);
+    expect(countByStatus('g1', 'superseded')).toBe(1);
+  });
+});
+
 describe('Database migration: bot_replies.was_evasive on existing DBs', () => {
   it('adds the was_evasive column to a pre-existing bot_replies table', () => {
     // Build a "legacy" DB file in memory by hand: same bot_replies shape WITHOUT was_evasive.

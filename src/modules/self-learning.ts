@@ -243,7 +243,8 @@ export class SelfLearningModule {
       return null;
     }
 
-    const factId = this.db.learnedFacts.insert({
+    const _correctionTerm = (distilled.correctFact ?? '').split(/\s/)[0] ?? '';
+    const { newId: factId } = this.db.learnedFacts.insertOrSupersede({
       groupId,
       topic: distilled.topic ?? null,
       fact: distilled.correctFact,
@@ -253,7 +254,7 @@ export class SelfLearningModule {
       sourceUserNickname: correctionMsg.nickname,
       sourceMsgId: correctionMsg.messageId,
       botReplyId,
-    });
+    }, _correctionTerm.length >= 3 ? _correctionTerm : distilled.correctFact);
     this.logger.info({ groupId, factId, fact: distilled.correctFact }, 'learned fact (correction)');
     return { factId, fact: distilled.correctFact };
   }
@@ -289,7 +290,8 @@ export class SelfLearningModule {
     }
 
     const sourceNicks = followups.map(f => f.nickname).join(',');
-    const factId = this.db.learnedFacts.insert({
+    const _passiveTerm = (distilled.answer ?? '').split(/\s/)[0] ?? '';
+    const { newId: factId } = this.db.learnedFacts.insertOrSupersede({
       groupId,
       topic: distilled.topic ?? null,
       fact: distilled.answer,
@@ -299,7 +301,7 @@ export class SelfLearningModule {
       sourceUserNickname: sourceNicks,
       sourceMsgId: null,
       botReplyId: evasiveBotReplyId,
-    });
+    }, _passiveTerm.length >= 3 ? _passiveTerm : distilled.answer);
     this.logger.info({ groupId, factId, fact: distilled.answer }, 'learned fact (passive)');
     return { factId, fact: distilled.answer };
   }
@@ -718,7 +720,8 @@ ${lines.join('\n')}
       { term: researchTerm, meaning: response.fact, speakerCount: 1, contextCount: 1, groupId },
       { groundingProvider: this._groundingProvider ?? new GeminiGroundingProvider(), logger: this.logger },
     );
-    const factId = this.db.learnedFacts.insert({
+    const _onlineTerm = (topic ?? trigger ?? '').split(/\s/)[0] ?? '';
+    const { newId: factId } = this.db.learnedFacts.insertOrSupersede({
       groupId,
       topic: researchTerm,
       fact: response.fact,
@@ -730,7 +733,7 @@ ${lines.join('\n')}
       botReplyId: evasiveBotReplyId,
       confidence,
       status: researchStatus,
-    });
+    }, _onlineTerm.length >= 3 ? _onlineTerm : (response.fact ?? '').split(/\s/)[0] ?? '');
     this.logger.info({ groupId, factId, fact: response.fact, source: response.source }, 'learned fact (online)');
     return { factId, fact: response.fact };
   }

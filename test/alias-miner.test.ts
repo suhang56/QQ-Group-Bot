@@ -28,6 +28,7 @@ function makeFactRepo(existing: LearnedFact[] = []): ILearnedFactsRepository & {
     listPending: vi.fn().mockReturnValue([]),
     countPending: vi.fn().mockReturnValue(0),
     insert: vi.fn().mockImplementation((row) => { inserted.push(row); return inserted.length; }),
+    insertOrSupersede: vi.fn().mockReturnValue({ newId: 1, supersededCount: 0 }),
     markStatus: vi.fn(),
     clearGroup: vi.fn(),
     countActive: vi.fn().mockReturnValue(0),
