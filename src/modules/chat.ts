@@ -1679,7 +1679,7 @@ export class ChatModule implements IChatModule {
       || isShortAck
       || isMetaCommentary
       || isPicBotCommand
-      || comprehensionScore < 0.3;
+      || comprehensionScore < 0.15;
     const groupCfgForJudge = this.db.groupConfig.get(groupId);
     const airReadingEnabled = groupCfgForJudge?.airReadingEnabled ?? false;
     const addresseeGraphEnabled = groupCfgForJudge?.addresseeGraphEnabled ?? false;
@@ -1736,6 +1736,7 @@ export class ChatModule implements IChatModule {
       addresseeIsOther,
       awkwardVeto,
       moodLevel,
+      metaIdentityBonus: factors.metaIdentityProbe,
     };
     const engagementDecision = makeEngagementDecision(engagementSignals);
     const isDirectForLog = engagementSignals.isMention || engagementSignals.isReplyToBot;

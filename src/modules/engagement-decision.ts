@@ -69,8 +69,8 @@ export interface EngagementSignals {
   readonly activityLevel: 'idle' | 'normal' | 'busy';
   /**
    * M7.1 — pre-chat LLM judge verdict on whether the bot should engage.
-   *   'engage' → force engage (even if score is below minScore) unless a
-   *              higher-priority suppression gate (5.5, 5.6) fires.
+   *   'engage' → +0.2 bonus on participationScore. Softens the Gate 6 bar;
+   *              does NOT bypass anti-monologue gates (5.5, 5.6) or the bar.
    *   'skip'   → force skip (unless direct trigger or adversarial).
    *   null     → no opinion; fall through to existing gates.
    * Direct triggers (mention/reply-to-bot) always win over 'skip'.
@@ -96,6 +96,15 @@ export interface EngagementSignals {
    * when high. Direct triggers (mention / reply) are unaffected.
    */
   readonly moodLevel: 'low' | 'normal' | 'high';
+  /**
+   * M3 — meta-identity probe bonus ("哪个人格" / "又是bot" etc.) gated on
+   * bot having spoken in the last 3 minutes. When > 0, Gate 6 treats the
+   * message as semi-direct (1.0x non-direct multiplier instead of 1.5x):
+   * meta-identity questions are directed at bot state and functionally
+   * semi-direct even without @. Value mirrors `ScoreFactors.metaIdentityProbe`
+   * from chat._computeWeightedScore.
+   */
+  readonly metaIdentityBonus: number;
 }
 
 /**
@@ -203,9 +212,15 @@ export function makeEngagementDecision(signals: EngagementSignals): EngagementDe
   // M9.2 layers mood multiplier: 1.2x when low (irritable bot shuts up more),
   // 0.9x when high (upbeat bot pipes up more readily). Direct triggers bypass
   // regardless.
-  // M7.1: relevanceOverride='engage' bypasses score — LLM already judged
-  // relevance against bot interests with full context.
-  const directMultiplier = isDirect ? 1.0 : 1.5;
+  // M7.1: relevanceOverride='engage' contributes a +0.2 bonus on
+  // participationScore — softens the score bar without bypassing it. This
+  // preserves anti-monologue gates (5.5/5.6 above) as hard stops and keeps
+  // Gate 6 internally consistent (LLM judge is a signal, not an override).
+  // M3: metaIdentityBonus > 0 treats the message as semi-direct for the
+  // multiplier (1.0x instead of 1.5x) — meta-identity probes are directed
+  // at bot state and functionally semi-direct even without @.
+  const isMetaIdentity = signals.metaIdentityBonus > 0;
+  const directMultiplier = (isDirect || isMetaIdentity) ? 1.0 : 1.5;
   const activityMultiplier = signals.activityLevel === 'busy' ? 1.4
                            : signals.activityLevel === 'idle' ? 0.75
                            : 1.0;
@@ -213,16 +228,17 @@ export function makeEngagementDecision(signals: EngagementSignals): EngagementDe
                        : signals.moodLevel === 'high' ? 0.9
                        : 1.0;
   const effectiveMinScore = signals.minScore * directMultiplier * activityMultiplier * moodMultiplier;
-  const llmEngageOverride = signals.relevanceOverride === 'engage';
-  if (isDirect || llmEngageOverride || signals.participationScore >= effectiveMinScore) {
+  const llmEngageBonus = signals.relevanceOverride === 'engage' ? 0.2 : 0;
+  const adjustedScore = signals.participationScore + llmEngageBonus;
+  if (isDirect || adjustedScore >= effectiveMinScore) {
     return {
       shouldReply: true,
       strength: 'engage',
       reason: isDirect
         ? 'direct trigger (mention/reply)'
-        : llmEngageOverride
-        ? 'pre-chat judge: engage'
-        : `score ${signals.participationScore.toFixed(3)} >= ${effectiveMinScore.toFixed(3)} [${signals.activityLevel}][${signals.moodLevel}]`,
+        : llmEngageBonus > 0
+        ? `score ${signals.participationScore.toFixed(3)} + llm-bonus ${llmEngageBonus} >= ${effectiveMinScore.toFixed(3)} [${signals.activityLevel}][${signals.moodLevel}]`
+        : `score ${adjustedScore.toFixed(3)} >= ${effectiveMinScore.toFixed(3)} [${signals.activityLevel}][${signals.moodLevel}]`,
     };
   }
 
@@ -230,6 +246,6 @@ export function makeEngagementDecision(signals: EngagementSignals): EngagementDe
   return {
     shouldReply: false,
     strength: 'skip',
-    reason: `score ${signals.participationScore.toFixed(3)} < ${effectiveMinScore.toFixed(3)} [${signals.activityLevel}][${signals.moodLevel}]`,
+    reason: `score ${adjustedScore.toFixed(3)} < ${effectiveMinScore.toFixed(3)} [${signals.activityLevel}][${signals.moodLevel}]`,
   };
 }
