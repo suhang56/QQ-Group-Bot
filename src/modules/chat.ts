@@ -2704,12 +2704,20 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     // most recent speaker. Guarded so we don't false-positive on peer-to-peer
     // chat: (a) must contain 你, (b) must NOT contain @ to another user,
     // (c) must end with question marker OR be ≤15 chars (short direct quip),
-    // (d) bot must have posted within IMPLICIT_BOT_REF_ALIAS_WINDOW_MS.
+    // (d) bot must have posted within IMPLICIT_BOT_REF_ALIAS_WINDOW_MS,
+    // (e) 你 must be directed AT the other party (跟你/问你/你能/你是/你有),
+    //     not a possessive/embedded 你 ("懂你意思" / "赞同你想法" where 你
+    //     refers to the prior peer speaker, not bot).
     if (msSinceBot < IMPLICIT_BOT_REF_ALIAS_WINDOW_MS && /你/.test(content)) {
       const hasAtOtherUser = /\[CQ:at,qq=\d+/.test(rawContent);
       if (!hasAtOtherUser) {
-        const isQuestion = /[?？]$|[吗嘛呢吧]$/.test(content.trim());
-        if (isQuestion || content.length <= 15) return true;
+        const trimmed = content.trim();
+        const isQuestion = /[?？]$|[吗嘛呢吧]$/.test(trimmed);
+        // 你 is a direct address only if it's at string start, after comma/space,
+        // OR preceded by a verb-marker that makes bot the object. Exclude
+        // possessive patterns (懂你X / 赞同你X / 你的 as object of verb).
+        const DIRECT_YOU_RE = /(^|[,，。？！?! ])你(?!的\S+(?:的)?$)(?!意思|想法|看法|观点|说法)/;
+        if ((isQuestion || trimmed.length <= 15) && DIRECT_YOU_RE.test(trimmed)) return true;
       }
     }
     return false;

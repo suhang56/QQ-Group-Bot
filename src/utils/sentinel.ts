@@ -570,6 +570,11 @@ export function isOutsiderCommentatorTone(text: string): boolean {
   // "你们X了吗/啊" — 对全群提泛问 (你们吃饭了吗 / 你们都回来了啊)
   if (/^你们.{1,10}(了吗|了啊|了呢)[？?。!！]?$/.test(trimmed)) return true;
 
+  // "你们X啊/呢" — 旁观形容/评述 (你们好多朋友啊 / 你们关系真好呢 / 你们人真多啊)
+  // Catches 你们 + up-to-8-char descriptor + mood-marker. Common garbage shape
+  // when LLM can't figure out what to say and just observes the group as outsider.
+  if (/^你们.{1,8}(啊|呢|哦|诶|呀|嘛)[？?。!！]?$/.test(trimmed)) return true;
+
   return false;
 }
 
