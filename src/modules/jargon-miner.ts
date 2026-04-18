@@ -378,21 +378,13 @@ export class JargonMiner {
         continue;
       }
 
-      // Supersede any ondemand-lookup rows for the same term (cron quality > ondemand).
-      const existingOndemand = this.learnedFacts.listActive(groupId, 500)
-        .filter(f => f.topic === 'ondemand-lookup'
-          && f.canonicalForm?.startsWith(candidate.content + '的意思是'));
-      for (const row of existingOndemand) {
-        this.learnedFacts.markStatus(row.id, 'superseded');
-      }
-
       const speakerCount = new Set(candidate.contexts.map(ctx => ctx.user_id ?? 'unknown')).size;
       const contextCount = candidate.contexts.length;
       const status = await validateFactForActive(
         { term: candidate.content, meaning: candidate.meaning ?? '', speakerCount, contextCount, groupId },
         { groundingProvider: this.groundingProvider ?? new GeminiGroundingProvider(), logger: this.logger },
       );
-      this.learnedFacts.insert({
+      this.learnedFacts.insertOrSupersede({
         groupId,
         topic: '群内黑话',
         fact: factText,
@@ -402,7 +394,7 @@ export class JargonMiner {
         botReplyId: null,
         confidence: 0.85,
         status,
-      });
+      }, candidate.content);
 
       this._markPromoted(groupId, candidate.content);
 

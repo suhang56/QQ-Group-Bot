@@ -2166,7 +2166,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     let webLookupBlock = '';
     if (this.webLookup) {
       const knownTerms = this._getKnownTermsSet(groupId);
-      const candidates = extractCandidateTerms(triggerMessage.content, knownTerms);
+      const candidates = extractCandidateTerms(triggerMessage.content);
       const unknownForWeb = candidates.filter(t => shouldLookupTerm(t, knownTerms, DEFAULT_COMMON_WORDS));
       if (unknownForWeb.length > 0) {
         const snippetParts: string[] = [];
@@ -3396,8 +3396,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     userId: string,
   ): Promise<string> {
     if (!this.onDemandLookup) return '';
-    const knownTerms = this._getKnownTermsSet(groupId);
-    const candidates = extractCandidateTerms(content, knownTerms);
+    const candidates = extractCandidateTerms(content);
     if (candidates.length === 0) return '';
     const foundLines: string[] = [];
     const weakLines: string[] = [];

@@ -29,6 +29,7 @@ function makeMessageRepo(rows: SearchFtsRow[]): IMessageRepository {
 function makeFactsRepo(): ILearnedFactsRepository {
   return {
     insert: vi.fn().mockReturnValue(1),
+    insertOrSupersede: vi.fn().mockReturnValue({ newId: 1, supersededCount: 0 }),
     listActive: vi.fn().mockReturnValue([]),
     listActiveWithEmbeddings: vi.fn().mockReturnValue([]),
     listNullEmbeddingActive: vi.fn().mockReturnValue([]),
@@ -83,24 +84,23 @@ const FIVE_ROWS: SearchFtsRow[] = [
 
 describe('extractCandidateTerms', () => {
   it('case 1: extracts unknown terms from casual message', () => {
-    const result = extractCandidateTerms('xtt bandori', new Set());
+    const result = extractCandidateTerms('xtt bandori');
     expect(result).toContain('xtt');
     expect(result.length).toBeGreaterThanOrEqual(1);
   });
 
-  it('case 2: known terms filtered out', () => {
-    const result = extractCandidateTerms('xtt bandori', new Set(['xtt', 'bandori']));
-    expect(result).not.toContain('xtt');
-    expect(result).not.toContain('bandori');
+  it('case 2: knownFacts param removed — terms are NOT filtered out', () => {
+    const result = extractCandidateTerms('xtt bandori');
+    expect(result).toContain('xtt');
   });
 
   it('case 3: returns at most 3 candidates', () => {
-    const result = extractCandidateTerms('aaa bbb ccc ddd eee', new Set());
+    const result = extractCandidateTerms('aaa bbb ccc ddd eee');
     expect(result.length).toBeLessThanOrEqual(3);
   });
 
   it('case 4: empty message returns empty array', () => {
-    expect(extractCandidateTerms('', new Set())).toEqual([]);
+    expect(extractCandidateTerms('')).toEqual([]);
   });
 });
 
@@ -164,7 +164,7 @@ describe('OnDemandLookup.lookupTerm', () => {
     });
     const result = await lookup.lookupTerm('g1', 'xtt', 'u1');
     expect(result).toEqual({ type: 'found', meaning: 'someone' });
-    expect(factsRepo.insert).toHaveBeenCalledOnce();
+    expect(factsRepo.insertOrSupersede).toHaveBeenCalledOnce();
   });
 
   it('case 9: jailbreak in meaning -> null, no insert', async () => {
@@ -202,13 +202,14 @@ describe('OnDemandLookup.lookupTerm', () => {
       logger: makeLogger(),
     });
     await lookup.lookupTerm('g1', 'xtt', 'u1');
-    expect(factsRepo.insert).toHaveBeenCalledWith(
+    expect(factsRepo.insertOrSupersede).toHaveBeenCalledWith(
       expect.objectContaining({
         sourceUserNickname: '[ondemand-lookup]',
         topic: 'ondemand-lookup',
         confidence: 0.8,
         groupId: 'g1',
       }),
+      'xtt',
     );
   });
 
