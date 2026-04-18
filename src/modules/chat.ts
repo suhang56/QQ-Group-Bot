@@ -1613,9 +1613,28 @@ export class ChatModule implements IChatModule {
     const isAdversarial = isProbe || isTask || isInject || isHarass;
 
     // ── Comprehension scoring (BEFORE Claude call) ────────────────────
+    // Extract short jargon term keys from learned_facts so the scorer recognises
+    // group-specific abbreviations (e.g. "xtt") and doesn't score them as unknown.
+    // Only topic values with user-visible classification prefixes are used —
+    // system metadata topics ("ondemand-lookup", "web_lookup:*") are skipped to
+    // avoid false substring hits in the scorer's j.includes() check.
+    const TOPIC_TERM_RE = /(?:user-taught|opus-classified:slang|opus-rest-classified:slang|opus-classified:fandom|opus-rest-classified:fandom):([^:]+)/;
+    const extraJargon: string[] = [];
+    if (this.db.learnedFacts) {
+      for (const f of this.db.learnedFacts.listActive(groupId, 500)) {
+        if (!f.topic) continue;
+        const m = f.topic.match(TOPIC_TERM_RE);
+        if (m && m[1] && m[1].length <= 15) extraJargon.push(m[1].toLowerCase());
+      }
+    }
     const comprehensionCtx: ComprehensionContext = {
       loreKeywords: this._getLoreKeywords(groupId),
-      jargonTerms: loadGroupJargon(this.db.rawDb, groupId).map(j => j.term.toLowerCase()),
+      jargonTerms: [
+        ...new Set([
+          ...loadGroupJargon(this.db.rawDb, groupId).map(j => j.term.toLowerCase()),
+          ...extraJargon,
+        ]),
+      ],
       aliasKeys: this._getAliasKeys(groupId),
     };
     const { score: comprehensionScore } = scoreComprehensionSafe(triggerMessage.content, comprehensionCtx);
