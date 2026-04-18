@@ -7,7 +7,7 @@ import { cosineSimilarity } from './embeddings.js';
 import { MemeGraphRepository, PhraseCandidatesRepository } from './meme-repos.js';
 import { sanitizeFtsQuery } from '../utils/text-tokenize.js';
 import { createLogger } from '../utils/logger.js';
-import { topicStringsForTerm } from '../modules/fact-topic-prefixes.js';
+import { topicStringsForTerm, extractTermFromTopic } from '../modules/fact-topic-prefixes.js';
 
 const bm25Logger = createLogger('learned-facts-bm25');
 const supersededLogger = createLogger('learned-facts-supersede');
@@ -433,14 +433,15 @@ export type LearnedFactInsertShape = {
 
 export interface ILearnedFactsRepository {
   insert(row: LearnedFactInsertShape): number;
-  insertOrSupersede(row: LearnedFactInsertShape, termToSupersede: string): { newId: number; supersededCount: number };
+  insertOrSupersede(row: LearnedFactInsertShape): { newId: number; supersededCount: number };
   listActive(groupId: string, limit: number): LearnedFact[];
   /**
-   * Return all active facts whose topic is one of the 6 canonical prefixes
-   * for this term. Result is tiny by construction (≤ 6 rows per term) — no
-   * LIMIT clause, no truncation risk. Returns empty array when no match.
-   * Exact topic match (no substring leak): `findActiveByTopicTerm(gid,'tt')`
-   * never returns `user-taught:xtt`.
+   * Return all active facts whose topic is one of the 9 canonical prefixes
+   * for this term. Result is tiny by construction (≤ 9 rows per term) — no
+   * LIMIT clause, no truncation risk. Returns empty array when no match or
+   * when the term itself fails isValidStructuredTerm. Exact topic match (no
+   * substring leak): `findActiveByTopicTerm(gid,'tt')` never returns
+   * `user-taught:xtt`. Uses dynamic placeholders (list length = prefix count).
    */
   findActiveByTopicTerm(groupId: string, term: string): LearnedFact[];
   listActiveWithEmbeddings(groupId: string): LearnedFact[];
@@ -1918,60 +1919,63 @@ class LearnedFactsRepository implements ILearnedFactsRepository {
     return id;
   }
 
-  insertOrSupersede(
-    row: LearnedFactInsertShape,
-    termToSupersede: string,
-  ): { newId: number; supersededCount: number } {
-    const term = termToSupersede.trim();
-    if (term.length < 3) {
-      const newId = this.insert(row);
+  insertOrSupersede(row: LearnedFactInsertShape): { newId: number; supersededCount: number } {
+    // Normalize topic: trim whitespace, collapse empty string to null.
+    // This normalized row is what we INSERT; it matches what future UPDATEs
+    // compare against. Never insert a raw untrimmed topic.
+    const trimmed = row.topic?.trim();
+    const topic = trimmed && trimmed.length > 0 ? trimmed : null;
+    const normalizedRow: LearnedFactInsertShape = { ...row, topic };
+
+    const term = topic ? extractTermFromTopic(topic) : null;
+
+    // Unstructured / invalid-suffix → pure insert, no supersession.
+    // Catches legacy bare "群内黑话", null, and dirty "user-taught:ygfn是谁啊".
+    if (!term) {
+      const newId = this.insert(normalizedRow);
       return { newId, supersededCount: 0 };
     }
-    const like = `%${term}%`;
-    const groupId = row.groupId;
-    const matches = this.db.prepare(
-      `SELECT id FROM learned_facts WHERE group_id = ? AND status = 'active'
-       AND (canonical_form LIKE ? OR fact LIKE ?) LIMIT 51`,
-    ).all(groupId, like, like) as Array<{ id: number }>;
-    if (matches.length > 50) {
-      throw new Error(`insertOrSupersede: term "${term}" matches >50 active rows — aborting to prevent bulk wipe`);
-    }
+
+    const groupId = normalizedRow.groupId;
     const now = Math.floor(Date.now() / 1000);
     let newId = 0;
     let supersededCount = 0;
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      const isUserTaught = row.topic?.startsWith('user-taught:') ?? false;
-      const updateSql = isUserTaught
-        ? `UPDATE learned_facts SET status = 'superseded', updated_at = ?
-           WHERE group_id = ? AND status = 'active'
-           AND (canonical_form LIKE ? OR fact LIKE ?)`
-        : `UPDATE learned_facts SET status = 'superseded', updated_at = ?
-           WHERE group_id = ? AND status = 'active'
-           AND (topic IS NULL OR topic NOT LIKE 'user-taught:%')
-           AND (canonical_form LIKE ? OR fact LIKE ?)`;
-      const updateResult = this.db.prepare(updateSql)
-        .run(now, groupId, like, like) as { changes: number };
+      // Exact equality against normalized topic. Healthy DB has ≤1 active row per topic.
+      const updateResult = this.db.prepare(
+        `UPDATE learned_facts SET status='superseded', updated_at=?
+         WHERE group_id=? AND status='active' AND topic=?`,
+      ).run(now, groupId, topic) as { changes: number };
+      if (updateResult.changes > 5) {
+        throw new Error(
+          `insertOrSupersede: topic "${topic}" has ${updateResult.changes} active rows — aborting`,
+        );
+      }
       supersededCount = updateResult.changes;
-      newId = this.insert(row);
+      newId = this.insert(normalizedRow);
       this.db.exec('COMMIT');
     } catch (err) {
       this.db.exec('ROLLBACK');
       throw err;
     }
     if (supersededCount > 0) {
-      supersededLogger.info({ groupId, term, supersededCount, newId }, 'facts superseded');
+      supersededLogger.info(
+        { groupId, topic, supersededCount, newId },
+        'facts superseded (exact-topic)',
+      );
     }
     return { newId, supersededCount };
   }
 
   findActiveByTopicTerm(groupId: string, term: string): LearnedFact[] {
     const topics = topicStringsForTerm(term);
+    if (topics.length === 0) return [];
+    const placeholders = topics.map(() => '?').join(', ');
     const rows = this.db.prepare(
       `SELECT * FROM learned_facts
-       WHERE group_id = ? AND status = 'active'
-       AND topic IN (?, ?, ?, ?, ?, ?)
-       ORDER BY id DESC`
+       WHERE group_id = ? AND status = 'active' AND topic IN (${placeholders})
+       ORDER BY id DESC`,
     ).all(groupId, ...topics) as unknown as LearnedFactRow[];
     return rows.map(learnedFactFromRow);
   }

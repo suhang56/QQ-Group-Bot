@@ -10,6 +10,12 @@ import { sanitizeNickname, sanitizeForPrompt, hasJailbreakPattern } from '../uti
 import { rrfFuse } from '../utils/rrf-fusion.js';
 import { validateFactForActive } from './fact-validator.js';
 import { GeminiGroundingProvider } from './web-lookup.js';
+import { deriveFactTerm } from './fact-term-extractor.js';
+import {
+  isValidStructuredTerm,
+  extractTermFromTopic,
+  compareFactsByTrust,
+} from './fact-topic-prefixes.js';
 
 /** Cosine similarity floor — facts below this are dropped unless pinned.
  * MiniLM-L6-v2 is noisier on Chinese text so we set a slightly higher
@@ -243,10 +249,17 @@ export class SelfLearningModule {
       return null;
     }
 
-    const _correctionTerm = (distilled.correctFact ?? '').split(/\s/)[0] ?? '';
+    const correctionTerm = deriveFactTerm({
+      explicitTopic: distilled.topic ?? null,
+      trigger: botReply.triggerContent,
+      factText: distilled.correctFact,
+    });
+    const correctionTopic = correctionTerm && isValidStructuredTerm(correctionTerm)
+      ? `user-taught:${correctionTerm}`
+      : null;
     const { newId: factId } = this.db.learnedFacts.insertOrSupersede({
       groupId,
-      topic: distilled.topic ?? null,
+      topic: correctionTopic,
       fact: distilled.correctFact,
       canonicalForm: distilled.correctFact,
       personaForm: null,
@@ -254,7 +267,7 @@ export class SelfLearningModule {
       sourceUserNickname: correctionMsg.nickname,
       sourceMsgId: correctionMsg.messageId,
       botReplyId,
-    }, _correctionTerm.length >= 3 ? _correctionTerm : distilled.correctFact);
+    });
     this.logger.info({ groupId, factId, fact: distilled.correctFact }, 'learned fact (correction)');
     return { factId, fact: distilled.correctFact };
   }
@@ -290,10 +303,17 @@ export class SelfLearningModule {
     }
 
     const sourceNicks = followups.map(f => f.nickname).join(',');
-    const _passiveTerm = (distilled.answer ?? '').split(/\s/)[0] ?? '';
+    const passiveTerm = deriveFactTerm({
+      explicitTopic: distilled.topic ?? null,
+      trigger: originalTrigger,
+      factText: distilled.answer,
+    });
+    const passiveTopic = passiveTerm && isValidStructuredTerm(passiveTerm)
+      ? `passive:${passiveTerm}`
+      : null;
     const { newId: factId } = this.db.learnedFacts.insertOrSupersede({
       groupId,
-      topic: distilled.topic ?? null,
+      topic: passiveTopic,
       fact: distilled.answer,
       canonicalForm: distilled.answer,
       personaForm: null,
@@ -301,7 +321,7 @@ export class SelfLearningModule {
       sourceUserNickname: sourceNicks,
       sourceMsgId: null,
       botReplyId: evasiveBotReplyId,
-    }, _passiveTerm.length >= 3 ? _passiveTerm : distilled.answer);
+    });
     this.logger.info({ groupId, factId, fact: distilled.answer }, 'learned fact (passive)');
     return { factId, fact: distilled.answer };
   }
@@ -438,7 +458,21 @@ export class SelfLearningModule {
       if (memeBlock) return { text: memeBlock, factIds: [] };
       return { text: '', factIds: [] };
     }
-    const base = this._renderFacts(finalFacts);
+    // Dedup: for each recognized term, keep the best fact per compareFactsByTrust.
+    // Rows with no recognized topic are keyed by their own id and don't collapse.
+    // NOTE: deduped.length may be < limit if multiple top-K entries share a term.
+    // Do NOT backfill — prompt cleanliness beats recall quantity.
+    const perTermBest = new Map<string, LearnedFact>();
+    for (const f of finalFacts) {
+      const term = extractTermFromTopic(f.topic ?? null);
+      const key = term ?? `__id:${f.id}`;
+      const existing = perTermBest.get(key);
+      if (!existing || compareFactsByTrust(f, existing) < 0) {
+        perTermBest.set(key, f);
+      }
+    }
+    const deduped = Array.from(perTermBest.values());
+    const base = this._renderFacts(deduped);
     const memeBlock = this._renderMemeGraphBlock(groupId, triggerEmbedding);
     if (memeBlock) {
       return { text: base.text + '\n\n' + memeBlock, factIds: base.factIds };
@@ -720,10 +754,17 @@ ${lines.join('\n')}
       { term: researchTerm, meaning: response.fact, speakerCount: 1, contextCount: 1, groupId },
       { groundingProvider: this._groundingProvider ?? new GeminiGroundingProvider(), logger: this.logger },
     );
-    const _onlineTerm = (topic ?? trigger ?? '').split(/\s/)[0] ?? '';
+    const onlineTerm = deriveFactTerm({
+      explicitTopic: topic ?? null,
+      trigger: trigger ?? null,
+      factText: response.fact,
+    });
+    const onlineTopic = onlineTerm && isValidStructuredTerm(onlineTerm)
+      ? `online-research:${onlineTerm}`
+      : null;
     const { newId: factId } = this.db.learnedFacts.insertOrSupersede({
       groupId,
-      topic: researchTerm,
+      topic: onlineTopic,
       fact: response.fact,
       canonicalForm: response.fact,
       personaForm: null,
@@ -733,7 +774,7 @@ ${lines.join('\n')}
       botReplyId: evasiveBotReplyId,
       confidence,
       status: researchStatus,
-    }, _onlineTerm.length >= 3 ? _onlineTerm : (response.fact ?? '').split(/\s/)[0] ?? '');
+    });
     this.logger.info({ groupId, factId, fact: response.fact, source: response.source }, 'learned fact (online)');
     return { factId, fact: response.fact };
   }
