@@ -613,3 +613,17 @@ CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
   INSERT INTO messages_fts(messages_fts, rowid, content, group_id)
   VALUES ('delete', old.id, old.content, old.group_id);
 END;
+
+-- web_lookup_cache (Path C): CSE results keyed by (group_id, term), TTL 30 days.
+CREATE TABLE IF NOT EXISTS web_lookup_cache (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id    TEXT    NOT NULL,
+  term        TEXT    NOT NULL,
+  snippet     TEXT    NOT NULL,
+  source_url  TEXT    NOT NULL,
+  confidence  INTEGER NOT NULL,
+  created_at  INTEGER NOT NULL,
+  expires_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_web_cache_term
+  ON web_lookup_cache(group_id, term, expires_at DESC);

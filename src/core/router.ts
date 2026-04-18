@@ -16,6 +16,7 @@ import type { ICharModule } from '../modules/char.js';
 import type { IStickerFirstModule } from '../modules/sticker-first.js';
 import type { AffinityModule } from '../modules/affinity.js';
 import type { IFatigueSource } from '../modules/fatigue.js';
+import type { WebLookup } from '../modules/web-lookup.js';
 import { extractTokens } from '../utils/text-tokenize.js';
 import { BotErrorCode } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
@@ -130,6 +131,7 @@ export class Router implements IRouter {
   private pokeModule: IPokeModule | null = null;
   private affinity: AffinityModule | null = null;
   private fatigue: IFatigueSource | null = null;
+  private webLookup: WebLookup | null = null;
   private forwardPurgeInterval: ReturnType<typeof setInterval> | null = null;
 
   // Repeater cooldown: key = `${groupId}:${content}`, value = last-triggered timestamp
@@ -239,6 +241,10 @@ export class Router implements IRouter {
 
   setFatigue(fatigue: IFatigueSource): void {
     this.fatigue = fatigue;
+  }
+
+  setWebLookup(webLookup: WebLookup): void {
+    this.webLookup = webLookup;
   }
 
   dispose(): void {
@@ -2361,6 +2367,36 @@ ${ctxLine}
       } else {
         await this.adapter.send(msg.groupId, `已批量通过 ${count} 条待审知识，全部纳入参考。`);
       }
+    });
+
+    this.commands.set('web_lookup_pending', async (msg, args, _config) => {
+      if (msg.role !== 'admin' && msg.role !== 'owner') {
+        await this.adapter.send(msg.groupId, '\u6ca1\u6709\u6743\u9650\u3002\u53ea\u6709\u7ba1\u7406\u5458\u53ef\u4ee5\u67e5\u770b\u5f85\u5ba1\u7f51\u7edc\u67e5\u8be2\u3002');
+        return;
+      }
+      const page = parseInt(args[0] ?? '1', 10) - 1;
+      const limit = 10;
+      const rows = this.db.learnedFacts.listPending(msg.groupId, limit, page * limit)
+        .filter(f => f.topic?.startsWith('web_lookup:'));
+      if (!rows.length) {
+        await this.adapter.send(msg.groupId, '\u6ca1\u6709\u5f85\u5ba1\u6838\u7684\u7f51\u7edc\u67e5\u8be2\u6761\u76ee');
+        return;
+      }
+      const lines = rows.map(f => `[${f.id}] ${f.topic}: ${f.fact.slice(0, 80)}`).join('\n');
+      await this.adapter.send(msg.groupId, `\u7f51\u7edc\u67e5\u8be2\u5f85\u5ba1\u6761\u76ee:\n${lines}\n\n\u901a\u8fc7: /fact_approve <ID>  \u62d2\u7edd: /fact_reject <ID>`);
+    });
+
+    this.commands.set('web_lookup_quota', async (msg, _args, _config) => {
+      if (msg.role !== 'admin' && msg.role !== 'owner') {
+        await this.adapter.send(msg.groupId, '\u6ca1\u6709\u6743\u9650\u3002');
+        return;
+      }
+      if (!this.webLookup) {
+        await this.adapter.send(msg.groupId, '\u7f51\u7edc\u67e5\u8be2\u529f\u80fd\u672a\u542f\u7528\u3002');
+        return;
+      }
+      const info = this.webLookup.getQuotaInfo();
+      await this.adapter.send(msg.groupId, `\u4eca\u65e5\u7f51\u7edc\u67e5\u8be2: ${info.usedToday}/${info.limit}`);
     });
 
     this.commands.set('stickerfirst_on', async (msg, _args, config) => {

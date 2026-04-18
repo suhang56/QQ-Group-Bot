@@ -262,3 +262,13 @@ export function defaultGroupConfig(groupId: string): GroupConfig {
     updatedAt: new Date().toISOString(),
   };
 }
+
+// ============================================================================
+// Path C — WebSearch (Google Custom Search JSON API)
+// ============================================================================
+
+export const WEB_LOOKUP_ENABLED = process.env['WEB_LOOKUP_ENABLED'] === '1';
+export const GOOGLE_CSE_API_KEY = process.env['GOOGLE_CSE_API_KEY'] ?? '';
+export const GOOGLE_CSE_CX = process.env['GOOGLE_CSE_CX'] ?? '';
+export const WEB_LOOKUP_MAX_PER_DAY = parseIntOr(process.env['WEB_LOOKUP_MAX_PER_DAY'], 50, 'WEB_LOOKUP_MAX_PER_DAY');
+export const WEB_LOOKUP_PLACEHOLDER_MS = parseIntOr(process.env['WEB_LOOKUP_PLACEHOLDER_MS'], 3000, 'WEB_LOOKUP_PLACEHOLDER_MS');
