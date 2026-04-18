@@ -195,6 +195,12 @@ export interface IMessageRepository {
   getByTimeRange(groupId: string, startSec: number, endSec: number): Message[];
   /** Distinct group_ids with any non-deleted message since sinceSec. Used by DiaryDistiller.runForAllGroups. */
   listActiveGroupIds(sinceSec: number): string[];
+  /**
+   * BM25 MATCH search over messages_fts for a group, newest-first.
+   * Raw query must be pre-sanitized via sanitizeFtsQuery before calling.
+   * Returns [] on FTS syntax error or missing table.
+   */
+  searchFts(groupId: string, ftsQuery: string, limit: number): Pick<Message, 'content' | 'timestamp'>[];
 }
 
 // ---- Diary types (W-B) ----
@@ -1062,6 +1068,25 @@ class MessageRepository implements IMessageRepository {
       `SELECT DISTINCT group_id FROM messages WHERE timestamp >= ? AND deleted = 0`
     ).all(sinceSec) as Array<{ group_id: string }>;
     return rows.map(r => r.group_id);
+  }
+
+  searchFts(groupId: string, ftsQuery: string, limit: number): Pick<Message, 'content' | 'timestamp'>[] {
+    if (!ftsQuery) return [];
+    try {
+      const rows = this.db.prepare(`
+        SELECT m.content, m.timestamp
+        FROM messages_fts fts
+        JOIN messages m ON m.id = fts.rowid
+        WHERE messages_fts MATCH ?
+          AND fts.group_id = ?
+          AND m.deleted = 0
+        ORDER BY m.timestamp DESC
+        LIMIT ?
+      `).all(ftsQuery, groupId, limit) as { content: string; timestamp: number }[];
+      return rows;
+    } catch {
+      return [];
+    }
   }
 }
 
@@ -3167,6 +3192,59 @@ export class Database {
         ftsLogger.warn({ err: String(e) }, 'FTS rebuild failed — vector-only fallback');
       }
     });
+
+    // Path A: detect-and-rebuild legacy tokenizer (mirrors learned_facts_fts pattern above).
+    // If an existing DB has messages_fts under unicode61, drop and recreate.
+    try {
+      const existingMsgsFts = this._db.prepare(
+        `SELECT sql FROM sqlite_master WHERE type='table' AND name='messages_fts'`,
+      ).get() as { sql?: string } | undefined;
+      if (existingMsgsFts?.sql && !/tokenize\s*=\s*['"]?trigram/i.test(existingMsgsFts.sql)) {
+        this._db.exec(`DROP TABLE messages_fts`);
+      }
+    } catch { /* table absent — CREATE below handles fresh install */ }
+
+    this._db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+        content,
+        group_id UNINDEXED,
+        content='messages',
+        content_rowid='id',
+        tokenize='trigram'
+      )
+    `);
+    this._db.exec(`
+      CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+        INSERT INTO messages_fts(rowid, content, group_id)
+        VALUES (new.id, new.content, new.group_id);
+      END
+    `);
+    this._db.exec(`
+      CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+        INSERT INTO messages_fts(messages_fts, rowid, content, group_id)
+        VALUES ('delete', old.id, old.content, old.group_id);
+      END
+    `);
+
+    // One-shot backfill via setImmediate (same pattern as learned_facts_fts).
+    // Deferred so 518k-row INSERT does not block bot startup.
+    const msgsFtsLogger = createLogger('messages-fts');
+    setImmediate(() => {
+      try {
+        const ftsCount = this._db.prepare(
+          `SELECT COUNT(*) as n FROM messages_fts`,
+        ).get() as { n: number };
+        const tblCount = this._db.prepare(
+          `SELECT COUNT(*) as n FROM messages`,
+        ).get() as { n: number };
+        if (ftsCount.n < tblCount.n) {
+          // Full rebuild is faster than per-row INSERT for existing rows.
+          this._db.exec(`INSERT INTO messages_fts(messages_fts) VALUES('rebuild')`);
+        }
+      } catch (e) {
+        msgsFtsLogger.warn({ err: String(e) }, 'messages-fts rebuild failed');
+      }
+    }).unref?.();
 
     // pending_moderation table — Batch D human-in-loop approval flow.
     this._db.exec(`

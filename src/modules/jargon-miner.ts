@@ -304,6 +304,14 @@ export class JargonMiner {
         continue;
       }
 
+      // Supersede any ondemand-lookup rows for the same term (cron quality > ondemand).
+      const existingOndemand = this.learnedFacts.listActive(groupId, 500)
+        .filter(f => f.topic === 'ondemand-lookup'
+          && f.canonicalForm?.startsWith(candidate.content + '的意思是'));
+      for (const row of existingOndemand) {
+        this.learnedFacts.markStatus(row.id, 'superseded');
+      }
+
       this.learnedFacts.insert({
         groupId,
         topic: '群内黑话',

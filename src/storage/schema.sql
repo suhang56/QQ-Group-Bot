@@ -590,3 +590,26 @@ CREATE TABLE IF NOT EXISTS honest_gaps (
   PRIMARY KEY (group_id, term)
 );
 CREATE INDEX IF NOT EXISTS idx_honest_gaps_group_count ON honest_gaps(group_id, seen_count DESC);
+
+-- messages_fts (Path A): FTS5 BM25 over chat messages for on-demand jargon lookup.
+-- trigram tokenizer required for CJK — unicode61 collapses CJK runs into one token.
+-- group_id UNINDEXED: stored but not indexed by FTS; group scoping done post-match.
+-- content_rowid links to messages.id (INTEGER PK, not SQLite rowid alias here).
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+  content,
+  group_id UNINDEXED,
+  content='messages',
+  content_rowid='id',
+  tokenize='trigram'
+);
+
+CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+  INSERT INTO messages_fts(rowid, content, group_id)
+  VALUES (new.id, new.content, new.group_id);
+END;
+
+-- FTS5 content table delete: must use the special 'delete' command row.
+CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+  INSERT INTO messages_fts(messages_fts, rowid, content, group_id)
+  VALUES ('delete', old.id, old.content, old.group_id);
+END;
