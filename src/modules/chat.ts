@@ -3642,12 +3642,6 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     const combined = parts.join('\n\n');
     this.loreCache.set(groupId, combined);
     this.loreKeywordsCache.set(groupId, tokenizeLore(combined));
-    this.logger.debug({
-      groupId,
-      overviewLen: overview.length,
-      memberFiles: loadedFiles,
-      totalLen: combined.length,
-    }, 'Relevant lore loaded (per-member)');
     return combined;
   }
 
