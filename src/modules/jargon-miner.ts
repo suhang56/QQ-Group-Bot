@@ -9,6 +9,7 @@ import { sanitizeForPrompt, hasJailbreakPattern } from '../utils/prompt-sanitize
 import { validateFactForActive } from './fact-validator.js';
 import { GeminiGroundingProvider } from './web-lookup.js';
 import { shouldAcceptFactCandidate } from './fact-candidate-validator.js';
+import { isValidStructuredTerm } from './fact-topic-prefixes.js';
 
 // ---- Constants ----
 
@@ -403,9 +404,13 @@ export class JargonMiner {
         { term: candidate.content, meaning: candidate.meaning ?? '', speakerCount, contextCount, groupId },
         { groundingProvider: this.groundingProvider ?? new GeminiGroundingProvider(), logger: this.logger },
       );
+      const jargonTerm = candidate.content.trim();
+      const jargonTopic = isValidStructuredTerm(jargonTerm)
+        ? `群内黑话:${jargonTerm}`
+        : null;
       this.learnedFacts.insertOrSupersede({
         groupId,
-        topic: '群内黑话',
+        topic: jargonTopic,
         fact: factText,
         sourceUserId: null,
         sourceUserNickname: '[jargon-miner]',
@@ -413,7 +418,7 @@ export class JargonMiner {
         botReplyId: null,
         confidence: 0.85,
         status,
-      }, candidate.content);
+      });
 
       this._markPromoted(groupId, candidate.content);
 

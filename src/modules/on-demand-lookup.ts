@@ -5,6 +5,7 @@ import type { ILearnedFactsRepository, IMessageRepository } from '../storage/db.
 import type { Logger } from 'pino';
 import { validateFactForActive } from './fact-validator.js';
 import { GeminiGroundingProvider } from './web-lookup.js';
+import { compareFactsByTrust, isValidStructuredTerm } from './fact-topic-prefixes.js';
 
 export interface OnDemandLookupDeps {
   db: {
@@ -93,21 +94,7 @@ export class OnDemandLookup {
       try {
         const matches = this.db.learnedFacts.findActiveByTopicTerm(groupId, normalizedTerm);
 
-        const priorityRank = (topic: string | null): number => {
-          if (!topic) return 99;
-          if (topic.startsWith('user-taught:')) return 0;
-          if (topic.startsWith('opus-classified:slang') || topic.startsWith('opus-rest-classified:slang')) return 1;
-          if (topic.startsWith('opus-classified:fandom') || topic.startsWith('opus-rest-classified:fandom')) return 2;
-          return 10;
-        };
-        matches.sort((a, b) => {
-          const pa = priorityRank(a.topic);
-          const pb = priorityRank(b.topic);
-          if (pa !== pb) return pa - pb;
-          const lenA = (a.personaForm ?? a.fact ?? '').length;
-          const lenB = (b.personaForm ?? b.fact ?? '').length;
-          return lenA - lenB;
-        });
+        matches.sort(compareFactsByTrust);
 
         const match = matches[0];
         if (match) {
@@ -230,9 +217,13 @@ confidence含义：0-6=不确定，7-9=有把握，10=非常确定。若无法�
       { term, meaning, speakerCount: 1, contextCount: 3, groupId },
       { groundingProvider: this.groundingProvider ?? new GeminiGroundingProvider(), logger: this.logger },
     );
+    const cleanTerm = term.trim();
+    const odTopic = isValidStructuredTerm(cleanTerm)
+      ? `ondemand-lookup:${cleanTerm}`
+      : null;
     this.db.learnedFacts.insertOrSupersede({
       groupId,
-      topic: 'ondemand-lookup',
+      topic: odTopic,
       fact: canonicalForm,
       canonicalForm,
       personaForm: null,
@@ -242,7 +233,7 @@ confidence含义：0-6=不确定，7-9=有把握，10=非常确定。若无法�
       botReplyId: null,
       confidence: confidence / 10,
       status,
-    }, term);
+    });
   }
 
   private _allowUser(userId: string): boolean {

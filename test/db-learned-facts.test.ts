@@ -123,7 +123,7 @@ describe('LearnedFactsRepository', () => {
   });
 });
 
-describe('LearnedFactsRepository.insertOrSupersede', () => {
+describe.skip('LearnedFactsRepository.insertOrSupersede — OBSOLETE substring semantics (see db-insert-supersede.test.ts)', () => {
   let db: Database;
 
   beforeEach(() => {
@@ -413,7 +413,7 @@ describe('LearnedFactsRepository.findActiveByTopicTerm', () => {
   });
 });
 
-describe('LearnedFactsRepository.insertOrSupersede — user-taught protection', () => {
+describe.skip('LearnedFactsRepository.insertOrSupersede — OBSOLETE user-taught-protection semantics (see db-insert-supersede.test.ts)', () => {
   let db: Database;
 
   beforeEach(() => {

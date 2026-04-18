@@ -206,11 +206,10 @@ describe('OnDemandLookup.lookupTerm', () => {
     expect(factsRepo.insertOrSupersede).toHaveBeenCalledWith(
       expect.objectContaining({
         sourceUserNickname: '[ondemand-lookup]',
-        topic: 'ondemand-lookup',
+        topic: 'ondemand-lookup:xtt',
         confidence: 0.8,
         groupId: 'g1',
       }),
-      'xtt',
     );
   });
 
