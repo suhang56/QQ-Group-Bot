@@ -88,6 +88,14 @@ export interface IRelationshipPromptSource {
   getBotUserRelation(groupId: string, botUserId: string, userId: string): SocialRelation | null;
 }
 
+// W-A: honest-gaps — surfaces hot unfamiliar terms into the chat system prompt
+// so the bot can say "啥来的" honestly instead of confabulating. See
+// src/modules/honest-gaps.ts.
+export interface IHonestGapsPromptSource {
+  /** Returns a pre-formatted block (wrapper tag + preamble + lines) or '' when nothing to inject. */
+  formatForPrompt(groupId: string): string;
+}
+
 // M6.5: facts-only addressing hint. State the relationship; let persona layer
 // infer tone. Hardcoded behavior prescriptions risk persona override
 // (ref: feedback_dont_stack_persona_overrides).
@@ -114,6 +122,9 @@ export interface IChatModule {
   tickStickerRefresh(groupId: string): void;
   getMoodTracker(): MoodTracker;
   noteAdminActivity(groupId: string, userId: string, nickname: string, content: string): void;
+  /** W-A: per-message honest-gaps hook. Optional so older test stubs still
+   *  satisfy IChatModule; router guards with typeof check. */
+  recordHonestGapsMessage?(groupId: string, content: string, nowMs: number): void;
   getEvasiveFlagForLastReply(groupId: string): boolean;
   getInjectedFactIdsForLastReply(groupId: string): number[];
   getConsecutiveReplies(groupId: string): number;
@@ -838,6 +849,12 @@ export class ChatModule implements IChatModule {
   // M7 (M7.1+M7.3+M7.4): pre-chat LLM judge (relevance + addressee + air-reading).
   // null-safe; when unset, all three override signals default to safe values.
   private preChatJudge: IPreChatJudge | null = null;
+  // W-A: honest-gaps source (reads top unfamiliar terms, writes them into the
+  // chat system prompt). null-safe; no section emitted when unset.
+  private honestGapsSource: IHonestGapsPromptSource | null = null;
+  // W-A: per-message hook target. Separate from honestGapsSource because the
+  // tracker implements both interfaces — we keep the typing tight.
+  private honestGapsTracker: { recordMessage(groupId: string, content: string, nowMs: number): void } | null = null;
   // per-group: whether the last generateReply call returned an evasive reply
   private readonly lastEvasiveReply = new Map<string, boolean>();
   private readonly conversationState = new ConversationStateTracker();
@@ -1281,6 +1298,27 @@ export class ChatModule implements IChatModule {
   }
   setPreChatJudge(judge: IPreChatJudge | null): void {
     this.preChatJudge = judge;
+  }
+  // W-A: honest-gaps wiring. Both interfaces are usually implemented by the
+  // same HonestGapsTracker instance, but we accept them via separate setters
+  // so tests can inject a formatter-only mock without also stubbing
+  // recordMessage().
+  setHonestGapsSource(src: IHonestGapsPromptSource | null): void {
+    this.honestGapsSource = src;
+  }
+  setHonestGapsTracker(
+    tracker: { recordMessage(groupId: string, content: string, nowMs: number): void } | null,
+  ): void {
+    this.honestGapsTracker = tracker;
+  }
+  /** Router passthrough — called for every incoming group message. No-op when tracker unset. */
+  recordHonestGapsMessage(groupId: string, content: string, nowMs: number): void {
+    if (!this.honestGapsTracker) return;
+    try {
+      this.honestGapsTracker.recordMessage(groupId, content, nowMs);
+    } catch {
+      // swallow — tracker already logs internally.
+    }
   }
 
   /** Return the key of the most recent sticker sent via sticker-first in this group, or null. */
@@ -3659,6 +3697,10 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     // Relationship section varies per-call (depends on immediate-context speakers),
     // so treat it like per-member lore for cache purposes.
     const hasRelationshipSource = this.relationshipSource !== null;
+    // W-A: honest-gaps section is group-scoped but updated on every incoming
+    // message, so cache it like relationship source (recompute each call) to
+    // keep the list fresh as new terms cross the threshold.
+    const hasHonestGaps = this.honestGapsSource !== null;
 
     // W-B: diary section pulls from group_diary and should refresh when a new
     // daily/weekly row lands. Bypass the cache when either kind exists for this
@@ -3672,7 +3714,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
 
     // If per-member lore is active, we can't use the full cached result since
     // lore content varies per call. But we can still use cached base + fresh lore.
-    if (cached && Date.now() < cached.expiresAt && !hasPerMemberLore && !hasRelationshipSource && !hasDiarySection) {
+    if (cached && Date.now() < cached.expiresAt && !hasPerMemberLore && !hasRelationshipSource && !hasHonestGaps && !hasDiarySection) {
       return cached.text;
     }
 
@@ -3718,6 +3760,13 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     // Inject learned jargon from jargon_candidates table
     const jargonEntries = loadGroupJargon(this.db.rawDb, groupId);
     const jargonSection = formatJargonBlock(jargonEntries);
+
+    // W-A: honest-gaps — surface hot unfamiliar terms so the bot can honestly
+    // say "啥来的" instead of confabulating. Pre-formatted (with wrapper tag +
+    // preamble) by the source; returns '' when below threshold.
+    const honestGapsSection = this.honestGapsSource
+      ? this.honestGapsSource.formatForPrompt(groupId)
+      : '';
 
     // M8.2: group-aggregate speech vibe. Char-mode suppresses this block so
     // the active character's voice is not diluted by the host group's flavor.
@@ -3804,12 +3853,12 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       return `\n\n${parts.join('\n')}`;
     })();
 
-    const text = `${personaBase}${adminStyleSection}${loreSection}${jargonSection}${groupStyleSection}${expressionSection}${relationshipSection}${diarySection}${rulesBlock}${imageAwarenessLine}\n\n---\n简短自然（普通闲聊 1-3 句话；涉及列举 / 计数 / 时间线 / 多人信息且事实段落有料时允许 2-4 行展开）。群友提到群里的人名、梗、黑话，基于上面资料接一下；不知道的就"啥来的"，不要装懂。${rulesInstruction}${outputRules}`;
+    const text = `${personaBase}${adminStyleSection}${loreSection}${jargonSection}${honestGapsSection}${groupStyleSection}${expressionSection}${relationshipSection}${diarySection}${rulesBlock}${imageAwarenessLine}\n\n---\n简短自然（普通闲聊 1-3 句话；涉及列举 / 计数 / 时间线 / 多人信息且事实段落有料时允许 2-4 行展开）。群友提到群里的人名、梗、黑话，基于上面资料接一下；不知道的就"啥来的"，不要装懂。${rulesInstruction}${outputRules}`;
 
     // Only cache the full text when NOT using per-member lore and NOT using
-    // per-call relationship data and NOT using a per-cycle diary section (all
-    // vary between calls otherwise).
-    if (!hasPerMemberLore && !hasRelationshipSource && !hasDiarySection) {
+    // per-call relationship data and NOT using per-cycle honest-gaps/diary
+    // sections (all vary between calls otherwise).
+    if (!hasPerMemberLore && !hasRelationshipSource && !hasHonestGaps && !hasDiarySection) {
       this.groupIdentityCache.set(groupId, { text, expiresAt: Date.now() + this.groupIdentityCacheTtlMs });
     }
     this.logger.debug({ groupId, hasLore: !!lore, hasStickerSection: stickerSection.length > 0, perMemberLore: hasPerMemberLore }, 'Group identity prompt built');

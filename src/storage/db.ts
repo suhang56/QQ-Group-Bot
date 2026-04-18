@@ -660,6 +660,23 @@ export interface IMoodRepository {
   upsert(row: MoodRow): void;
 }
 
+// ---- Honest gaps (W-A) ----
+
+export interface HonestGapsRow {
+  groupId: string;
+  term: string;
+  seenCount: number;
+  firstSeen: number; // unix seconds
+  lastSeen: number;  // unix seconds
+}
+
+export interface IHonestGapsRepository {
+  /** Increment seen_count for (groupId, term); insert with seen_count=1 on first sighting. nowSec in unix seconds. */
+  upsert(groupId: string, term: string, nowSec: number): void;
+  /** Top terms with seen_count >= minSeen, ordered by (seen_count DESC, last_seen DESC). */
+  getTopTerms(groupId: string, minSeen: number, limit: number): HonestGapsRow[];
+}
+
 // ---- Meme graph (memes-v1) ----
 
 export interface MemeGraphEntry {
@@ -2824,6 +2841,47 @@ class GroupDiaryRepository implements IGroupDiaryRepository {
   }
 }
 
+// ---- Honest gaps repository (W-A) ----
+
+class HonestGapsRepository implements IHonestGapsRepository {
+  private readonly upsertStmt;
+  private readonly topStmt;
+
+  constructor(db: DatabaseSync) {
+    this.upsertStmt = db.prepare(`
+      INSERT INTO honest_gaps (group_id, term, seen_count, first_seen, last_seen)
+      VALUES (?, ?, 1, ?, ?)
+      ON CONFLICT(group_id, term) DO UPDATE SET
+        seen_count = seen_count + 1,
+        last_seen  = excluded.last_seen
+    `);
+    this.topStmt = db.prepare(`
+      SELECT group_id, term, seen_count, first_seen, last_seen
+      FROM honest_gaps
+      WHERE group_id = ? AND seen_count >= ?
+      ORDER BY seen_count DESC, last_seen DESC
+      LIMIT ?
+    `);
+  }
+
+  upsert(groupId: string, term: string, nowSec: number): void {
+    this.upsertStmt.run(groupId, term, nowSec, nowSec);
+  }
+
+  getTopTerms(groupId: string, minSeen: number, limit: number): HonestGapsRow[] {
+    const rows = this.topStmt.all(groupId, minSeen, limit) as unknown as Array<{
+      group_id: string; term: string; seen_count: number; first_seen: number; last_seen: number;
+    }>;
+    return rows.map(r => ({
+      groupId: r.group_id,
+      term: r.term,
+      seenCount: r.seen_count,
+      firstSeen: r.first_seen,
+      lastSeen: r.last_seen,
+    }));
+  }
+}
+
 // ---- Main Database class ----
 
 export class Database {
@@ -2850,6 +2908,7 @@ export class Database {
   readonly userStyles: IUserStyleRepository;
   readonly userStylesAggregate: IUserStyleAggregateRepository;
   readonly mood: IMoodRepository;
+  readonly honestGaps: IHonestGapsRepository;
   readonly memeGraph: IMemeGraphRepo;
   readonly phraseCandidates: IPhraseCandidatesRepo;
   readonly groupDiary: IGroupDiaryRepository;
@@ -2888,6 +2947,7 @@ export class Database {
     this.userStyles = new UserStyleRepository(this._db);
     this.userStylesAggregate = new UserStyleAggregateRepository(this._db);
     this.mood = new MoodRepository(this._db);
+    this.honestGaps = new HonestGapsRepository(this._db);
     this.memeGraph = new MemeGraphRepository(this._db);
     this.phraseCandidates = new PhraseCandidatesRepository(this._db);
     this.groupDiary = new GroupDiaryRepository(this._db);
@@ -3396,6 +3456,21 @@ export class Database {
       )
     `);
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_group_diary_lookup ON group_diary(group_id, kind, period_end DESC)`);
+
+    // honest_gaps (W-A): per-group unfamiliar-term counter. Mirrored here for
+    // existing DBs; schema.sql handles fresh installs. See
+    // feedback_sqlite_schema_migration.
+    this._db.exec(`
+      CREATE TABLE IF NOT EXISTS honest_gaps (
+        group_id    TEXT    NOT NULL,
+        term        TEXT    NOT NULL,
+        seen_count  INTEGER NOT NULL DEFAULT 1,
+        first_seen  INTEGER NOT NULL,
+        last_seen   INTEGER NOT NULL,
+        PRIMARY KEY (group_id, term)
+      )
+    `);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_honest_gaps_group_count ON honest_gaps(group_id, seen_count DESC)`);
   }
 
   /**
