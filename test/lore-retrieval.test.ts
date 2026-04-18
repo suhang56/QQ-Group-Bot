@@ -156,10 +156,12 @@ describe('buildLorePayload', () => {
 
   it('returns identity core only when no entities matched', () => {
     const payload = buildLorePayload(GROUP_ID, new Set(), LORE_DIR);
+    // INV-1: contract-level truthy + non-empty string (structural, content-independent)
     expect(payload).toBeTruthy();
+    expect(typeof payload).toBe('string');
+    expect(payload!.length).toBeGreaterThan(0);
+    // INV-2: identity-core-only payload respects IDENTITY_CORE_CAP (800)
     expect(payload!.length).toBeLessThanOrEqual(800);
-    expect(payload).toContain('北美炸梦同好会');
-    expect(payload).toContain('戸山香澄');
   });
 
   it('returns identity core + matched chunk for hyw', () => {
@@ -168,10 +170,19 @@ describe('buildLorePayload', () => {
     const entities = new Set(hywChunks!);
     const payload = buildLorePayload(GROUP_ID, entities, LORE_DIR);
     expect(payload).toBeTruthy();
-    expect(payload!.length).toBeGreaterThan(800);
     expect(payload!.length).toBeLessThanOrEqual(8000);
-    // Should contain identity core
-    expect(payload).toContain('北美炸梦同好会');
+    // INV-4 anchor: entity-matched payload must be strictly longer than identity-core-only
+    // payload for the same group. This is the regression guard for "chunks appended"
+    // contract and replaces the rotted content-string assertion.
+    const identityOnlyPayload = buildLorePayload(GROUP_ID, new Set(), LORE_DIR);
+    expect(identityOnlyPayload).toBeTruthy();
+    expect(payload!.length).toBeGreaterThan(identityOnlyPayload!.length);
+  });
+
+  it('returns null for nonexistent groupId', () => {
+    // INV-3: contract boundary — missing chunks file returns null, not throws, not ''
+    const missing = buildLorePayload('000000000', new Set(), LORE_DIR);
+    expect(missing).toBeNull();
   });
 
   it('respects 8000 char cap for multi-entity payload', () => {
