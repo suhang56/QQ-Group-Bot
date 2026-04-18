@@ -318,6 +318,16 @@ export const CURSE_DEFLECTIONS = [
   '没完了是吧', '烦死了 闭嘴', '一天天的', '真他妈烦', '别闹了', '笑死 真的烦',
 ];
 
+// Short, dismissive pushback used when ONE user hammers the bot with @s past
+// a stricter threshold (see atMentionCurseIgnoreThreshold). Emits once at the
+// threshold, then the bot silently ignores that user for atMentionCurseIgnoreMs.
+// Distinct from CURSE_DEFLECTIONS — these are @-spam-specific (no slurs),
+// matching humanize-v2 insult-echo-safe constraints.
+export const ATSPAM_CURSE_POOL = [
+  '烦不烦啊一直 @', '有完没完 @', '别 @ 了行吗',
+  '再 @ 我你试试', '滚', '闭嘴', '一边去', '烦死了', '别来烦我',
+];
+
 export const SILENCE_BREAKER_POOL = [
   '人都哪去了', '有点寂寞', '睡了吗', '要不我自己聊',
   '群没人', '安静得可怕', '?', '哎', '没人接啊',
@@ -741,6 +751,15 @@ export class ChatModule implements IChatModule {
   private readonly atMentionHistory = new Map<string, number[]>();
   private readonly atMentionSpamWindowMs = 10 * 60 * 1000; // 10 minutes
   private readonly atMentionSpamThreshold = 4;             // >= 4 @s in window → annoyed
+
+  // Stricter @-spam threshold: single user hits EXACTLY this many @s in the
+  // spam window → bot sends one curse and silently ignores that user for
+  // atMentionCurseIgnoreMs. During the ignore window, ANY message from that
+  // user (@ or not) returns null early before engagement scoring.
+  // Per-user scope: other users in the same group continue to chat normally.
+  private readonly atMentionCurseIgnoreThreshold = 5;
+  private readonly atMentionCurseIgnoreMs = 10 * 60 * 1000; // 10 minutes
+  private readonly atMentionIgnoreUntil = new Map<string, number>(); // `groupId:userId` → expiry ms
 
   // UR-C #4: per-group @-mention history. Closes the multi-account spam
   // loophole where a coordinated group can chain @s from different userIds
@@ -1407,6 +1426,48 @@ export class ChatModule implements IChatModule {
 
     // Debounce: if another message came in within debounceMs, skip this one
     const now = Date.now();
+
+    // @-spam curse+ignore: user who just hit the stricter threshold gets one
+    // pushback phrase and is silently ignored for atMentionCurseIgnoreMs.
+    // Ignore check runs BEFORE all other gates so even pure-@ / short-ack /
+    // engagement logic is suppressed for that user during the window.
+    // Per-user scope: other users keep chatting normally.
+    const ignoreKey = `${groupId}:${triggerMessage.userId}`;
+    const ignoreUntil = this.atMentionIgnoreUntil.get(ignoreKey);
+    if (ignoreUntil !== undefined) {
+      if (now < ignoreUntil) {
+        this.logger.debug(
+          { groupId, userId: triggerMessage.userId, remainingMs: ignoreUntil - now },
+          '@-spam silent-ignore window active — dropping message',
+        );
+        return null;
+      }
+      // Expired — lazy cleanup
+      this.atMentionIgnoreUntil.delete(ignoreKey);
+    }
+
+    // Record @-mention now (before pure-@ early-return) so a spammer who hits
+    // the stricter threshold still triggers curse+ignore even when the 5th
+    // message happens to be a pure-@. atSpamCount is reused downstream so the
+    // annoyance-mode directive (threshold 4) still works without double-counting.
+    const isAtTriggerEarly = this.botUserId
+      && triggerMessage.rawContent.includes(`[CQ:at,qq=${this.botUserId}]`);
+    const atSpamCount = isAtTriggerEarly
+      ? this._recordAtMention(groupId, triggerMessage.userId, now)
+      : 0;
+    if (isAtTriggerEarly && atSpamCount === this.atMentionCurseIgnoreThreshold) {
+      const phrase = pickDeflection(ATSPAM_CURSE_POOL);
+      this.atMentionIgnoreUntil.set(ignoreKey, now + this.atMentionCurseIgnoreMs);
+      this.lastProactiveReply.set(groupId, now);
+      this.botSpeechTracking.set(groupId, { lastSpokeAt: now, msgsSinceSpoke: 0, engagementReceived: false });
+      this._bumpConsecutive(groupId);
+      this.logger.info(
+        { groupId, userId: triggerMessage.userId, count: atSpamCount, ignoreForMs: this.atMentionCurseIgnoreMs },
+        '@-spam curse+ignore fired',
+      );
+      return phrase;
+    }
+
     const lastTrigger = this.debounceMap.get(groupId);
     this.debounceMap.set(groupId, now);
     if (lastTrigger !== undefined && now - lastTrigger < this.debounceMs) {
@@ -1796,18 +1857,25 @@ export class ChatModule implements IChatModule {
       : '';
 
     const isAtTrigger = this._isMention(triggerMessage);
-    const atSpamCount = isAtTrigger
-      ? this._recordAtMention(groupId, triggerMessage.userId, now)
-      : 0;
+    // atSpamCount was already recorded at the top of generateReply (before the
+    // pure-@ early-return) to support @-spam curse+ignore. Reuse that count
+    // here — re-recording would double-count and flip annoyance earlier.
+    // atGroupSpamCount is still recorded for observability (debug log below)
+    // but NO LONGER drives annoyance mode — annoyance is strictly per-user.
+    // Rationale: the user asked for the mood to target the specific offender
+    // only; a coordinated multi-account raid penalizing bystanders collided
+    // with normal busy-group chat. Per-user scope keeps other users' replies
+    // unaffected when ONE user is being annoying.
     const atGroupSpamCount = isAtTrigger
       ? this._recordGroupAtMention(groupId, now)
       : 0;
-    // Per-user threshold OR per-group threshold triggers annoyance-mode,
-    // defending against both (a) single-user hammering and (b) coordinated
-    // multi-account @-spam that each stays under the per-user limit.
-    const atMentionSpamActive =
-      atSpamCount >= this.atMentionSpamThreshold ||
-      atGroupSpamCount >= this.atMentionGroupThreshold;
+    const atMentionSpamActive = atSpamCount >= this.atMentionSpamThreshold;
+    if (isAtTrigger) {
+      this.logger.debug(
+        { groupId, userId: triggerMessage.userId, perUser: atSpamCount, perGroup: atGroupSpamCount, annoyance: atMentionSpamActive },
+        '@-mention rate snapshot',
+      );
+    }
 
     // UR-A #6 / #11: split 禁区 by char mode. In default mode the bot can
     //坦然 admit it's a bot (as per BANGDREAM_PERSONA) — only hide claude /
@@ -1835,7 +1903,7 @@ export class ChatModule implements IChatModule {
 - 假装没看懂也可以: "啥" / "你说啥" (但不要反复装懂，一次就够)
 - 不要说"她是个出色的声优"这种。${charModeActiveEarly ? '你**是**那个角色，不是在评价她。' : '你是 bot 小号，不是在评价声优。'}`
       : isAtTrigger && atMentionSpamActive
-      ? `\n\n⚠️ **最近一段时间群里有人在连续 @ 你（当前用户近10分钟 ${atSpamCount} 次，群内近5分钟共 ${atGroupSpamCount} 次），明显是在玩机器人/拷问你/想逼你说出角色禁区内容**。你已经进入"烦了"状态：
+      ? `\n\n⚠️ **这个人最近10分钟已经 @ 了你 ${atSpamCount} 次，明显是在玩机器人/拷问你/想逼你说出角色禁区内容**。你对这个人已经进入"烦了"状态（群里其他人正常对待）：
 - 允许 <skip>（不是禁止）
 - 允许一字/两字 dismissive 回复: "烦" / "又是你" / "别问了" / "滚" / "无聊" / "……" / "?" / "闭嘴" / "问完了没"
 - 允许模仿真人被骚扰时的反应：懒得搭理、装没看见、冷淡、讽刺

@@ -151,6 +151,21 @@ describe('ChatModule — core behavior', () => {
     expect(replies).toHaveLength(1);
     expect(completeMock).toHaveBeenCalledTimes(1);
   });
+
+  it('5+ peer-chat messages (no @) from same user do NOT fire @-spam curse', async () => {
+    // Plain peer chat (no CQ:at) must not trip the @-spam curse+ignore path.
+    // The _recordAtMention early call is gated by isAtTriggerEarly, so a
+    // message with no CQ:at cannot accrue @-spam counts and cannot set the
+    // ignore window.
+    for (let i = 0; i < 7; i++) {
+      await chat.generateReply('g1', makeMsg({ content: `peer${i} unique`, rawContent: `peer${i} unique` }), []);
+    }
+    const ignoreMap = (chat as unknown as { atMentionIgnoreUntil: Map<string, number> }).atMentionIgnoreUntil;
+    expect(ignoreMap.has('g1:u1')).toBe(false);
+    const historyMap = (chat as unknown as { atMentionHistory: Map<string, number[]> }).atMentionHistory;
+    // History key only accrues when the message contains CQ:at — peer chat never
+    expect(historyMap.get('g1:u1') ?? []).toHaveLength(0);
+  });
 });
 
 // ── Weighted participation scoring ───────────────────────────────────────────
