@@ -103,6 +103,12 @@ describe('extractCandidateTerms', () => {
   it('case 4: empty message returns empty array', () => {
     expect(extractCandidateTerms('')).toEqual([]);
   });
+
+  it('case 4b: filters question fragments from direct term questions', () => {
+    expect(extractCandidateTerms('xtt是啥')).toEqual(['xtt']);
+    expect(extractCandidateTerms('请问ygfn是谁')).toEqual(['ygfn']);
+    expect(extractCandidateTerms('xtt什么意思')).toEqual(['xtt']);
+  });
 });
 
 // ---- OnDemandLookup tests ----
