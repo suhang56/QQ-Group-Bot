@@ -531,10 +531,6 @@ const webLookup = new WebLookup(
   db.webLookupCache,
   db.learnedFacts,
   modelRouterAsLlm,
-  undefined,
-  WEB_LOOKUP_ENABLED ? async (groupId: string) => {
-    await adapter.send(groupId, '\u7b49\u4e00\u4e0b\u6211\u67e5\u67e5');
-  } : undefined,
 );
 router.setWebLookup(webLookup);
 chat.setWebLookup(webLookup);

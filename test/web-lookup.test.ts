@@ -258,59 +258,75 @@ describe('GoogleCseProvider', () => {
 
 // ── shouldLookupTerm unit tests ───────────────────────────────────────────────
 
+const QUESTION_MSG = 'MyGO\u662f\u4ec0\u4e48'; // MyGO是什么
+const NON_QUESTION_MSG = '\u5934\u75db\uff0c\u60f3\u7761\u89c9'; // 头痛，想睡觉
+
 describe('shouldLookupTerm', () => {
-  it('returns true for romaji capitalized name', () => {
-    expect(shouldLookupTerm('Roselia')).toBe(true);
+  it('returns true for romaji capitalized name in direct question', () => {
+    expect(shouldLookupTerm('Roselia', 'Roselia\u662f\u4ec0\u4e48')).toBe(true); // Roselia是什么
   });
 
-  it('returns true for romaji name (mixed case)', () => {
-    expect(shouldLookupTerm('MyGO')).toBe(true);
+  it('returns true for romaji name (mixed case) in direct question', () => {
+    expect(shouldLookupTerm('MyGO', QUESTION_MSG)).toBe(true);
   });
 
-  it('returns true for CJK 2-char name', () => {
-    expect(shouldLookupTerm('\u51cc\u9633')).toBe(true); // 凌阳
+  it('returns true for CJK 2-char name in direct question', () => {
+    expect(shouldLookupTerm('\u51cc\u9633', '\u51cc\u9633\u662f\u4ec0\u4e48')).toBe(true); // 凌阳是什么
   });
 
-  it('returns true for CJK 4-char proper name', () => {
-    expect(shouldLookupTerm('\u5712\u7530\u7f8e\u9057')).toBe(true); // 園田美遊
+  it('returns true for CJK 4-char proper name in direct question', () => {
+    expect(shouldLookupTerm('\u5712\u7530\u7f8e\u9057', '\u5712\u7530\u7f8e\u9057\u662f\u8c01')).toBe(true); // 園田美遊是谁
   });
 
-  it('returns false for lowercase romaji', () => {
-    expect(shouldLookupTerm('hello')).toBe(false);
+  it('returns false for lowercase romaji even in direct question', () => {
+    expect(shouldLookupTerm('hello', 'hello\u662f\u4ec0\u4e48')).toBe(false); // hello是什么 — not romaji-cap
   });
 
-  it('returns false for single CJK character', () => {
-    expect(shouldLookupTerm('\u4eba')).toBe(false); // 人
+  it('returns false for single CJK character even in direct question', () => {
+    expect(shouldLookupTerm('\u4eba', '\u4eba\u662f\u4ec0\u4e48')).toBe(false); // 人是什么 — single CJK
   });
 
-  it('returns false for non-name ASCII', () => {
-    expect(shouldLookupTerm('foo123')).toBe(false);
+  it('returns false for non-name ASCII even in direct question', () => {
+    expect(shouldLookupTerm('foo123', 'foo123\u662f\u4ec0\u4e48')).toBe(false); // foo123是什么
   });
 
   it('returns false when term is in knownFacts', () => {
     const knownFacts = new Set(['MyGO']);
-    expect(shouldLookupTerm('MyGO', knownFacts)).toBe(false);
+    expect(shouldLookupTerm('MyGO', QUESTION_MSG, knownFacts)).toBe(false);
   });
 
   it('returns false when term is in default commonWords', () => {
-    expect(shouldLookupTerm('\u4eca\u5929')).toBe(false);
+    expect(shouldLookupTerm('\u4eca\u5929', '\u4eca\u5929\u662f\u4ec0\u4e48')).toBe(false); // 今天是什么
   });
 
   it('returns false when term is in custom commonWords', () => {
     const customCommon = new Set(['Roselia']);
-    expect(shouldLookupTerm('Roselia', new Set(), customCommon)).toBe(false);
+    expect(shouldLookupTerm('Roselia', 'Roselia\u662f\u4ec0\u4e48', new Set(), customCommon)).toBe(false);
   });
 
   it('knownFacts takes precedence over romaji match', () => {
     const knownFacts = new Set(['Roselia']);
-    expect(shouldLookupTerm('Roselia', knownFacts, DEFAULT_COMMON_WORDS)).toBe(false);
+    expect(shouldLookupTerm('Roselia', 'Roselia\u662f\u4ec0\u4e48', knownFacts, DEFAULT_COMMON_WORDS)).toBe(false);
   });
 
-  it('empty knownFacts and empty commonWords — valid romaji passes', () => {
-    expect(shouldLookupTerm('Poppin', new Set(), new Set())).toBe(true);
+  it('empty knownFacts and empty commonWords with direct question — valid romaji passes', () => {
+    expect(shouldLookupTerm('Poppin', 'Poppin\u662f\u4ec0\u4e48', new Set(), new Set())).toBe(true); // Poppin是什么
   });
 
-  it('Path A null term triggers grounding lookup via shouldLookupTerm', async () => {
+  // New: non-question messages must NOT trigger lookup
+  it('\u5934\u75db as term, non-question message returns false', () => {
+    expect(shouldLookupTerm('\u5934\u75db', NON_QUESTION_MSG)).toBe(false);
+  });
+
+  it('\u5934\u75db as term, direct question message returns true', () => {
+    expect(shouldLookupTerm('\u5934\u75db', '\u5934\u75db\u662f\u554a\u610f\u601d')).toBe(true); // 头痛是啥意思
+  });
+
+  it('casual venting message is not a lookup trigger', () => {
+    expect(shouldLookupTerm('\u6012\u6c14\u503c', '\u6211\u5fd8\u8bb0\u628a\u6012\u6c14\u503c\u91cd\u7f6e\u4e86')).toBe(false);
+  });
+
+  it('Path A null term triggers grounding lookup via shouldLookupTerm with direct question', async () => {
     process.env['WEB_LOOKUP_ENABLED'] = '1';
     process.env['GEMINI_API_KEY'] = 'test-key';
     global.fetch = vi.fn().mockResolvedValue({
@@ -328,7 +344,7 @@ describe('shouldLookupTerm', () => {
     const snippetParts: string[] = [];
     for (const { term, meaning } of pathATerms) {
       if (meaning !== null) continue;
-      if (!shouldLookupTerm(term, knownFacts, DEFAULT_COMMON_WORDS)) continue;
+      if (!shouldLookupTerm(term, QUESTION_MSG, knownFacts, DEFAULT_COMMON_WORDS)) continue;
       const webResult = await wl.lookupTerm('g1', term, 'user1');
       if (webResult) snippetParts.push(`"${term}": ${webResult.answer}`);
     }
@@ -336,6 +352,21 @@ describe('shouldLookupTerm', () => {
     expect(global.fetch).toHaveBeenCalledOnce();
     expect(snippetParts.length).toBe(1);
     expect(snippetParts[0]).toContain('"MyGO"');
+  });
+
+  it('Path A null term skips grounding when message is not a question', async () => {
+    global.fetch = vi.fn();
+    const wl = new WebLookup(makeCacheRepo(), makeFactsRepo(), makeLlm());
+
+    const pathATerms = [{ term: 'MyGO', meaning: null as string | null }];
+    const knownFacts = new Set(pathATerms.filter(r => r.meaning !== null).map(r => r.term));
+    for (const { term, meaning } of pathATerms) {
+      if (meaning !== null) continue;
+      if (!shouldLookupTerm(term, NON_QUESTION_MSG, knownFacts, DEFAULT_COMMON_WORDS)) continue;
+      await wl.lookupTerm('g1', term, 'user1');
+    }
+
+    expect(global.fetch).not.toHaveBeenCalled();
   });
 
   it('Path A non-null term skips grounding (corpus hit)', async () => {
@@ -346,7 +377,7 @@ describe('shouldLookupTerm', () => {
     const knownFacts = new Set(pathATerms.filter(r => r.meaning !== null).map(r => r.term));
     for (const { term, meaning } of pathATerms) {
       if (meaning !== null) continue;
-      if (!shouldLookupTerm(term, knownFacts, DEFAULT_COMMON_WORDS)) continue;
+      if (!shouldLookupTerm(term, QUESTION_MSG, knownFacts, DEFAULT_COMMON_WORDS)) continue;
       await wl.lookupTerm('g1', term, 'user1');
     }
 

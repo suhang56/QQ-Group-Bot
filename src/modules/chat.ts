@@ -2212,7 +2212,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     if (this.webLookup) {
       const knownTerms = this._getKnownTermsSet(groupId);
       const candidates = extractCandidateTerms(triggerMessage.content);
-      const unknownForWeb = candidates.filter(t => shouldLookupTerm(t, knownTerms, DEFAULT_COMMON_WORDS));
+      const unknownForWeb = candidates.filter(t => shouldLookupTerm(t, triggerMessage.content, knownTerms, DEFAULT_COMMON_WORDS));
       if (unknownForWeb.length > 0) {
         const snippetParts: string[] = [];
         for (const term of unknownForWeb) {
