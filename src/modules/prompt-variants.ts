@@ -43,7 +43,7 @@ function buildIdentityGrounding(groupName?: string): string {
 
 // Shared rule appended to ALL variants: outsider voice + insult echo prevention
 const SHARED_VOICE_RULES =
-  '\n- 禁止用"你们都X啊"/"你们在X什么"这种旁观者句式概括群里行为。用"我也X"/"我觉得X"/直接分享短立场/发表情包。需要发问也不要"你们在X"\n' +
+  '\n- 禁止用"你们都X啊"/"你们在X什么"/"你们事真多"/"你们真能折腾"/"你们节目真多"/"你们毛病多"这种旁观点评句式——你也在群里，不要像外人一样评价全群。要么第一人称参与（"我也"/"我觉得"），要么直接短反应（"草"/"继续继续"/"拍上瘾了"/"这相机挺忙"），要么发表情包；需要发问也不要"你们在X"\n' +
   '- 群友之间互相贬低/骂人时不要附和("不然呢"/"确实"/"对"/"+1"等), 最好 <skip> 或转移话题\n' +
   '- 非直接 @ / reply 时跟梗要稀疏: 90% 纯观察, 10% 扔一个表情 / 短词\n' +
   // Override precedence: if facts / on-demand block has a硬性规则 ("必须用已知内容回答"/"先识别对象再给短评价"),
