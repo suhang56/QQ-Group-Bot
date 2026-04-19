@@ -2910,17 +2910,12 @@ describe('ChatModule — _isEvasiveReply', () => {
   it('"有利息是谁啊" matches (asking-who with subject)', () => expect(makeChat()['_isEvasiveReply']('有利息是谁啊')).toBe(true));
 });
 
-describe('ChatModule — getEvasiveFlagForLastReply', () => {
+describe('ChatModule — evasive flag in ChatResult.meta', () => {
   let db: Database;
 
   beforeEach(() => { db = new Database(':memory:'); });
 
-  it('returns false before any reply', () => {
-    const chat = new ChatModule(makeMockClaude(), db, { botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999 });
-    expect(chat.getEvasiveFlagForLastReply('g1')).toBe(false);
-  });
-
-  it('returns true after an evasive reply', async () => {
+  it('returns true in meta.evasive after an evasive reply', async () => {
     const claude = vi.fn().mockResolvedValue({
       text: '忘了', inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0,
     } satisfies ClaudeResponse);
@@ -2929,19 +2924,21 @@ describe('ChatModule — getEvasiveFlagForLastReply', () => {
       db,
       { botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999, moodProactiveEnabled: false, deflectCacheEnabled: false },
     );
-    await chat.generateReply('g1', makeMsg({ content: 'fire bird 是谁' }), []);
-    expect(chat.getEvasiveFlagForLastReply('g1')).toBe(true);
+    const result = await chat.generateReply('g1', makeMsg({ content: 'fire bird 是谁' }), []);
+    expect(result.kind).toBe('reply');
+    expect(result.kind === 'reply' && result.meta.evasive).toBe(true);
   });
 
-  it('returns false after a non-evasive reply', async () => {
+  it('returns false in meta.evasive after a non-evasive reply', async () => {
     const chat = new ChatModule(makeMockClaude('好啊'), db, {
       botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999, moodProactiveEnabled: false, deflectCacheEnabled: false,
     });
-    await chat.generateReply('g1', makeMsg({ content: '今天天气' }), []);
-    expect(chat.getEvasiveFlagForLastReply('g1')).toBe(false);
+    const result = await chat.generateReply('g1', makeMsg({ content: '今天天气' }), []);
+    expect(result.kind).toBe('reply');
+    expect(result.kind === 'reply' && result.meta.evasive).toBe(false);
   });
 
-  it('flag is per-group isolated', async () => {
+  it('evasive flag is per-group isolated (carried in result)', async () => {
     const claude = vi.fn()
       .mockResolvedValueOnce({ text: '忘了', inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 } satisfies ClaudeResponse)
       .mockResolvedValue({ text: '好啊', inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 } satisfies ClaudeResponse);
@@ -2950,10 +2947,10 @@ describe('ChatModule — getEvasiveFlagForLastReply', () => {
       db,
       { botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999, moodProactiveEnabled: false, deflectCacheEnabled: false },
     );
-    await chat.generateReply('g1', makeMsg({ groupId: 'g1', content: 'fire bird' }), []);
-    await chat.generateReply('g2', makeMsg({ groupId: 'g2', content: 'hello' }), []);
-    expect(chat.getEvasiveFlagForLastReply('g1')).toBe(true);
-    expect(chat.getEvasiveFlagForLastReply('g2')).toBe(false);
+    const r1 = await chat.generateReply('g1', makeMsg({ groupId: 'g1', content: 'fire bird' }), []);
+    const r2 = await chat.generateReply('g2', makeMsg({ groupId: 'g2', content: 'hello' }), []);
+    expect(r1.kind === 'reply' && r1.meta.evasive).toBe(true);
+    expect(r2.kind === 'reply' && r2.meta.evasive).toBe(false);
   });
 });
 

@@ -1005,9 +1005,6 @@ export class ChatModule implements IChatModule {
     updatedAt: string;
     compiled: Array<{ name: string; re: RegExp; weight: number }>;
   }>();
-  // per-group: key of the most recent sticker the bot sent via sticker-first.
-  // Used by /sticker_ban to identify the target when admin says "don't use that one".
-  private readonly lastStickerKeyByGroup = new Map<string, string>();
   // per-group: active topic engagement state (set when bot replies, consumed in scoring)
   private readonly engagedTopic = new Map<string, { tokens: Set<string>; until: number; msgCount: number }>();
   // per-group: admin userId → { nickname, samples[] } (populated from live messages)
@@ -1046,12 +1043,7 @@ export class ChatModule implements IChatModule {
   private honestGapsTracker: { recordMessage(groupId: string, content: string, nowMs: number): void } | null = null;
   // Path A: on-demand jargon lookup via BM25+LLM inference.
   private onDemandLookup: OnDemandLookup | null = null;
-  // per-group: whether the last generateReply call returned an evasive reply
-  private readonly lastEvasiveReply = new Map<string, boolean>();
   private readonly conversationState = new ConversationStateTracker();
-  // per-group: fact ids injected into the system prompt of the last generateReply.
-  // Router reads this right after generateReply returns to wire into self-learning.rememberInjection.
-  private readonly lastInjectedFactIds = new Map<string, number[]>();
 
   private readonly loreDirPath: string;
   private readonly loreSizeCapBytes: number;
@@ -1408,29 +1400,12 @@ export class ChatModule implements IChatModule {
     return false;
   }
 
-  /**
-   * Returns whether the last generateReply call for a group produced an evasive reply.
-   * Router reads this synchronously right after generateReply returns.
-   */
-  getEvasiveFlagForLastReply(groupId: string): boolean {
-    return this.lastEvasiveReply.get(groupId) ?? false;
-  }
-
   getConsecutiveReplies(groupId: string): number {
     return this.consecutiveReplies.get(groupId) ?? 0;
   }
 
   getActivityLevel(groupId: string): 'idle' | 'normal' | 'busy' {
     return this.activityTracker.level(groupId);
-  }
-
-  /**
-   * Returns the fact ids that were injected into the most recent generateReply
-   * system prompt for this group. Router pairs this with the bot_replies row id
-   * to let self-learning remember what facts shaped a given reply.
-   */
-  getInjectedFactIdsForLastReply(groupId: string): number[] {
-    return this.lastInjectedFactIds.get(groupId) ?? [];
   }
 
   /** Record a message from a group admin/owner for speech-style mirroring. */
@@ -1523,11 +1498,6 @@ export class ChatModule implements IChatModule {
     }
   }
 
-  /** Return the key of the most recent sticker sent via sticker-first in this group, or null. */
-  getLastStickerKey(groupId: string): string | null {
-    return this.lastStickerKeyByGroup.get(groupId) ?? null;
-  }
-
   /** Evict lore + identity caches for a group so next message re-reads the updated file. */
   invalidateLore(groupId: string): void {
     if (this.loreLoader) {
@@ -1570,16 +1540,6 @@ export class ChatModule implements IChatModule {
   ): Promise<ChatResult> {
     this.knownGroups.add(groupId);
     const metaBuilder = new ReplyMetaBuilder();
-
-    // Clear per-group volatile state at turn-start so early-return paths
-    // (pure @, react deflection, rate-limit, debounce, relay, etc.) don't
-    // let the prior turn's injectedFactIds / evasive flag leak into router
-    // bookkeeping and get associated with this turn's reply. The actual
-    // values are set later only if we reach the prompt-build / post-process
-    // stages; if an early return fires, the map simply stays empty for the
-    // next read.
-    this.lastInjectedFactIds.set(groupId, []);
-    this.lastEvasiveReply.set(groupId, false);
 
     // M6.4: snapshot consecutive-reply count as it stood at the moment this
     // peer message arrived, BEFORE any reset. Gate 5.6 reads this snapshot
@@ -2376,7 +2336,6 @@ export class ChatModule implements IChatModule {
     const { text: factsBlock, injectedFactIds, matchedFactIds: matchedFactRetrievalIds, pinnedOnly: factsBlockPinnedOnly } =
       (await this.selfLearning?.formatFactsForPrompt(groupId, 50, triggerMessage.content))
       ?? { text: '', injectedFactIds: [], matchedFactIds: [], pinnedOnly: false };
-    this.lastInjectedFactIds.set(groupId, injectedFactIds);
     metaBuilder.setFactIds(injectedFactIds, matchedFactRetrievalIds);
     // Used by hasRealFactHit below. factsBlock non-empty alone is NOT a
     // "trigger hit a fact" signal because pinned-newest + recency fallback
@@ -2804,7 +2763,6 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
         msgCount: 0,
       });
       const isEvasive = this._isEvasiveReply(processed);
-      this.lastEvasiveReply.set(groupId, isEvasive);
       metaBuilder.setEvasive(isEvasive);
       return { kind: 'reply', text: processed, meta: metaBuilder.buildReply(isDirect ? 'direct' : 'normal'), reasonCode: 'engaged' };
     } catch (err) {
