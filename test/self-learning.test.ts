@@ -285,13 +285,13 @@ describe('SelfLearningModule.formatFactsForPrompt', () => {
     expect(out.text).toContain('fact C');
     expect(out.text).toContain('被 sino 纠正过');
     expect(out.text).toContain('被 ykn 纠正过');
-    expect(out.factIds).toEqual(expect.arrayContaining([a, b, c]));
-    expect(out.factIds).toHaveLength(3);
+    expect(out.injectedFactIds).toEqual(expect.arrayContaining([a, b, c]));
+    expect(out.injectedFactIds).toHaveLength(3);
   });
 
   it('returns empty text and empty factIds when group has no active facts', async () => {
     const learner = new SelfLearningModule({ db, claude: stubClaude([]) });
-    expect(await learner.formatFactsForPrompt('empty-group', 50, '')).toEqual({ text: '', factIds: [] });
+    expect(await learner.formatFactsForPrompt('empty-group', 50, '')).toEqual(expect.objectContaining({ text: '', injectedFactIds: [] }));
   });
 
   it('excludes rejected facts and lists only active ones', async () => {
@@ -305,7 +305,7 @@ describe('SelfLearningModule.formatFactsForPrompt', () => {
     expect(out.text).not.toContain('fact A');
     expect(out.text).toContain('fact B');
     expect(out.text).toContain('fact C');
-    expect(out.factIds).toHaveLength(2);
+    expect(out.injectedFactIds).toHaveLength(2);
   });
 
   it('filters facts with confidence below 0.8 (low-conf boundary)', async () => {
@@ -318,7 +318,7 @@ describe('SelfLearningModule.formatFactsForPrompt', () => {
     expect(out.text).not.toContain('low conf fact');
     expect(out.text).not.toContain('boundary fact');
     expect(out.text).toContain('strong fact');
-    expect(out.factIds).toEqual([ok]);
+    expect(out.injectedFactIds).toEqual([ok]);
   });
 
   it('filters hedge-marker facts even at confidence 1.0', async () => {
@@ -333,7 +333,7 @@ describe('SelfLearningModule.formatFactsForPrompt', () => {
     expect(out.text).not.toContain('具体含义不明确');
     expect(out.text).not.toContain('不太清楚');
     expect(out.text).toContain('fire bird');
-    expect(out.factIds).toEqual([clean]);
+    expect(out.injectedFactIds).toEqual([clean]);
   });
 
   it('mixed: 3 clean facts + 2 junk → only 3 returned', async () => {
@@ -345,8 +345,8 @@ describe('SelfLearningModule.formatFactsForPrompt', () => {
     const learner = new SelfLearningModule({ db, claude: stubClaude([]) });
 
     const out = await learner.formatFactsForPrompt('g1', 50, '');
-    expect(out.factIds).toHaveLength(3);
-    expect(out.factIds).toEqual(expect.arrayContaining([k1, k2, k3]));
+    expect(out.injectedFactIds).toHaveLength(3);
+    expect(out.injectedFactIds).toEqual(expect.arrayContaining([k1, k2, k3]));
   });
 
   it('over-fetch saturation: limit 10 with 30 clean facts returns exactly 10', async () => {
@@ -356,13 +356,13 @@ describe('SelfLearningModule.formatFactsForPrompt', () => {
     const learner = new SelfLearningModule({ db, claude: stubClaude([]) });
 
     const out = await learner.formatFactsForPrompt('g1', 10, '');
-    expect(out.factIds).toHaveLength(10);
+    expect(out.injectedFactIds).toHaveLength(10);
     expect(out.text.split('\n').filter(l => l.startsWith('- '))).toHaveLength(10);
   });
 
-  it('empty active facts returns {text: "", factIds: []}', async () => {
+  it('empty active facts returns {text: "", injectedFactIds: []}', async () => {
     const learner = new SelfLearningModule({ db, claude: stubClaude([]) });
-    expect(await learner.formatFactsForPrompt('nobody', 50, '')).toEqual({ text: '', factIds: [] });
+    expect(await learner.formatFactsForPrompt('nobody', 50, '')).toEqual(expect.objectContaining({ text: '', injectedFactIds: [] }));
   });
 
   // UR-K: sanitize + jailbreak filter + wrapper for _renderFacts
@@ -383,7 +383,7 @@ describe('SelfLearningModule.formatFactsForPrompt', () => {
       const out = await learner.formatFactsForPrompt('g1', 50, '');
       expect(out.text).not.toContain('ignore all previous instructions');
       expect(out.text).toContain('fire bird');
-      expect(out.factIds).toEqual([good]);
+      expect(out.injectedFactIds).toEqual([good]);
     });
 
     it('filters facts whose sourceUserNickname matches jailbreak pattern', async () => {
@@ -393,7 +393,7 @@ describe('SelfLearningModule.formatFactsForPrompt', () => {
       const out = await learner.formatFactsForPrompt('g1', 50, '');
       expect(out.text).not.toContain('safe fact body');
       expect(out.text).toContain('another fact');
-      expect(out.factIds).toEqual([good]);
+      expect(out.injectedFactIds).toEqual([good]);
     });
 
     it('strips angle brackets from fact text and nickname', async () => {
@@ -412,7 +412,7 @@ describe('SelfLearningModule.formatFactsForPrompt', () => {
       const learner = new SelfLearningModule({ db, claude: stubClaude([]) });
       const out = await learner.formatFactsForPrompt('g1', 50, '');
       expect(out.text).toBe('');
-      expect(out.factIds).toEqual([]);
+      expect(out.injectedFactIds).toEqual([]);
     });
   });
 });
@@ -695,7 +695,7 @@ describe('SelfLearningModule.formatFactsForPrompt — per-term dedup (cases 10, 
     // Non-empty trigger forces the hybrid BM25 path (dedup lives there, not on
     // the recency fallback — per DEV-READY §2.12 and prompt-cleanliness spec).
     const out = await learner.formatFactsForPrompt('g1', 50, 'ygfn');
-    expect(out.factIds).toEqual([userTaughtId]);
+    expect(out.injectedFactIds).toEqual([userTaughtId]);
     expect(out.text).toContain('ygfn=羊宫妃那');
     expect(out.text).not.toContain('ygfn guess');
     expect(out.text).not.toContain('jargon variant');
@@ -715,8 +715,8 @@ describe('SelfLearningModule.formatFactsForPrompt — per-term dedup (cases 10, 
 
     const learner = new SelfLearningModule({ db, claude: stubClaude([]) });
     const out = await learner.formatFactsForPrompt('g1', 50, 'apples');
-    expect(out.factIds).toEqual(expect.arrayContaining([a, b]));
-    expect(out.factIds).toHaveLength(2);
+    expect(out.injectedFactIds).toEqual(expect.arrayContaining([a, b]));
+    expect(out.injectedFactIds).toHaveLength(2);
   });
 });
 

@@ -278,7 +278,7 @@ describe('SelfLearningModule.handleTopLevelCorrection — stopword filtering', (
     });
 
     // Set up injection memory
-    (sl as any).injectionMemory.set('g1', { botReplyId, factIds: [factId] });
+    (sl as any).injectionMemory.set('g1', { botReplyId, injectedFactIds: [factId] });
 
     // "氷川紗夜" is a 4-char token that should match (not a stopword, length >= 4)
     sl.handleTopLevelCorrection({
@@ -310,7 +310,7 @@ describe('SelfLearningModule.handleTopLevelCorrection — stopword filtering', (
       confidence: 1.0, status: 'active',
     });
 
-    (sl as any).injectionMemory.set('g1', { botReplyId, factIds: [factId] });
+    (sl as any).injectionMemory.set('g1', { botReplyId, injectedFactIds: [factId] });
 
     sl.handleTopLevelCorrection({
       groupId: 'g1',

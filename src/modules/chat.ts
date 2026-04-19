@@ -2312,9 +2312,9 @@ export class ChatModule implements IChatModule {
 ← 要接的这条 — 只输出一个：${isAtTrigger ? '一条自然反应（不能是 <skip>）' : '<skip> 或 一条自然反应'}。${distinctSpeakers >= 3 ? `\n最近 ${distinctSpeakers} 个群友同时聊，可以用"你们"集体称呼。` : ''}
 ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMessage.content) ? '\n**注意**: 这条消息有人直接骂你。**绝对不要回"自言自语吗"/"在骂谁"** — 那是 bot tell。要么硬怼回去，要么 <skip>。' : ''}`;
 
-    const { text: factsBlock, factIds: injectedFactIds, matchedFactIds: matchedFactRetrievalIds, pinnedOnly: factsBlockPinnedOnly } =
+    const { text: factsBlock, injectedFactIds, matchedFactIds: matchedFactRetrievalIds, pinnedOnly: factsBlockPinnedOnly } =
       (await this.selfLearning?.formatFactsForPrompt(groupId, 50, triggerMessage.content))
-      ?? { text: '', factIds: [], matchedFactIds: [], pinnedOnly: false };
+      ?? { text: '', injectedFactIds: [], matchedFactIds: [], pinnedOnly: false };
     this.lastInjectedFactIds.set(groupId, injectedFactIds);
     // Used by hasFactualInjection below. factsBlock non-empty alone is NOT a
     // "trigger hit a fact" signal because pinned-newest + recency fallback

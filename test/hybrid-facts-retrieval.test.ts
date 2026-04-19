@@ -66,7 +66,7 @@ describe('hybrid-retrieval (BM25 + vector RRF)', () => {
     const learner = new SelfLearningModule({ db, claude: stubClaude() });
     const out = await learner.formatFactsForPrompt('g1', 10, '');
     expect(out.text).toContain('群梗 fire bird');
-    expect(out.factIds).toEqual([id]);
+    expect(out.injectedFactIds).toEqual([id]);
   });
 
   it('empty vector DB + populated BM25 returns BM25-only RRF results', async () => {
@@ -87,8 +87,8 @@ describe('hybrid-retrieval (BM25 + vector RRF)', () => {
     // Trigger matches both via BM25 keyword `一个乐队`; neither row has embedding_vec
     // so vector list is empty. Hybrid must still return them.
     const out = await learner.formatFactsForPrompt('g1', 10, '一个乐队');
-    expect(out.factIds.length).toBeGreaterThanOrEqual(2);
-    expect(out.factIds).toEqual(expect.arrayContaining([a, b]));
+    expect(out.injectedFactIds.length).toBeGreaterThanOrEqual(2);
+    expect(out.injectedFactIds).toEqual(expect.arrayContaining([a, b]));
     // Persona text ('啦' / '嘛') should appear since personaForm preferred for injection
     expect(out.text).toMatch(/就是乐队啦|嘛另一个乐队/);
   });

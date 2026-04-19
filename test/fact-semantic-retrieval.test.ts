@@ -101,7 +101,7 @@ describe('SelfLearningModule.formatFactsForPrompt — semantic retrieval', () =>
 
     // limit=15 → 5 pinned (newest weather) + similarity → target survives
     const out = await learner.formatFactsForPrompt('g1', 15, '有利息是谁');
-    expect(out.factIds).toContain(target);
+    expect(out.injectedFactIds).toContain(target);
     expect(out.text).toContain('遠藤ゆりか');
   });
 
@@ -113,7 +113,7 @@ describe('SelfLearningModule.formatFactsForPrompt — semantic retrieval', () =>
       db, claude: stubClaude(), embeddingService: fakeEmbedder(),
     });
     const out = await learner.formatFactsForPrompt('g1', 10, '有利息是谁');
-    expect(out.factIds).toEqual([clean]);
+    expect(out.injectedFactIds).toEqual([clean]);
   });
 
   it('similarity below 0.30 floor → fact dropped (unless pinned)', async () => {
@@ -126,7 +126,7 @@ describe('SelfLearningModule.formatFactsForPrompt — semantic retrieval', () =>
       db, claude: stubClaude(), embeddingService: fakeEmbedder(),
     });
     const out = await learner.formatFactsForPrompt('g1', 50, '有利息是谁');
-    expect(out.factIds).toHaveLength(5);
+    expect(out.injectedFactIds).toHaveLength(5);
   });
 
   it('pinned-newest-K holds: 5 newest are always kept regardless of score', async () => {
@@ -143,7 +143,7 @@ describe('SelfLearningModule.formatFactsForPrompt — semantic retrieval', () =>
     });
     const out = await learner.formatFactsForPrompt('g1', 10, '有利息是谁');
     // All 5 newest noise facts should be pinned in.
-    for (const id of newIds) expect(out.factIds).toContain(id);
+    for (const id of newIds) expect(out.injectedFactIds).toContain(id);
   });
 
   it('kill switch FACTS_RAG_DISABLED=1 → recency fallback path', async () => {
@@ -155,7 +155,7 @@ describe('SelfLearningModule.formatFactsForPrompt — semantic retrieval', () =>
       db, claude: stubClaude(), embeddingService: fakeEmbedder(),
     });
     const out = await learner.formatFactsForPrompt('g1', 50, '有利息是谁');
-    expect(out.factIds).toHaveLength(3);
+    expect(out.injectedFactIds).toHaveLength(3);
     expect(out.text).toContain('newest');
     expect(out.text).toContain('middle');
     expect(out.text).toContain('oldest');
@@ -168,7 +168,7 @@ describe('SelfLearningModule.formatFactsForPrompt — semantic retrieval', () =>
       db, claude: stubClaude(), embeddingService: notReadyEmbedder(),
     });
     const out = await learner.formatFactsForPrompt('g1', 50, 'whatever');
-    expect(out.factIds).toHaveLength(2);
+    expect(out.injectedFactIds).toHaveLength(2);
   });
 
   it('embedding service throws on trigger embed → recency fallback', async () => {
@@ -178,7 +178,7 @@ describe('SelfLearningModule.formatFactsForPrompt — semantic retrieval', () =>
       db, claude: stubClaude(), embeddingService: throwingEmbedder(),
     });
     const out = await learner.formatFactsForPrompt('g1', 50, '有利息是谁');
-    expect(out.factIds).toHaveLength(2);
+    expect(out.injectedFactIds).toHaveLength(2);
   });
 
   it('empty group → empty result', async () => {
@@ -186,7 +186,7 @@ describe('SelfLearningModule.formatFactsForPrompt — semantic retrieval', () =>
       db, claude: stubClaude(), embeddingService: fakeEmbedder(),
     });
     const out = await learner.formatFactsForPrompt('empty', 50, '有利息是谁');
-    expect(out).toEqual({ text: '', factIds: [] });
+    expect(out).toEqual(expect.objectContaining({ text: '', injectedFactIds: [] }));
   });
 
   it('empty trigger text → recency fallback (semantic disabled when no trigger)', async () => {
@@ -196,7 +196,7 @@ describe('SelfLearningModule.formatFactsForPrompt — semantic retrieval', () =>
       db, claude: stubClaude(), embeddingService: fakeEmbedder(),
     });
     const out = await learner.formatFactsForPrompt('g1', 50, '');
-    expect(out.factIds).toHaveLength(2);
+    expect(out.injectedFactIds).toHaveLength(2);
   });
 
   it('rejected facts excluded from semantic retrieval', async () => {
@@ -207,7 +207,7 @@ describe('SelfLearningModule.formatFactsForPrompt — semantic retrieval', () =>
       db, claude: stubClaude(), embeddingService: fakeEmbedder(),
     });
     const out = await learner.formatFactsForPrompt('g1', 50, '有利息是谁');
-    expect(out.factIds).toEqual([b]);
+    expect(out.injectedFactIds).toEqual([b]);
   });
 
   it('null embeddingService at construction → recency fallback', async () => {
@@ -216,6 +216,6 @@ describe('SelfLearningModule.formatFactsForPrompt — semantic retrieval', () =>
       db, claude: stubClaude(), embeddingService: null,
     });
     const out = await learner.formatFactsForPrompt('g1', 50, '有利息是谁');
-    expect(out.factIds).toHaveLength(1);
+    expect(out.injectedFactIds).toHaveLength(1);
   });
 });
