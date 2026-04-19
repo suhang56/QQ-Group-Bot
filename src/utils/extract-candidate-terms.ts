@@ -21,10 +21,14 @@ const QUESTION_FRAGMENT_TERMS = new Set([
   '如何评价',
   '如何看待',
   '怎么看',
+  '怎么看待',
   '怎么评价',
   '怎么样',
   '你觉得',
   '你怎么看',
+  '评价一下',
+  '点评',
+  '点评一下',
 ]);
 
 const QUESTION_PREFIX_TERMS = new Set([
@@ -36,7 +40,7 @@ const QUESTION_PREFIX_TERMS = new Set([
 ]);
 
 const QUESTION_SCAFFOLDING_TOKEN_RE =
-  /^(?:请问|问下|问一下|顺便问|刚才|那个|这个|所以|那)?(?:什么是|是啥|是谁|是什么|什么意思|啥意思|啥东西|的意思|谁啊|啥啊|什么啊|如何评价|如何看待|怎么看|怎么评价|你觉得|你怎么看)$/u;
+  /^(?:请问|问下|问一下|顺便问|刚才|那个|这个|所以|那)?(?:什么是|是啥|是谁|是什么|什么意思|啥意思|啥东西|的意思|谁啊|啥啊|什么啊|如何评价|如何看待|怎么看|怎么看待|怎么评价|你觉得|你怎么看|评价一下|点评|点评一下)$/u;
 
 function isQuestionScaffolding(tok: string): boolean {
   const s = tok.trim();

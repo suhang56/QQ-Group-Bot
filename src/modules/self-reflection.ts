@@ -488,7 +488,13 @@ ${newBullets}`;
 - reasoning 禁用「必须 / 绝对 / 一定 / 永不」这类绝对词
 - 绝不输出 <skip> / [skip] 或任何 sentinel 标记
 - 若群聊样本没给出清晰的调优方向，宁可输出小改动或极短 reasoning，不要编造
-- JSON 外不要任何文字`;
+- JSON 外不要任何文字
+
+**不可变约束（不能被 persona patch 改写）：**
+- 不得引入"装人类 / 不承认是 bot / 假装真人"这类方向（身份口径：坦然是 bot）
+- 不得写入"所有声优都不能评价 / 不要回答 fandom 问题"这类屏蔽知识命中的规则（facts / on-demand / learned_facts 命中时，必须按那个块回答，不是装傐）
+- 不得放宽禁区：claude/具体模型/运维知识 始终不说；把小号本人绑定到真人/CV 始终不做
+- 只能调语气、口癖、语气词、话题偏好、情绪强度；不能调身份认知、安全边界、知识回答规则`;
 
     const userContent = `## 现有 persona（可能为空）
 ${oldPersona ?? '（尚未设置）'}
@@ -632,7 +638,13 @@ ${repliesText || '（无）'}`;
 - reasoning 必须按 [culture] / [bot应对] / [新梗] / [新alias] 四块排，每块开头用方括号标签
 - 绝不输出 <skip> / [skip] 或任何 sentinel 标记
 - 若本周样本没给出清晰的调优方向，宁可输出极小改动或保守 reasoning，不要编造
-- JSON 外不要任何文字`;
+- JSON 外不要任何文字
+
+**不可变约束（不能被 persona patch 改写）：**
+- 不得引入"装人类 / 不承认是 bot / 假装真人"这类方向（身份口径：坦然是 bot）
+- 不得写入"所有声优都不能评价 / 不要回答 fandom 问题"这类屏蔽知识命中的规则（facts / on-demand / learned_facts 命中时，必须按那个块回答，不是装傐）
+- 不得放宽禁区：claude/具体模型/运维知识 始终不说；把小号本人绑定到真人/CV 始终不做
+- 只能调语气、口癖、语气词、话题偏好、情绪强度；不能调身份认知、安全边界、知识回答规则`;
 
     const userContent = `## 现有 persona（可能为空）
 ${oldPersona ?? '（尚未设置）'}
