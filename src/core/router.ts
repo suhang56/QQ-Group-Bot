@@ -18,6 +18,9 @@ import type { AffinityModule } from '../modules/affinity.js';
 import type { IFatigueSource } from '../modules/fatigue.js';
 import type { WebLookup } from '../modules/web-lookup.js';
 import { extractTokens } from '../utils/text-tokenize.js';
+import { extractCandidateTerms } from '../utils/extract-candidate-terms.js';
+import { compareFactsByTrust } from '../modules/fact-topic-prefixes.js';
+import { isDirectQuestion, isGroundedOpinionQuestion } from '../utils/is-direct-question.js';
 import { BotErrorCode } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
 import { defaultGroupConfig, PERSONA_PATCH_TTL_DAYS, PERSONA_PATCH_WEEKLY_TTL_DAYS } from '../config.js';
@@ -819,10 +822,41 @@ export class Router implements IRouter {
         // short ack only when no intent pattern matches.
         if (!reply) {
           const triggerText = (item.msg.content ?? '').trim();
+          // Fact-recovery pass: if chat returned null (likely from dedup/sentinel/
+          // guard drop) but the trigger is a direct/opinion question AND any term
+          // in it has a known fact, answer with the fact instead of a 不知道 pool
+          // deflection. Prevents the "generated correct fact answer → caught by
+          // near-dup guard → fallback to '不知道'" regression.
+          const isFactQuery = isDirectQuestion(triggerText) || isGroundedOpinionQuestion(triggerText);
+          if (isFactQuery) {
+            const candidates = extractCandidateTerms(triggerText);
+            for (const term of candidates) {
+              try {
+                const rows = this.db.learnedFacts.findActiveByTopicTerm(groupId, term);
+                if (rows.length === 0) continue;
+                const sorted = [...rows].sort(compareFactsByTrust);
+                const best = sorted[0]!;
+                const meaning = best.personaForm || best.canonicalForm || best.fact;
+                if (meaning && meaning.trim().length > 0) {
+                  reply = meaning.trim().slice(0, 200);
+                  this.logger.info({ groupId, userId: item.msg.userId, term, factId: best.id, triggerText }, '@-mention fact-recovery fallback — chat returned null but learned_facts had term');
+                  break;
+                }
+              } catch (err) {
+                this.logger.debug({ err, term }, 'fact-recovery fallback: findActiveByTopicTerm failed');
+              }
+            }
+          }
+        }
+        if (!reply) {
+          const triggerText = (item.msg.content ?? '').trim();
           const AT_FALLBACK_POOLS = {
             // Request/imperative — bot declines without agreeing
             request: ['不想', '不帮', '想啥呢', '做梦', '别闹', '想得美', '不干', '不不不'],
-            // Interrogative — bot admits seeing the question but doesn't answer
+            // Interrogative — bot admits seeing the question but doesn't answer.
+            // "不知道/不清楚" only fires when fact-recovery above also had nothing,
+            // so a bot 装傻 here is an honest "I really have no data" admission,
+            // not an accidental drop of a found fact.
             question: ['不知道', '不清楚', '别问我', '懒得想', '问别人', '谁知道'],
             // Exclamation/command — lazy ack
             exclaim: ['嗯', '哦', '好', '收到', '行吧'],

@@ -71,7 +71,7 @@ describe('Path A routing glue -- 3-outcome matrix', () => {
   it('found outcome: injects "已知: termA = X" into block', async () => {
     mockLookup.lookupTerm.mockResolvedValue({ type: 'found', meaning: 'X' });
     vi.spyOn(chat as never, '_getKnownTermsSet').mockReturnValue(new Set());
-    const block = await (chat as never)._buildOnDemandBlock(
+    const { block } = await (chat as never)._buildOnDemandBlock(
       'g1',
       '[termA] 是什么',
       'u1',
@@ -83,7 +83,7 @@ describe('Path A routing glue -- 3-outcome matrix', () => {
   it('weak outcome: injects "你猜 termB 可能是指 Y" into block', async () => {
     mockLookup.lookupTerm.mockResolvedValue({ type: 'weak', guess: 'Y' });
     vi.spyOn(chat as never, '_getKnownTermsSet').mockReturnValue(new Set());
-    const block = await (chat as never)._buildOnDemandBlock(
+    const { block } = await (chat as never)._buildOnDemandBlock(
       'g1',
       '[termB] 啥意思',
       'u1',
@@ -94,7 +94,7 @@ describe('Path A routing glue -- 3-outcome matrix', () => {
   it('unknown + direct question: injects "你没听过" block', async () => {
     mockLookup.lookupTerm.mockResolvedValue(null);
     vi.spyOn(chat as never, '_getKnownTermsSet').mockReturnValue(new Set());
-    const block = await (chat as never)._buildOnDemandBlock(
+    const { block } = await (chat as never)._buildOnDemandBlock(
       'g1',
       '[termC] 是谁？',
       'u1',
@@ -109,7 +109,7 @@ describe('Path A routing glue -- 3-outcome matrix', () => {
         : { type: 'unknown' }
     ));
     vi.spyOn(chat as never, '_getKnownTermsSet').mockReturnValue(new Set());
-    const block = await (chat as never)._buildOnDemandBlock(
+    const { block } = await (chat as never)._buildOnDemandBlock(
       'g1',
       'xtt foo 是啥',
       'u1',

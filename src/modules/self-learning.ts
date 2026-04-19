@@ -458,20 +458,7 @@ export class SelfLearningModule {
       if (memeBlock) return { text: memeBlock, factIds: [] };
       return { text: '', factIds: [] };
     }
-    // Dedup: for each recognized term, keep the best fact per compareFactsByTrust.
-    // Rows with no recognized topic are keyed by their own id and don't collapse.
-    // NOTE: deduped.length may be < limit if multiple top-K entries share a term.
-    // Do NOT backfill — prompt cleanliness beats recall quantity.
-    const perTermBest = new Map<string, LearnedFact>();
-    for (const f of finalFacts) {
-      const term = extractTermFromTopic(f.topic ?? null);
-      const key = term ?? `__id:${f.id}`;
-      const existing = perTermBest.get(key);
-      if (!existing || compareFactsByTrust(f, existing) < 0) {
-        perTermBest.set(key, f);
-      }
-    }
-    const deduped = Array.from(perTermBest.values());
+    const deduped = SelfLearningModule._dedupByTermTrust(finalFacts);
     const base = this._renderFacts(deduped);
     const memeBlock = this._renderMemeGraphBlock(groupId, triggerEmbedding);
     if (memeBlock) {
@@ -480,22 +467,47 @@ export class SelfLearningModule {
     return base;
   }
 
+  /**
+   * Dedup a fact list by recognized structured term: for each term, keep the
+   * top-trust fact per compareFactsByTrust. Rows with no recognized topic are
+   * keyed by their own id so they don't collapse into one another. Result may
+   * be shorter than input — prompt cleanliness beats recall quantity. Shared
+   * by both the hybrid-RAG path and the recency-fallback path so both apply
+   * the same knowledge-pool semantics.
+   */
+  private static _dedupByTermTrust(facts: readonly LearnedFact[]): LearnedFact[] {
+    const perTermBest = new Map<string, LearnedFact>();
+    for (const f of facts) {
+      const term = extractTermFromTopic(f.topic ?? null);
+      const key = term ?? `__id:${f.id}`;
+      const existing = perTermBest.get(key);
+      if (!existing || compareFactsByTrust(f, existing) < 0) {
+        perTermBest.set(key, f);
+      }
+    }
+    return Array.from(perTermBest.values());
+  }
+
   private _formatFactsRecency(groupId: string, limit: number, reason: string): FormattedFacts {
     const overFetch = Math.min(limit * 3, 150);
     const raw = this.db.learnedFacts.listActive(groupId, overFetch);
     let droppedLowConf = 0;
     let droppedHedge = 0;
-    const kept = raw.filter(f => {
+    const filtered = raw.filter(f => {
       if (f.confidence < SelfLearningModule.MIN_INJECT_CONFIDENCE) { droppedLowConf++; return false; }
       if (SelfLearningModule.isHedged(f.fact)) { droppedHedge++; return false; }
       return true;
-    }).slice(0, limit);
+    });
+    // Apply same per-term trust-tier dedup as the main RAG path, then clip.
+    // Without this, recency fallback could inject multiple low-trust
+    // legacy facts for the same term alongside a user-taught override.
+    const deduped = SelfLearningModule._dedupByTermTrust(filtered).slice(0, limit);
     this.logger.debug(
-      { groupId, total: raw.length, kept: kept.length, droppedLowConf, droppedHedge, reason },
+      { groupId, total: raw.length, keptBeforeDedup: filtered.length, keptAfterDedup: deduped.length, droppedLowConf, droppedHedge, reason },
       'facts filtered for prompt (recency)',
     );
-    if (kept.length === 0) return { text: '', factIds: [] };
-    return this._renderFacts(kept);
+    if (deduped.length === 0) return { text: '', factIds: [] };
+    return this._renderFacts(deduped);
   }
 
   /**
