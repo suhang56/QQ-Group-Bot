@@ -88,13 +88,13 @@ describe('ChatModule._getContextStickers — UR-G sanitize', () => {
     const out: string = await (chat as any)._getContextStickers('g1', 'hi');
 
     expect(out).not.toContain('<|system|>');
-    expect(out).not.toContain('<');
-    expect(out).not.toContain('>');
+    expect(out).not.toContain('</');
     // Sanitized content still present (minus the stripped brackets)
     expect(out).toContain('system');
     // Hint shape preserved
     expect(out).toContain('常用于');
-    expect(out).toContain('[CQ:image');
+    expect(out).toContain('<sticker:1>');
+    expect(out).not.toContain('[CQ:image');
   });
 
   it('strips codefence that would break the cache boundary', async () => {
@@ -109,7 +109,8 @@ describe('ChatModule._getContextStickers — UR-G sanitize', () => {
     expect(out).not.toMatch(/```/);
     // The hint is still built (label/summary + cqCode still present)
     expect(out).toContain('开心');
-    expect(out).toContain('[CQ:image');
+    expect(out).toContain('<sticker:1>');
+    expect(out).not.toContain('[CQ:image');
   });
 
   it('empty contextSamples still yields hint line without context clause', async () => {
@@ -121,6 +122,7 @@ describe('ChatModule._getContextStickers — UR-G sanitize', () => {
 
     expect(out).toContain('开心');
     expect(out).not.toContain('常用于');
-    expect(out).toContain('[CQ:image');
+    expect(out).toContain('<sticker:1>');
+    expect(out).not.toContain('[CQ:image');
   });
 });

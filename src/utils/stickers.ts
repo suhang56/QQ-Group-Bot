@@ -4,6 +4,7 @@ import type { IClaudeClient } from '../ai/claude.js';
 import { createLogger } from './logger.js';
 import { RUNTIME_CHAT_MODEL } from '../config.js';
 import { sanitizeForPrompt, sanitizeNickname, hasJailbreakPattern } from './prompt-sanitize.js';
+import { makeStickerTokenChoices } from './sticker-tokens.js';
 
 const logger = createLogger('stickers');
 
@@ -18,6 +19,7 @@ export interface StickerEntry {
 }
 
 export interface LabeledSticker {
+  key: string;
   label: string;
   cqCode: string;
 }
@@ -94,8 +96,9 @@ export async function buildStickerSection(
   }
 
   const labels = await _getOrGenerateLabels(groupId, stickersDirPath, top, claude);
-  const lines2 = labels.map(({ label, cqCode }) => `- ${label} → ${cqCode}`).join('\n');
-  const section = `\n这个群常用的表情包（当语境合适时直接用CQ码发送，就像群友一样）：\n${lines2}`;
+  const choices = makeStickerTokenChoices(labels);
+  const lines2 = choices.map(({ label, token }) => `- ${label ?? 'sticker'} -> ${token}`).join('\n');
+  const section = `\nSticker choices for this group (optional; if a sticker-only reply fits, output exactly one token like <sticker:1>; do not copy CQ codes):\n${lines2}`;
 
   sectionCache.set(groupId, section);
   poolCache.set(groupId, labels);
@@ -128,7 +131,7 @@ async function _getOrGenerateLabels(
       const raw = JSON.parse(readFileSync(labelsFile, 'utf8')) as Record<string, string>;
       const result: LabeledSticker[] = stickers
         .filter(s => raw[s.key])
-        .map(s => ({ label: raw[s.key]!, cqCode: s.cqCode }));
+        .map(s => ({ key: s.key, label: raw[s.key]!, cqCode: s.cqCode }));
       if (result.length === stickers.length) {
         logger.debug({ groupId }, 'Sticker labels loaded from cache');
         return result;
@@ -161,7 +164,7 @@ async function _getOrGenerateLabels(
       });
       const label = resp.text.trim().slice(0, 10);
       // Defense-in-depth: the 10-char label lands in the chat system prompt
-      // as "- ${label} → ${cqCode}". A tainted label would persist and leak.
+      // beside a sticker token. A tainted label would persist and leak.
       if (hasJailbreakPattern(label)) {
         logger.warn({ key: s.key, label }, 'jailbreak pattern in sticker label — using summary fallback');
         labelMap[s.key] = fallbackLabel;
@@ -183,5 +186,5 @@ async function _getOrGenerateLabels(
     logger.warn({ err }, 'Failed to save sticker labels cache');
   }
 
-  return stickers.map(s => ({ label: labelMap[s.key] ?? s.summary, cqCode: s.cqCode }));
+  return stickers.map(s => ({ key: s.key, label: labelMap[s.key] ?? s.summary, cqCode: s.cqCode }));
 }

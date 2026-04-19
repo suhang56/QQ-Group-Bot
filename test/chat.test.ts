@@ -79,6 +79,46 @@ describe('ChatModule — core behavior', () => {
     expect('text' in result && result.text).toBe('bot reply');
   });
 
+  it('maps main chat sticker tokens to CQ codes without exposing raw CQ codes', async () => {
+    const cqCode = '[CQ:image,file=file:///D:/stickers/ok.png]';
+    const repo = {
+      upsert: vi.fn(),
+      getTopByGroup: vi.fn().mockReturnValue([{
+        id: 1, groupId: 'g1', key: 'img:ok', type: 'image',
+        localPath: null, cqCode, summary: '笑',
+        contextSamples: ['来个表情'],
+        count: 5, firstSeen: 1000, lastSeen: 2000,
+        usagePositive: 0, usageNegative: 0,
+      }]),
+      getAllCandidates: vi.fn().mockReturnValue([]),
+      recordUsage: vi.fn(),
+      setSummary: vi.fn(),
+      listMissingSummary: vi.fn().mockReturnValue([]),
+      blockSticker: vi.fn(),
+      unblockSticker: vi.fn(),
+      getMfaceKeys: vi.fn().mockReturnValue(new Set<string>()),
+      getEmbeddingVec: vi.fn().mockReturnValue(null),
+      setEmbeddingVec: vi.fn(),
+    };
+    claude = makeMockClaude('<sticker:1>');
+    chat = makePassthroughChat(claude, db, {
+      localStickerRepo: repo,
+      stickerMinScoreFloor: -999,
+      stickerTopKForReply: 5,
+    });
+    const result = await chat.generateReply('g1', makeMsg({ content: '来个表情', rawContent: '来个表情' }), []);
+
+    expect(result.kind).toBe('sticker');
+    if (result.kind === 'sticker') {
+      expect(result.cqCode).toBe(cqCode);
+      expect(result.reasonCode).toBe('sticker-token');
+    }
+    const call = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { system: Array<{ text: string }> };
+    const systemText = call.system.map(s => s.text).join('\n');
+    expect(systemText).toContain('<sticker:1>');
+    expect(systemText).not.toContain('[CQ:image');
+  });
+
   it('uses recent messages as few-shot context', async () => {
     const ts = Math.floor(Date.now() / 1000);
     db.messages.insert({ groupId: 'g1', userId: 'u2', nickname: 'Bob', content: 'sup', timestamp: ts - 10, deleted: false });
@@ -3230,9 +3270,10 @@ describe('ChatModule — mface rotation', () => {
 
     const section = (chat as unknown as { _buildRotatedStickerSection: (g: string) => string })._buildRotatedStickerSection(groupId);
 
+    expect(section).not.toContain('[CQ:mface');
     expect(section).not.toContain('emoji_id=x1');
     expect(section).not.toContain('emoji_id=x2');
-    expect(section).toContain('emoji_id=x3');
+    expect(section).toContain('<sticker:1>');
 
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });

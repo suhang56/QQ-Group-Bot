@@ -189,6 +189,12 @@ describe('postProcess', () => {
     expect(postProcess(legit)).toBe(legit);
   });
 
+  it('strips truncated [CQ:image,...url=http...] fragments copied by mimic', () => {
+    const truncated = '[CQ:image,file=abc.jpg,sub_type=0,url=https://multimedia.nt.qq.com/download?fileid=x,file_size=12';
+    expect(postProcess(truncated)).toBe('');
+    expect(postProcess(`笑死 ${truncated}`)).toBe('笑死');
+  });
+
   it('strips any <CQ:...> variant (hallucinated at/face/whatever)', () => {
     expect(postProcess('<CQ:at,qq=123>')).toBe('');
     expect(postProcess('<CQ:face,id=14>')).toBe('');

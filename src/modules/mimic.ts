@@ -7,7 +7,8 @@ import { BotErrorCode, ClaudeApiError, ClaudeParseError } from '../utils/errors.
 import { createLogger } from '../utils/logger.js';
 import { defaultGroupConfig, chatHistoryDefaults, RUNTIME_CHAT_MODEL } from '../config.js';
 import { sentinelCheck, postProcess, HARDENED_SYSTEM } from '../utils/sentinel.js';
-import { buildStickerSection } from '../utils/stickers.js';
+import { buildStickerSection, getStickerPool } from '../utils/stickers.js';
+import { makeStickerTokenChoices, resolveStickerTokenOutput, type StickerTokenChoice } from '../utils/sticker-tokens.js';
 import { extractKeywords } from '../utils/text-tokenize.js';
 import { sanitizeForPrompt, sanitizeNickname } from '../utils/prompt-sanitize.js';
 
@@ -55,6 +56,7 @@ const FEW_SHOT_CAP = 30;
 
 /** Messages that are pure CQ codes (stickers, images, etc.) */
 const PURE_CQ_RE = /^\s*(\[CQ:[^\]]+\]\s*)+$/;
+const MALFORMED_CQ_FRAGMENT_RE = /\[CQ:[^\]\n]*$/m;
 
 /** Filter few-shot samples: remove noise, prefer topic-relevant messages. */
 export function filterFewShot(
@@ -65,6 +67,7 @@ export function filterFewShot(
   const cleaned = msgs.filter(m => {
     // Remove pure CQ code messages
     if (PURE_CQ_RE.test(m.content)) return false;
+    if (MALFORMED_CQ_FRAGMENT_RE.test(m.content)) return false;
     // Remove messages < 3 chars (after stripping CQ codes)
     const stripped = m.content.replace(/\[CQ:[^\]]+\]/g, '').trim();
     if (stripped.length < 3) return false;
@@ -267,11 +270,16 @@ export class MimicModule implements IMimicModule {
 
     // F4: Personalize sticker section by target user
     let stickerSection = '';
+    let stickerChoices: StickerTokenChoice[] = [];
     const userStickers = extractUserStickers(userMsgs, this.recentMimicStickers);
     if (userStickers.length >= MimicModule.MIN_USER_STICKERS) {
       // Build a compact sticker section from user's own stickers
       const topStickers = userStickers.slice(0, this.chatStickerTopN);
-      stickerSection = `\n${safeNickHeader}常用的表情包：\n${topStickers.map(s => `- ${s}`).join('\n')}`;
+      stickerChoices = makeStickerTokenChoices(topStickers.map(cqCode => ({ cqCode })));
+      stickerSection =
+        `\n${safeNickHeader}常用的表情包：\n`
+        + `${stickerChoices.map(s => `- ${s.token}`).join('\n')}\n`
+        + 'If the best mimic response is only a sticker, output exactly one sticker token like <sticker:1>. Do not copy CQ codes.';
     } else {
       // Fallback to group-wide pool
       if (!this.stickerSectionCache.has(groupId)) {
@@ -281,6 +289,7 @@ export class MimicModule implements IMimicModule {
           .catch(err => this.logger.warn({ err, groupId }, 'Sticker section warm-up failed'));
       }
       stickerSection = this.stickerSectionCache.get(groupId) ?? '';
+      stickerChoices = makeStickerTokenChoices(getStickerPool(groupId) ?? []);
     }
 
     // F2: Inject target user's lore into system prompt
@@ -319,9 +328,11 @@ export class MimicModule implements IMimicModule {
       );
 
       const processed = postProcess(text);
+      const stickerResolved = resolveStickerTokenOutput(processed, stickerChoices);
+      const finalText = stickerResolved !== null ? stickerResolved.cqCode : processed;
 
       // F4: Track sticker rotation — record any sticker CQ codes in the output
-      const outputStickers = processed.match(/\[CQ:(mface|image),[^\]]+\]/g);
+      const outputStickers = finalText.match(/\[CQ:(mface|image),[^\]]+\]/g);
       if (outputStickers) {
         for (const s of outputStickers) {
           this.recentMimicStickers.push(s);
@@ -332,7 +343,7 @@ export class MimicModule implements IMimicModule {
       }
 
       this.logger.info({ groupId, targetUserId, targetNickname: nickname, historyCount, mimicPrefix: `[模仿 @${nickname}]` }, 'mimic generated');
-      return { ok: true, text: processed, historyCount };
+      return { ok: true, text: finalText, historyCount };
     } catch (err) {
       if (err instanceof ClaudeApiError || err instanceof ClaudeParseError) {
         this.logger.warn({ err, groupId, targetUserId }, 'Claude error during mimic — fail-safe');
