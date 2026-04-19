@@ -50,6 +50,14 @@ function isQuestion(row: SampledRow): boolean {
   return QUESTION_END_RE.test(row.content) || QUESTION_START_RE.test(row.content);
 }
 
+/** R6.1a: empty-content rows with a media CQ code — valid object_react candidates. */
+function isEmptyBecauseMediaOnly(row: SampledRow): boolean {
+  const content = row.content ?? '';
+  if (content.trim() !== '') return false;
+  const raw = row.rawContent ?? '';
+  return /\[CQ:(?:image|mface|video|record)[^\]]*\]/.test(raw);
+}
+
 function isPureImageOrMface(row: SampledRow): boolean {
   const raw = row.rawContent ?? row.content;
   if (!/\[CQ:(?:image|mface|face)[^\]]*\]/.test(raw)) return false;
@@ -119,6 +127,8 @@ export function applyWeakLabel(
   const burst = isBurstWindow(row);
   const pureImage = isPureImageOrMface(row);
   const imageCaption = isImageWithShortCaption(row);
+  // R6.1a: empty-with-media rows are valid object_react; empty-without-media are bad samples
+  const emptyMediaOnly = isEmptyBecauseMediaOnly(row);
   const pluralYou = (row.rawContent ?? row.content).includes('你们');
 
   // Track which categories would match (for multi-category-match flag)
@@ -186,7 +196,8 @@ export function applyWeakLabel(
     hasKnownFactTerm: knownFact,
     hasRealFactHit: knownFact,
     allowPluralYou: pluralYou,
-    isObjectReact: pureImage || imageCaption,
+    // R6.1a: emptyMediaOnly rows are valid object_react; empty-without-media get false here
+    isObjectReact: pureImage || imageCaption || emptyMediaOnly,
     isBotStatusContext: botStatus,
     isBurst: burst,
     isRelay: relay,

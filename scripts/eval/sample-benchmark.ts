@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 /**
- * R6.1 Benchmark Sampler
+ * R6.1a Benchmark Sampler
  *
  * Usage:
  *   npx tsx scripts/eval/sample-benchmark.ts \
@@ -24,16 +24,20 @@ import { createHash } from 'node:crypto';
 import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import type { SampledRow, ContextMessage, DbRow } from './types.js';
-import { CATEGORY_LABELS } from './types.js';
+import { CATEGORY_LABELS, CATEGORY_PRIORITY_ORDER } from './types.js';
 import { seededSample } from './seed.js';
 import {
   queryCat1, queryCat2, queryCat3, queryCat4, queryCat5,
   queryCat6, queryCat7, queryCat8, queryCat9, queryCat10,
 } from './categories/index.js';
+import { CAT2_MAX } from './categories/cat2-known-fact-term.js';
 import { applyWeakLabel } from './weak-label.js';
 import { buildSummary } from './summary.js';
 
 export { CATEGORY_LABELS };
+
+/** Per-category content-hash cap: same hash may appear at most this many times per category. */
+const CONTENT_HASH_CAP_PER_CATEGORY = 5;
 
 interface CliArgs {
   dbPath: string;
@@ -50,7 +54,7 @@ function parseArgs(argv: string[]): CliArgs {
   let groupId = '';
   let botQQ = '';
   let seed = 42;
-  let perCategoryTarget = 250;
+  let perCategoryTarget = 200;
   let outputDir = 'data/eval';
 
   for (let i = 0; i < args.length; i++) {
@@ -74,8 +78,13 @@ function parseArgs(argv: string[]): CliArgs {
   return { dbPath, groupId, botQQ, seed, perCategoryTarget, outputDir };
 }
 
-function contentHash(content: string): string {
+function makeContentHash(content: string): string {
   return createHash('sha256').update(content).digest('hex').slice(0, 16);
+}
+
+function makeContextHash(content: string, contextBefore: ContextMessage[]): string {
+  const contextStr = contextBefore.map(c => c.content).join('\x00');
+  return createHash('sha256').update(content + '\x01' + contextStr).digest('hex').slice(0, 16);
 }
 
 function fetchContext(
@@ -124,7 +133,8 @@ function dbRowToSampledRow(
     category,
     categoryLabel: CATEGORY_LABELS[category - 1]!,
     samplingSeed: seed,
-    contentHash: contentHash(row.content),
+    contentHash: makeContentHash(row.content),
+    contextHash: makeContextHash(row.content, context.before),
   };
 }
 
@@ -144,6 +154,28 @@ function getCategoryRows(db: DatabaseSync, cat: number, groupId: string, botQQ: 
   }
 }
 
+/**
+ * For each message, check which category predicates it matches (before primary-priority assignment).
+ * Returns a Map<messageId, Set<category>> for overlap matrix computation.
+ */
+function computeCategoryMembership(
+  db: DatabaseSync,
+  groupId: string,
+  botQQ: string,
+  limit: number,
+): Map<number, Set<number>> {
+  const membership = new Map<number, Set<number>>();
+  for (let cat = 1; cat <= 10; cat++) {
+    const rows = getCategoryRows(db, cat, groupId, botQQ, limit);
+    for (const row of rows) {
+      const set = membership.get(row.id) ?? new Set<number>();
+      set.add(cat);
+      membership.set(row.id, set);
+    }
+  }
+  return membership;
+}
+
 export async function runSampling(args: CliArgs): Promise<{ rawRows: SampledRow[]; exitCode: number }> {
   const { dbPath, groupId, botQQ, seed, perCategoryTarget, outputDir } = args;
 
@@ -153,28 +185,71 @@ export async function runSampling(args: CliArgs): Promise<{ rawRows: SampledRow[
   }
 
   const db = new DatabaseSync(dbPath, { readOnly: true } as Parameters<typeof DatabaseSync>[1]);
-  const limit = perCategoryTarget * 5;
-  const seen = new Set<number>();
-  const rawRows: SampledRow[] = [];
 
-  for (let cat = 1; cat <= 10; cat++) {
-    const candidates = getCategoryRows(db, cat, groupId, botQQ, limit);
+  // oversample factor: fetch 3× target so after dedupe we still have enough candidates
+  const limit = perCategoryTarget * 3;
 
-    // Deduplicate across categories — first category wins
-    const fresh = candidates.filter(r => !seen.has(r.id));
+  // R6.1a: compute category membership for overlap matrix BEFORE primary-priority dedupe
+  const membership = computeCategoryMembership(db, groupId, botQQ, limit);
+
+  // R6.1a: compute overlap matrix (catA → catB → count of msgs that matched both)
+  const overlapMatrix: Record<number, Record<number, number>> = {};
+  for (const cats of membership.values()) {
+    const catArr = [...cats];
+    for (const a of catArr) {
+      for (const b of catArr) {
+        if (a === b) continue;
+        if (!overlapMatrix[a]) overlapMatrix[a] = {};
+        overlapMatrix[a]![b] = (overlapMatrix[a]![b] ?? 0) + 1;
+      }
+    }
+  }
+
+  // R6.1a: primary-priority dedupe — process categories in priority order
+  // A message is assigned to the first (highest-priority) category that claims it.
+  const globalAssigned = new Set<number>(); // messageId
+  const categoryResults = new Map<number, SampledRow[]>();
+
+  for (const cat of CATEGORY_PRIORITY_ORDER) {
+    // cat2 target is capped at CAT2_MAX
+    const catTarget = cat === 2 ? Math.min(perCategoryTarget, CAT2_MAX) : perCategoryTarget;
+
+    const allCandidates = getCategoryRows(db, cat, groupId, botQQ, limit);
+
+    // Filter out already-assigned from prior priority categories
+    const fresh = allCandidates.filter(r => !globalAssigned.has(r.id));
+
+    // Per-category content-hash cap: at most CONTENT_HASH_CAP_PER_CATEGORY rows per hash
+    const hashCountInCat = new Map<string, number>();
+    const capped = fresh.filter(r => {
+      const h = makeContentHash(r.content);
+      const count = hashCountInCat.get(h) ?? 0;
+      if (count >= CONTENT_HASH_CAP_PER_CATEGORY) return false;
+      hashCountInCat.set(h, count + 1);
+      return true;
+    });
+
     const sampled = seededSample(
-      fresh.map(r => ({ ...r, messageId: r.id })),
+      capped.map(r => ({ ...r, messageId: r.id })),
       seed,
-      perCategoryTarget,
+      catTarget,
     );
 
+    const rows: SampledRow[] = [];
     for (const row of sampled) {
-      seen.add(row.id);
+      globalAssigned.add(row.id);
       const ctx = fetchContext(db, groupId, row.id);
-      rawRows.push(dbRowToSampledRow(row as DbRow, ctx, cat, seed));
+      rows.push(dbRowToSampledRow(row as DbRow, ctx, cat, seed));
     }
 
-    console.log(`Cat ${cat} (${CATEGORY_LABELS[cat - 1]}): ${sampled.length} sampled`);
+    categoryResults.set(cat, rows);
+    console.log(`Cat ${cat} (${CATEGORY_LABELS[cat - 1]}): ${rows.length} sampled`);
+  }
+
+  // Reassemble in natural category order 1–10 for output
+  const rawRows: SampledRow[] = [];
+  for (let cat = 1; cat <= 10; cat++) {
+    rawRows.push(...(categoryResults.get(cat) ?? []));
   }
 
   if (rawRows.length === 0) {
@@ -188,7 +263,7 @@ export async function runSampling(args: CliArgs): Promise<{ rawRows: SampledRow[
     .map(r => applyWeakLabel(r, db, botQQ))
     .filter((r): r is NonNullable<typeof r> => r !== null);
 
-  const summary = buildSummary(rawRows, labeledRows, seed, perCategoryTarget);
+  const summary = buildSummary(rawRows, labeledRows, seed, perCategoryTarget, overlapMatrix);
 
   try {
     mkdirSync(outputDir, { recursive: true });
