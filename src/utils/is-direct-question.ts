@@ -25,8 +25,11 @@ export function isDirectQuestion(content: string): boolean {
  */
 export const GROUNDED_OPINION_PATTERNS: readonly RegExp[] = [
   /如何评价\s*\S{1,15}/,
-  /怎么(看|评价)\s*\S{1,15}/,
+  /如何看待\s*\S{1,15}/,
+  /怎么(看|评价|看待)\s*\S{1,15}/,
   /你觉得\s*\S{1,15}/,
+  /评价一下\s*\S{1,15}/,
+  /点评\s*\S{1,15}/,
 ];
 
 export function isGroundedOpinionQuestion(content: string): boolean {
