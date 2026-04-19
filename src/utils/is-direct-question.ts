@@ -44,7 +44,8 @@ export const DIRECT_QUESTION_PATTERNS: readonly RegExp[] = [
 ];
 
 export function isDirectQuestion(content: string): boolean {
-  const stripped = content.replace(/\[CQ:[^\]]+\]/g, '').trim();
+  const stripped = content.replace(/\[CQ:[^\]]+\]/g, '').trim()
+    .replace(/[？?！!。，,、…]+$/, '');
   for (const re of DIRECT_SUFFIX_STEMS) {
     const m = re.exec(stripped);
     if (m) {
@@ -93,7 +94,8 @@ export const GROUNDED_OPINION_PATTERNS: readonly RegExp[] = [
 ];
 
 export function isGroundedOpinionQuestion(content: string): boolean {
-  const stripped = content.replace(/\[CQ:[^\]]+\]/g, '').trim();
+  const stripped = content.replace(/\[CQ:[^\]]+\]/g, '').trim()
+    .replace(/[？?！!。，,、…]+$/, '');
   for (const re of OPINION_SUFFIX_STEMS) {
     const m = re.exec(stripped);
     if (m) {
