@@ -379,6 +379,40 @@ describe('sample-benchmark integration', () => {
     db.close();
   });
 
+  // ---- R6.1a Test: empty-without-media row → excluded from labeled output ----
+  it('R6.1a: empty content + no media CQ in rawContent → applyWeakLabel returns null', () => {
+    const db = new DatabaseSync(FIXTURE, { readOnly: true } as Parameters<typeof DatabaseSync>[1]);
+    const baseRow = (content: string, rawContent: string): SampledRow => ({
+      id: 'test:9999',
+      groupId: GROUP,
+      messageId: 9999,
+      sourceMessageId: null,
+      userId: 'u1',
+      nickname: 'Alice',
+      timestamp: 1700000000,
+      content,
+      rawContent,
+      triggerContext: [],
+      triggerContextAfter: [],
+      category: 9,
+      categoryLabel: 'normal_chimein',
+      samplingSeed: 1,
+      contentHash: makeContentHash(content),
+      contextHash: '0000',
+    });
+    // empty content, empty raw → excluded
+    expect(applyWeakLabel(baseRow('', ''), db, BOT_QQ)).toBeNull();
+    // whitespace-only content, empty raw → excluded
+    expect(applyWeakLabel(baseRow('   ', ''), db, BOT_QQ)).toBeNull();
+    // empty content with non-media raw (e.g. plain text artifact) → excluded
+    expect(applyWeakLabel(baseRow('', 'plain text no cq'), db, BOT_QQ)).toBeNull();
+    // empty content with [CQ:at,...] but no media → excluded
+    expect(applyWeakLabel(baseRow('', '[CQ:at,qq=1]'), db, BOT_QQ)).toBeNull();
+    // empty content WITH media CQ → NOT excluded (sanity: media path still passes)
+    expect(applyWeakLabel(baseRow('', '[CQ:image,file=abc.jpg]'), db, BOT_QQ)).not.toBeNull();
+    db.close();
+  });
+
   // ---- R6.1a Test 21: buildSummary sameContentHash metric ----
   it('R6.1a: buildSummary correctly counts sameContentHash duplicates', () => {
     const makeRow = (id: number, content: string): SampledRow => ({

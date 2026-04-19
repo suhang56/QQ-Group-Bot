@@ -118,6 +118,7 @@ export function applyWeakLabel(
   botQQ: string,
 ): WeakLabeledRow | null {
   if (isAdminCommand(row)) return null;
+  if (row.content.trim() === '' && !isEmptyBecauseMediaOnly(row)) return null;
 
   const knownFact = hasKnownFactTerm(db, row.groupId, row.content);
   const direct = isDirect(row, botQQ);
