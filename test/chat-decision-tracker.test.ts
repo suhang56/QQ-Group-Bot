@@ -250,6 +250,19 @@ describe('R1-A: captureDecision — guard_path + prompt_variant for non-reply ki
     const evt = db.chatDecisionEvents.getById(rows[0]!.decision_event_id)!;
     expect(evt.guard_path).toBeNull();
   });
+
+  it('kind=sticker with meta.guardPath set → guard_path written', () => {
+    const result: ChatResult = {
+      kind: 'sticker',
+      cqCode: '[CQ:image,file=abc]',
+      reasonCode: 'sticker-trigger',
+      meta: { ...BASE_META, guardPath: 'sticker-guard' } as unknown as typeof BASE_META,
+    };
+    tracker.captureDecision(result, BASE_CTX);
+    const rows = db.chatDecisionEffects.getUnscored(1000001, 10);
+    const evt = db.chatDecisionEvents.getById(rows[0]!.decision_event_id)!;
+    expect(evt.guard_path).toBe('sticker-guard');
+  });
 });
 
 // ── scoreUnscored: Phase B signal detection ─────────────────────────────

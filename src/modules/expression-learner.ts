@@ -17,8 +17,8 @@ const FS_PII_RE = /(?<!\d)\d{11}(?!\d)|(?<!\d)\d{5,}(?!\d)|小区|单元|门牌|
 const FS_URL_RE = /https?:\/\//i;
 // Slur phrases: strip 去死/死吧/死一死/滚蛋/滚开 but keep 笑死/笑死我/死鬼/bare 死
 const FS_SLUR_RE = /去死|死吧|死一死|滚蛋|滚开/;
-// Bot-meta text filter
-const FS_BOT_META_RE = /小号|bot|机器人|AI|claude|模型|查资料|装傻|胡说|乱说|修好|坏了|重启|停机/i;
+// Bot-meta text filter — strong bot-self-reference markers only (no casual words like 装傻/坏了)
+const FS_BOT_META_RE = /小号|bot|机器人|AI|claude|模型|查资料|重启|停机/i;
 // Fandom vocab for fallback ranking
 const FS_FANDOM_VOCAB_RE = /(草|绷|急|xp|推|补番|邦|乐队|声优|卡池|二游|番|老婆|cp|中之人|小团体|live|awsl|笑死)/i;
 
@@ -322,6 +322,11 @@ export class ExpressionLearner {
    * Build a system-block snippet of raw groupmate quote examples for tone reference.
    * Source: groupmate_expression_samples (never expression_patterns / bot history).
    * Returns '' when no qualified samples exist.
+   *
+   * @param n Advisory only — actual output is at most 3 entries (or 1 when all
+   *   overlap scores are zero). The real driver is matchContent token overlap
+   *   quality, not n. Caller may pass any value; it is otherwise ignored in the
+   *   new groupmate-only code path.
    */
   formatFewShotBlock(
     groupId: string,

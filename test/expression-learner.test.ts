@@ -596,6 +596,36 @@ describe('ExpressionLearner', () => {
       expect(out).not.toContain('你是AI吗');
     });
 
+    it('retains rows containing 装傻 (casual phrase, not bot-meta)', () => {
+      const learner = makeLearnerWithCandidates([makeSample('装傻是真的好玩')]);
+      const out = learner.formatFewShotBlock(GROUP, 3);
+      expect(out).toContain('装傻是真的好玩');
+    });
+
+    it('retains rows containing 胡说 (casual phrase, not bot-meta)', () => {
+      const learner = makeLearnerWithCandidates([makeSample('胡说什么呢')]);
+      const out = learner.formatFewShotBlock(GROUP, 3);
+      expect(out).toContain('胡说什么呢');
+    });
+
+    it('retains rows containing 乱说 (casual phrase, not bot-meta)', () => {
+      const learner = makeLearnerWithCandidates([makeSample('你乱说的吧')]);
+      const out = learner.formatFewShotBlock(GROUP, 3);
+      expect(out).toContain('你乱说的吧');
+    });
+
+    it('retains rows containing 坏了 (casual phrase, not bot-meta)', () => {
+      const learner = makeLearnerWithCandidates([makeSample('坏了家人们')]);
+      const out = learner.formatFewShotBlock(GROUP, 3);
+      expect(out).toContain('坏了家人们');
+    });
+
+    it('retains rows containing 修好 (casual phrase, not bot-meta)', () => {
+      const learner = makeLearnerWithCandidates([makeSample('终于修好了')]);
+      const out = learner.formatFewShotBlock(GROUP, 3);
+      expect(out).toContain('终于修好了');
+    });
+
     it('strips rows containing URL', () => {
       const learner = makeLearnerWithCandidates([makeSample('看这个https://example.com'), makeSample('哈哈')]);
       const out = learner.formatFewShotBlock(GROUP, 3);
