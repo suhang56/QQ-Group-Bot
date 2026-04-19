@@ -62,6 +62,7 @@ import { RatingPortalServer } from './server/rating-portal.js';
 import { TuningGenerator } from './server/tuning-generator.js';
 import { GroupmateVoice } from './modules/groupmate-voice.js';
 import { ChatDecisionTracker } from './modules/chat-decision-tracker.js';
+import { DeferQueue, DEFER_RECHECK_INTERVAL_MS } from './utils/defer-queue.js';
 
 // ============================================================
 // PHASE 1: Infrastructure (logger, env, PID lock, database)
@@ -592,6 +593,9 @@ const chatDecisionTracker = new ChatDecisionTracker({
 });
 router.setChatDecisionTracker(chatDecisionTracker);
 
+const deferQueue = new DeferQueue();
+router.setDeferQueue(deferQueue);
+
 // 5. Wire events
 adapter.on('error', (err) => {
   logger.fatal({ err }, 'Adapter fatal error');
@@ -649,6 +653,14 @@ try {
     });
   }, 5 * 60_000);
   decisionScoringTimer.unref?.();
+
+  // P5: deadline-based defer recheck — fires every ~10s
+  const deferRecheckTimer = setInterval(() => {
+    void router.recheckAllDeferredDeadlines().catch(err => {
+      logger.warn({ err }, 'defer-queue deadline recheck failed');
+    });
+  }, DEFER_RECHECK_INTERVAL_MS);
+  deferRecheckTimer.unref?.();
 
   // Daily affinity decay
   const affinityDecayTimer = setInterval(() => {

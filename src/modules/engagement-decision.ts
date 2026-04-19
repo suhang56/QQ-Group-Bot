@@ -249,3 +249,52 @@ export function makeEngagementDecision(signals: EngagementSignals): EngagementDe
     reason: `score ${adjustedScore.toFixed(3)} < ${effectiveMinScore.toFixed(3)} [${signals.activityLevel}][${signals.moodLevel}]`,
   };
 }
+
+// --- P5: Pre-generate timing gate ---
+
+export interface PreGenerateContext {
+  groupId: string;
+  /** Trigger message metadata */
+  msg: { messageId: string; userId: string; content: string; timestamp: number };
+  /** Recent messages in the group (timestamps in epoch seconds) */
+  recentMsgs: Array<{ userId: string; timestamp: number; messageId: string }>;
+  nowSec: number;
+  isDirect: boolean;
+  hasKnownFactTerm: boolean;
+  /** Average score of last N scored effects for this group; 0 if no data. Null treated as 0. */
+  recentNegativeScore: number | null;
+}
+
+export type PreGenerateOutcome =
+  | { action: 'proceed' }
+  | { action: 'defer'; reasonCode: string; deadlineSec: number }
+  | { action: 'silent'; reasonCode: string };
+
+/**
+ * Rules-based pre-generate gate. Runs BEFORE chatModule.generateReply.
+ * Evaluation order: direct override (highest priority) → cooldown → burst-settle → default proceed.
+ */
+export function evaluatePreGenerate(ctx: PreGenerateContext): PreGenerateOutcome {
+  // Rule 0 — Direct override: always proceed for @-mentions, replies-to-bot, or known-fact messages
+  if (ctx.isDirect || ctx.hasKnownFactTerm) {
+    return { action: 'proceed' };
+  }
+
+  const score = ctx.recentNegativeScore ?? 0;
+
+  // Rule 1 — Cooldown: recent negative feedback → silent (not deferred; cost not worth retry)
+  if (score < -0.4) {
+    return { action: 'silent', reasonCode: 'cooldown' };
+  }
+
+  // Rule 2 — Burst-settle: high message rate → defer until burst ends
+  // Timestamps in recentMsgs are epoch seconds
+  const burstThresholdSec = ctx.nowSec - 8;
+  const msgsInBurst = ctx.recentMsgs.filter(m => m.timestamp >= burstThresholdSec).length;
+  if (msgsInBurst >= 5) {
+    return { action: 'defer', reasonCode: 'burst-settle', deadlineSec: ctx.nowSec + 8 };
+  }
+
+  // Default: proceed
+  return { action: 'proceed' };
+}

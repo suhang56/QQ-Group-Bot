@@ -29,7 +29,10 @@ import { expandForwards, purgeExpiredForwardCache } from './forward-expand.js';
 import { MOD_APPROVAL_ADMIN } from './constants.js';
 import { isValidStructuredTerm } from '../modules/fact-topic-prefixes.js';
 import { isSendable } from '../utils/chat-result.js';
+import type { ChatResult } from '../utils/chat-result.js';
 import type { ChatDecisionTracker } from '../modules/chat-decision-tracker.js';
+import { DeferQueue, type DeferredItem } from '../utils/defer-queue.js';
+import { evaluatePreGenerate } from '../modules/engagement-decision.js';
 
 const MAX_SPLIT_LINES = 3;
 const MOD_DM_HOURLY_CAP = 20;
@@ -138,6 +141,7 @@ export class Router implements IRouter {
   private fatigue: IFatigueSource | null = null;
   private webLookup: WebLookup | null = null;
   private chatDecisionTracker: ChatDecisionTracker | null = null;
+  private deferQueue: DeferQueue | null = null;
   private forwardPurgeInterval: ReturnType<typeof setInterval> | null = null;
 
   // Repeater cooldown: key = `${groupId}:${content}`, value = last-triggered timestamp
@@ -267,6 +271,21 @@ export class Router implements IRouter {
 
   setChatDecisionTracker(tracker: ChatDecisionTracker): void {
     this.chatDecisionTracker = tracker;
+  }
+
+  setDeferQueue(queue: DeferQueue): void {
+    this.deferQueue = queue;
+  }
+
+  async recheckAllDeferredDeadlines(): Promise<void> {
+    if (!this.deferQueue) return;
+    const nowSec = Math.floor(Date.now() / 1000);
+    for (const groupId of this.deferQueue.getAllGroups()) {
+      const ready = this.deferQueue.dequeueReadyForGroup(groupId, nowSec);
+      if (ready.length > 0) {
+        await this._recheckItems(groupId, ready, 'deadline');
+      }
+    }
   }
 
   dispose(): void {
@@ -697,6 +716,73 @@ export class Router implements IRouter {
             }
           }
 
+          // P5: pre-generate timing gate (organic path)
+          if (this.deferQueue) {
+            const nowSec = Math.floor(Date.now() / 1000);
+            const hasKnownFactTerm = this._hasKnownFactTermPreview(msg.groupId, msg.content);
+            const recentNegativeScore = this._computeRecentNegativeScore(msg.groupId);
+            const outcome = evaluatePreGenerate({
+              groupId: msg.groupId,
+              msg: { messageId: msg.messageId, userId: msg.userId, content: msg.content, timestamp: msg.timestamp },
+              recentMsgs,
+              nowSec,
+              isDirect: false,
+              hasKnownFactTerm,
+              recentNegativeScore,
+            });
+            if (outcome.action === 'defer') {
+              this.deferQueue.enqueue({
+                groupId: msg.groupId, msg, recentMsgs,
+                queuedAtSec: nowSec, deadlineSec: outcome.deadlineSec, recheckCount: 0,
+              });
+              if (this.chatDecisionTracker) {
+                const deferResult: ChatResult = {
+                  kind: 'defer',
+                  untilSec: outcome.deadlineSec,
+                  targetMsgId: msg.messageId,
+                  reasonCode: outcome.reasonCode as 'rate-limit' | 'burst-settle' | 'cooldown',
+                  meta: { decisionPath: 'defer' },
+                };
+                this.chatDecisionTracker.captureDecision(deferResult, {
+                  groupId: msg.groupId,
+                  triggerMsgId: msg.messageId ?? null,
+                  targetMsgId: msg.messageId ?? null,
+                  triggerUserId: msg.userId ?? null,
+                  sentBotReplyId: null,
+                  nowSec,
+                });
+              }
+              this.logger.debug({ groupId: msg.groupId, reasonCode: outcome.reasonCode,
+                deadlineSec: outcome.deadlineSec, queueDepth: this.deferQueue.size(msg.groupId) },
+                'pre-generate: deferred');
+              return;
+            }
+            if (outcome.action === 'silent') {
+              if (this.chatDecisionTracker) {
+                const silentResult: ChatResult = {
+                  kind: 'silent', reasonCode: outcome.reasonCode as 'timing' | 'guard' | 'scope' | 'confabulation' | 'bot-triggered' | 'downrated',
+                  meta: { decisionPath: 'silent' },
+                };
+                this.chatDecisionTracker.captureDecision(silentResult, {
+                  groupId: msg.groupId,
+                  triggerMsgId: msg.messageId ?? null,
+                  targetMsgId: msg.messageId ?? null,
+                  triggerUserId: msg.userId ?? null,
+                  sentBotReplyId: null,
+                  nowSec,
+                });
+              }
+              this.logger.debug({ groupId: msg.groupId, reasonCode: outcome.reasonCode }, 'pre-generate: silent (timing)');
+              return;
+            }
+            // outcome.action === 'proceed': trigger recheck for any pending defers, then fall through
+            if (this.deferQueue.size(msg.groupId) > 0) {
+              void this._recheckDeferredItems(msg.groupId).catch(
+                err => this.logger.warn({ err, groupId: msg.groupId }, 'deferQueue recheck failed'),
+              );
+            }
+          }
+
           const result = await this.chatModule.generateReply(msg.groupId, msg, recentMsgs);
           let botReplyId: number | null = null;
           switch (result.kind) {
@@ -876,6 +962,22 @@ export class Router implements IRouter {
           nickname: m.nickname, role: 'member' as const,
           content: m.content, rawContent: m.content, timestamp: m.timestamp,
         }));
+        // P5: pre-generate gate — @-mention path (isDirect=true always returns proceed)
+        if (this.deferQueue) {
+          const nowSec = Math.floor(Date.now() / 1000);
+          const outcome = evaluatePreGenerate({
+            groupId,
+            msg: { messageId: item.msg.messageId, userId: item.msg.userId, content: item.msg.content, timestamp: item.msg.timestamp },
+            recentMsgs,
+            nowSec,
+            isDirect: true,
+            hasKnownFactTerm: false,
+            recentNegativeScore: 0,
+          });
+          if (outcome.action !== 'proceed') {
+            this.logger.warn({ groupId, outcome }, 'P5: unexpected non-proceed for direct @-mention');
+          }
+        }
         const result = await this.chatModule.generateReply(groupId, item.msg, recentMsgs);
         // TODO P1.5: fact-recovery pass (router.ts:840-858 pre-P1) should move into ChatModule
         let atBotReplyId: number | null = null;
@@ -968,6 +1070,172 @@ export class Router implements IRouter {
 
   private _defaultConfig(groupId: string) {
     return defaultGroupConfig(groupId);
+  }
+
+  // P5: cheap DB probe for known fact terms (≤3 candidates, no BM25/vector)
+  private _hasKnownFactTermPreview(groupId: string, content: string): boolean {
+    const cands = extractCandidateTerms(content).filter(isValidStructuredTerm).slice(0, 3);
+    for (const term of cands) {
+      try {
+        if (this.db.learnedFacts.findActiveByTopicTerm(groupId, term).length > 0) return true;
+      } catch { /* non-fatal */ }
+    }
+    return false;
+  }
+
+  // P5: average score of last 5 scored effects for this group
+  private _computeRecentNegativeScore(groupId: string): number {
+    if (!this.chatDecisionTracker) return 0;
+    try {
+      const effects = this.db.chatDecisionEffects.getRecentByGroup(groupId, 5);
+      const scored = effects.filter(e => e.scored_at_sec !== null && e.score !== null);
+      if (scored.length === 0) return 0;
+      return scored.reduce((sum, e) => sum + (e.score ?? 0), 0) / scored.length;
+    } catch { return 0; }
+  }
+
+  // P5: process a list of deferred items for a group (used by both new-message and deadline recheck)
+  private async _recheckItems(groupId: string, items: DeferredItem[], _trigger: 'deadline' | 'new-message'): Promise<void> {
+    if (!this.chatModule) return;
+    const nowSec = Math.floor(Date.now() / 1000);
+    for (const item of items) {
+      const freshMsgs = this.db.messages.getRecent(groupId, 20).map(m => ({
+        messageId: String(m.id),
+        groupId: m.groupId,
+        userId: m.userId,
+        nickname: m.nickname,
+        role: 'member' as const,
+        content: m.content,
+        rawContent: m.rawContent ?? m.content,
+        timestamp: m.timestamp,
+      }));
+      const hasKnownFactTerm = this._hasKnownFactTermPreview(groupId, item.msg.content);
+      const recentNegativeScore = this._computeRecentNegativeScore(groupId);
+      const recheck = evaluatePreGenerate({
+        groupId,
+        msg: { messageId: item.msg.messageId, userId: item.msg.userId, content: item.msg.content, timestamp: item.msg.timestamp },
+        recentMsgs: freshMsgs,
+        nowSec,
+        isDirect: false,
+        hasKnownFactTerm,
+        recentNegativeScore,
+      });
+      if (recheck.action === 'proceed') {
+        try {
+          const result = await this.chatModule.generateReply(groupId, item.msg, freshMsgs);
+          let botReplyId: number | null = null;
+          switch (result.kind) {
+            case 'reply':
+              botReplyId = await this._sendReply(groupId, result.text, undefined, {
+                module: 'chat',
+                triggerMsgId: item.msg.messageId,
+                triggerUserId: item.msg.userId,
+                triggerUserNickname: item.msg.nickname,
+                triggerContent: item.msg.content,
+              });
+              break;
+            case 'sticker':
+              this.lastStickerKeyByGroup.set(groupId, result.meta.key);
+              botReplyId = await this._sendReply(groupId, result.cqCode, undefined, {
+                module: 'chat',
+                triggerMsgId: item.msg.messageId,
+                triggerUserId: item.msg.userId,
+                triggerUserNickname: item.msg.nickname,
+                triggerContent: item.msg.content,
+              });
+              break;
+            case 'fallback':
+              botReplyId = await this._sendReply(groupId, result.text, undefined, {
+                module: 'chat',
+                triggerMsgId: item.msg.messageId,
+                triggerUserId: item.msg.userId,
+                triggerUserNickname: item.msg.nickname,
+                triggerContent: item.msg.content,
+              });
+              break;
+            case 'silent':
+            case 'defer':
+              break;
+            default:
+              result satisfies never;
+          }
+          if (this.chatDecisionTracker) {
+            this.chatDecisionTracker.captureDecision(result, {
+              groupId,
+              triggerMsgId: item.msg.messageId ?? null,
+              targetMsgId: item.msg.messageId ?? null,
+              triggerUserId: item.msg.userId ?? null,
+              sentBotReplyId: botReplyId,
+              nowSec,
+            });
+          }
+        } catch (err) {
+          this.logger.warn({ err, groupId }, 'deferred recheck: generateReply failed');
+        }
+        break; // process one deferred item at a time to avoid pile-on
+      } else {
+        // Stale or still-deferred on recheck → silent drop
+        if (this.chatDecisionTracker) {
+          const silentResult: ChatResult = {
+            kind: 'silent',
+            reasonCode: 'timing',
+            meta: { decisionPath: 'silent' },
+          };
+          this.chatDecisionTracker.captureDecision(silentResult, {
+            groupId,
+            triggerMsgId: item.msg.messageId ?? null,
+            targetMsgId: null,
+            triggerUserId: item.msg.userId ?? null,
+            sentBotReplyId: null,
+            nowSec,
+          });
+        }
+      }
+    }
+  }
+
+  // P5: on new-message arrival, recheck all queued items for this group
+  private async _recheckDeferredItems(groupId: string): Promise<void> {
+    if (!this.deferQueue) return;
+    const nowSec = Math.floor(Date.now() / 1000);
+    // First drop truly stale items
+    const stale = this.deferQueue.removeStale(nowSec);
+    if (stale.length > 0) {
+      await this._recheckItems(groupId, stale, 'new-message');
+    }
+    // Then check all queued items (new message may resolve burst condition)
+    const all = this.deferQueue.getAll(groupId);
+    if (all.length > 0) {
+      const freshMsgs = this.db.messages.getRecent(groupId, 20).map(m => ({
+        messageId: String(m.id),
+        groupId: m.groupId,
+        userId: m.userId,
+        nickname: m.nickname,
+        role: 'member' as const,
+        content: m.content,
+        rawContent: m.rawContent ?? m.content,
+        timestamp: m.timestamp,
+      }));
+      const recheckNowSec = Math.floor(Date.now() / 1000);
+      for (const item of all) {
+        const hasKnownFactTerm = this._hasKnownFactTermPreview(groupId, item.msg.content);
+        const recentNegativeScore = this._computeRecentNegativeScore(groupId);
+        const recheck = evaluatePreGenerate({
+          groupId,
+          msg: { messageId: item.msg.messageId, userId: item.msg.userId, content: item.msg.content, timestamp: item.msg.timestamp },
+          recentMsgs: freshMsgs,
+          nowSec: recheckNowSec,
+          isDirect: false,
+          hasKnownFactTerm,
+          recentNegativeScore,
+        });
+        if (recheck.action === 'proceed') {
+          this.deferQueue.clear(groupId);
+          await this._recheckItems(groupId, [item], 'new-message');
+          break;
+        }
+      }
+    }
   }
 
   /**
