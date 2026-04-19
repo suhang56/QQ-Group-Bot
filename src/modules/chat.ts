@@ -46,6 +46,7 @@ import { isDirectQuestion, isGroundedOpinionQuestion } from '../utils/is-direct-
 import { extractTermFromTopic } from './fact-topic-prefixes.js';
 import { buildFactualContextSignal } from './factual-context-signal.js';
 import { CHAT_SILENT_SKIP } from '../utils/chat-control.js';
+import type { BaseResultMeta, ReplyMeta, StickerMeta } from '../utils/chat-result.js';
 import { GroupmateVoice, type VoiceBlock } from './groupmate-voice.js';
 import { isAddresseeScopeViolation } from '../utils/sentinel.js';
 
@@ -828,6 +829,42 @@ export function buildMoodHint(mood: 'playful' | 'tense' | null): string {
 
 const MAX_OUTGOING_IDS = 50;
 
+class ReplyMetaBuilder {
+  private guardPath: BaseResultMeta['guardPath'] | undefined;
+  private promptVariant: BaseResultMeta['promptVariant'] | undefined;
+  private evasive = false;
+  private injectedFactIds: number[] = [];
+  private matchedFactIds: number[] = [];
+  private usedVoiceCount = 0;
+  private usedFactHint = false;
+
+  setGuardPath(g: BaseResultMeta['guardPath']): this { this.guardPath = g; return this; }
+  setPromptVariant(v: BaseResultMeta['promptVariant']): this { this.promptVariant = v; return this; }
+  setEvasive(e: boolean): this { this.evasive = e; return this; }
+  setFactIds(injected: number[], matched: number[]): this {
+    this.injectedFactIds = injected;
+    this.matchedFactIds = matched;
+    this.usedFactHint = matched.length > 0;
+    return this;
+  }
+  setVoiceCount(n: number): this { this.usedVoiceCount = n; return this; }
+
+  buildBase(decisionPath: BaseResultMeta['decisionPath']): BaseResultMeta {
+    return { decisionPath, guardPath: this.guardPath, promptVariant: this.promptVariant };
+  }
+  buildReply(decisionPath: BaseResultMeta['decisionPath']): ReplyMeta {
+    return {
+      decisionPath, guardPath: this.guardPath, promptVariant: this.promptVariant,
+      evasive: this.evasive, injectedFactIds: this.injectedFactIds,
+      matchedFactIds: this.matchedFactIds, usedVoiceCount: this.usedVoiceCount,
+      usedFactHint: this.usedFactHint,
+    };
+  }
+  buildSticker(key: string, score?: number): StickerMeta {
+    return { decisionPath: 'sticker', guardPath: this.guardPath, promptVariant: this.promptVariant, key, score };
+  }
+}
+
 export class ChatModule implements IChatModule {
   private readonly logger = createLogger('chat');
   private readonly debounceMs: number;
@@ -1536,6 +1573,7 @@ export class ChatModule implements IChatModule {
     _recentMessages: GroupMessage[]
   ): Promise<string | null> {
     this.knownGroups.add(groupId);
+    const _metaBuilder = new ReplyMetaBuilder(); // M2: accumulator — output unused until M4
 
     // Clear per-group volatile state at turn-start so early-return paths
     // (pure @, react deflection, rate-limit, debounce, relay, etc.) don't
@@ -2341,6 +2379,7 @@ export class ChatModule implements IChatModule {
       (await this.selfLearning?.formatFactsForPrompt(groupId, 50, triggerMessage.content))
       ?? { text: '', injectedFactIds: [], matchedFactIds: [], pinnedOnly: false };
     this.lastInjectedFactIds.set(groupId, injectedFactIds);
+    _metaBuilder.setFactIds(injectedFactIds, matchedFactRetrievalIds);
     // Used by hasRealFactHit below. factsBlock non-empty alone is NOT a
     // "trigger hit a fact" signal because pinned-newest + recency fallback
     // always populate it. Only retrieval hits (BM25/vector/Path A) count.
@@ -2404,6 +2443,7 @@ export class ChatModule implements IChatModule {
       activeMemeJokes: activeMemeJokes.length > 0 ? activeMemeJokes : undefined,
     };
     const variant = pickVariant(variantCtx);
+    _metaBuilder.setPromptVariant(variant as BaseResultMeta['promptVariant']);
     const variantBlock = buildVariantSystemPrompt(variantCtx).systemPrompt;
     this.logger.debug({ groupId, variant, activeJokeHit, sensitiveEntityHit }, 'prompt variant selected');
 
@@ -2469,6 +2509,7 @@ export class ChatModule implements IChatModule {
           maxSamples: hasRealFactHit ? 4 : 12,
         })
       : { text: '', sampleCount: 0, speakerCount: 0, substantiveCount: 0, seed: 0 };
+    _metaBuilder.setVoiceCount(voiceBlock.sampleCount);
     if (voiceBlock.sampleCount > 0) {
       this.logger.debug(
         { groupId, sampleCount: voiceBlock.sampleCount, speakerCount: voiceBlock.speakerCount,
@@ -2755,6 +2796,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
         msgCount: 0,
       });
       this.lastEvasiveReply.set(groupId, this._isEvasiveReply(processed));
+      _metaBuilder.setEvasive(this._isEvasiveReply(processed));
       return processed;
     } catch (err) {
       if (err instanceof ClaudeApiError || err instanceof ClaudeParseError) {
