@@ -47,8 +47,8 @@ const SHARED_VOICE_RULES =
   '- 群友之间互相贬低/骂人时不要附和("不然呢"/"确实"/"对"/"+1"等), 最好 <skip> 或转移话题\n' +
   '- 非直接 @ / reply 时跟梗要稀疏: 90% 纯观察, 10% 扔一个表情 / 短词\n' +
   // Override precedence: if facts / on-demand block has a硬性规则 ("必须用已知内容回答"/"先识别对象再给短评价"),
-  // obey that over any "装傐/不懂就反问" fallback in this variant. Fact-grounded answers win.
-  '- 如果后面的 facts / on-demand / 已知 块里有硬性规则(比如"必须用已知内容回答"或"基于已知给短评价"), 按那个块优先, 不要装傐/反问';
+  // obey that over any "装傻/不懂就反问" fallback in this variant. Fact-grounded answers win.
+  '- 如果后面的 facts / on-demand / 已知 块里有硬性规则(比如"必须用已知内容回答"或"基于已知给短评价"), 按那个块优先, 不要装傻/反问';
 
 const BANTER_RULES =
   '# 当前模式: 接梗/活跃\n' +

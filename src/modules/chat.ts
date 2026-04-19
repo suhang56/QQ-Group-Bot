@@ -2377,10 +2377,10 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     // On hardened regen we still retain factsBlock + onDemandFactBlock so the
     // second attempt has the same knowledge surface as the first; otherwise a
     // regen caused by sentinel/QA/coref/outsider guard would drop facts and
-    // the bot goes from grounded → 装傐. A short fact-first micro-rule ensures
-    // hardened mode also obeys "fact overrides persona 装傐" priority.
+    // the bot goes from grounded → 装傻. A short fact-first micro-rule ensures
+    // hardened mode also obeys "fact overrides persona 装傻" priority.
     const hardenedFactPriorityRule = (factsBlock || onDemandFactBlock)
-      ? '\n\n硬性规则（覆盖其他所有装傐/反问倾向）：如果下面的 facts / on-demand 块有 X 的答案 → 用它直接回答；不能装不知道、不能反问、不能说"考我啊/评价啥啊"。'
+      ? '\n\n硬性规则（覆盖其他所有装傻/反问倾向）：如果下面的 facts / on-demand 块有 X 的答案 → 用它直接回答；不能装不知道、不能反问、不能说"考我啊/评价啥啊"。'
       : '';
     const chatRequest = (hardened = false) => this.claude.complete({
       model: hardened ? RUNTIME_CHAT_MODEL : pickedModel,
@@ -2444,7 +2444,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       // direct/opinion question — a slightly-long declarative answer grounded
       // in facts is the CORRECT behavior, not a regen trigger. Without this,
       // a good fact answer gets kicked to hardened regen and the second round
-      // often drops back to 装傐/short-deflect.
+      // often drops back to 装傻/short-deflect.
       const hasFactContext = !!onDemandFactBlock || !!factsBlock;
       const isFactQuery = isDirectQuestion(triggerMessage.content) || isGroundedOpinionQuestion(triggerMessage.content);
       const skipQaGuard = hasFactContext || isFactQuery;
