@@ -17,6 +17,8 @@ import { runSampling } from '../../scripts/eval/sample-benchmark.js';
 import { seededRand, seededSample } from '../../scripts/eval/seed.js';
 import { applyWeakLabel } from '../../scripts/eval/weak-label.js';
 import { queryCat2, CAT2_MAX } from '../../scripts/eval/categories/cat2-known-fact-term.js';
+import { queryCat7 } from '../../scripts/eval/categories/cat7-relay.js';
+import { queryCat9 } from '../../scripts/eval/categories/cat9-normal-chimein.js';
 import { buildSummary } from '../../scripts/eval/summary.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -553,6 +555,188 @@ describe('sample-benchmark integration', () => {
       const db = new DatabaseSync(FIXTURE, { readOnly: true } as Parameters<typeof DatabaseSync>[1]);
       const rows = queryCat2(db, GROUP, CAT2_MAX + 1000);
       expect(rows.length).toBeLessThanOrEqual(CAT2_MAX);
+      db.close();
+    });
+  });
+
+  // ============================================================
+  // R6.1b regression tests — 5 semantic fixes
+  // ============================================================
+
+  // Fix 1 (HIGH face): face CQ + empty content must pass isEmptyBecauseMediaOnly
+  describe('R6.1b: face CQ + empty content', () => {
+    it('empty content + [CQ:face,...] → not filtered by applyWeakLabel, isObjectReact=true', () => {
+      const db = new DatabaseSync(FIXTURE, { readOnly: true } as Parameters<typeof DatabaseSync>[1]);
+      const faceRow: SampledRow = {
+        id: 'test:7777',
+        groupId: GROUP,
+        messageId: 7777,
+        sourceMessageId: null,
+        userId: 'u1',
+        nickname: 'Alice',
+        timestamp: 1700000000,
+        content: '',
+        rawContent: '[CQ:face,id=0]',
+        triggerContext: [],
+        triggerContextAfter: [],
+        category: 4,
+        categoryLabel: 'image_mface',
+        samplingSeed: 1,
+        contentHash: 'x',
+        contextHash: 'x',
+      };
+      const labeled = applyWeakLabel(faceRow, db, BOT_QQ);
+      expect(labeled).not.toBeNull();
+      expect(labeled!.label.isObjectReact).toBe(true);
+      db.close();
+    });
+  });
+
+  // Fix 2/3 (C1): cat2 knownFactSource covers all 7 sources
+  describe('R6.1b: cat2 knownFactSource enum covers all 7 sources', () => {
+    it('topic / canonical / persona / meme-canonical / meme-variant / jargon / phrase → correct knownFactSource', () => {
+      const db = new DatabaseSync(FIXTURE, { readOnly: true } as Parameters<typeof DatabaseSync>[1]);
+      const makeRow = (content: string): SampledRow => ({
+        id: `test:src:${content}`,
+        groupId: GROUP,
+        messageId: 0,
+        sourceMessageId: null,
+        userId: 'u1',
+        nickname: 'Alice',
+        timestamp: 1700000000,
+        content,
+        rawContent: content,
+        triggerContext: [],
+        triggerContextAfter: [],
+        category: 2,
+        categoryLabel: 'known_fact_term',
+        samplingSeed: 1,
+        contentHash: 'x',
+        contextHash: 'x',
+      });
+
+      const cases: Array<[string, string]> = [
+        ['ykn 是谁啊', 'topic'],
+        ['说说 canonx', 'canonical'],
+        ['personaz 真强', 'persona'],
+        ['memex 出现', 'meme'],
+        ['memevar 来了', 'meme'],
+        ['黑话 jargonx', 'jargon'],
+        ['口头 phrasex', 'phrase'],
+      ];
+
+      for (const [content, expectedSource] of cases) {
+        const labeled = applyWeakLabel(makeRow(content), db, BOT_QQ);
+        expect(labeled, `content=${content}`).not.toBeNull();
+        expect(labeled!.label.knownFactSource, `content=${content}`).toBe(expectedSource);
+        expect(labeled!.label.hasKnownFactTerm, `content=${content}`).toBe(true);
+      }
+      db.close();
+    });
+
+    it('content with no cat2-source-matching tokens → knownFactSource=null, hasKnownFactTerm=false', () => {
+      const db = new DatabaseSync(FIXTURE, { readOnly: true } as Parameters<typeof DatabaseSync>[1]);
+      const row: SampledRow = {
+        id: 'test:no-fact',
+        groupId: GROUP,
+        messageId: 0,
+        sourceMessageId: null,
+        userId: 'u1',
+        nickname: 'Alice',
+        timestamp: 1700000000,
+        content: 'zzunknownterm 没有什么意思',
+        rawContent: 'zzunknownterm 没有什么意思',
+        triggerContext: [],
+        triggerContextAfter: [],
+        category: 9,
+        categoryLabel: 'normal_chimein',
+        samplingSeed: 1,
+        contentHash: 'x',
+        contextHash: 'x',
+      };
+      const labeled = applyWeakLabel(row, db, BOT_QQ);
+      expect(labeled).not.toBeNull();
+      expect(labeled!.label.knownFactSource).toBeNull();
+      expect(labeled!.label.hasKnownFactTerm).toBe(false);
+    });
+
+    it('cat2 sampled rows have knownFactSource != null for >=70%', async () => {
+      const { rawRows } = await sample(1, 20);
+      const db = new DatabaseSync(FIXTURE, { readOnly: true } as Parameters<typeof DatabaseSync>[1]);
+      const cat2Rows = rawRows.filter(r => r.category === 2);
+      expect(cat2Rows.length).toBeGreaterThan(0);
+      let withSource = 0;
+      for (const row of cat2Rows) {
+        const labeled = applyWeakLabel(row, db, BOT_QQ);
+        if (labeled?.label.knownFactSource !== null && labeled?.label.knownFactSource !== undefined) {
+          withSource++;
+        }
+      }
+      const rate = withSource / cat2Rows.length;
+      expect(rate, `cat2 knownFactSource hit rate ${withSource}/${cat2Rows.length}`).toBeGreaterThanOrEqual(0.7);
+      db.close();
+    });
+  });
+
+  // Fix 4 (C2): media rows with distinct file= get distinct contentHash
+  describe('R6.1b: media-aware contentHash', () => {
+    it('two empty-content images with different file= get different contentHash', async () => {
+      const { rawRows } = await sample(1, 50);
+      const emptyMediaRows = rawRows.filter(
+        r => r.content === '' && (r.rawContent ?? '').includes('[CQ:image'),
+      );
+      expect(emptyMediaRows.length, 'fixture must have >= 2 empty-media image rows').toBeGreaterThanOrEqual(2);
+      const hashes = new Set(emptyMediaRows.map(r => r.contentHash));
+      expect(hashes.size, 'distinct file= in empty images must yield distinct contentHash').toBeGreaterThan(1);
+    });
+
+    it('identical media signatures produce same hash (determinism check)', async () => {
+      // Run twice and confirm reproducibility for image rows
+      const { rawRows: a } = await sample(42, 50);
+      const { rawRows: b } = await sample(42, 50);
+      const imagesA = a.filter(r => r.content === '' && (r.rawContent ?? '').includes('[CQ:image'));
+      const imagesB = b.filter(r => r.content === '' && (r.rawContent ?? '').includes('[CQ:image'));
+      expect(imagesA.length).toBe(imagesB.length);
+      for (let i = 0; i < imagesA.length; i++) {
+        expect(imagesA[i]!.contentHash).toBe(imagesB[i]!.contentHash);
+      }
+    });
+  });
+
+  // Fix 5 (C3): queryCat7 windowed to match weak-label.isRelay
+  describe('R6.1b: cat7 window alignment with weak-label', () => {
+    it('every queryCat7 row, after trigger-context fill, has isRelay=true under applyWeakLabel', async () => {
+      const { rawRows } = await sample(1, 20);
+      const db = new DatabaseSync(FIXTURE, { readOnly: true } as Parameters<typeof DatabaseSync>[1]);
+      const cat7Rows = rawRows.filter(r => r.category === 7);
+      expect(cat7Rows.length).toBeGreaterThan(0);
+      for (const row of cat7Rows) {
+        const labeled = applyWeakLabel(row, db, BOT_QQ);
+        expect(labeled, `cat7 row ${row.id} applyWeakLabel must not return null`).not.toBeNull();
+        expect(labeled!.label.isRelay, `cat7 row ${row.id} must have isRelay=true`).toBe(true);
+      }
+      db.close();
+    });
+  });
+
+  // Fix 6 (C4): cat9 junk filter
+  describe('R6.1b: cat9 junk filter', () => {
+    it('queryCat9 excludes pure-interjection and slash/bang rows', () => {
+      const db = new DatabaseSync(FIXTURE, { readOnly: true } as Parameters<typeof DatabaseSync>[1]);
+      const rows = queryCat9(db, GROUP, 50);
+      const contents = rows.map(r => r.content);
+      expect(contents).not.toContain('呵呵呵呵呵');
+      expect(contents).not.toContain('/rule show');
+      expect(contents).not.toContain('！！！！！');
+      db.close();
+    });
+
+    it('queryCat9 still admits real chime-in content', () => {
+      const db = new DatabaseSync(FIXTURE, { readOnly: true } as Parameters<typeof DatabaseSync>[1]);
+      const rows = queryCat9(db, GROUP, 50);
+      const contents = rows.map(r => r.content);
+      // fixture chime-in rows should be present
+      expect(contents.some(c => c === '今天天气真好啊' || c === '是啊出去玩了' || c === '我也想去啊')).toBe(true);
       db.close();
     });
   });

@@ -8,8 +8,9 @@ import type {
 import { CATEGORY_LABELS } from './types.js';
 import { CAT2_MAX } from './categories/cat2-known-fact-term.js';
 
-/** Regex to detect media-only CQ codes that make content appear empty. */
-const MEDIA_CQ_RE = /\[CQ:(?:image|mface|video|record)[^\]]*\]/;
+/** Regex to detect media-only CQ codes that make content appear empty.
+ *  R6.1b: kept in sync with weak-label.isEmptyBecauseMediaOnly — `face` included. */
+const MEDIA_CQ_RE = /\[CQ:(?:image|mface|face|video|record)[^\]]*\]/;
 
 export function buildSummary(
   rawRows: SampledRow[],

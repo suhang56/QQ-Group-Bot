@@ -78,8 +78,46 @@ function parseArgs(argv: string[]): CliArgs {
   return { dbPath, groupId, botQQ, seed, perCategoryTarget, outputDir };
 }
 
-function makeContentHash(content: string): string {
-  return createHash('sha256').update(content).digest('hex').slice(0, 16);
+const MEDIA_CQ_RE = /\[CQ:(?:image|mface|face|video|record)[^\]]*\]/g;
+
+/**
+ * R6.1b: media-aware content hash.
+ *
+ * Empty-content media rows (e.g. raw_content = "[CQ:image,file=abc.jpg]")
+ * all used to collapse to sha256("") and got capped at 5 per category. That
+ * erased 80%+ of cat4 samples (9/50 observed).
+ *
+ * For rows with media CQ codes, hash a signature extracted from the CQ code
+ * (file=, url=, id=, sub_type=) so different images with empty captions get
+ * distinct hashes. For non-media rows, hash content (original behaviour).
+ */
+function extractMediaSignatures(raw: string): string[] {
+  const sigs: string[] = [];
+  const matches = raw.match(MEDIA_CQ_RE);
+  if (!matches) return sigs;
+  for (const m of matches) {
+    // Pull file=, url=, id=, sub_type= values — any of them individuates the media.
+    const parts: string[] = [];
+    for (const key of ['file', 'url', 'id', 'sub_type'] as const) {
+      const keyRe = new RegExp(`${key}=([^,\\]]+)`);
+      const match = keyRe.exec(m);
+      if (match?.[1]) parts.push(`${key}:${match[1]}`);
+    }
+    // Include CQ type as prefix; fall back to full CQ string when no keys parse out.
+    const typeMatch = /\[CQ:([a-z]+)/.exec(m);
+    const prefix = typeMatch?.[1] ?? 'media';
+    sigs.push(parts.length > 0 ? `${prefix}|${parts.join('|')}` : m);
+  }
+  return sigs;
+}
+
+function makeContentHash(content: string, rawContent?: string | null): string {
+  const raw = rawContent ?? '';
+  const sigs = raw ? extractMediaSignatures(raw) : [];
+  // If media CQ is present, prefer its signatures + content (so captioned
+  // images still differ by caption). Otherwise hash content alone.
+  const hashInput = sigs.length > 0 ? `${content}\x02${sigs.join('\x03')}` : content;
+  return createHash('sha256').update(hashInput).digest('hex').slice(0, 16);
 }
 
 function makeContextHash(content: string, contextBefore: ContextMessage[]): string {
@@ -133,7 +171,7 @@ function dbRowToSampledRow(
     category,
     categoryLabel: CATEGORY_LABELS[category - 1]!,
     samplingSeed: seed,
-    contentHash: makeContentHash(row.content),
+    contentHash: makeContentHash(row.content, row.raw_content),
     contextHash: makeContextHash(row.content, context.before),
   };
 }
@@ -220,9 +258,11 @@ export async function runSampling(args: CliArgs): Promise<{ rawRows: SampledRow[
     const fresh = allCandidates.filter(r => !globalAssigned.has(r.id));
 
     // Per-category content-hash cap: at most CONTENT_HASH_CAP_PER_CATEGORY rows per hash
+    // R6.1b: same media-aware hash as SampledRow.contentHash — empty-content media
+    // rows no longer collapse to a single hash.
     const hashCountInCat = new Map<string, number>();
     const capped = fresh.filter(r => {
-      const h = makeContentHash(r.content);
+      const h = makeContentHash(r.content, r.raw_content);
       const count = hashCountInCat.get(h) ?? 0;
       if (count >= CONTENT_HASH_CAP_PER_CATEGORY) return false;
       hashCountInCat.set(h, count + 1);

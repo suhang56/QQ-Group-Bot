@@ -35,10 +35,15 @@ msg('u1', 'Alice', '帮我看看', `[CQ:at,qq=${BOT_QQ}]帮我看看`, BASE + 1)
 msg('u2', 'Bob', '问一下', `你好[CQ:at,qq=${BOT_QQ}]`, BASE + 2);
 msg('u3', 'Carol', '有人吗', `[CQ:at,qq=${BOT_QQ}]有人吗`, BASE + 3);
 
-// Cat 2 — known-fact-term: content contains 'ykn' (fact in learned_facts)
-msg('u1', 'Alice', 'ykn是谁啊', 'ykn是谁啊', BASE + 10);
-msg('u2', 'Bob', '说说ykn', '说说ykn', BASE + 11);
-msg('u3', 'Carol', '你知道ykn吗', '你知道ykn吗', BASE + 12);
+// Cat 2 — known-fact-term: each row targets a distinct cat2 recall source.
+msg('u1', 'Alice', 'ykn 是谁啊', 'ykn 是谁啊', BASE + 10);          // matches learned_facts.topic (pre-tokenize)
+msg('u2', 'Bob', '说说 canonx', '说说 canonx', BASE + 11);            // matches learned_facts.canonical_form
+msg('u3', 'Carol', '你知道 ykn 吗', '你知道 ykn 吗', BASE + 12);     // matches learned_facts.topic again
+msg('u4', 'Dave', 'personaz 真的很强', 'personaz 真的很强', BASE + 13); // matches learned_facts.persona_form
+msg('u5', 'Eve', 'memex 出现了', 'memex 出现了', BASE + 14);         // matches meme_graph.canonical
+msg('u1', 'Alice', 'memevar 说的就是这个', 'memevar 说的就是这个', BASE + 15); // matches meme_graph.variants
+msg('u2', 'Bob', '黑话 jargonx 来了', '黑话 jargonx 来了', BASE + 16); // matches jargon_candidates
+msg('u3', 'Carol', '口头 phrasex 常用', '口头 phrasex 常用', BASE + 17); // matches phrase_candidates
 
 // Cat 3 — rhetorical banter (3 rows)
 msg('u1', 'Alice', '啥情况这是', '啥情况这是', BASE + 20);
@@ -49,6 +54,11 @@ msg('u3', 'Carol', '离谱！笑死', '离谱！笑死', BASE + 22);
 msg('u1', 'Alice', '', '[CQ:image,file=abc.jpg,url=x]', BASE + 30);
 msg('u2', 'Bob', '', '[CQ:mface,id=99]', BASE + 31);
 msg('u3', 'Carol', '哈哈', '[CQ:image,file=def.jpg]哈哈', BASE + 32);
+// R6.1b: face CQ + empty content should be emptyBecauseMediaOnly=true
+msg('u4', 'Dave', '', '[CQ:face,id=0]', BASE + 33);
+// R6.1b: 2 distinct empty images with different file= — must get different contentHash
+msg('u5', 'Eve', '', '[CQ:image,file=unique-A.jpg,url=u1]', BASE + 34);
+msg('u6', 'Frank', '', '[CQ:image,file=unique-B.jpg,url=u2]', BASE + 35);
 
 // Cat 5 — bot status context (3 rows)
 msg('u1', 'Alice', '机器人怎么了', '机器人怎么了', BASE + 40);
@@ -66,6 +76,10 @@ msg('u2', 'Bob', '扣1', '扣1', BASE + 61);
 msg('u3', 'Carol', '扣1', '扣1', BASE + 62);
 // also a plain '1' relay
 msg('u1', 'Alice', '1', '1', BASE + 63);
+// R6.1b: echo-relay trio within a 5-message window — not in RELAY_SET fast-path
+msg('u1', 'Alice', '哈哈', '哈哈', BASE + 64);
+msg('u2', 'Bob', '哈哈', '哈哈', BASE + 65);
+msg('u3', 'Carol', '哈哈', '哈哈', BASE + 66);
 
 // Cat 8 — conflict (3 rows matching sb / 傻逼 / 滚)
 msg('u1', 'Alice', '你真sb', '你真sb', BASE + 70);
@@ -81,6 +95,12 @@ msg('u1', 'Alice', '下午一起去吗', '下午一起去吗', BASE + 100);
 msg('u2', 'Bob', '可以啊几点', '可以啊几点', BASE + 101);
 msg('u4', 'Dave', '我也要去', '我也要去', BASE + 110);
 
+// R6.1b: cat9 junk rows — must be EXCLUDED by queryCat9 junk filter
+// These content values are >= 5 chars (pass SQL LENGTH gate) so they test JS-side filter.
+msg('u1', 'Alice', '呵呵呵呵呵', '呵呵呵呵呵', BASE + 111);    // pure interjection
+msg('u2', 'Bob', '/rule show', '/rule show', BASE + 112);      // slash command
+msg('u3', 'Carol', '！！！！！', '！！！！！', BASE + 113);     // pure bang
+
 // Cat 10 — silence: short content or no following messages
 // Insert some very short messages
 msg('u1', 'Alice', '嗯', '嗯', BASE + 200);
@@ -92,11 +112,43 @@ msg('u1', 'Alice', '收到了', '收到了', BASE + 2000);
 // Admin command row (should be excluded from labeled output)
 msg('admin1', 'AdminUser', '/rule_add no spam', '/rule_add no spam', BASE + 300);
 
-// learned_facts for cat2 testing
+// learned_facts for cat2 testing — R6.1b: seed rows per cat2 source type so the
+// extended hasKnownFactTerm can distinguish `knownFactSource` values.
+// Source: topic (and canonical)
 db.prepare(
-  `INSERT OR IGNORE INTO learned_facts (group_id, topic, fact, confidence, status, created_at, updated_at, canonical_form)
-   VALUES (?, ?, ?, 1.0, 'active', ?, ?, ?)`
-).run(GROUP, 'user:ykn', 'ykn=凑友希那', BASE, BASE, 'ykn');
+  `INSERT OR IGNORE INTO learned_facts (group_id, topic, fact, confidence, status, created_at, updated_at, canonical_form, persona_form)
+   VALUES (?, ?, ?, 1.0, 'active', ?, ?, ?, ?)`
+).run(GROUP, 'ykn', 'ykn=凑友希那', BASE, BASE, 'ykn', null);
+
+// Source: canonical_form only (topic differs)
+db.prepare(
+  `INSERT OR IGNORE INTO learned_facts (group_id, topic, fact, confidence, status, created_at, updated_at, canonical_form, persona_form)
+   VALUES (?, ?, ?, 1.0, 'active', ?, ?, ?, ?)`
+).run(GROUP, 'unique-topic-for-canon', 'canonx=大号', BASE, BASE, 'canonx', null);
+
+// Source: persona_form
+db.prepare(
+  `INSERT OR IGNORE INTO learned_facts (group_id, topic, fact, confidence, status, created_at, updated_at, canonical_form, persona_form)
+   VALUES (?, ?, ?, 1.0, 'active', ?, ?, ?, ?)`
+).run(GROUP, 'unique-topic-for-persona', 'personaz=牛娃', BASE, BASE, 'unique-canon-persona', 'personaz');
+
+// meme_graph rows (canonical + variants)
+db.prepare(
+  `INSERT OR IGNORE INTO meme_graph (group_id, canonical, variants, meaning, total_count, confidence, status, created_at, updated_at)
+   VALUES (?, ?, ?, ?, 1, 0.8, 'active', ?, ?)`
+).run(GROUP, 'memex', JSON.stringify(['memevar', 'memex-alt']), 'test meme', BASE, BASE);
+
+// jargon_candidates promoted
+db.prepare(
+  `INSERT OR IGNORE INTO jargon_candidates (group_id, content, count, is_jargon, promoted, created_at, updated_at)
+   VALUES (?, ?, 10, 2, 1, ?, ?)`
+).run(GROUP, 'jargonx', BASE, BASE);
+
+// phrase_candidates promoted
+db.prepare(
+  `INSERT OR IGNORE INTO phrase_candidates (group_id, content, gram_len, count, is_jargon, promoted, created_at, updated_at)
+   VALUES (?, ?, 3, 10, 2, 1, ?, ?)`
+).run(GROUP, 'phrasex', BASE, BASE);
 
 // Null-topic rows — must NOT crash queryCat2 (regression guard for R6.1 hotfix)
 // Row with null topic but valid canonical_form: should still match via canonical_form

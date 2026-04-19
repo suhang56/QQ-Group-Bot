@@ -18,10 +18,27 @@ export type ExpectedAct =
 
 export type ExpectedDecision = 'reply' | 'silent' | 'defer';
 
+/**
+ * R6.1b: matches the 7 recall sources scanned by queryCat2 (cat2-known-fact-term).
+ * `null` when no source matched. Priority when multiple sources match:
+ *   topic > canonical > persona > fact > meme > jargon > phrase.
+ */
+export type KnownFactSource =
+  | 'topic'
+  | 'canonical'
+  | 'persona'
+  | 'fact'
+  | 'meme'
+  | 'jargon'
+  | 'phrase'
+  | null;
+
 export interface WeakReplayLabel {
   expectedAct: ExpectedAct;
   expectedDecision: ExpectedDecision;
   hasKnownFactTerm: boolean;
+  /** R6.1b: which of the 7 cat2 recall sources matched, or null. */
+  knownFactSource: KnownFactSource;
   /** R6.1: set equal to hasKnownFactTerm; true retrieval deferred to R6.3 */
   hasRealFactHit: boolean;
   allowPluralYou: boolean;
