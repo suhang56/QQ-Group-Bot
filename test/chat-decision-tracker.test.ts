@@ -184,6 +184,74 @@ describe('captureDecision — kind=defer', () => {
   });
 });
 
+// ── R1-A: guard_path and prompt_variant written for all kinds ──────────
+
+describe('R1-A: captureDecision — guard_path + prompt_variant for non-reply kinds', () => {
+  let db: Database;
+  let tracker: ChatDecisionTracker;
+  beforeEach(() => { db = makeDb(); tracker = makeTracker(db); });
+
+  it('kind=silent with meta.guardPath set → guard_path written', () => {
+    const result: ChatResult = {
+      kind: 'silent',
+      reasonCode: 'guard',
+      meta: { ...BASE_META, guardPath: 'guard/scope' },
+    };
+    tracker.captureDecision(result, { ...BASE_CTX, sentBotReplyId: null });
+    const rows = db.chatDecisionEffects.getUnscored(1000001, 10);
+    const evt = db.chatDecisionEvents.getById(rows[0]!.decision_event_id)!;
+    expect(evt.guard_path).toBe('guard/scope');
+  });
+
+  it('kind=silent with meta.guardPath undefined → guard_path null', () => {
+    const result: ChatResult = {
+      kind: 'silent',
+      reasonCode: 'guard',
+      meta: { ...BASE_META, guardPath: undefined },
+    };
+    tracker.captureDecision(result, { ...BASE_CTX, sentBotReplyId: null });
+    const rows = db.chatDecisionEffects.getUnscored(1000001, 10);
+    const evt = db.chatDecisionEvents.getById(rows[0]!.decision_event_id)!;
+    expect(evt.guard_path).toBeNull();
+  });
+
+  it('kind=defer with meta.promptVariant set → prompt_variant written', () => {
+    const result: ChatResult = {
+      kind: 'defer',
+      untilSec: 1000120,
+      targetMsgId: 'msg1',
+      reasonCode: 'rate-limit',
+      meta: { ...BASE_META, promptVariant: 'variant-A' as 'default' },
+    };
+    tracker.captureDecision(result, { ...BASE_CTX, sentBotReplyId: null });
+    const rows = db.chatDecisionEffects.getUnscored(1000001, 10);
+    const evt = db.chatDecisionEvents.getById(rows[0]!.decision_event_id)!;
+    expect(evt.prompt_variant).toBe('variant-A');
+  });
+
+  it('kind=defer with meta.guardPath set → guard_path written', () => {
+    const result: ChatResult = {
+      kind: 'defer',
+      untilSec: 1000120,
+      targetMsgId: 'msg1',
+      reasonCode: 'rate-limit',
+      meta: { ...BASE_META, guardPath: 'defer-guard' },
+    };
+    tracker.captureDecision(result, { ...BASE_CTX, sentBotReplyId: null });
+    const rows = db.chatDecisionEffects.getUnscored(1000001, 10);
+    const evt = db.chatDecisionEvents.getById(rows[0]!.decision_event_id)!;
+    expect(evt.guard_path).toBe('defer-guard');
+  });
+
+  it('kind=reply with meta.guardPath undefined → guard_path null (no error)', () => {
+    const result = makeReplyResult({ guardPath: undefined });
+    tracker.captureDecision(result, BASE_CTX);
+    const rows = db.chatDecisionEffects.getUnscored(1000001, 10);
+    const evt = db.chatDecisionEvents.getById(rows[0]!.decision_event_id)!;
+    expect(evt.guard_path).toBeNull();
+  });
+});
+
 // ── scoreUnscored: Phase B signal detection ─────────────────────────────
 
 describe('scoreUnscored — signal detection', () => {

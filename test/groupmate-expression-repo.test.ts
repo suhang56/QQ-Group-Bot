@@ -185,4 +185,49 @@ describe('GroupmateExpressionRepository (via Database)', () => {
       expect(repo.listAll(GROUP)).toHaveLength(1);
     });
   });
+
+  describe('listQualifiedCandidates (R1-B)', () => {
+    it('excludes rows with schema_version != 2', () => {
+      repo.upsert(GROUP, '哈哈哈哈哈', 'hash1', 'user1', 'msg1');
+      repo.upsert(GROUP, '哈哈哈哈哈', 'hash1', 'user2', 'msg2');
+      // Default upsert sets schema_version=2; force it to 1 to test exclusion
+      db.exec("UPDATE groupmate_expression_samples SET schema_version = 1 WHERE expression_hash = 'hash1'");
+      expect(repo.listQualifiedCandidates(GROUP, 50)).toHaveLength(0);
+    });
+
+    it('includes rows with schema_version=2 and passing quality gate', () => {
+      repo.upsert(GROUP, '哈哈哈哈哈', 'hash1', 'user1', 'msg1');
+      repo.upsert(GROUP, '哈哈哈哈哈', 'hash1', 'user2', 'msg2');
+      const rows = repo.listQualifiedCandidates(GROUP, 50);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.schemaVersion).toBe(2);
+    });
+
+    it('excludes rejected=1 rows', () => {
+      repo.upsert(GROUP, '哈哈哈哈哈', 'hash1', 'user1', 'msg1');
+      repo.upsert(GROUP, '哈哈哈哈哈', 'hash1', 'user2', 'msg2');
+      const all = repo.listAll(GROUP);
+      db.exec(`UPDATE groupmate_expression_samples SET rejected = 1 WHERE id = ${all[0]!.id}`);
+      expect(repo.listQualifiedCandidates(GROUP, 50)).toHaveLength(0);
+    });
+
+    it('excludes rows failing quality gate (occurrence_count<3 AND speaker_count<2)', () => {
+      repo.upsert(GROUP, '哈哈哈哈哈', 'hash1', 'user1', 'msg1');
+      repo.upsert(GROUP, '哈哈哈哈哈', 'hash1', 'user1', 'msg2');
+      // 2 occurrences, 1 speaker → excluded
+      expect(repo.listQualifiedCandidates(GROUP, 50)).toHaveLength(0);
+    });
+
+    it('respects limit parameter', () => {
+      for (let i = 0; i < 5; i++) {
+        repo.upsert(GROUP, `哈哈哈哈哈${i}`, `hash${i}`, 'user1', `msg${i}`);
+        repo.upsert(GROUP, `哈哈哈哈哈${i}`, `hash${i}`, 'user2', `msg${i}b`);
+      }
+      expect(repo.listQualifiedCandidates(GROUP, 3)).toHaveLength(3);
+    });
+
+    it('returns empty when table is empty', () => {
+      expect(repo.listQualifiedCandidates(GROUP, 50)).toHaveLength(0);
+    });
+  });
 });

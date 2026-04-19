@@ -34,6 +34,7 @@ function makeGexRepo(samples: GroupmateExpressionSample[]): IGroupmateExpression
   return {
     upsert: vi.fn(),
     listQualified: vi.fn().mockReturnValue(samples),
+    listQualifiedCandidates: vi.fn().mockReturnValue(samples),
     listAll: vi.fn().mockReturnValue(samples),
     deleteDecayed: vi.fn().mockReturnValue(0),
     deleteById: vi.fn(),
@@ -111,6 +112,7 @@ describe('chat-expression-wiring (P3)', () => {
       listQualified: vi.fn().mockImplementation((_groupId: string, limit: number) =>
         limit >= 20 ? samples : samples.slice(0, limit),
       ),
+      listQualifiedCandidates: vi.fn().mockReturnValue(samples),
       listAll: vi.fn().mockReturnValue(samples),
       deleteDecayed: vi.fn().mockReturnValue(0),
       deleteById: vi.fn(),
