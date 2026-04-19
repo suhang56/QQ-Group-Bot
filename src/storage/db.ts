@@ -755,6 +755,7 @@ export interface GroupmateExpressionSample {
 export interface IGroupmateExpressionRepository {
   upsert(groupId: string, expression: string, expressionHash: string, speakerUserId: string, sourceMessageId: string): void;
   listQualified(groupId: string, limit: number): GroupmateExpressionSample[];
+  listQualifiedCandidates(groupId: string, limit: number): GroupmateExpressionSample[];
   listAll(groupId: string): GroupmateExpressionSample[];
   deleteDecayed(groupId: string, cutoffSeconds: number): number;
   deleteById(id: number): void;
@@ -2987,6 +2988,18 @@ class GroupmateExpressionRepository implements IGroupmateExpressionRepository {
       WHERE group_id = ? AND rejected = 0
         AND (occurrence_count >= 3 OR speaker_count >= 2)
       ORDER BY speaker_count DESC, occurrence_count DESC, last_active_at DESC
+      LIMIT ?
+    `).all(groupId, limit) as unknown as GroupmateExpressionRow[];
+    return rows.map(groupmateExprFromRow);
+  }
+
+  listQualifiedCandidates(groupId: string, limit: number): GroupmateExpressionSample[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM groupmate_expression_samples
+      WHERE group_id = ? AND rejected = 0
+        AND (occurrence_count >= 3 OR speaker_count >= 2)
+        AND schema_version = 2
+      ORDER BY last_active_at DESC
       LIMIT ?
     `).all(groupId, limit) as unknown as GroupmateExpressionRow[];
     return rows.map(groupmateExprFromRow);
