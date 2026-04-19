@@ -142,7 +142,7 @@ In R6.1, `hasRealFactHit` equals `hasKnownFactTerm`. True fact hit detection req
 
 | # | Label | Detection |
 |---|-------|-----------|
-| 1 | `direct_at_bot` | rawContent contains `[CQ:at,qq=<botQQ>` |
+| 1 | `direct_at_bot` | rawContent contains `[CQ:at,qq=<botQQ>` (see note below) |
 | 2 | `known_fact_term` | content LIKE-matches a learned_facts topic or canonical_form |
 | 3 | `rhetorical_banter` | 啥情况/无语/离谱/哈哈/笑死/wtf/etc. keywords, no image |
 | 4 | `image_mface` | rawContent contains `[CQ:image`, `[CQ:mface`, or `[CQ:face` |
@@ -154,6 +154,8 @@ In R6.1, `hasRealFactHit` equals `hasKnownFactTerm`. True fact hit detection req
 | 10 | `silence_candidate` | content ≤4 chars, or in ack-set, or no following msgs within 300s |
 
 **Category assignment priority**: categories are queried 1→10; a row appearing in an earlier category is excluded from later ones (cross-category deduplication via `seen` set).
+
+> **isDirect vs cat1 boundary note**: The `WeakReplayLabel.isDirect` flag is `true` when rawContent contains `[CQ:at,qq=<botQQ>` **or** `[CQ:reply,` (i.e., a reply-to-any-message). Category 1 SQL only matches `[CQ:at,qq=<botQQ>` — pure reply-to messages are NOT captured by cat1 and will appear in a later category (e.g., cat3/cat9). As a result, a row with `isDirect=true` and `expectedAct='direct_chat'` may have `category > 1`. This is intentional: reply-to-bot is a less reliable direct-address signal (CQ:reply has no target QQ field), and isolating @-bot rows in cat1 gives a higher-confidence direct-address sample.
 
 ---
 

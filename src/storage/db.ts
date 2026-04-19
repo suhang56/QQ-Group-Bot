@@ -1098,6 +1098,9 @@ function announcementFromRow(row: AnnouncementRow): GroupAnnouncement {
 class MessageRepository implements IMessageRepository {
   constructor(private readonly db: DatabaseSync) {
     this.db.exec(
+      'CREATE INDEX IF NOT EXISTS idx_messages_group_id ON messages(group_id, id)'
+    );
+    this.db.exec(
       'CREATE INDEX IF NOT EXISTS idx_messages_group_nickname ON messages(group_id, nickname)'
     );
   }
