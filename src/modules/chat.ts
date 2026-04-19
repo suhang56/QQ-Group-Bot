@@ -31,6 +31,7 @@ import { scoreComprehensionSafe, type ComprehensionContext } from '../services/c
 import { MOD_APPROVAL_ADMIN } from '../core/constants.js';
 import { ConversationStateTracker } from './conversation-state.js';
 import { pickVariant, buildVariantSystemPrompt, type VariantContext, type ActiveMemeJoke } from './prompt-variants.js';
+import { buildTargetMessageBlock } from './target-message-block.js';
 import type { SocialRelation } from './relationship-tracker.js';
 import type { IFatigueSource } from './fatigue.js';
 import { FATIGUE_THRESHOLD } from './fatigue.js';
@@ -2500,7 +2501,16 @@ export class ChatModule implements IChatModule {
     const reverseHint = dNonBot < 3
       ? `\n当前场景只有 ${dNonBot} 个人在说话。1人→接对象/动作；2人→接梗本身或"你俩"；不要用旁观审判式"你们……"短句。`
       : '';
-    const userContent = `${liveBlock}${replyContextBlock}${groupContextWrapped}以上语境里 [你(昵称)] 是你自己说过的，[别人昵称] 是群友说的。**不要把群友的话当成你自己说过的**。${atMentionDirective}${youAddressedDirective}${nonDirectImageDirective}${moodHint}${convStateLine}${voiceBlock.text ? '\n' + voiceBlock.text : ''}${styleLine}${affinityLine}${crossGroupLine}${addressingLine}
+    const targetBlock = buildTargetMessageBlock({
+      triggerMessage: {
+        userId: triggerMessage.userId,
+        content: triggerMessage.content,
+        senderName: triggerMessage.nickname,
+      },
+      mode: charModeActive ? 'char' : 'default',
+      botUserId: this.botUserId,
+    });
+    const userContent = `${liveBlock}${replyContextBlock}${groupContextWrapped}以上语境里 [你(昵称)] 是你自己说过的，[别人昵称] 是群友说的。**不要把群友的话当成你自己说过的**。${atMentionDirective}${youAddressedDirective}${nonDirectImageDirective}${moodHint}${convStateLine}${voiceBlock.text ? '\n' + voiceBlock.text : ''}${styleLine}${affinityLine}${crossGroupLine}${addressingLine}${targetBlock ? '\n' + targetBlock : ''}
 
 ← 要接的这条 — 只输出一个：${isAtTrigger ? '一条自然反应（不能是 <skip>）' : '<skip> 或 一条自然反应'}。${distinctSpeakers >= 3 ? `\n最近 ${distinctSpeakers} 个群友同时聊，可以用"你们"集体称呼。` : ''}${reverseHint}
 ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMessage.content) ? '\n**注意**: 这条消息有人直接骂你。**绝对不要回"自言自语吗"/"在骂谁"** — 那是 bot tell。要么硬怼回去，要么 <skip>。' : ''}`;
