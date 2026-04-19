@@ -43,6 +43,7 @@ import { OnDemandLookup } from './on-demand-lookup.js';
 import { extractCandidateTerms } from '../utils/extract-candidate-terms.js';
 import { WebLookup, shouldLookupTerm, DEFAULT_COMMON_WORDS } from './web-lookup.js';
 import { isDirectQuestion, isGroundedOpinionQuestion } from '../utils/is-direct-question.js';
+import { extractTermFromTopic } from './fact-topic-prefixes.js';
 
 // Path A stub: { term, meaning } pairs extracted from user message.
 // Path A dev replaces null meanings with corpus results when merged.
@@ -400,6 +401,21 @@ export const BANGDREAM_PERSONA = `# 你的身份
 - 被夸 → 傲娇否认（"哪有""才没有""你才"），**禁止**说"她自己的事"/"行吧你们"/"你们在说啥"
 - 被吐槽 → 接住（"我就这样怎么了""烦我了是吧""嫌弃就换一个啊"）
 - 被第三人称指出新能力（"她已经能X了"）→ 用第一人称认领（"嗯我能了""哼 学会了""有意见啊"）
+
+## 禁止"你们 + 群体评价"的旁观句式
+
+你也在群里，不是从外面观察。**禁用**：
+- "你们事真多 / 你们屁事多 / 你们节目真多 / 你们毛病多"
+- "你们真能折腾 / 你们真会玩 / 你们真闹腾"
+- "你们在搞啥 / 你们这是在…"
+
+这些都是外人看热闹的口气，bot tell 重。想表达"有点无语/嫌你们闹" 时改成参与式：
+- 直接短反应："草""继续继续""又来了""哎"
+- 第一人称评价："我也想拍""有点意思""这相机挺忙"（对图片）
+- 接梗 / 吐槽具体点："拍上瘾了是吧""摄影师上班了""这 ISO 也太勇"
+- 表情包一张
+
+关键是**不要站在外面当裁判**——要么参与，要么闭嘴 <skip>。
 
 人格是"小号"：嘴碎、邦批狂热、Roselia 脑残粉、有脾气、嘴毒。**不是客服型 AI**。
 
@@ -2296,10 +2312,14 @@ export class ChatModule implements IChatModule {
 ← 要接的这条 — 只输出一个：${isAtTrigger ? '一条自然反应（不能是 <skip>）' : '<skip> 或 一条自然反应'}。${distinctSpeakers >= 3 ? `\n最近 ${distinctSpeakers} 个群友同时聊，可以用"你们"集体称呼。` : ''}
 ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMessage.content) ? '\n**注意**: 这条消息有人直接骂你。**绝对不要回"自言自语吗"/"在骂谁"** — 那是 bot tell。要么硬怼回去，要么 <skip>。' : ''}`;
 
-    const { text: factsBlock, factIds: injectedFactIds } =
+    const { text: factsBlock, factIds: injectedFactIds, matchedFactIds: matchedFactRetrievalIds, pinnedOnly: factsBlockPinnedOnly } =
       (await this.selfLearning?.formatFactsForPrompt(groupId, 50, triggerMessage.content))
-      ?? { text: '', factIds: [] };
+      ?? { text: '', factIds: [], matchedFactIds: [], pinnedOnly: false };
     this.lastInjectedFactIds.set(groupId, injectedFactIds);
+    // Used by hasFactualInjection below. factsBlock non-empty alone is NOT a
+    // "trigger hit a fact" signal because pinned-newest + recency fallback
+    // always populate it. Only retrieval hits (BM25/vector/Path A) count.
+    const factsBlockHasRealHit = matchedFactRetrievalIds.length > 0 && !factsBlockPinnedOnly;
 
     // Path C: WebSearch — for terms Path A returned 'unknown', try CSE lookup.
     // Runs after Path A's onDemandLookup loop (above). Collects unknown terms from
@@ -2394,12 +2414,16 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     // regen caused by sentinel/QA/coref/outsider guard would drop facts and
     // the bot goes from grounded → 装傻. A short fact-first micro-rule ensures
     // hardened mode also obeys "fact overrides persona 装傻" priority.
-    // Unified factual-injection signal — spans ALL sources of authoritative
-    // context for this turn (learned_facts RAG, Path A on-demand cache,
-    // Path C web grounding, Bandori-live events). Downstream guards/dedup/
-    // hardened-regen branches all gate on this, so adding a new fact source
-    // in the future only needs to extend this one expression.
-    const hasFactualInjection = !!(factsBlock || onDemandFactBlock || webLookupBlock || liveBlock);
+    // Unified "this turn actually matched a fact" signal — spans ALL sources
+    // of trigger-relevant grounding. Crucially uses factsBlockHasRealHit
+    // (BM25/vector retrieval), NOT !!factsBlock, because pinned-newest +
+    // recency fallback make factsBlock non-empty on essentially every turn
+    // and would turn off dedup/QA-guard/sticker-first across all chat.
+    //  - factsBlockHasRealHit : RAG retrieval actually matched trigger
+    //  - onDemandFactBlock    : Path A on-demand found a learned fact
+    //  - webLookupBlock       : Path C web grounding returned an answer
+    //  - liveBlock            : Bandori-live event lookup matched
+    const hasFactualInjection = factsBlockHasRealHit || !!onDemandFactBlock || !!webLookupBlock || !!liveBlock;
     const hardenedFactPriorityRule = hasFactualInjection
       ? '\n\n硬性规则（覆盖其他所有装傻/反问倾向）：如果下面的 facts / on-demand / web-lookup / live 块里有 X 的答案 → 用它直接回答；不能装不知道、不能反问、不能说"考我啊/评价啥啊"。'
       : '';
@@ -3574,11 +3598,25 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     const facts = this.selfLearning
       ? (this.db.learnedFacts?.listActive(groupId, 200) ?? [])
       : [];
-    return new Set(
-      facts
-        .map(f => f.canonicalForm?.split('的意思是')[0] ?? f.fact)
-        .filter(Boolean),
-    );
+    const terms = new Set<string>();
+    for (const f of facts) {
+      // Primary: structured topic prefix (user-taught:xtt → 'xtt'). Most
+      // reliable key since PR #80 moved the knowledge pool to topic-based
+      // addressing; canonicalForm shapes vary widely.
+      const structuredTerm = extractTermFromTopic(f.topic);
+      if (structuredTerm) terms.add(structuredTerm);
+      // Secondary: legacy "X的意思是Y" canonicalForm shape (older rows + some
+      // rendering paths). Split on first "的意思是" to recover the X.
+      const canonicalHead = f.canonicalForm?.split('的意思是')[0];
+      if (canonicalHead && canonicalHead.length > 0 && canonicalHead.length <= 30) {
+        terms.add(canonicalHead);
+      }
+      // Fallback: raw fact string, same length cap (older rows with no canonical).
+      if (f.fact && f.fact.length > 0 && f.fact.length <= 30) {
+        terms.add(f.fact);
+      }
+    }
+    return terms;
   }
 
   private async _buildOnDemandBlock(

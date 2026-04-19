@@ -434,6 +434,8 @@ export type LearnedFactInsertShape = {
 export interface ILearnedFactsRepository {
   insert(row: LearnedFactInsertShape): number;
   insertOrSupersede(row: LearnedFactInsertShape): { newId: number; supersededCount: number };
+  /** Fetch one row by id, any status. Returns null if not found. */
+  findById(id: number): LearnedFact | null;
   listActive(groupId: string, limit: number): LearnedFact[];
   /**
    * Return all active facts whose topic is one of the 9 canonical prefixes
@@ -1985,6 +1987,13 @@ class LearnedFactsRepository implements ILearnedFactsRepository {
       `SELECT * FROM learned_facts WHERE group_id = ? AND status = 'active' ORDER BY created_at DESC, id DESC LIMIT ?`
     ).all(groupId, limit) as unknown as LearnedFactRow[];
     return rows.map(learnedFactFromRow);
+  }
+
+  findById(id: number): LearnedFact | null {
+    const row = this.db.prepare(
+      `SELECT * FROM learned_facts WHERE id = ? LIMIT 1`
+    ).get(id) as LearnedFactRow | undefined;
+    return row ? learnedFactFromRow(row) : null;
   }
 
   listActiveWithEmbeddings(groupId: string): LearnedFact[] {

@@ -575,6 +575,14 @@ export function isOutsiderCommentatorTone(text: string): boolean {
   // when LLM can't figure out what to say and just observes the group as outsider.
   if (/^你们.{1,8}(啊|呢|哦|诶|呀|嘛)[？?。!！]?$/.test(trimmed)) return true;
 
+  // "你们 + 评价性名词 / 真+动词" — the "你们事真多 / 你们屁事多 / 你们节目真多 /
+  // 你们真能折腾 / 你们真会玩" family. Bot standing outside the group and
+  // commenting on the group as a spectator. Observed live 2026-04-19:
+  //   "继续激情拍摄" → bot: "你们事真多"
+  // Not caught by 啊/呢 pattern above because terminal punctuation is absent.
+  if (/^你们.{0,6}(事|节目|毛病|屁事|破事|心思|花样|套路|玩法|点子)(?:真|太|可|好|挺)?(多|烦|闲|乱|闹|杂|奇|怪)/.test(trimmed)) return true;
+  if (/^你们(真|太|可|好|挺).{0,4}(能|会|爱|喜欢)(?:折腾|闹腾|作|搞事|整活|玩|闹)/.test(trimmed)) return true;
+
   return false;
 }
 

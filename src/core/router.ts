@@ -814,6 +814,16 @@ export class Router implements IRouter {
           content: m.content, rawContent: m.content, timestamp: m.timestamp,
         }));
         let reply = await this.chatModule.generateReply(groupId, item.msg, recentMsgs);
+        // Snapshot learning-signals from chatModule BEFORE any fallback path
+        // overwrites `reply`. If chat generated a real response (`reply` is
+        // non-null now), these come from the prompt-build / processing stage
+        // and should drive rememberInjection + evasive research. If chat
+        // returned null and the fallback path below produces a reply, the
+        // signals stay as their turn-start empty values (cleared in
+        // generateReply), so the learning hooks are correctly skipped.
+        const chatProducedReply = reply !== null;
+        const chatWasEvasive = chatProducedReply ? this.chatModule.getEvasiveFlagForLastReply(groupId) : false;
+        const chatInjectedFactIds = chatProducedReply ? this.chatModule.getInjectedFactIdsForLastReply(groupId) : [];
 
         // Safety net: @-mention must never result in total silence. If chat
         // returned null (sentinel drop / dedup / opt-out), pick a fallback
@@ -874,7 +884,7 @@ export class Router implements IRouter {
           this.logger.info({ groupId, userId: item.msg.userId, triggerText, fallbackPool: Object.entries(AT_FALLBACK_POOLS).find(([, v]) => v === pool)?.[0], reply }, '@-mention fallback deflection — chat returned null');
         }
 
-        await this._sendReply(groupId, reply, item.sourceMsgId, {
+        const atBotReplyId = await this._sendReply(groupId, reply, item.sourceMsgId, {
           module: 'chat',
           triggerMsgId: item.msg.messageId,
           triggerUserId: item.msg.userId,
@@ -883,6 +893,29 @@ export class Router implements IRouter {
         });
         timestamps.push(Date.now());
         this.atReplyTimestamps.set(groupId, timestamps);
+
+        // Parity with non-@ path (router.ts:686-699): if chatModule produced
+        // the reply, feed its signals back into the learning loop.
+        //   - rememberInjection: record which fact IDs entered the prompt so
+        //     a later top-level correction can retract them
+        //   - markEvasive + researchOnline + _scheduleHarvest: if chat flagged
+        //     the reply as evasive, fire the online + passive harvest paths
+        //     so next time we have a real answer.
+        // Skipped for fallback-generated replies (fact-recovery / pool
+        // deflection) — those don't have injection memory or a clean
+        // evasive-vs-real distinction.
+        if (chatProducedReply && atBotReplyId !== null && this.selfLearning && chatInjectedFactIds.length > 0) {
+          this.selfLearning.rememberInjection(groupId, atBotReplyId, chatInjectedFactIds);
+        }
+        if (chatProducedReply && chatWasEvasive && atBotReplyId !== null && this.selfLearning) {
+          try { this.db.botReplies.markEvasive(atBotReplyId); } catch { /* non-fatal */ }
+          this._scheduleHarvest(groupId, atBotReplyId, item.msg.content);
+          void this.selfLearning.researchOnline({
+            groupId,
+            evasiveBotReplyId: atBotReplyId,
+            originalTrigger: item.msg.content,
+          }).catch(err => this.logger.debug({ err, groupId }, 'researchOnline rejected (@ path)'));
+        }
       }
     } finally {
       this.atInFlight.delete(groupId);
