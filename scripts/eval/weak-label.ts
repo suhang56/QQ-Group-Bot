@@ -93,14 +93,19 @@ function isBurstWindow(row: SampledRow): boolean {
  * highest-priority matching source, or null when no source matches.
  *
  * Priority: topic > canonical > persona > fact > meme > jargon > phrase.
- * Aligns hasKnownFactTerm with the row set cat2 actually samples from.
+ *
+ * Perf: one query per source table regardless of token count — tokens are
+ * batched into WHERE value IN (?, ?, ...). Previously N×M queries per row
+ * (N tokens × M sources) caused quadratic blowup on real DB.
  */
 function findKnownFactSource(db: DatabaseSync, groupId: string, content: string): KnownFactSource {
   const tokens = extractTokens(content);
   if (tokens.length === 0) return null;
 
-  // Detect persona_form column once per call (schema is static across calls
-  // in practice, but cost is negligible — avoids module-level state).
+  const tokenSet = new Set(tokens);
+  const placeholders = tokens.map(() => '?').join(',');
+
+  // Detect persona_form column once per call (schema-static; negligible cost).
   let hasPersonaForm = false;
   try {
     db.prepare(`SELECT persona_form FROM learned_facts LIMIT 0`).all();
@@ -109,75 +114,106 @@ function findKnownFactSource(db: DatabaseSync, groupId: string, content: string)
     // column not present
   }
 
-  for (const tok of tokens) {
-    const factsSql = hasPersonaForm
-      ? `SELECT topic, canonical_form, persona_form, fact FROM learned_facts
-         WHERE group_id = ? AND status = 'active'
-           AND (topic = ? OR canonical_form = ? OR persona_form = ? OR fact = ?)
-         LIMIT 1`
-      : `SELECT topic, canonical_form, NULL as persona_form, fact FROM learned_facts
-         WHERE group_id = ? AND status = 'active'
-           AND (topic = ? OR canonical_form = ? OR fact = ?)
-         LIMIT 1`;
-    const bindings = hasPersonaForm
-      ? [groupId, tok, tok, tok, tok]
-      : [groupId, tok, tok, tok];
-    const hit = db.prepare(factsSql).get(...bindings) as
-      | { topic: string | null; canonical_form: string | null; persona_form: string | null; fact: string | null }
-      | undefined;
-    if (hit) {
-      if (hit.topic === tok) return 'topic';
-      if (hit.canonical_form === tok) return 'canonical';
-      if (hasPersonaForm && hit.persona_form === tok) return 'persona';
-      if (hit.fact === tok) return 'fact';
-      // SQL matched but none of the named columns equal tok (shouldn't happen,
-      // but be defensive): fall through to next token.
-    }
+  // Query 1 — learned_facts: single scan, pick highest-priority column match.
+  // We select all rows whose topic/canonical/persona/fact equals ANY token,
+  // then sort by column priority on the JS side.
+  const factsCols = hasPersonaForm
+    ? 'topic, canonical_form, persona_form, fact'
+    : 'topic, canonical_form, NULL as persona_form, fact';
+  const factsWhere = hasPersonaForm
+    ? `(topic IN (${placeholders}) OR canonical_form IN (${placeholders}) OR persona_form IN (${placeholders}) OR fact IN (${placeholders}))`
+    : `(topic IN (${placeholders}) OR canonical_form IN (${placeholders}) OR fact IN (${placeholders}))`;
+  const factsBindings = hasPersonaForm
+    ? [groupId, ...tokens, ...tokens, ...tokens, ...tokens]
+    : [groupId, ...tokens, ...tokens, ...tokens];
+  try {
+    const rows = db.prepare(`
+      SELECT ${factsCols} FROM learned_facts
+      WHERE group_id = ? AND status = 'active' AND ${factsWhere}
+      LIMIT 100
+    `).all(...factsBindings) as Array<{
+      topic: string | null;
+      canonical_form: string | null;
+      persona_form: string | null;
+      fact: string | null;
+    }>;
 
-    // Source 5: meme_graph.canonical + variants
-    try {
-      const memeRows = db.prepare(`
-        SELECT canonical, variants FROM meme_graph
-        WHERE group_id = ? AND status IN ('active', 'manual_edit')
-          AND (canonical = ? OR variants LIKE ?)
-        LIMIT 5
-      `).all(groupId, tok, `%"${tok}"%`) as Array<{ canonical: string; variants: string }>;
-      for (const r of memeRows) {
-        if (r.canonical === tok) return 'meme';
-        try {
-          const vs: unknown = JSON.parse(r.variants ?? '[]');
-          if (Array.isArray(vs) && vs.includes(tok)) return 'meme';
-        } catch {
-          // malformed JSON — skip
-        }
+    // Priority: topic > canonical > persona > fact
+    let best: KnownFactSource = null;
+    const rank: Record<Exclude<KnownFactSource, null>, number> = {
+      topic: 0, canonical: 1, persona: 2, fact: 3, meme: 4, jargon: 5, phrase: 6,
+    };
+    for (const r of rows) {
+      if (r.topic !== null && tokenSet.has(r.topic)) {
+        if (best === null || rank.topic < rank[best]) best = 'topic';
       }
-    } catch {
-      // meme_graph table missing
+      if (r.canonical_form !== null && tokenSet.has(r.canonical_form)) {
+        if (best === null || rank.canonical < rank[best]) best = 'canonical';
+      }
+      if (hasPersonaForm && r.persona_form !== null && tokenSet.has(r.persona_form)) {
+        if (best === null || rank.persona < rank[best]) best = 'persona';
+      }
+      if (r.fact !== null && tokenSet.has(r.fact)) {
+        if (best === null || rank.fact < rank[best]) best = 'fact';
+      }
+      if (best === 'topic') break; // highest priority — short-circuit
     }
+    if (best !== null) return best;
+  } catch {
+    // learned_facts missing — unlikely, but don't fail the whole function
+  }
 
-    // Source 6: jargon_candidates promoted rows
-    try {
-      const jargonHit = db.prepare(`
-        SELECT 1 FROM jargon_candidates
-        WHERE group_id = ? AND content = ? AND (is_jargon = 2 OR promoted = 1)
-        LIMIT 1
-      `).get(groupId, tok);
-      if (jargonHit) return 'jargon';
-    } catch {
-      // table missing
-    }
+  // Query 2 — meme_graph: canonical column is batchable; variants is a JSON
+  // string so we still LIKE-scan but batched with OR clauses over tokens.
+  try {
+    const likeClauses = tokens.map(() => 'variants LIKE ?').join(' OR ');
+    const likeBindings = tokens.map(t => `%"${t}"%`);
+    const memeRows = db.prepare(`
+      SELECT canonical, variants FROM meme_graph
+      WHERE group_id = ? AND status IN ('active', 'manual_edit')
+        AND (canonical IN (${placeholders}) OR ${likeClauses})
+      LIMIT 50
+    `).all(groupId, ...tokens, ...likeBindings) as Array<{ canonical: string; variants: string }>;
 
-    // Source 7: phrase_candidates promoted rows
-    try {
-      const phraseHit = db.prepare(`
-        SELECT 1 FROM phrase_candidates
-        WHERE group_id = ? AND content = ? AND (is_jargon = 2 OR promoted = 1)
-        LIMIT 1
-      `).get(groupId, tok);
-      if (phraseHit) return 'phrase';
-    } catch {
-      // table missing
+    for (const r of memeRows) {
+      if (tokenSet.has(r.canonical)) return 'meme';
+      try {
+        const vs: unknown = JSON.parse(r.variants ?? '[]');
+        if (Array.isArray(vs)) {
+          for (const v of vs) {
+            if (typeof v === 'string' && tokenSet.has(v)) return 'meme';
+          }
+        }
+      } catch {
+        // malformed JSON — skip
+      }
     }
+  } catch {
+    // meme_graph table missing
+  }
+
+  // Query 3 — jargon_candidates: single batched IN.
+  try {
+    const jargonHit = db.prepare(`
+      SELECT 1 FROM jargon_candidates
+      WHERE group_id = ? AND content IN (${placeholders}) AND (is_jargon = 2 OR promoted = 1)
+      LIMIT 1
+    `).get(groupId, ...tokens);
+    if (jargonHit) return 'jargon';
+  } catch {
+    // table missing
+  }
+
+  // Query 4 — phrase_candidates: single batched IN.
+  try {
+    const phraseHit = db.prepare(`
+      SELECT 1 FROM phrase_candidates
+      WHERE group_id = ? AND content IN (${placeholders}) AND (is_jargon = 2 OR promoted = 1)
+      LIMIT 1
+    `).get(groupId, ...tokens);
+    if (phraseHit) return 'phrase';
+  } catch {
+    // table missing
   }
 
   return null;
