@@ -10,8 +10,9 @@ CREATE TABLE IF NOT EXISTS messages (
   source_message_id TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_messages_group ON messages(group_id, timestamp DESC);
-CREATE INDEX IF NOT EXISTS idx_messages_user  ON messages(group_id, user_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_group    ON messages(group_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_group_id ON messages(group_id, id);
+CREATE INDEX IF NOT EXISTS idx_messages_user     ON messages(group_id, user_id, timestamp DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_source_id ON messages(source_message_id) WHERE source_message_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_messages_group_nickname ON messages(group_id, nickname);
 

@@ -1,0 +1,10 @@
+export { queryCat1 } from './cat1-direct-at-bot.js';
+export { queryCat2 } from './cat2-known-fact-term.js';
+export { queryCat3 } from './cat3-rhetorical-banter.js';
+export { queryCat4 } from './cat4-image-mface.js';
+export { queryCat5 } from './cat5-bot-status-context.js';
+export { queryCat6 } from './cat6-burst-nondirect.js';
+export { queryCat7 } from './cat7-relay.js';
+export { queryCat8 } from './cat8-conflict-heat.js';
+export { queryCat9 } from './cat9-normal-chimein.js';
+export { queryCat10 } from './cat10-silence-candidate.js';

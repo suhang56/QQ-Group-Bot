@@ -7,3 +7,12 @@ dist/
 *.log
 pino-*.txt
 coverage/
+
+# R6.1 evaluation data (local-only, group chat history not committed)
+!data/eval/
+data/eval/*.jsonl
+data/eval/*.json
+
+# SQLite WAL journals (transient, recreated by sqlite on every access)
+*.sqlite-shm
+*.sqlite-wal
