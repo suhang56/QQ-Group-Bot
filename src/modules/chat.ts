@@ -2374,11 +2374,23 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       'chat routing decision',
     );
 
+    // On hardened regen we still retain factsBlock + onDemandFactBlock so the
+    // second attempt has the same knowledge surface as the first; otherwise a
+    // regen caused by sentinel/QA/coref/outsider guard would drop facts and
+    // the bot goes from grounded → 装傐. A short fact-first micro-rule ensures
+    // hardened mode also obeys "fact overrides persona 装傐" priority.
+    const hardenedFactPriorityRule = (factsBlock || onDemandFactBlock)
+      ? '\n\n硬性规则（覆盖其他所有装傐/反问倾向）：如果下面的 facts / on-demand 块有 X 的答案 → 用它直接回答；不能装不知道、不能反问、不能说"考我啊/评价啥啊"。'
+      : '';
     const chatRequest = (hardened = false) => this.claude.complete({
       model: hardened ? RUNTIME_CHAT_MODEL : pickedModel,
       maxTokens: 2048,
       system: hardened
-        ? [{ text: HARDENED_SYSTEM, cache: true }]
+        ? [
+            { text: HARDENED_SYSTEM + hardenedFactPriorityRule, cache: true },
+            ...(factsBlock ? [{ text: factsBlock, cache: true as const }] : []),
+            ...(onDemandFactBlock ? [{ text: onDemandFactBlock, cache: false }] : []),
+          ]
         : [
             { text: systemPrompt, cache: true },
             { text: STATIC_CHAT_DIRECTIVES, cache: true },
@@ -2428,8 +2440,16 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
         .filter(m => m.userId !== this.botUserId)
         .slice(-4)
         .map(m => m.content);
+      // Skip QA-report guard when this turn has facts or is a fact-grounded
+      // direct/opinion question — a slightly-long declarative answer grounded
+      // in facts is the CORRECT behavior, not a regen trigger. Without this,
+      // a good fact answer gets kicked to hardened regen and the second round
+      // often drops back to 装傐/short-deflect.
+      const hasFactContext = !!onDemandFactBlock || !!factsBlock;
+      const isFactQuery = isDirectQuestion(triggerMessage.content) || isGroundedOpinionQuestion(triggerMessage.content);
+      const skipQaGuard = hasFactContext || isFactQuery;
       for (let regenIter = 0; regenIter < 2; regenIter++) {
-        const qaFail = qaReportRegenHint(processed);
+        const qaFail = skipQaGuard ? null : qaReportRegenHint(processed);
         const coreFail = hasCoreferenceSelfReference(processed, [triggerMessage.nickname]);
         const outsiderFail = outsiderToneRegenHint(processed);
         const insultFail = detectInsultEchoRisk(processed, recentHumanContents);
