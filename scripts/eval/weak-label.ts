@@ -1,163 +1,180 @@
-/**
- * Apply WeakReplayLabel to a BenchmarkRow using 9-step precedence.
- * First match wins, mirroring R4-lite's strategy classifier.
- */
 import type { DatabaseSync } from 'node:sqlite';
-import type {
-  BenchmarkRow,
-  WeakReplayLabel,
-  LabeledBenchmarkRow,
-  ExpectedAct,
-  ExpectedDecision,
-  ContextMsg,
-} from './types.js';
-import { hasKnownFactTermInDb } from './categories/known-fact-term.js';
+import type { SampledRow, WeakReplayLabel, WeakLabeledRow, ExpectedAct, ExpectedDecision } from './types.js';
+import { extractTokens } from '../../src/modules/honest-gaps.js';
 
-const ADMIN_CMD_RE = /^\/[a-z_]+/;
-const RELAY_VOTE_RE = /^[\+＋1１]$|^支持$|^同意$|^顶$|^扣1$|^1$/;
-const RELAY_CLAIM_RE = /^(抢|来了|\d+楼|先来|占楼)$/;
-const RELAY_ECHO_RE_MAX_LEN = 4;
-const RELAY_WINDOW_SEC = 30;
-const CONFLICT_RE =
-  /滚|傻|蠢|笨|垃圾|废物|白痴|脑残|你去死|草你|卧槽|fuck|shit|nmsl|sb|nb|cnm|妈的|干你|操你/i;
-const SUMMARIZE_RE = /总结|回顾|recap|summary|说了什么|聊了啥/i;
-const BOT_AT_RE_STR = (botId: string) => `\\[CQ:at,qq=${botId}[^\\]]*\\]`;
-const BOT_STATUS_RE = /禁言|策略|机器人|bot|关了|开了|休眠|屏蔽|封禁|管理员/i;
-const IMAGE_CQ_RE = /\[CQ:(?:image|mface|face)[^\]]*\]/;
-const PLURAL_YOU_RE = /你们/;
-const TRAILING_PUNCT_RE = /[.!?,。！？，、]+$/;
+const R4_DEPLOY_EPOCH = 1700000000; // approx R4 deploy date; rows before this may have legacy few-shot
 
-function normalize(s: string): string {
-  return s.replace(/\[CQ:[^\]]*\]/g, '').trim().replace(TRAILING_PUNCT_RE, '');
+const BOT_STATUS_KEYWORDS = [
+  '禁言', '解禁', '策略', '小号', '机器人', 'bot', '屏蔽', '沉默',
+  '为什么不说话', '你死了', '你怎么不回',
+];
+const CONFLICT_KEYWORDS = [
+  '你他妈', '草你', '傻逼', '废物', '滚', '你妈', 'cnm', 'nmsl', 'sb', '蠢', '脑子有病', '找打',
+];
+const RELAY_SET = new Set(['1', '2', '3', '扣1', '接龙', '+1', '！', '!', '冲']);
+const SUMMARIZE_RE = /总结|回顾|说说刚才/;
+const QUESTION_END_RE = /[？?]$/;
+const QUESTION_START_RE = /^(为什么|怎么|啥|几)/;
+
+/** True if content starts with '/' — admin command out of benchmark scope. */
+function isAdminCommand(row: SampledRow): boolean {
+  return row.content.trimStart().startsWith('/');
 }
 
-function detectRelay(content: string, context: ContextMsg[]): boolean {
-  const cleaned = normalize(content);
-  if (!cleaned) return false;
-  const windowStart: number = context.length > 0
-    ? (context[context.length - 1]?.timestamp ?? 0) - RELAY_WINDOW_SEC
-    : 0;
-  const recent = context.filter(c => c.timestamp >= windowStart);
+function isDirect(row: SampledRow, botQQ: string): boolean {
+  const raw = row.rawContent ?? row.content;
+  return raw.includes(`[CQ:at,qq=${botQQ}`) || raw.includes('[CQ:reply,');
+}
 
-  if (RELAY_VOTE_RE.test(cleaned)) {
-    return recent.filter(c => RELAY_VOTE_RE.test(normalize(c.content))).length >= 2;
-  }
-  if (RELAY_CLAIM_RE.test(cleaned)) {
-    return recent.filter(c => RELAY_CLAIM_RE.test(normalize(c.content))).length >= 2;
-  }
-  const len = cleaned.length;
-  if (len >= 1 && len <= RELAY_ECHO_RE_MAX_LEN) {
-    return recent.filter(c => normalize(c.content) === cleaned).length >= 2;
+function isRelayPattern(row: SampledRow): boolean {
+  if (RELAY_SET.has(row.content.trim())) return true;
+  const trimmed = row.content.trim();
+  if (trimmed.length < 2) return false;
+  const contextMatches = row.triggerContext.filter(c => c.content.trim() === trimmed);
+  return contextMatches.length >= 2;
+}
+
+function isConflictHeat(row: SampledRow): boolean {
+  return CONFLICT_KEYWORDS.some(k => row.content.includes(k));
+}
+
+function isBotStatusKeywords(row: SampledRow): boolean {
+  return BOT_STATUS_KEYWORDS.some(k => row.content.toLowerCase().includes(k.toLowerCase()));
+}
+
+function isSummarizeRequest(row: SampledRow): boolean {
+  return SUMMARIZE_RE.test(row.content);
+}
+
+function isQuestion(row: SampledRow): boolean {
+  return QUESTION_END_RE.test(row.content) || QUESTION_START_RE.test(row.content);
+}
+
+function isPureImageOrMface(row: SampledRow): boolean {
+  const raw = row.rawContent ?? row.content;
+  if (!/\[CQ:(?:image|mface|face)[^\]]*\]/.test(raw)) return false;
+  const stripped = raw.replace(/\[CQ:[^\]]*\]/g, '').trim();
+  return stripped.length === 0;
+}
+
+function isImageWithShortCaption(row: SampledRow): boolean {
+  const raw = row.rawContent ?? row.content;
+  if (!/\[CQ:(?:image|mface|face)[^\]]*\]/.test(raw)) return false;
+  const stripped = raw.replace(/\[CQ:[^\]]*\]/g, '').trim();
+  return stripped.length >= 1 && stripped.length <= 12 && !isQuestion(row);
+}
+
+function isReplyWorthy(row: SampledRow): boolean {
+  const speakers = new Set(row.triggerContext.map(c => c.userId));
+  if (speakers.size >= 2) return true;
+  if (row.content.length >= 10) return true;
+  return false;
+}
+
+function isBurstWindow(row: SampledRow): boolean {
+  const windowStart = row.timestamp - 15;
+  const windowEnd = row.timestamp + 15;
+  const nearby = row.triggerContext.filter(c => c.timestamp >= windowStart && c.timestamp <= windowEnd);
+  return nearby.length >= 4;
+}
+
+function hasKnownFactTerm(db: DatabaseSync, groupId: string, content: string): boolean {
+  const tokens = extractTokens(content);
+  if (tokens.length === 0) return false;
+  for (const tok of tokens) {
+    const hit = db.prepare(`
+      SELECT 1 FROM learned_facts
+      WHERE group_id = ?
+        AND status = 'active'
+        AND (topic = ? OR canonical_form = ?)
+      LIMIT 1
+    `).get(groupId, tok, tok);
+    if (hit) return true;
   }
   return false;
 }
 
-function detectConflict(content: string, context: ContextMsg[]): boolean {
-  const combined = [content, ...context.map(c => c.content)].join(' ');
-  return CONFLICT_RE.test(combined);
-}
-
-function detectSummarize(content: string, context: ContextMsg[]): boolean {
-  return SUMMARIZE_RE.test(content) && context.length >= 20;
-}
-
-function detectBotReferent(content: string, raw: string, botUserId: string): boolean {
-  const atBot = new RegExp(BOT_AT_RE_STR(botUserId));
-  return atBot.test(raw) || atBot.test(content);
-}
-
-function detectIsObjectReact(raw: string, content: string): boolean {
-  if (!IMAGE_CQ_RE.test(raw)) return false;
-  const stripped = content.replace(/\[CQ:[^\]]*\]/g, '').trim();
-  const isShortNonQuestion = stripped.length <= 12 && !/[？?]/.test(stripped);
-  return stripped.length === 0 || isShortNonQuestion;
-}
-
-function detectIsDirect(raw: string, botUserId: string): boolean {
-  const atBot = new RegExp(BOT_AT_RE_STR(botUserId));
-  return atBot.test(raw) || /\[CQ:reply,/.test(raw);
+function detectRiskFlags(row: SampledRow, matchedCategories: number[]): string[] {
+  const flags: string[] = [];
+  if (row.timestamp < R4_DEPLOY_EPOCH) flags.push('legacy-few-shot-possible');
+  const atTargets = [...(row.rawContent ?? row.content).matchAll(/\[CQ:at,qq=(\d+)/g)];
+  if (atTargets.length > 1) flags.push('ambiguous-target');
+  if (matchedCategories.length > 1) flags.push('multi-category-match');
+  if (row.triggerContext.length < 3) flags.push('short-context');
+  return flags;
 }
 
 export function applyWeakLabel(
-  row: BenchmarkRow,
+  row: SampledRow,
   db: DatabaseSync,
-  botUserId: string,
-  historyLength: number,
-): LabeledBenchmarkRow {
-  const context = row.triggerContext;
-  const content = row.content;
-  const raw = (row as unknown as Record<string, unknown>)['rawContent'] as string ?? content;
+  botQQ: string,
+): WeakLabeledRow | null {
+  if (isAdminCommand(row)) return null;
 
-  const hasKnownFact = hasKnownFactTermInDb(db, {
-    id: parseInt(row.messageId, 10),
-    group_id: row.groupId,
-    user_id: row.userId,
-    nickname: row.nickname,
-    content: row.content,
-    raw_content: raw,
-    timestamp: row.timestamp,
-    source_message_id: null,
-  });
+  const knownFact = hasKnownFactTerm(db, row.groupId, row.content);
+  const direct = isDirect(row, botQQ);
+  const relay = isRelayPattern(row);
+  const conflict = isConflictHeat(row);
+  const botStatus = isBotStatusKeywords(row);
+  const burst = isBurstWindow(row);
+  const pureImage = isPureImageOrMface(row);
+  const imageCaption = isImageWithShortCaption(row);
+  const pluralYou = (row.rawContent ?? row.content).includes('你们');
 
-  const isRelay = detectRelay(content, context);
-  const isDirect = detectIsDirect(raw, botUserId);
-  const isBotStatus = BOT_STATUS_RE.test([content, ...context.map(c => c.content)].join(' '));
-  const isImage = IMAGE_CQ_RE.test(raw);
-  const isObjectReact = detectIsObjectReact(raw, content);
-  const isBurst = (() => {
-    const ts = row.timestamp;
-    const windowStart = ts - 15;
-    return context.filter(c => c.timestamp >= windowStart).length + 1 >= 5;
-  })();
-  const allowPluralYou = PLURAL_YOU_RE.test([content, ...context.map(c => c.content)].join(' '));
+  // Track which categories would match (for multi-category-match flag)
+  const matchedCategories: number[] = [];
+  if (direct) matchedCategories.push(1);
+  if (relay) matchedCategories.push(7);
+  if (conflict) matchedCategories.push(8);
+  if (botStatus) matchedCategories.push(5);
+  if (pureImage || imageCaption) matchedCategories.push(4);
 
-  const riskFlags: string[] = [];
-
-  // Step 1: admin command — skip (not included in benchmark)
-  if (ADMIN_CMD_RE.test(content.trim())) {
-    riskFlags.push('admin-command-skipped');
-  }
+  const riskFlags = detectRiskFlags(row, matchedCategories);
 
   let expectedAct: ExpectedAct;
   let expectedDecision: ExpectedDecision;
 
   // Step 2: relay
-  if (isRelay) {
+  if (relay) {
     expectedAct = 'relay';
     expectedDecision = 'reply';
   }
   // Step 3: conflict
-  else if (detectConflict(content, context)) {
+  else if (conflict) {
     expectedAct = 'conflict_handle';
     expectedDecision = 'reply';
   }
-  // Step 4: summarize
-  else if (detectSummarize(content, context) && historyLength >= 20) {
+  // Step 4: summarize + long context
+  else if (isSummarizeRequest(row) && row.triggerContext.length >= 20) {
     expectedAct = 'summarize';
     expectedDecision = 'reply';
   }
-  // Step 5: bot-referent + status keywords
-  else if (isBotStatus) {
-    const botReferent = detectBotReferent(content, raw, botUserId);
-    expectedAct = botReferent ? 'bot_status_query' : 'meta_admin_status';
+  // Step 5a: bot status + direct
+  else if (botStatus && direct) {
+    expectedAct = 'bot_status_query';
     expectedDecision = 'reply';
   }
-  // Step 6: pure image/mface or image+short caption + no known-fact
-  else if (isObjectReact && !hasKnownFact) {
+  // Step 5b: bot status + not direct
+  else if (botStatus) {
+    expectedAct = 'meta_admin_status';
+    expectedDecision = 'defer';
+  }
+  // Step 6: image/mface (no known fact)
+  else if ((pureImage || (imageCaption && !isQuestion(row))) && !knownFact) {
     expectedAct = 'object_react';
     expectedDecision = 'reply';
   }
-  // Step 7: direct + not above
-  else if (isDirect) {
+  // Step 7: direct
+  else if (direct) {
     expectedAct = 'direct_chat';
     expectedDecision = 'reply';
   }
-  // Step 8: other reply-worthy
-  else if (!isSilenceCandidate(content, context)) {
+  // Step 8: reply-worthy
+  else if (isReplyWorthy(row)) {
     expectedAct = 'chime_in';
     expectedDecision = 'reply';
   }
-  // Step 9: silence candidate
+  // Step 9: silence
   else {
     expectedAct = 'chime_in';
     expectedDecision = 'silent';
@@ -166,25 +183,16 @@ export function applyWeakLabel(
   const label: WeakReplayLabel = {
     expectedAct,
     expectedDecision,
-    hasKnownFactTerm: hasKnownFact,
-    hasRealFactHit: hasKnownFact,
-    allowPluralYou,
-    isObjectReact,
-    isBotStatusContext: isBotStatus,
-    isBurst,
-    isRelay,
-    isDirect,
+    hasKnownFactTerm: knownFact,
+    hasRealFactHit: knownFact,
+    allowPluralYou: pluralYou,
+    isObjectReact: pureImage || imageCaption,
+    isBotStatusContext: botStatus,
+    isBurst: burst,
+    isRelay: relay,
+    isDirect: direct,
     riskFlags,
   };
 
   return { ...row, label };
-}
-
-function isSilenceCandidate(content: string, context: ContextMsg[]): boolean {
-  const c = content.replace(/\[CQ:[^\]]*\]/g, '').trim();
-  if (!c) return true;
-  const speakerIds = new Set(context.map(m => m.userId));
-  if (speakerIds.size === 0) return true;
-  if (speakerIds.size === 1 && context.length >= 5) return true;
-  return false;
 }

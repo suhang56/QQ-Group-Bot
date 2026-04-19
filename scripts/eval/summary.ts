@@ -1,72 +1,43 @@
-import { createHash } from 'node:crypto';
-import type {
-  BenchmarkRow,
-  LabeledBenchmarkRow,
-  SamplingCategory,
-  SummaryJson,
-  CategoryStats,
-} from './types.js';
-import { ALL_CATEGORIES } from './types.js';
+import type { SampledRow, WeakLabeledRow, SummaryJson, CategorySummary } from './types.js';
+import { CATEGORY_LABELS } from './types.js';
 
 export function buildSummary(
-  rawRows: BenchmarkRow[],
-  labeledRows: LabeledBenchmarkRow[],
-  seed: string,
-  sourceDb: string,
+  rawRows: SampledRow[],
+  _labeledRows: WeakLabeledRow[],
+  seed: number,
   perCategoryTarget: number,
 ): SummaryJson {
-  const perCategory = {} as Record<SamplingCategory, CategoryStats>;
-  for (const cat of ALL_CATEGORIES) {
-    const sampled = rawRows.filter(r => r.category === cat).length;
-    const labeled = labeledRows.filter(r => r.category === cat).length;
-    perCategory[cat] = { sampled, labeled, target: perCategoryTarget };
+  const countByCat = new Map<number, number>();
+  for (const row of rawRows) {
+    countByCat.set(row.category, (countByCat.get(row.category) ?? 0) + 1);
   }
 
-  // Duplicate detection by content hash
+  const categories: CategorySummary[] = CATEGORY_LABELS.map((label, i) => {
+    const cat = i + 1;
+    const sampled = countByCat.get(cat) ?? 0;
+    return { category: cat, label, sampled, target: perCategoryTarget, gap: perCategoryTarget - sampled };
+  });
+
   const hashCount = new Map<string, number>();
   for (const row of rawRows) {
-    const h = createHash('sha256').update(row.content).digest('hex');
-    hashCount.set(h, (hashCount.get(h) ?? 0) + 1);
+    hashCount.set(row.contentHash, (hashCount.get(row.contentHash) ?? 0) + 1);
   }
   let duplicateCount = 0;
   for (const count of hashCount.values()) {
     if (count > 1) duplicateCount += count;
   }
-  const byContentHash = rawRows.length > 0 ? duplicateCount / rawRows.length : 0;
 
-  // Data quality
-  let emptyContent = 0;
-  let missingContext = 0;
-  let missingContextAfter = 0;
-  for (const row of rawRows) {
-    if (!row.content || row.content.trim() === '') emptyContent++;
-    if (row.triggerContext.length < 5) missingContext++;
-    if (row.triggerContextAfter.length < 3) missingContextAfter++;
-  }
-
-  // Gaps
-  const undersampled = ALL_CATEGORIES
-    .map(cat => {
-      const stats = perCategory[cat];
-      const shortfall = stats.target - stats.sampled;
-      return { category: cat, sampled: stats.sampled, target: stats.target, shortfall };
-    })
-    .filter(g => g.sampled < g.target * 0.8);
+  const emptyContentCount = rawRows.filter(r => !r.content || r.content.trim() === '').length;
 
   return {
-    generatedAt: new Date().toISOString(),
-    samplingSeed: seed,
-    sourceDb,
+    generatedAt: Math.floor(Date.now() / 1000),
+    seed,
+    perCategoryTarget,
     totalSampled: rawRows.length,
-    totalLabeled: labeledRows.length,
-    perCategory,
-    duplicateRate: { byContentHash, duplicateCount },
-    dataQuality: {
-      emptyContent,
-      malformedRows: 0,
-      missingContext,
-      missingContextAfter,
-    },
-    gaps: { undersampled },
+    categories,
+    duplicateCount,
+    duplicateRate: rawRows.length > 0 ? duplicateCount / rawRows.length : 0,
+    emptyContentCount,
+    malformedCount: 0,
   };
 }
