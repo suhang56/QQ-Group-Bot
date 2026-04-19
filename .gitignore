@@ -12,3 +12,7 @@ coverage/
 !data/eval/
 data/eval/*.jsonl
 data/eval/*.json
+
+# SQLite WAL journals (transient, recreated by sqlite on every access)
+*.sqlite-shm
+*.sqlite-wal
