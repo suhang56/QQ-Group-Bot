@@ -1,6 +1,7 @@
 import type { IMessageRepository, IExpressionPatternRepository, ExpressionPattern, Message } from '../storage/db.js';
 import { createLogger } from '../utils/logger.js';
 import { sanitizeForPrompt, hasJailbreakPattern } from '../utils/prompt-sanitize.js';
+import { hasSpectatorJudgmentTemplate } from '../utils/sentinel.js';
 import type { Logger } from 'pino';
 
 const CQ_ONLY_RE = /^\[CQ:[^\]]+\]$/;
@@ -66,6 +67,9 @@ export class ExpressionLearner {
 
       if (this._shouldSkip(userMsg.content) || this._shouldSkip(botMsg.content)) continue;
 
+      // Filter spectator-judgment template from bot self-replies before persisting.
+      if (hasSpectatorJudgmentTemplate(botMsg.content)) continue;
+
       const situation = userMsg.content.slice(0, 50);
       const expression = botMsg.content.slice(0, 100);
 
@@ -125,6 +129,13 @@ export class ExpressionLearner {
     for (const p of topPatterns) {
       if (hasJailbreakPattern(p.situation) || hasJailbreakPattern(p.expression)) {
         filteredCount.n++;
+        continue;
+      }
+      // Read-path: filter spectator-judgment template from historical poisoned rows.
+      // Does NOT delete from DB — read-skip only, no side-effect migration.
+      if (hasSpectatorJudgmentTemplate(p.expression)) {
+        filteredCount.n++;
+        this.logger.warn({ groupId, expression: p.expression.slice(0, 40) }, 'spectator-template filtered stored expression at read time');
         continue;
       }
       const safeSituation = sanitizeForPrompt(p.situation, 100);

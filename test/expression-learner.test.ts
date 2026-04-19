@@ -671,4 +671,92 @@ describe('ExpressionLearner', () => {
       expect(learner.formatFewShotBlock(GROUP, 3)).toBe('');
     });
   });
+
+  describe('spectator-template filter — persist path', () => {
+    it('rejects bot reply matching spectator pattern on persist', () => {
+      const msgs = [
+        makeMsg(BOT_USER_ID, 'Bot', '你们事真多', 1700000002),
+        makeMsg('u1', 'Bob', '继续激情拍摄', 1700000001),
+      ];
+      const msgRepo = makeMsgRepo(msgs);
+      const patternRepo = makePatternRepo();
+      const learner = new ExpressionLearner({
+        messages: msgRepo, expressionPatterns: patternRepo,
+        botUserId: BOT_USER_ID, logger: silentLogger,
+      });
+      learner.scan(GROUP);
+      expect(patternRepo.upsert).not.toHaveBeenCalled();
+    });
+
+    it('rejects bot reply with whitespace-padded spectator pattern on persist', () => {
+      const msgs = [
+        makeMsg(BOT_USER_ID, 'Bot', '你们 事 真多', 1700000002),
+        makeMsg('u1', 'Bob', 'something happened', 1700000001),
+      ];
+      const msgRepo = makeMsgRepo(msgs);
+      const patternRepo = makePatternRepo();
+      const learner = new ExpressionLearner({
+        messages: msgRepo, expressionPatterns: patternRepo,
+        botUserId: BOT_USER_ID, logger: silentLogger,
+      });
+      learner.scan(GROUP);
+      expect(patternRepo.upsert).not.toHaveBeenCalled();
+    });
+
+    it('allows non-spectator bot replies on persist', () => {
+      const msgs = [
+        makeMsg(BOT_USER_ID, 'Bot', '笑死了吧这', 1700000002),
+        makeMsg('u1', 'Bob', '继续激情拍摄', 1700000001),
+      ];
+      const msgRepo = makeMsgRepo(msgs);
+      const patternRepo = makePatternRepo();
+      const learner = new ExpressionLearner({
+        messages: msgRepo, expressionPatterns: patternRepo,
+        botUserId: BOT_USER_ID, logger: silentLogger,
+      });
+      learner.scan(GROUP);
+      expect(patternRepo.upsert).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('spectator-template filter — read path (formatForPrompt)', () => {
+    function seedPattern(
+      repo: ReturnType<typeof makePatternRepo>,
+      situation: string,
+      expression: string,
+      weight: number,
+    ): void {
+      repo._store.set(`${GROUP}|${situation}|${expression}`, {
+        groupId: GROUP, situation, expression,
+        weight, createdAt: Date.now(), updatedAt: Date.now(),
+      });
+    }
+
+    it('skips spectator-template expression at read time without deleting from DB', () => {
+      const patternRepo = makePatternRepo();
+      seedPattern(patternRepo, '继续激情拍摄', '你们事真多', 5.0);
+      const learner = new ExpressionLearner({
+        messages: makeMsgRepo([]), expressionPatterns: patternRepo,
+        botUserId: BOT_USER_ID, logger: silentLogger,
+      });
+
+      const result = learner.formatForPrompt(GROUP, 5);
+      expect(result).not.toContain('你们事真多');
+      // Row must still be in the DB — read-skip only, no mutation
+      expect(patternRepo._store.has(`${GROUP}|继续激情拍摄|你们事真多`)).toBe(true);
+      expect(patternRepo.delete).not.toHaveBeenCalled();
+    });
+
+    it('allows non-spectator expressions through at read time', () => {
+      const patternRepo = makePatternRepo();
+      seedPattern(patternRepo, '早上好', '早安', 5.0);
+      const learner = new ExpressionLearner({
+        messages: makeMsgRepo([]), expressionPatterns: patternRepo,
+        botUserId: BOT_USER_ID, logger: silentLogger,
+      });
+
+      const result = learner.formatForPrompt(GROUP, 5);
+      expect(result).toContain('早安');
+    });
+  });
 });
