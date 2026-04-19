@@ -16,6 +16,7 @@ import type { SampledRow, WeakLabeledRow, SummaryJson } from '../../scripts/eval
 import { runSampling } from '../../scripts/eval/sample-benchmark.js';
 import { seededRand, seededSample } from '../../scripts/eval/seed.js';
 import { applyWeakLabel } from '../../scripts/eval/weak-label.js';
+import { queryCat2 } from '../../scripts/eval/categories/cat2-known-fact-term.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURE = path.join(__dirname, '../fixtures/eval-sample.sqlite');
@@ -286,6 +287,57 @@ describe('sample-benchmark integration', () => {
     it('seed=0 produces valid sample', () => {
       const rows = Array.from({ length: 5 }, (_, i) => ({ messageId: i, val: i }));
       expect(seededSample(rows, 0, 3)).toHaveLength(3);
+    });
+  });
+
+  // ---- Null-topic regression tests (R6.1 hotfix) ----
+  describe('queryCat2 null-topic guard', () => {
+    it('does not crash when learned_facts has a row with null topic but valid canonical_form', () => {
+      const db = new DatabaseSync(FIXTURE, { readOnly: true } as Parameters<typeof DatabaseSync>[1]);
+      // Fixture contains a row with topic=NULL, canonical_form='null-topic-canonical'
+      // queryCat2 must not throw; it should return valid DbRow[]
+      expect(() => {
+        const rows = queryCat2(db, GROUP, 10);
+        expect(Array.isArray(rows)).toBe(true);
+      }).not.toThrow();
+      db.close();
+    });
+
+    it('does not crash when learned_facts has a row with both topic and canonical_form null', () => {
+      const db = new DatabaseSync(FIXTURE, { readOnly: true } as Parameters<typeof DatabaseSync>[1]);
+      // Fixture contains a row with topic=NULL, canonical_form=NULL
+      // queryCat2 must not throw
+      expect(() => {
+        const rows = queryCat2(db, GROUP, 10);
+        expect(Array.isArray(rows)).toBe(true);
+      }).not.toThrow();
+      db.close();
+    });
+
+    it('returns [] when the only active facts have null topic AND null canonical_form', () => {
+      // Build an in-memory DB with only all-null rows
+      const db = new DatabaseSync(':memory:');
+      const schema = readFileSync(
+        path.join(__dirname, '../../src/storage/schema.sql'),
+        'utf8',
+      );
+      db.exec(schema);
+      db.prepare(
+        `INSERT INTO learned_facts (group_id, topic, fact, confidence, status, created_at, updated_at, canonical_form)
+         VALUES (?, NULL, 'test', 1.0, 'active', 0, 0, NULL)`,
+      ).run('g1');
+      const rows = queryCat2(db, 'g1', 10);
+      expect(rows).toEqual([]);
+      db.close();
+    });
+
+    it('still returns matching rows when valid facts coexist with null-topic rows', () => {
+      // The fixture has ykn (valid), null-topic+canonical, and all-null rows together
+      const db = new DatabaseSync(FIXTURE, { readOnly: true } as Parameters<typeof DatabaseSync>[1]);
+      const rows = queryCat2(db, GROUP, 50);
+      // Fixture has messages containing 'ykn' — they must still be found
+      expect(rows.some(r => r.content.includes('ykn'))).toBe(true);
+      db.close();
     });
   });
 });
