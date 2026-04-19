@@ -864,6 +864,8 @@ describe('Router — @-mention queue with quote-reply', () => {
       invalidateLore: vi.fn(),
       tickStickerRefresh: vi.fn(),
       noteAdminActivity: vi.fn(),
+      getEvasiveFlagForLastReply: vi.fn().mockReturnValue(false),
+      getInjectedFactIdsForLastReply: vi.fn().mockReturnValue([]),
     };
   }
 

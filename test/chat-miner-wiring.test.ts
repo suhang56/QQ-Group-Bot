@@ -172,13 +172,13 @@ describe('ChatModule — M6.2a miner wiring', () => {
 
       const { systemText, userText } = captureCall(claude);
       // style must be in user role, NOT in system
-      expect(userText).toContain('Zoe 最近这么说话');
+      expect(userText).toContain('说话习惯参考：Zoe');
       expect(userText).toContain('口头禅: 草、啊这');
-      expect(systemText).not.toContain('Zoe 最近这么说话');
+      expect(systemText).not.toContain('说话习惯参考：Zoe');
       expect(styleSource.formatStyleForPrompt).toHaveBeenCalledWith('g1', 'u-triggerer');
     });
 
-    it('does NOT call style helper on non-direct triggers (ambient chat)', async () => {
+    it('calls style helper on ambient chat (isDirectTrigger gate removed)', async () => {
       const styleSource: IStylePromptSource = {
         formatStyleForPrompt: vi.fn().mockReturnValue('## 这个人的说话风格\n- 口头禅: x'),
         formatGroupAggregateForPrompt: vi.fn().mockReturnValue(''),
@@ -189,9 +189,10 @@ describe('ChatModule — M6.2a miner wiring', () => {
       // plain message, no @mention, no reply to bot
       await chat.generateReply('g1', makeMsg({ userId: 'u-random', content: '今天天气真好' }), []);
 
-      expect(styleSource.formatStyleForPrompt).not.toHaveBeenCalled();
+      // M4e removed the isDirectTrigger gate — style now fires on all turns except fact-hits, pure-image, CQ-only, ack
+      expect(styleSource.formatStyleForPrompt).toHaveBeenCalledWith('g1', 'u-random');
       const { userText } = captureCall(claude);
-      expect(userText).not.toContain('最近这么说话');
+      expect(userText).toContain('说话习惯参考');
     });
 
     it('skips style hint when helper returns empty (no dead brackets)', async () => {
