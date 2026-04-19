@@ -135,6 +135,9 @@ export class OnDemandLookup {
     }
 
     if (isWeak) {
+      // TODO(ondemand-weak-leak-followup): consider confidence floor for weak path
+      // (e.g. if (result.confidence < 5) return { type: 'unknown' }) — deferred to
+      // follow-up PR to avoid suppressing legitimate sparse-hit jargon signals.
       // 1-2 hits: surface as ask-confirm guess, never cache
       this.logger.debug({ groupId, term, hits: rows.length, confidence: result.confidence }, 'ondemand-lookup: weak → ask-confirm');
       return { type: 'weak', guess: result.meaning };

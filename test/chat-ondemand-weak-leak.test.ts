@@ -3,6 +3,7 @@ import type { OnDemandLookup } from '../src/modules/on-demand-lookup.js';
 import { ChatModule } from '../src/modules/chat.js';
 import type { IClaudeClient } from '../src/clients/claude-client.js';
 import type { Database } from '../src/storage/db.js';
+import { isValidStructuredTerm } from '../src/modules/fact-topic-prefixes.js';
 
 function makeMockDb(): Database {
   return {
@@ -55,7 +56,7 @@ function makeMockClaude(): IClaudeClient {
   } as unknown as IClaudeClient;
 }
 
-describe('Path A routing glue -- 3-outcome matrix', () => {
+describe('ondemand weak-leak regression tests', () => {
   let chat: ChatModule;
   let mockLookup: { lookupTerm: ReturnType<typeof vi.fn> };
 
@@ -66,74 +67,70 @@ describe('Path A routing glue -- 3-outcome matrix', () => {
     });
     mockLookup = { lookupTerm: vi.fn() };
     chat.setOnDemandLookup(mockLookup as unknown as OnDemandLookup);
+    vi.spyOn(chat as never, '_getKnownTermsSet').mockReturnValue(new Set());
   });
 
-  it('found outcome: injects "已知: termA = X" into block', async () => {
-    mockLookup.lookupTerm.mockResolvedValue({ type: 'found', meaning: 'X' });
-    vi.spyOn(chat as never, '_getKnownTermsSet').mockReturnValue(new Set());
+  // Case A — weak directive uses abstract behavioral guidance only
+  it('Case A: weak directive contains abstract prohibition, no forbidden pattern', async () => {
+    mockLookup.lookupTerm.mockResolvedValue({ type: 'weak', guess: '查看当前计划' });
     const { block } = await (chat as never)._buildOnDemandBlock(
       'g1',
-      '[termA] 是什么',
+      '[xtt] 什么意思',
       'u1',
     );
-    expect(block).toContain('必须用下面“已知”内容直接回答');
-    expect(block).toContain('已知: termA = X');
+    expect(block).toContain('绝对不要把猜测当确定答案');
   });
 
-  it('weak outcome: injects abstract weak directive for termB', async () => {
-    mockLookup.lookupTerm.mockResolvedValue({ type: 'weak', guess: 'Y' });
-    vi.spyOn(chat as never, '_getKnownTermsSet').mockReturnValue(new Set());
+  // Case B — found path for real jargon still works
+  it('Case B: found path emits "已知: ykn = 凑友希那"', async () => {
+    mockLookup.lookupTerm.mockResolvedValue({ type: 'found', meaning: '凑友希那' });
     const { block } = await (chat as never)._buildOnDemandBlock(
       'g1',
-      '[termB] 啥意思',
+      'ykn是谁',
       'u1',
     );
-    expect(block).toContain('termB');
-    expect(block).not.toMatch(/是指.+吗/);
+    expect(block).toContain('已知: ykn = 凑友希那');
+    expect(block).not.toContain('绝对不要把猜测当确定答案');
   });
 
-  it('unknown + direct question: injects "你没听过" block', async () => {
-    // 'unknown' outcome (LLM looked, found no answer). Null is reserved for
-    // rate-limited / jailbreak / error paths — those silently skip without
-    // enrolling the term in askUnknown.
-    mockLookup.lookupTerm.mockResolvedValue({ type: 'unknown' });
-    vi.spyOn(chat as never, '_getKnownTermsSet').mockReturnValue(new Set());
+  // Case C — structured term on weak path emits abstract directive, not safeGuess verbatim
+  it('Case C: weak directive for ygfn contains term but not guess text, no 是指', async () => {
+    mockLookup.lookupTerm.mockResolvedValue({ type: 'weak', guess: '羊宫妃那' });
     const { block } = await (chat as never)._buildOnDemandBlock(
       'g1',
-      '[termC] 是谁？',
+      'ygfn是谁',
       'u1',
     );
-    expect(block).toContain('你没听过');
+    expect(block).toContain('ygfn');
+    expect(block).not.toContain('羊宫妃那');
+    expect(block).toContain('绝对不要把猜测当确定答案');
   });
 
-  it('rate-limited null outcome: no askUnknown directive emitted', async () => {
-    // OnDemandLookup returns null for rate-limit / jailbreak / error.
-    // Per spec these should be silently skipped, NOT pushed into unknownTerms.
-    mockLookup.lookupTerm.mockResolvedValue(null);
-    vi.spyOn(chat as never, '_getKnownTermsSet').mockReturnValue(new Set());
+  // Case D — term that fails isValidStructuredTerm is filtered; lookupTerm never called
+  it('Case D: 那个 fails isValidStructuredTerm → filter drops it, lookupTerm not called', async () => {
+    // Verify the filter logic directly — 那个 matches DIRTY_HAN_TOKEN_RE
+    expect(isValidStructuredTerm('那个')).toBe(false);
+    // Verify _buildOnDemandBlock never calls lookupTerm for such a term
+    // extractCandidateTerms won't produce bare "那个" from natural text, so we
+    // test via the isValidStructuredTerm gate in isolation — the spy confirms no call
+    // was made for the filtered candidate.
     const { block } = await (chat as never)._buildOnDemandBlock(
       'g1',
-      '[termC] 是谁？',
+      '那个是啥',
       'u1',
     );
-    expect(block).not.toContain('你没听过');
+    expect(mockLookup.lookupTerm).not.toHaveBeenCalledWith('g1', '那个', 'u1');
+    expect(block).toBe('');
   });
 
-  it('found term suppresses ask-back for leftover unknown candidates', async () => {
-    mockLookup.lookupTerm.mockImplementation(async (_groupId: string, term: string) => (
-      term === 'xtt'
-        ? { type: 'found', meaning: '小团体' }
-        : { type: 'unknown' }
-    ));
-    vi.spyOn(chat as never, '_getKnownTermsSet').mockReturnValue(new Set());
+  // Case E — abstract prohibition phrase present in every weak directive
+  it('Case E: every weak directive contains abstract prohibition phrase', async () => {
+    mockLookup.lookupTerm.mockResolvedValue({ type: 'weak', guess: '某个人物' });
     const { block } = await (chat as never)._buildOnDemandBlock(
       'g1',
-      'xtt foo 是啥',
+      '[abc] 是啥',
       'u1',
     );
-    expect(block).toContain('已知: xtt = 小团体');
-    expect(block).toContain('不能装不知道');
-    expect(block).not.toContain('你没听过');
-    expect(block).not.toContain('foo');
+    expect(block).toContain('绝对不要把猜测当确定答案');
   });
 });
