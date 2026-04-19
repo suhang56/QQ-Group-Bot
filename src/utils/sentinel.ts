@@ -170,6 +170,11 @@ export function sanitize(text: string): string {
     // Strip ANY angle-bracketed <CQ:...> — this is always hallucination; no
     // legitimate path ever emits CQ codes in angle brackets.
     .replace(/<CQ:[^>\n]*>/gi, '')
+    // Strip leaked quote-rendering tags/fragments. QQ reply quotes and some
+    // clients render blockquote-like structure; the model can leak either the
+    // full HTML tag or the bare closing fragment after angle brackets vanish.
+    .replace(/<\/?blockquote\s*>/gi, '')
+    .replace(/\/blockquote\b/gi, '')
     .split('\n')
     // Drop whole-line <skip> first (including punct-padded "..<skip>" /
     // "<skip>..") so we don't leave a ".." remnant after inline strip.

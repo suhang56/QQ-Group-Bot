@@ -195,6 +195,12 @@ describe('postProcess', () => {
     expect(postProcess(`笑死 ${truncated}`)).toBe('笑死');
   });
 
+  it('strips leaked blockquote fragments from generated replies', () => {
+    expect(postProcess('哼/blockquote')).toBe('哼');
+    expect(postProcess('哼</blockquote>')).toBe('哼');
+    expect(postProcess('<blockquote>哼')).toBe('哼');
+  });
+
   it('strips any <CQ:...> variant (hallucinated at/face/whatever)', () => {
     expect(postProcess('<CQ:at,qq=123>')).toBe('');
     expect(postProcess('<CQ:face,id=14>')).toBe('');
