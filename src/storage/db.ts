@@ -207,6 +207,8 @@ export interface IMessageRepository {
   searchFts(groupId: string, ftsQuery: string, limit: number): Pick<Message, 'content' | 'timestamp'>[];
   /** Returns distinct non-empty nicknames seen in a group. Used by HonestGapsTracker nickname filter. */
   listDistinctNicknames(groupId: string, limit?: number): string[];
+  /** Next `limit` non-deleted messages in `groupId` with timestamp > afterSec, ordered ASC. Used by P4 scoring job. */
+  getAfter(groupId: string, afterSec: number, limit: number): Message[];
 }
 
 // ---- Diary types (W-B) ----
@@ -498,6 +500,65 @@ export interface IWebLookupCacheRepository {
   get(groupId: string, term: string, nowSec: number): WebLookupCacheRow | null;
   put(row: Omit<WebLookupCacheRow, 'id'>): void;
   cleanupExpired(nowSec: number): number;
+}
+
+// ---- P4: Chat Decision Tracker types ----
+
+export interface ChatDecisionEventRow {
+  id: number;
+  group_id: string;
+  trigger_msg_id: string | null;
+  target_msg_id: string | null;
+  trigger_user_id: string | null;
+  result_kind: string;
+  reason_code: string;
+  decision_path: string | null;
+  guard_path: string | null;
+  prompt_variant: string | null;
+  sent_bot_reply_id: number | null;
+  reply_text: string | null;
+  used_fact_ids: string | null;
+  used_voice_count: number | null;
+  captured_at_sec: number;
+}
+
+export interface ChatDecisionEffectRow {
+  id: number;
+  decision_event_id: number;
+  group_id: string;
+  sig_explicit_negative: number;
+  sig_correction: number;
+  sig_ignored: number;
+  sig_continued_topic: number;
+  sig_target_user_replied: number;
+  sig_other_at_bot: number;
+  followup_msg_ids: string | null;
+  score: number | null;
+  scored_at_sec: number | null;
+}
+
+export interface ScoredEffectUpdate {
+  sig_explicit_negative: number;
+  sig_correction: number;
+  sig_ignored: number;
+  sig_continued_topic: number;
+  sig_target_user_replied: number;
+  sig_other_at_bot: number;
+  followup_msg_ids: string;
+  score: number;
+  scored_at_sec: number;
+}
+
+export interface IChatDecisionEventRepository {
+  insert(row: Omit<ChatDecisionEventRow, 'id'>): number;
+  getById(id: number): ChatDecisionEventRow | undefined;
+}
+
+export interface IChatDecisionEffectRepository {
+  insertPlaceholder(decisionEventId: number, groupId: string): void;
+  getUnscored(olderThanSec: number, limit: number): ChatDecisionEffectRow[];
+  updateScored(id: number, update: ScoredEffectUpdate): void;
+  getRecentByGroup(groupId: string, limit: number): ChatDecisionEffectRow[];
 }
 
 export type ProposedAction = 'warn' | 'delete' | 'mute_10m' | 'mute_1h' | 'kick';
@@ -1171,6 +1232,13 @@ class MessageRepository implements IMessageRepository {
        ORDER BY nickname LIMIT ?`
     ).all(groupId, limit) as Array<{ nickname: string }>;
     return rows.map(r => r.nickname);
+  }
+
+  getAfter(groupId: string, afterSec: number, limit: number): Message[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM messages WHERE group_id = ? AND timestamp > ? AND deleted = 0 ORDER BY timestamp ASC LIMIT ?`
+    ).all(groupId, afterSec, limit) as unknown as MessageRow[];
+    return rows.map(msgFromRow);
   }
 }
 
@@ -3232,6 +3300,92 @@ class WebLookupCacheRepository implements IWebLookupCacheRepository {
   }
 }
 
+// ---- P4: ChatDecisionEventRepository + ChatDecisionEffectRepository ----
+
+class ChatDecisionEventRepository implements IChatDecisionEventRepository {
+  private readonly _insert: ReturnType<DatabaseSync['prepare']>;
+  private readonly _getById: ReturnType<DatabaseSync['prepare']>;
+
+  constructor(db: DatabaseSync) {
+    this._insert = db.prepare(`
+      INSERT INTO chat_decision_events
+        (group_id, trigger_msg_id, target_msg_id, trigger_user_id,
+         result_kind, reason_code, decision_path, guard_path, prompt_variant,
+         sent_bot_reply_id, reply_text, used_fact_ids, used_voice_count, captured_at_sec)
+      VALUES
+        (@group_id, @trigger_msg_id, @target_msg_id, @trigger_user_id,
+         @result_kind, @reason_code, @decision_path, @guard_path, @prompt_variant,
+         @sent_bot_reply_id, @reply_text, @used_fact_ids, @used_voice_count, @captured_at_sec)
+    `);
+    this._getById = db.prepare(`SELECT * FROM chat_decision_events WHERE id = ?`);
+  }
+
+  insert(row: Omit<ChatDecisionEventRow, 'id'>): number {
+    const info = this._insert.run(row) as { lastInsertRowid: number | bigint };
+    return Number(info.lastInsertRowid);
+  }
+
+  getById(id: number): ChatDecisionEventRow | undefined {
+    return this._getById.get(id) as ChatDecisionEventRow | undefined;
+  }
+}
+
+class ChatDecisionEffectRepository implements IChatDecisionEffectRepository {
+  private readonly _insertPlaceholder: ReturnType<DatabaseSync['prepare']>;
+  private readonly _getUnscored: ReturnType<DatabaseSync['prepare']>;
+  private readonly _updateScored: ReturnType<DatabaseSync['prepare']>;
+  private readonly _getRecentByGroup: ReturnType<DatabaseSync['prepare']>;
+
+  constructor(db: DatabaseSync) {
+    this._insertPlaceholder = db.prepare(`
+      INSERT INTO chat_decision_effects (decision_event_id, group_id)
+      VALUES (?, ?)
+    `);
+    this._getUnscored = db.prepare(`
+      SELECT e.* FROM chat_decision_effects e
+      JOIN chat_decision_events d ON e.decision_event_id = d.id
+      WHERE e.scored_at_sec IS NULL AND d.captured_at_sec <= ?
+      ORDER BY d.captured_at_sec ASC
+      LIMIT ?
+    `);
+    this._updateScored = db.prepare(`
+      UPDATE chat_decision_effects SET
+        sig_explicit_negative   = @sig_explicit_negative,
+        sig_correction          = @sig_correction,
+        sig_ignored             = @sig_ignored,
+        sig_continued_topic     = @sig_continued_topic,
+        sig_target_user_replied = @sig_target_user_replied,
+        sig_other_at_bot        = @sig_other_at_bot,
+        followup_msg_ids        = @followup_msg_ids,
+        score                   = @score,
+        scored_at_sec           = @scored_at_sec
+      WHERE id = @id
+    `);
+    this._getRecentByGroup = db.prepare(`
+      SELECT * FROM chat_decision_effects
+      WHERE group_id = ? AND scored_at_sec IS NOT NULL
+      ORDER BY scored_at_sec DESC
+      LIMIT ?
+    `);
+  }
+
+  insertPlaceholder(decisionEventId: number, groupId: string): void {
+    this._insertPlaceholder.run(decisionEventId, groupId);
+  }
+
+  getUnscored(olderThanSec: number, limit: number): ChatDecisionEffectRow[] {
+    return this._getUnscored.all(olderThanSec, limit) as unknown as ChatDecisionEffectRow[];
+  }
+
+  updateScored(id: number, update: ScoredEffectUpdate): void {
+    this._updateScored.run({ id, ...update });
+  }
+
+  getRecentByGroup(groupId: string, limit: number): ChatDecisionEffectRow[] {
+    return this._getRecentByGroup.all(groupId, limit) as unknown as ChatDecisionEffectRow[];
+  }
+}
+
 // ---- Main Database class ----
 
 export class Database {
@@ -3264,6 +3418,8 @@ export class Database {
   readonly phraseCandidates: IPhraseCandidatesRepo;
   readonly groupDiary: IGroupDiaryRepository;
   readonly webLookupCache: IWebLookupCacheRepository;
+  readonly chatDecisionEvents: IChatDecisionEventRepository;
+  readonly chatDecisionEffects: IChatDecisionEffectRepository;
 
   private readonly _db: DatabaseSync;
 
@@ -3305,6 +3461,8 @@ export class Database {
     this.phraseCandidates = new PhraseCandidatesRepository(this._db);
     this.groupDiary = new GroupDiaryRepository(this._db);
     this.webLookupCache = new WebLookupCacheRepository(this._db);
+    this.chatDecisionEvents = new ChatDecisionEventRepository(this._db);
+    this.chatDecisionEffects = new ChatDecisionEffectRepository(this._db);
   }
 
   /** Execute arbitrary SQL — intended for bulk-import scripts and migrations only. */
@@ -3976,6 +4134,48 @@ export class Database {
     this._db.exec(
       'CREATE INDEX IF NOT EXISTS idx_web_cache_term ON web_lookup_cache(group_id, term, expires_at DESC)'
     );
+
+    // P4: chat_decision_events + chat_decision_effects tables.
+    // CREATE TABLE IF NOT EXISTS in schema.sql handles fresh installs;
+    // these exec calls cover existing DBs idempotently.
+    this._db.exec(`CREATE TABLE IF NOT EXISTS chat_decision_events (
+      id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_id             TEXT    NOT NULL,
+      trigger_msg_id       TEXT,
+      target_msg_id        TEXT,
+      trigger_user_id      TEXT,
+      result_kind          TEXT    NOT NULL,
+      reason_code          TEXT    NOT NULL,
+      decision_path        TEXT,
+      guard_path           TEXT,
+      prompt_variant       TEXT,
+      sent_bot_reply_id    INTEGER,
+      reply_text           TEXT,
+      used_fact_ids        TEXT,
+      used_voice_count     INTEGER,
+      captured_at_sec      INTEGER NOT NULL
+    )`);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_cde_group_kind ON chat_decision_events(group_id, result_kind, captured_at_sec DESC)`);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_cde_guard ON chat_decision_events(guard_path, captured_at_sec DESC)`);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_cde_group_ts ON chat_decision_events(group_id, captured_at_sec DESC)`);
+
+    this._db.exec(`CREATE TABLE IF NOT EXISTS chat_decision_effects (
+      id                         INTEGER PRIMARY KEY AUTOINCREMENT,
+      decision_event_id          INTEGER NOT NULL REFERENCES chat_decision_events(id) ON DELETE CASCADE,
+      group_id                   TEXT    NOT NULL,
+      sig_explicit_negative      INTEGER NOT NULL DEFAULT 0,
+      sig_correction             INTEGER NOT NULL DEFAULT 0,
+      sig_ignored                INTEGER NOT NULL DEFAULT 0,
+      sig_continued_topic        INTEGER NOT NULL DEFAULT 0,
+      sig_target_user_replied    INTEGER NOT NULL DEFAULT 0,
+      sig_other_at_bot           INTEGER NOT NULL DEFAULT 0,
+      followup_msg_ids           TEXT,
+      score                      REAL,
+      scored_at_sec              INTEGER
+    )`);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_cde_effects_group ON chat_decision_effects(group_id, scored_at_sec)`);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_cde_effects_decision ON chat_decision_effects(decision_event_id)`);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_cde_effects_unscored ON chat_decision_effects(scored_at_sec, decision_event_id) WHERE scored_at_sec IS NULL`);
   }
 
   /**

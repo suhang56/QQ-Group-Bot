@@ -654,3 +654,64 @@ CREATE TABLE IF NOT EXISTS web_lookup_cache (
 );
 CREATE INDEX IF NOT EXISTS idx_web_cache_term
   ON web_lookup_cache(group_id, term, expires_at DESC);
+
+-- chat_decision_events: every generateReply() decision, captured at-time.
+-- result_kind matches ChatResult.kind. captured_at_sec is epoch SECONDS
+-- (same unit as messages.timestamp and bot_replies.sent_at).
+-- reply_text for sticker kind stores the cqCode string, not natural-language text.
+-- Internal-only table; no export endpoint. Same precedent as bot_replies.
+CREATE TABLE IF NOT EXISTS chat_decision_events (
+  id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id             TEXT    NOT NULL,
+  trigger_msg_id       TEXT,
+  target_msg_id        TEXT,
+  trigger_user_id      TEXT,
+  result_kind          TEXT    NOT NULL,
+  reason_code          TEXT    NOT NULL,
+  decision_path        TEXT,
+  guard_path           TEXT,
+  prompt_variant       TEXT,
+  sent_bot_reply_id    INTEGER,
+  reply_text           TEXT,
+  used_fact_ids        TEXT,
+  used_voice_count     INTEGER,
+  captured_at_sec      INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_cde_group_kind
+  ON chat_decision_events(group_id, result_kind, captured_at_sec DESC);
+CREATE INDEX IF NOT EXISTS idx_cde_guard
+  ON chat_decision_events(guard_path, captured_at_sec DESC);
+CREATE INDEX IF NOT EXISTS idx_cde_group_ts
+  ON chat_decision_events(group_id, captured_at_sec DESC);
+
+-- chat_decision_effects: followup scoring for every decision_event.
+-- One row per event, inserted as placeholder (signals=0, score=null) at capture time.
+-- Scoring job fills signals + score + scored_at_sec ~5min later.
+-- IMPORTANT — sig_ignored interpretation differs by result_kind:
+--   for silent/defer: "group continued normally without bot" (neutral-to-positive)
+--   for reply: "no one reacted" (negative)
+-- Always filter WHERE result_kind = X when comparing cohorts. Never mix.
+CREATE TABLE IF NOT EXISTS chat_decision_effects (
+  id                         INTEGER PRIMARY KEY AUTOINCREMENT,
+  decision_event_id          INTEGER NOT NULL
+                               REFERENCES chat_decision_events(id) ON DELETE CASCADE,
+  group_id                   TEXT    NOT NULL,
+  sig_explicit_negative      INTEGER NOT NULL DEFAULT 0,
+  sig_correction             INTEGER NOT NULL DEFAULT 0,
+  sig_ignored                INTEGER NOT NULL DEFAULT 0,
+  sig_continued_topic        INTEGER NOT NULL DEFAULT 0,
+  sig_target_user_replied    INTEGER NOT NULL DEFAULT 0,
+  sig_other_at_bot           INTEGER NOT NULL DEFAULT 0,
+  followup_msg_ids           TEXT,
+  score                      REAL,
+  scored_at_sec              INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_cde_effects_group
+  ON chat_decision_effects(group_id, scored_at_sec);
+CREATE INDEX IF NOT EXISTS idx_cde_effects_decision
+  ON chat_decision_effects(decision_event_id);
+CREATE INDEX IF NOT EXISTS idx_cde_effects_unscored
+  ON chat_decision_effects(scored_at_sec, decision_event_id)
+  WHERE scored_at_sec IS NULL;
