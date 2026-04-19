@@ -28,6 +28,8 @@ import { resolveAtTarget } from '../utils/cqcode.js';
 import { expandForwards, purgeExpiredForwardCache } from './forward-expand.js';
 
 import { MOD_APPROVAL_ADMIN } from './constants.js';
+import { isChatSilentSkip } from '../utils/chat-control.js';
+import { isValidStructuredTerm } from '../modules/fact-topic-prefixes.js';
 
 const MAX_SPLIT_LINES = 3;
 const MOD_DM_HOURLY_CAP = 20;
@@ -646,8 +648,25 @@ export class Router implements IRouter {
           await this._enqueueAtMention(msg, config);
         } else {
           // Sticker-first intercept: try matching a sticker before invoking the
-          // full ChatModule (saves one Claude API call when a sticker matches)
-          if (this.stickerFirstModule && config.stickerFirstEnabled) {
+          // full ChatModule — but skip when query is a direct/opinion question
+          // (those need factual answers, not stickers) or when a known structured
+          // fact term is in the message.
+          let skipStickerFirst = isDirectQuestion(msg.content) || isGroundedOpinionQuestion(msg.content);
+          if (!skipStickerFirst) {
+            const cands = extractCandidateTerms(msg.content)
+              .filter(isValidStructuredTerm)
+              .slice(0, 3);
+            for (const term of cands) {
+              try {
+                const rows = this.db.learnedFacts.findActiveByTopicTerm(msg.groupId, term);
+                if (rows.length > 0) { skipStickerFirst = true; break; }
+              } catch (err) {
+                this.logger.warn({ err, term }, 'sticker-first: DB probe failed — allowing sticker');
+              }
+            }
+          }
+
+          if (!skipStickerFirst && this.stickerFirstModule && config.stickerFirstEnabled) {
             try {
               const stickerChoice = await this.stickerFirstModule.pickSticker(
                 msg.groupId, msg.content, config.stickerFirstThreshold, true,
@@ -672,6 +691,10 @@ export class Router implements IRouter {
           }
 
           const reply = await this.chatModule.generateReply(msg.groupId, msg, recentMsgs);
+          if (isChatSilentSkip(reply)) {
+            // Intentionally suppressed — no send, no fallback pool, no bot_replies insert.
+            return;
+          }
           if (reply) {
             const wasEvasive = this.chatModule.getEvasiveFlagForLastReply(msg.groupId);
             const injectedFactIds = this.chatModule.getInjectedFactIdsForLastReply(msg.groupId);
@@ -814,6 +837,10 @@ export class Router implements IRouter {
           content: m.content, rawContent: m.content, timestamp: m.timestamp,
         }));
         let reply = await this.chatModule.generateReply(groupId, item.msg, recentMsgs);
+        if (isChatSilentSkip(reply)) {
+          // Intentionally suppressed — stay silent, no bot_replies, no fallback pool.
+          return;
+        }
         // Snapshot learning-signals from chatModule BEFORE any fallback path
         // overwrites `reply`. If chat generated a real response (`reply` is
         // non-null now), these come from the prompt-build / processing stage

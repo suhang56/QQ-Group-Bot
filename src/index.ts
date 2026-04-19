@@ -60,6 +60,7 @@ import { PhraseMiner } from './modules/phrase-miner.js';
 import { MemeClusterer } from './modules/meme-clusterer.js';
 import { RatingPortalServer } from './server/rating-portal.js';
 import { TuningGenerator } from './server/tuning-generator.js';
+import { GroupmateVoice } from './modules/groupmate-voice.js';
 
 // ============================================================
 // PHASE 1: Infrastructure (logger, env, PID lock, database)
@@ -403,6 +404,9 @@ const relationshipTracker = new RelationshipTracker({
 chat.setExpressionSource(expressionLearner);
 chat.setStyleSource(styleLearner);
 chat.setRelationshipSource(relationshipTracker);
+
+const groupmateVoice = new GroupmateVoice({ messages: db.messages, botUserId });
+chat.setGroupmateVoice(groupmateVoice);
 
 // W-A: honest-gaps tracker — streamed per-message from router.dispatch via
 // chat.recordHonestGapsMessage, and read back in _buildGroupIdentityPrompt via

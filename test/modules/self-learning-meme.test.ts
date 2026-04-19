@@ -192,7 +192,7 @@ describe('SelfLearningModule meme_graph injection', () => {
     // No learned_facts inserted, but meme_graph has entries
     const result = await learner.formatFactsForPrompt('g1', 50, 'hyw');
     expect(result.text).toContain('[群梗]');
-    expect(result.factIds).toEqual([]);
+    expect(result.injectedFactIds).toEqual([]);
   });
 
   it('limits variant display to first 3', async () => {

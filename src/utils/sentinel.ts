@@ -663,3 +663,28 @@ export function insultEchoRegenHint(
   }
   return null;
 }
+
+// ── Spectator-judgment template detector ──────────────────────────────────
+// Normalizes internally: stripCQ → remove ALL whitespace (compact form).
+// Caller passes raw text. Does NOT mutate input.
+
+const _stripCQForSentinel = (s: string): string => s.replace(/\[CQ:[^\]]+\]/g, '').trim();
+
+const SPECTATOR_PATTERNS: readonly RegExp[] = [
+  /你们事(?:真|都)?多/,
+  /你们节目(?:真|都)?多/,
+  /你们毛病(?:真|都)?多/,
+  /你们真能折腾/,
+  /^又来了你们|你们又来了|你们又开始了|你们怎么又/,
+  /有病(?:吧|啊)?你们|你们有病(?:吧|啊|么)?/,
+  /^你们几个(?:又|真|怎么|在|搁|干嘛|干啥|有病|事)/,
+];
+
+export function hasSpectatorJudgmentTemplate(rawText: string): boolean {
+  const compact = _stripCQForSentinel(rawText).replace(/\s+/g, '');
+  return SPECTATOR_PATTERNS.some(p => p.test(compact));
+}
+
+export function isAddresseeScopeViolation(rawText: string, distinctNonBotSpeakers: number): boolean {
+  return hasSpectatorJudgmentTemplate(rawText) && distinctNonBotSpeakers < 3;
+}

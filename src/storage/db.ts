@@ -197,6 +197,8 @@ export interface IMessageRepository {
   getByTimeRange(groupId: string, startSec: number, endSec: number): Message[];
   /** Distinct group_ids with any non-deleted message since sinceSec. Used by DiaryDistiller.runForAllGroups. */
   listActiveGroupIds(sinceSec: number): string[];
+  /** Top N groups by message count since sinceSec. Used by StyleLearner fallback when ACTIVE_GROUPS is empty. */
+  listActiveGroupIdsByMessageCount(sinceSec: number, limit: number): string[];
   /**
    * BM25 MATCH search over messages_fts for a group, newest-first.
    * Raw query must be pre-sanitized via sanitizeFtsQuery before calling.
@@ -1107,6 +1109,13 @@ class MessageRepository implements IMessageRepository {
     const rows = this.db.prepare(
       `SELECT DISTINCT group_id FROM messages WHERE timestamp >= ? AND deleted = 0`
     ).all(sinceSec) as Array<{ group_id: string }>;
+    return rows.map(r => r.group_id);
+  }
+
+  listActiveGroupIdsByMessageCount(sinceSec: number, limit: number): string[] {
+    const rows = this.db.prepare(
+      `SELECT group_id FROM messages WHERE timestamp >= ? AND deleted = 0 GROUP BY group_id ORDER BY COUNT(*) DESC LIMIT ?`
+    ).all(sinceSec, limit) as Array<{ group_id: string }>;
     return rows.map(r => r.group_id);
   }
 
