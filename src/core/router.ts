@@ -29,6 +29,7 @@ import { expandForwards, purgeExpiredForwardCache } from './forward-expand.js';
 import { MOD_APPROVAL_ADMIN } from './constants.js';
 import { isValidStructuredTerm } from '../modules/fact-topic-prefixes.js';
 import { isSendable } from '../utils/chat-result.js';
+import type { ChatDecisionTracker } from '../modules/chat-decision-tracker.js';
 
 const MAX_SPLIT_LINES = 3;
 const MOD_DM_HOURLY_CAP = 20;
@@ -136,6 +137,7 @@ export class Router implements IRouter {
   private affinity: AffinityModule | null = null;
   private fatigue: IFatigueSource | null = null;
   private webLookup: WebLookup | null = null;
+  private chatDecisionTracker: ChatDecisionTracker | null = null;
   private forwardPurgeInterval: ReturnType<typeof setInterval> | null = null;
 
   // Repeater cooldown: key = `${groupId}:${content}`, value = last-triggered timestamp
@@ -261,6 +263,10 @@ export class Router implements IRouter {
 
   setWebLookup(webLookup: WebLookup): void {
     this.webLookup = webLookup;
+  }
+
+  setChatDecisionTracker(tracker: ChatDecisionTracker): void {
+    this.chatDecisionTracker = tracker;
   }
 
   dispose(): void {
@@ -692,9 +698,10 @@ export class Router implements IRouter {
           }
 
           const result = await this.chatModule.generateReply(msg.groupId, msg, recentMsgs);
+          let botReplyId: number | null = null;
           switch (result.kind) {
             case 'reply': {
-              const botReplyId = await this._sendReply(msg.groupId, result.text, undefined, {
+              botReplyId = await this._sendReply(msg.groupId, result.text, undefined, {
                 module: 'chat',
                 triggerMsgId: msg.messageId,
                 triggerUserId: msg.userId,
@@ -717,7 +724,7 @@ export class Router implements IRouter {
             }
             case 'sticker': {
               this.lastStickerKeyByGroup.set(msg.groupId, result.meta.key);
-              await this._sendReply(msg.groupId, result.cqCode, undefined, {
+              botReplyId = await this._sendReply(msg.groupId, result.cqCode, undefined, {
                 module: 'chat',
                 triggerMsgId: msg.messageId,
                 triggerUserId: msg.userId,
@@ -727,7 +734,7 @@ export class Router implements IRouter {
               break;
             }
             case 'fallback': {
-              await this._sendReply(msg.groupId, result.text, undefined, {
+              botReplyId = await this._sendReply(msg.groupId, result.text, undefined, {
                 module: 'chat',
                 triggerMsgId: msg.messageId,
                 triggerUserId: msg.userId,
@@ -742,6 +749,17 @@ export class Router implements IRouter {
               break;
             default:
               result satisfies never;
+          }
+          // P4: capture every decision (including silent/defer) for effect tracking
+          if (this.chatDecisionTracker) {
+            this.chatDecisionTracker.captureDecision(result, {
+              groupId: msg.groupId,
+              triggerMsgId: msg.messageId ?? null,
+              targetMsgId: msg.messageId ?? null,
+              triggerUserId: msg.userId ?? null,
+              sentBotReplyId: botReplyId,
+              nowSec: Math.floor(Date.now() / 1000),
+            });
           }
         }
       }
@@ -917,6 +935,17 @@ export class Router implements IRouter {
         if (isSendable(result)) {
           timestamps.push(Date.now());
           this.atReplyTimestamps.set(groupId, timestamps);
+        }
+        // P4: capture every @-mention decision for effect tracking
+        if (this.chatDecisionTracker) {
+          this.chatDecisionTracker.captureDecision(result, {
+            groupId,
+            triggerMsgId: item.msg.messageId ?? null,
+            targetMsgId: item.sourceMsgId ? String(item.sourceMsgId) : (item.msg.messageId ?? null),
+            triggerUserId: item.msg.userId ?? null,
+            sentBotReplyId: atBotReplyId,
+            nowSec: Math.floor(Date.now() / 1000),
+          });
         }
       }
     } finally {
