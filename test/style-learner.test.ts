@@ -90,10 +90,10 @@ describe('StyleLearner', () => {
       expect(styleRepo.upsert).toHaveBeenCalledWith(GROUP, 'u1', 'Alice', validStyleJson);
     });
 
-    it('skips users with fewer than 20 filtered messages', async () => {
+    it('skips users with fewer than 10 filtered messages (new threshold)', async () => {
       const recentTs = makeRecentTimestamp();
-      const topUsers = [{ userId: 'u1', nickname: 'Alice', count: 10 }];
-      const msgs = Array.from({ length: 10 }, (_, i) =>
+      const topUsers = [{ userId: 'u1', nickname: 'Alice', count: 9 }];
+      const msgs = Array.from({ length: 9 }, (_, i) =>
         makeMsg('u1', 'Alice', `msg ${i} long enough`, recentTs + i),
       );
       const userMsgs = new Map([['u1', msgs]]);
@@ -133,17 +133,18 @@ describe('StyleLearner', () => {
 
     it('filters out CQ-only, command, and short messages before counting', async () => {
       const recentTs = makeRecentTimestamp();
-      const topUsers = [{ userId: 'u1', nickname: 'Alice', count: 30 }];
+      const topUsers = [{ userId: 'u1', nickname: 'Alice', count: 20 }];
       const msgs: ReturnType<typeof makeMsg>[] = [];
-      // 15 valid messages
-      for (let i = 0; i < 15; i++) {
+      // 6 valid messages (below new threshold of 10 after filtering)
+      for (let i = 0; i < 6; i++) {
         msgs.push(makeMsg('u1', 'Alice', `valid message number ${i}`, recentTs + i));
       }
-      // 15 invalid messages (short, CQ, commands)
-      for (let i = 0; i < 5; i++) {
-        msgs.push(makeMsg('u1', 'Alice', 'hi', recentTs + 15 + i)); // < 3 chars
-        msgs.push(makeMsg('u1', 'Alice', '[CQ:image,file=x.jpg]', recentTs + 20 + i)); // pure CQ
-        msgs.push(makeMsg('u1', 'Alice', '/help please now', recentTs + 25 + i)); // command
+      // 14 invalid messages (short, CQ, commands)
+      for (let i = 0; i < 4; i++) {
+        msgs.push(makeMsg('u1', 'Alice', 'hi', recentTs + 6 + i)); // < 3 chars
+        msgs.push(makeMsg('u1', 'Alice', '[CQ:image,file=x.jpg]', recentTs + 10 + i)); // pure CQ
+        msgs.push(makeMsg('u1', 'Alice', '/help please now', recentTs + 14 + i)); // command
+        msgs.push(makeMsg('u1', 'Alice', 'ok', recentTs + 18 + i)); // < 3 chars
       }
       const userMsgs = new Map([['u1', msgs]]);
       const msgRepo = makeMsgRepo(topUsers, userMsgs);
@@ -156,7 +157,7 @@ describe('StyleLearner', () => {
       });
 
       await learner.learnStyles(GROUP);
-      // 15 valid < 20 threshold → should skip
+      // 6 valid < 10 threshold → should skip
       expect(claude.complete).not.toHaveBeenCalled();
     });
 
@@ -721,6 +722,125 @@ describe('StyleLearner', () => {
       expect(text).not.toContain('<t>');
       expect(text).not.toContain('<q>');
       expect(text).toContain('p草/p');
+    });
+  });
+
+  describe('M5 config changes', () => {
+    it('MIN_MESSAGES threshold is now 10 (not 20)', async () => {
+      const recentTs = makeRecentTimestamp();
+      const topUsers = [{ userId: 'u1', nickname: 'Alice', count: 15 }];
+      // 11 messages — above new threshold (10) but below old threshold (20)
+      const msgs = Array.from({ length: 11 }, (_, i) =>
+        makeMsg('u1', 'Alice', `message ${i} long enough to pass`, recentTs + i),
+      );
+      const userMsgs = new Map([['u1', msgs]]);
+      const msgRepo = makeMsgRepo(topUsers, userMsgs);
+      const styleRepo = makeStyleRepo();
+      const claude = makeClaudeWith(JSON.stringify(validStyleJson));
+
+      const learner = new StyleLearner({
+        messages: msgRepo, userStyles: styleRepo, claude,
+        activeGroups: [GROUP], logger: silentLogger,
+      });
+
+      await learner.learnStyles(GROUP);
+      // With threshold=10, 11 messages should pass and trigger LLM
+      expect(claude.complete).toHaveBeenCalled();
+    });
+
+    it('quality gate: skips user with <3 substantive AND totalChars<80', async () => {
+      const recentTs = makeRecentTimestamp();
+      const topUsers = [{ userId: 'u1', nickname: 'Alice', count: 15 }];
+      // 11 messages all very short (< 6 chars each) → substantive=0, totalChars << 80
+      const msgs = Array.from({ length: 11 }, (_, i) =>
+        makeMsg('u1', 'Alice', `hi${i}`, recentTs + i),
+      );
+      const userMsgs = new Map([['u1', msgs]]);
+      const msgRepo = makeMsgRepo(topUsers, userMsgs);
+      const styleRepo = makeStyleRepo();
+      const claude = makeClaudeWith(JSON.stringify(validStyleJson));
+
+      const learner = new StyleLearner({
+        messages: msgRepo, userStyles: styleRepo, claude,
+        activeGroups: [GROUP], logger: silentLogger,
+      });
+
+      await learner.learnStyles(GROUP);
+      // Quality gate should block: < 3 substantive (length>=6) AND totalChars < 80
+      expect(claude.complete).not.toHaveBeenCalled();
+    });
+
+    it('quality gate passes when ≥3 substantive messages (length≥6)', async () => {
+      const recentTs = makeRecentTimestamp();
+      const topUsers = [{ userId: 'u1', nickname: 'Alice', count: 15 }];
+      // 13 filtered messages: 3 substantive (≥6 chars) + 10 short (3-5 chars, pass filter)
+      const msgs: ReturnType<typeof makeMsg>[] = [];
+      msgs.push(makeMsg('u1', 'Alice', 'enough chars here', recentTs));
+      msgs.push(makeMsg('u1', 'Alice', 'another long one', recentTs + 1));
+      msgs.push(makeMsg('u1', 'Alice', 'third long msg', recentTs + 2));
+      for (let i = 3; i < 13; i++) {
+        msgs.push(makeMsg('u1', 'Alice', `abc`, recentTs + i)); // 3 chars — passes filter, not substantive
+      }
+      const userMsgs = new Map([['u1', msgs]]);
+      const msgRepo = makeMsgRepo(topUsers, userMsgs);
+      const styleRepo = makeStyleRepo();
+      const claude = makeClaudeWith(JSON.stringify(validStyleJson));
+
+      const learner = new StyleLearner({
+        messages: msgRepo, userStyles: styleRepo, claude,
+        activeGroups: [GROUP], logger: silentLogger,
+      });
+
+      await learner.learnStyles(GROUP);
+      // 13 filtered (≥ MIN_MESSAGES_FOR_STYLE=10), 3 substantive (≥6 chars) → quality gate passes
+      expect(claude.complete).toHaveBeenCalled();
+    });
+
+    it('_runAll uses listActiveGroupIdsByMessageCount fallback when activeGroups empty', async () => {
+      const recentTs = makeRecentTimestamp();
+      const topUsers = [{ userId: 'u1', nickname: 'Alice', count: 20 }];
+      const msgs = Array.from({ length: 20 }, (_, i) =>
+        makeMsg('u1', 'Alice', `message content ${i} long enough`, recentTs + i),
+      );
+      const userMsgs = new Map([['u1', msgs]]);
+      const baseRepo = makeMsgRepo(topUsers, userMsgs);
+      // Add listActiveGroupIdsByMessageCount to mock repo
+      const listFn = vi.fn().mockReturnValue([GROUP]);
+      const msgRepo = { ...baseRepo, listActiveGroupIdsByMessageCount: listFn } as unknown as IMessageRepository;
+      const styleRepo = makeStyleRepo();
+      const claude = makeClaudeWith(JSON.stringify(validStyleJson));
+
+      const learner = new StyleLearner({
+        messages: msgRepo, userStyles: styleRepo, claude,
+        activeGroups: [],  // empty — forces fallback
+        logger: silentLogger,
+      });
+
+      // Access private _runAll via any cast
+      await (learner as any)._runAll();
+
+      expect(listFn).toHaveBeenCalled();
+      // Should have used the fallback group and run style learning
+      expect(claude.complete).toHaveBeenCalled();
+    });
+
+    it('_runAll fallback caps at top-5 groups', async () => {
+      const listFn = vi.fn().mockReturnValue(['g1', 'g2', 'g3', 'g4', 'g5']);
+      const msgRepo = {
+        ...makeMsgRepo([], new Map()),
+        listActiveGroupIdsByMessageCount: listFn,
+      } as unknown as IMessageRepository;
+      const styleRepo = makeStyleRepo();
+      const claude = makeClaudeWith(JSON.stringify(validStyleJson));
+
+      const learner = new StyleLearner({
+        messages: msgRepo, userStyles: styleRepo, claude,
+        activeGroups: [], logger: silentLogger,
+      });
+
+      await (learner as any)._runAll();
+      // Called with limit=5
+      expect(listFn).toHaveBeenCalledWith(expect.any(Number), 5);
     });
   });
 });
