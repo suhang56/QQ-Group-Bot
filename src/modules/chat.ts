@@ -1484,6 +1484,16 @@ export class ChatModule implements IChatModule {
   ): Promise<string | null> {
     this.knownGroups.add(groupId);
 
+    // Clear per-group volatile state at turn-start so early-return paths
+    // (pure @, react deflection, rate-limit, debounce, relay, etc.) don't
+    // let the prior turn's injectedFactIds / evasive flag leak into router
+    // bookkeeping and get associated with this turn's reply. The actual
+    // values are set later only if we reach the prompt-build / post-process
+    // stages; if an early return fires, the map simply stays empty for the
+    // next read.
+    this.lastInjectedFactIds.set(groupId, []);
+    this.lastEvasiveReply.set(groupId, false);
+
     // M6.4: snapshot consecutive-reply count as it stood at the moment this
     // peer message arrived, BEFORE any reset. Gate 5.6 reads this snapshot
     // so the cap can block the first peer message that arrives after the
@@ -2384,8 +2394,14 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     // regen caused by sentinel/QA/coref/outsider guard would drop facts and
     // the bot goes from grounded → 装傻. A short fact-first micro-rule ensures
     // hardened mode also obeys "fact overrides persona 装傻" priority.
-    const hardenedFactPriorityRule = (factsBlock || onDemandFactBlock)
-      ? '\n\n硬性规则（覆盖其他所有装傻/反问倾向）：如果下面的 facts / on-demand 块有 X 的答案 → 用它直接回答；不能装不知道、不能反问、不能说"考我啊/评价啥啊"。'
+    // Unified factual-injection signal — spans ALL sources of authoritative
+    // context for this turn (learned_facts RAG, Path A on-demand cache,
+    // Path C web grounding, Bandori-live events). Downstream guards/dedup/
+    // hardened-regen branches all gate on this, so adding a new fact source
+    // in the future only needs to extend this one expression.
+    const hasFactualInjection = !!(factsBlock || onDemandFactBlock || webLookupBlock || liveBlock);
+    const hardenedFactPriorityRule = hasFactualInjection
+      ? '\n\n硬性规则（覆盖其他所有装傻/反问倾向）：如果下面的 facts / on-demand / web-lookup / live 块里有 X 的答案 → 用它直接回答；不能装不知道、不能反问、不能说"考我啊/评价啥啊"。'
       : '';
     const chatRequest = (hardened = false) => this.claude.complete({
       model: hardened ? RUNTIME_CHAT_MODEL : pickedModel,
@@ -2450,9 +2466,8 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       // in facts is the CORRECT behavior, not a regen trigger. Without this,
       // a good fact answer gets kicked to hardened regen and the second round
       // often drops back to 装傻/short-deflect.
-      const hasFactContext = !!onDemandFactBlock || !!factsBlock;
       const isFactQuery = isDirectQuestion(triggerMessage.content) || isGroundedOpinionQuestion(triggerMessage.content);
-      const skipQaGuard = hasFactContext || isFactQuery;
+      const skipQaGuard = hasFactualInjection || isFactQuery;
       for (let regenIter = 0; regenIter < 2; regenIter++) {
         const qaFail = skipQaGuard ? null : qaReportRegenHint(processed);
         const coreFail = hasCoreferenceSelfReference(processed, [triggerMessage.nickname]);
@@ -2511,10 +2526,9 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       // would cause the router @-fallback to emit "不知道/不清楚" — the exact
       // opposite of what a fact-grounded answer should do. Keep the reply.
       const recentOwn = this.botRecentOutputs.get(groupId) ?? [];
-      const hasFactContextForDedup = !!factsBlock || !!onDemandFactBlock;
       const isFactQueryForDedup = isDirectQuestion(triggerMessage.content)
         || isGroundedOpinionQuestion(triggerMessage.content);
-      const skipDedup = hasFactContextForDedup || isFactQueryForDedup;
+      const skipDedup = hasFactualInjection || isFactQueryForDedup;
       const NEAR_DUP_WINDOW = 8;
       const nearDup = skipDedup ? null : recentOwn.slice(-NEAR_DUP_WINDOW).find(prev => {
         // Short replies: use exact/substring check instead of Jaccard
@@ -2548,11 +2562,13 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       }
 
       // ── STICKER-FIRST INTERCEPT ──────────────────────────────────────────
-      // Skip sticker-first for factual queries where the text IS the payload.
-      // Right now: any reply where bandori-live knowledge was injected into
-      // the user-role context (liveBlock non-empty) — user asked about live
-      // info and expects the actual answer, not a sticker reaction.
-      const hasFactualInjection = liveBlock.length > 0;
+      // Skip sticker-first for ANY factual query where the text IS the
+      // payload. Previously only gated on liveBlock, so learned_facts /
+      // on-demand / web-lookup answers could still be replaced by a sticker
+      // (e.g., "@bot xtt 是啥" returning a sticker instead of the text
+      // definition). Now unified with the hasFactualInjection signal used
+      // for hardened-regen / QA-guard / dedup so every factual surface
+      // suppresses sticker-first identically.
       if (this.stickerFirst && !hasFactualInjection) {
         const sfConfig = this.db.groupConfig.get(groupId);
         if (sfConfig?.stickerFirstEnabled) {
@@ -3589,9 +3605,14 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
         const safeTerm = sanitizeForPrompt(term, 60);
         const safeGuess = sanitizeForPrompt(outcome.guess, 100);
         weakLines.push(`你猜 ${safeTerm} 可能是指 ${safeGuess}，可以反问 "${safeTerm}是指${safeGuess}吗"`);
-      } else {
+      } else if (outcome?.type === 'unknown') {
+        // Legitimate "LLM looked and returned no answer" — fair game for askUnknown.
         unknownTerms.push(sanitizeForPrompt(term, 60));
       }
+      // outcome === null: rate-limited / jailbreak gate / error path.
+      // Silently skip — do NOT enroll in unknownTerms, or bot would be told
+      // to ask about a term it never actually looked up. (See OnDemandLookup
+      // docstring: "null = rate-limited or unrecoverable error".)
     }
     const dedupedUnknown = [...new Set(unknownTerms)];
     // If any candidate has an exact learned meaning, do not also inject an

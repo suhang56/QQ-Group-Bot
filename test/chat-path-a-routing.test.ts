@@ -92,7 +92,10 @@ describe('Path A routing glue -- 3-outcome matrix', () => {
   });
 
   it('unknown + direct question: injects "你没听过" block', async () => {
-    mockLookup.lookupTerm.mockResolvedValue(null);
+    // 'unknown' outcome (LLM looked, found no answer). Null is reserved for
+    // rate-limited / jailbreak / error paths — those silently skip without
+    // enrolling the term in askUnknown.
+    mockLookup.lookupTerm.mockResolvedValue({ type: 'unknown' });
     vi.spyOn(chat as never, '_getKnownTermsSet').mockReturnValue(new Set());
     const { block } = await (chat as never)._buildOnDemandBlock(
       'g1',
@@ -100,6 +103,19 @@ describe('Path A routing glue -- 3-outcome matrix', () => {
       'u1',
     );
     expect(block).toContain('你没听过');
+  });
+
+  it('rate-limited null outcome: no askUnknown directive emitted', async () => {
+    // OnDemandLookup returns null for rate-limit / jailbreak / error.
+    // Per spec these should be silently skipped, NOT pushed into unknownTerms.
+    mockLookup.lookupTerm.mockResolvedValue(null);
+    vi.spyOn(chat as never, '_getKnownTermsSet').mockReturnValue(new Set());
+    const { block } = await (chat as never)._buildOnDemandBlock(
+      'g1',
+      '[termC] 是谁？',
+      'u1',
+    );
+    expect(block).not.toContain('你没听过');
   });
 
   it('found term suppresses ask-back for leftover unknown candidates', async () => {
