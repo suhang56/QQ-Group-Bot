@@ -8,7 +8,7 @@ export function queryCat2(db: DatabaseSync, groupId: string, limit: number): DbR
     SELECT topic, canonical_form FROM learned_facts
     WHERE group_id = ? AND status = 'active'
     ORDER BY updated_at DESC LIMIT 500
-  `).all(groupId) as Array<{ topic: string; canonical_form: string | null }>;
+  `).all(groupId) as Array<{ topic: string | null; canonical_form: string | null }>;
 
   if (terms.length === 0) return [];
 
@@ -21,13 +21,17 @@ export function queryCat2(db: DatabaseSync, groupId: string, limit: number): DbR
   const patterns: string[] = [];
   const bindings: string[] = [];
   for (const t of terms) {
-    patterns.push("m.content LIKE ? ESCAPE '!'");
-    bindings.push('%' + escapeLike(t.topic) + '%');
+    if (t.topic) {
+      patterns.push("m.content LIKE ? ESCAPE '!'");
+      bindings.push('%' + escapeLike(t.topic) + '%');
+    }
     if (t.canonical_form) {
       patterns.push("m.content LIKE ? ESCAPE '!'");
       bindings.push('%' + escapeLike(t.canonical_form) + '%');
     }
   }
+
+  if (patterns.length === 0) return [];
 
   const sql = `
     SELECT m.* FROM messages m

@@ -98,6 +98,19 @@ db.prepare(
    VALUES (?, ?, ?, 1.0, 'active', ?, ?, ?)`
 ).run(GROUP, 'user:ykn', 'ykn=凑友希那', BASE, BASE, 'ykn');
 
+// Null-topic rows — must NOT crash queryCat2 (regression guard for R6.1 hotfix)
+// Row with null topic but valid canonical_form: should still match via canonical_form
+db.prepare(
+  `INSERT OR IGNORE INTO learned_facts (group_id, topic, fact, confidence, status, created_at, updated_at, canonical_form)
+   VALUES (?, NULL, ?, 1.0, 'active', ?, ?, ?)`
+).run(GROUP, 'null-topic fact', BASE, BASE, 'null-topic-canonical');
+
+// Row with both topic and canonical_form null: produces no patterns, must not crash
+db.prepare(
+  `INSERT OR IGNORE INTO learned_facts (group_id, topic, fact, confidence, status, created_at, updated_at, canonical_form)
+   VALUES (?, NULL, ?, 1.0, 'active', ?, ?, NULL)`
+).run(GROUP, 'all-null row', BASE, BASE);
+
 db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
 db.close();
 console.log(`Fixture written: ${outPath} (${seq - 1} rows)`);
