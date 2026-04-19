@@ -288,10 +288,9 @@ export function evaluatePreGenerate(ctx: PreGenerateContext): PreGenerateOutcome
   }
 
   // Rule 2 — Burst-settle: high message rate → defer until burst ends
-  // Timestamps in recentMsgs are milliseconds; convert nowSec to ms for comparison
-  const burstWindowMs = 8 * 1000;
-  const burstThresholdMs = ctx.nowSec * 1000 - burstWindowMs;
-  const msgsInBurst = ctx.recentMsgs.filter(m => m.timestamp >= burstThresholdMs).length;
+  // Timestamps in recentMsgs are epoch seconds
+  const burstThresholdSec = ctx.nowSec - 8;
+  const msgsInBurst = ctx.recentMsgs.filter(m => m.timestamp >= burstThresholdSec).length;
   if (msgsInBurst >= 5) {
     return { action: 'defer', reasonCode: 'burst-settle', deadlineSec: ctx.nowSec + 8 };
   }

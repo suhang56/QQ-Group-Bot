@@ -20,12 +20,12 @@ function makeCtx(overrides: Partial<PreGenerateContext> = {}): PreGenerateContex
   };
 }
 
-/** Build N messages all within the last 8 seconds */
+/** Build N messages all within the last 8 seconds (timestamps in epoch seconds) */
 function burstMsgs(count: number, nowSec = NOW_SEC) {
   return Array.from({ length: count }, (_, i) => ({
     messageId: `m${i}`,
     userId: 'u1',
-    timestamp: (nowSec - 4) * 1000 + i, // all within last 8s
+    timestamp: nowSec - 4 + i, // all within last 8s, epoch seconds
   }));
 }
 
@@ -118,7 +118,7 @@ describe('evaluatePreGenerate', () => {
   });
 
   it('burst: only messages within last 8s counted (older messages ignored)', () => {
-    const oldMsg = { messageId: 'old', userId: 'u1', timestamp: (NOW_SEC - 100) * 1000 };
+    const oldMsg = { messageId: 'old', userId: 'u1', timestamp: NOW_SEC - 100 };
     const recentMsgs = [...burstMsgs(4), oldMsg];
     const result = evaluatePreGenerate(makeCtx({ recentMsgs }));
     // Only 4 within 8s → no burst
@@ -126,7 +126,7 @@ describe('evaluatePreGenerate', () => {
   });
 
   it('burst: messages at exactly nowSec - 8 seconds → included (inclusive boundary)', () => {
-    const boundaryMsg = { messageId: 'boundary', userId: 'u1', timestamp: (NOW_SEC - 8) * 1000 };
+    const boundaryMsg = { messageId: 'boundary', userId: 'u1', timestamp: NOW_SEC - 8 };
     const recentMsgs = [...burstMsgs(4), boundaryMsg];
     const result = evaluatePreGenerate(makeCtx({ recentMsgs }));
     // 5 within 8s (boundary is inclusive) → burst
