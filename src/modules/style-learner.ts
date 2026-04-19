@@ -14,7 +14,7 @@ import type { Logger } from 'pino';
 
 const CQ_ONLY_RE = /^\[CQ:[^\]]+\]$/;
 const COMMAND_RE = /^\//;
-const MIN_MESSAGES_FOR_STYLE = 20;
+const MIN_MESSAGES_FOR_STYLE = 10;
 const STYLE_MODEL = 'gemini-2.5-flash';
 
 export type StyleJson = StyleJsonData;
@@ -58,7 +58,7 @@ export class StyleLearner {
     this.claude = opts.claude;
     this.activeGroups = opts.activeGroups;
     this.logger = opts.logger ?? createLogger('style-learner');
-    this.intervalMs = opts.intervalMs ?? 4 * 60 * 60_000; // 4 hours
+    this.intervalMs = opts.intervalMs ?? 1 * 60 * 60_000; // 1 hour
     this.onAggregateUpdated = opts.onAggregateUpdated ?? null;
   }
 
@@ -66,7 +66,7 @@ export class StyleLearner {
     // Initial run after 5 minutes
     this.firstTimer = setTimeout(() => {
       void this._runAll().catch(err => this.logger.error({ err }, 'style learner initial run failed'));
-    }, 5 * 60_000);
+    }, 1 * 60_000);
     this.firstTimer.unref?.();
 
     this.timer = setInterval(() => {
@@ -81,7 +81,15 @@ export class StyleLearner {
   }
 
   private async _runAll(): Promise<void> {
-    for (const groupId of this.activeGroups) {
+    let groups = this.activeGroups;
+    if (groups.length === 0 && typeof (this.messages as any).listActiveGroupIdsByMessageCount === 'function') {
+      const nowSec = Math.floor(Date.now() / 1000);
+      groups = (this.messages as any).listActiveGroupIdsByMessageCount(nowSec - 7 * 86400, 5) as string[];
+      if (groups.length > 0) {
+        this.logger.warn({ groups }, 'ACTIVE_GROUPS empty; running on top-5 recently-active groups');
+      }
+    }
+    for (const groupId of groups) {
       try {
         await this.learnStyles(groupId);
       } catch (err) {
@@ -111,6 +119,13 @@ export class StyleLearner {
 
       if (filtered.length < MIN_MESSAGES_FOR_STYLE) {
         this.logger.debug({ groupId, userId: user.userId, msgCount: filtered.length }, 'too few messages for style analysis');
+        continue;
+      }
+      // Quality gate: need ≥3 samples of length≥6 OR totalChars≥80
+      const substantiveFiltered = filtered.filter(m => m.content.length >= 6);
+      const totalCharsFiltered = filtered.reduce((n, m) => n + m.content.length, 0);
+      if (substantiveFiltered.length < 3 && totalCharsFiltered < 80) {
+        this.logger.debug({ groupId, userId: user.userId }, 'style quality gate fail — skipping user');
         continue;
       }
 
