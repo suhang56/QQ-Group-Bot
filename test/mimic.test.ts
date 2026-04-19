@@ -149,6 +149,33 @@ describe('MimicModule.generateMimic', () => {
     }
   });
 
+  it('maps sticker tokens to CQ codes without exposing raw CQ codes to the model', async () => {
+    const sticker = (i: number) => `[CQ:image,file=img${i}.png,sub_type=0,url=https://example.com/${i},file_size=12]`;
+    const msgs = Array.from({ length: 6 }, (_, i) => makeMsg({
+      id: i + 1,
+      content: `normal message ${i}`,
+      rawContent: sticker(i),
+    }));
+    vi.mocked(messages.getByUser).mockReturnValue(msgs);
+    vi.mocked(claude.complete).mockResolvedValue({
+      text: '<sticker:2>',
+      inputTokens: 100, outputTokens: 5,
+      cacheReadTokens: 0, cacheWriteTokens: 0,
+    });
+
+    const mod = makeModule(claude, messages, configs);
+    const result = await mod.generateMimic('g1', 'u1', 'topic text', []);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.text).toBe(sticker(1));
+    }
+    const call = vi.mocked(claude.complete).mock.calls[0]![0] as ClaudeRequest;
+    const userContent = call.messages[0]!.content;
+    expect(userContent).toContain('<sticker:1>');
+    expect(userContent).not.toContain('[CQ:image');
+  });
+
   // Topic passed → included in prompt
   it('passes topic to claude when provided', async () => {
     const msgs = Array.from({ length: 10 }, (_, i) => makeMsg({ id: i + 1, content: `msg${i}` }));
@@ -335,6 +362,16 @@ describe('filterFewShot', () => {
     const msgs = [
       msg('[CQ:image,file=abc.jpg]'),
       msg('[CQ:mface,id=123] [CQ:image,file=xyz.jpg]'),
+      msg('hello world'),
+    ];
+    const result = filterFewShot(msgs, null);
+    expect(result).toHaveLength(1);
+    expect(result[0]!.content).toBe('hello world');
+  });
+
+  it('removes malformed truncated CQ fragments', () => {
+    const msgs = [
+      msg('[CQ:image,file=abc.jpg,url=https://x,file_size=12'),
       msg('hello world'),
     ];
     const result = filterFewShot(msgs, null);

@@ -55,8 +55,9 @@ describe('buildStickerSection', () => {
     ]);
     const claude = makeMockClaude('已老实');
     const result = await buildStickerSection('g-basic', tmpDir, 5, claude);
-    expect(result).toContain('表情包');
-    expect(result).toContain('[CQ:mface');
+    expect(result).toContain('Sticker choices');
+    expect(result).toContain('<sticker:1>');
+    expect(result).not.toContain('[CQ:mface');
     expect(result).toContain('已老实');
     expect((claude.complete as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
   });
@@ -87,6 +88,7 @@ describe('buildStickerSection', () => {
     const result = await buildStickerSection('g-cache', tmpDir, 5, claude);
     expect((claude.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
     expect(result).toContain('盯人');
+    expect(result).toContain('<sticker:1>');
   });
 
   it('saves generated labels to disk cache', async () => {

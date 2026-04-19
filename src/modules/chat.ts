@@ -50,6 +50,7 @@ import { type BaseResultMeta, type ReplyMeta, type StickerMeta, type ChatResult 
 import { pickAtFallback, classifyAtFallbackReason } from './fallback-pool.js';
 import { GroupmateVoice, type VoiceBlock } from './groupmate-voice.js';
 import { isAddresseeScopeViolation } from '../utils/sentinel.js';
+import { isStickerTokenOutput, makeStickerTokenChoices, resolveStickerTokenOutput, type StickerTokenChoice } from '../utils/sticker-tokens.js';
 
 // Path A stub: { term, meaning } pairs extracted from user message.
 // Path A dev replaces null meanings with corpus results when merged.
@@ -546,7 +547,7 @@ context 有昵称 → 叫出昵称+"你又来装失忆"；不想答 → "问你�
 选一个形态输出：
 - (a) 短话（3–15 字）
 - (b) 两到三行短消息（换行分隔）
-- (c) **只发一个表情包**（纯 \`[CQ:image,file=...]\` 码）。只能用【当前语境下推荐使用的群表情】清单里的，**禁止 \`[CQ:mface,...]\`、\`[CQ:face,...]\`、QQ 黄脸/商城表情**
+- (c) **只发一个表情包**（纯 \`<sticker:n>\` token）。只能用【当前语境下推荐使用的群表情】清单里的 token，禁止手写或复制任何 \`[CQ:...]\` 码
 - (d) \`<skip>\`（话题不是你的菜/事实不熟/气氛不对）
 - (e) 极短反应（"哈"/"草"/"？"）
 - (f) **文字+表情组合**（表情独占一行）
@@ -2061,12 +2062,22 @@ export class ChatModule implements IChatModule {
 
     const t0 = Date.now();
     const systemPrompt = this._getGroupIdentityPrompt(groupId, triggerMessage.content, immediateChron as GroupMessage[]);
+    const globalStickerChoices = this.stickerSectionCache.get(groupId)
+      ? makeStickerTokenChoices(getStickerPool(groupId) ?? [])
+      : [];
     const t1 = Date.now();
     const moodSection = this._buildMoodSection(groupId);
     const t2 = Date.now();
-    const contextStickerSection = await this._getContextStickers(groupId, triggerMessage.content);
+    const contextStickerData = await this._getContextStickerChoices(groupId, triggerMessage.content, globalStickerChoices.length + 1);
+    const contextStickerSection = contextStickerData.text;
     const t3 = Date.now();
-    const rotatedStickerSection = this._buildRotatedStickerSection(groupId);
+    const rotatedStickerData = this._buildRotatedStickerSectionWithChoices(groupId, globalStickerChoices.length + contextStickerData.choices.length + 1);
+    const rotatedStickerSection = rotatedStickerData.text;
+    const stickerTokenChoices = [
+      ...globalStickerChoices,
+      ...contextStickerData.choices,
+      ...rotatedStickerData.choices,
+    ];
     const t4 = Date.now();
     this.logger.info({
       groupId,
@@ -2572,6 +2583,32 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       if (entityReplacement !== null) {
         this.logger.info({ groupId, original: processed, replacement: entityReplacement }, 'entity-guard replaced output');
         processed = entityReplacement;
+      }
+
+      const stickerTokenChoice = !hasRealFactHit
+        ? resolveStickerTokenOutput(processed, stickerTokenChoices)
+        : null;
+      if (stickerTokenChoice) {
+        this._recordOwnReply(groupId, stickerTokenChoice.cqCode);
+        this._recordAffinityChat(
+          groupId,
+          triggerMessage.userId,
+          triggerMessage.content,
+          {
+            isMention: engagementSignals.isMention,
+            isReplyToBot: engagementSignals.isReplyToBot,
+            isAdversarial: engagementSignals.isAdversarial,
+            comprehensionScore: engagementSignals.comprehensionScore,
+          },
+          engagePathAffinityRecorded,
+        );
+        this.logger.info({ groupId, key: stickerTokenChoice.key, token: stickerTokenChoice.token }, 'chat: sending sticker token choice');
+        return { kind: 'sticker', cqCode: stickerTokenChoice.cqCode, meta: metaBuilder.buildSticker(stickerTokenChoice.key), reasonCode: 'sticker-token' };
+      }
+      if (isStickerTokenOutput(processed)) {
+        this.logger.info({ groupId, processed, hasRealFactHit }, 'chat: invalid or fact-blocked sticker token output dropped');
+        metaBuilder.setGuardPath('post-process');
+        return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'guard' };
       }
 
       // UR-A #16: bounded regen loop. Each iteration re-runs all 4 guards
@@ -3265,9 +3302,13 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
 
   /** Return a system prompt section with top-K context-matched local stickers, or empty string. */
   /** Build a per-call rotated sticker section from the cached labeled pool. */
-  private _buildRotatedStickerSection(groupId: string): string {
+  _buildRotatedStickerSection(groupId: string): string {
+    return this._buildRotatedStickerSectionWithChoices(groupId, 1).text;
+  }
+
+  private _buildRotatedStickerSectionWithChoices(groupId: string, startIndex: number): { text: string; choices: StickerTokenChoice[] } {
     const pool = getStickerPool(groupId);
-    if (!pool || pool.length === 0) return '';
+    if (!pool || pool.length === 0) return { text: '', choices: [] };
 
     const recentKeys = this.stickerFirst?.getRecentMfaceKeys(groupId) ?? new Set<string>();
     // Extract emoji_id from each cqCode for cooldown comparison
@@ -3282,9 +3323,13 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       ? filtered
       : _reservoirSample(filtered, sampleSize);
 
-    if (sampled.length === 0) return '';
-    const lines = sampled.map(({ label, cqCode }) => `- ${label} → ${cqCode}`).join('\n');
-    return `\n这个群常用的表情包（当语境合适时直接用CQ码发送，就像群友一样）：\n${lines}`;
+    if (sampled.length === 0) return { text: '', choices: [] };
+    const choices = makeStickerTokenChoices(sampled, startIndex);
+    const lines = choices.map(({ label, token }) => `- ${label ?? 'sticker'} -> ${token}`).join('\n');
+    return {
+      text: `\nSticker choices for this group (optional; if a sticker-only reply fits, output exactly one token like <sticker:${startIndex}>; do not copy CQ codes):\n${lines}`,
+      choices,
+    };
   }
 
   // Embedding cache: text → vec. Bounded by LRU-ish turnover at the call site.
@@ -3305,8 +3350,12 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     } catch { return null; }
   }
 
-  private async _getContextStickers(groupId: string, queryText: string): Promise<string> {
-    if (!this.localStickerRepo) return '';
+  async _getContextStickers(groupId: string, queryText: string): Promise<string> {
+    return (await this._getContextStickerChoices(groupId, queryText, 1)).text;
+  }
+
+  private async _getContextStickerChoices(groupId: string, queryText: string, startIndex: number): Promise<{ text: string; choices: StickerTokenChoice[] }> {
+    if (!this.localStickerRepo) return { text: '', choices: [] };
     // Cap candidate pool at 20 (was 50). Top-20 by usage is plenty — we only show 5.
     const candidates = this.localStickerRepo.getTopByGroup(groupId, 20)
       // Only image stickers captured from the group (exclude mface market stickers)
@@ -3314,7 +3363,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       // Must have a real vision-generated summary — otherwise bot sees hash garbage
       .filter(s => s.summary !== null && s.summary !== '' && s.summary !== s.key)
       .filter(s => (s.usagePositive - s.usageNegative) >= this.stickerMinScoreFloor);
-    if (candidates.length === 0) return '';
+    if (candidates.length === 0) return { text: '', choices: [] };
 
     let ranked = candidates;
 
@@ -3344,8 +3393,14 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       ranked = candidates.slice(0, this.stickerTopKForReply);
     }
 
-    if (ranked.length === 0) return '';
-    const lines = ranked.map(s => {
+    if (ranked.length === 0) return { text: '', choices: [] };
+    const choices = makeStickerTokenChoices(ranked.map(s => ({
+      key: s.key,
+      label: s.summary ?? s.key,
+      cqCode: s.cqCode,
+    })), startIndex);
+    const lines = choices.map((choice, i) => {
+      const s = ranked[i]!;
       const label = s.summary ?? s.key;
       // UR-G: contextSamples rows are raw attacker-typed group messages stored in
       // the sticker DB. sanitizeForPrompt strips <>/``` before the 20-char slice
@@ -3353,9 +3408,12 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       // cached system-prompt hint line.
       const rawCtx = s.contextSamples.slice(0, 1).join('');
       const ctx = sanitizeForPrompt(rawCtx, 40);
-      return `- ${label}${ctx ? `（常用于"${ctx.slice(0, 20)}"之类的语境）` : ''} → ${s.cqCode}`;
+      return `- ${label}${ctx ? `（常用于"${ctx.slice(0, 20)}"之类的语境）` : ''} -> ${choice.token}`;
     }).join('\n');
-    return `\n【当前语境下推荐使用的群表情（可选，语境合适再用）】\n${lines}`;
+    return {
+      text: `\n【当前语境下推荐使用的群表情（可选，语境合适再用）】\n${lines}\nIf the best reply is only one of these stickers, output exactly its sticker token; do not copy CQ codes.`,
+      choices,
+    };
   }
 
   private _buildMoodSection(groupId: string): string {

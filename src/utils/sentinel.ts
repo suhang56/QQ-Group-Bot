@@ -163,7 +163,10 @@ export function sanitize(text: string): string {
     // image segments by copying from context (which has real url= params).
     // Legit learned-sticker replies use file=file:/// local paths and never
     // contain url=, so this filter is safe.
-    .replace(/\[CQ:image,[^\]]*url=[^\]]*\]/gi, '')
+    .replace(/\[CQ:image,[^\]\n]*url=[^\]\n]*(?:\]|$)/gi, '')
+    // Strip malformed CQ fragments that reached end-of-line without a closing
+    // bracket. This catches truncated mimic output like "[CQ:image,...file_size=12".
+    .replace(/\[CQ:[^\]\n]*$/gim, '')
     // Strip ANY angle-bracketed <CQ:...> — this is always hallucination; no
     // legitimate path ever emits CQ codes in angle brackets.
     .replace(/<CQ:[^>\n]*>/gi, '')
