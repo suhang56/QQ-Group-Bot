@@ -61,6 +61,7 @@ import { MemeClusterer } from './modules/meme-clusterer.js';
 import { RatingPortalServer } from './server/rating-portal.js';
 import { TuningGenerator } from './server/tuning-generator.js';
 import { GroupmateVoice } from './modules/groupmate-voice.js';
+import { ChatDecisionTracker } from './modules/chat-decision-tracker.js';
 
 // ============================================================
 // PHASE 1: Infrastructure (logger, env, PID lock, database)
@@ -583,6 +584,14 @@ const webLookup = new WebLookup(
 router.setWebLookup(webLookup);
 chat.setWebLookup(webLookup);
 
+const chatDecisionTracker = new ChatDecisionTracker({
+  events: db.chatDecisionEvents,
+  effects: db.chatDecisionEffects,
+  messages: db.messages,
+  logger: createLogger('chat-decision-tracker'),
+});
+router.setChatDecisionTracker(chatDecisionTracker);
+
 // 5. Wire events
 adapter.on('error', (err) => {
   logger.fatal({ err }, 'Adapter fatal error');
@@ -632,6 +641,14 @@ try {
   aliasMiner.start();
   styleLearner.start();
   relationshipTracker.start();
+
+  // P4: scoring job — scores unscored effect rows every 5min, bounded LIMIT 200/run
+  const decisionScoringTimer = setInterval(() => {
+    void chatDecisionTracker.scoreUnscored().catch(err => {
+      logger.warn({ err }, 'chat-decision scoring failed');
+    });
+  }, 5 * 60_000);
+  decisionScoringTimer.unref?.();
 
   // Daily affinity decay
   const affinityDecayTimer = setInterval(() => {
