@@ -4347,9 +4347,10 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       return text ? `\n\n${text}` : '';
     })();
 
-    // M6.2a: expression-learner — group-scoped past reply patterns. Helper
-    // returns '' when no rows; prepend a newline separator only when non-empty
-    // so we never emit a dangling header.
+    // M6.2a / P3: expression-learner — groupmate habits (reads groupmate_expression_samples by default).
+    // TODO(P3): skip block when hasRealFactHit=true (facts crowd out habit hints).
+    // Threading hasRealFactHit here requires restructuring the generateReply pipeline since
+    // _getGroupIdentityPrompt is called before hasRealFactHit is computed (line ~2062 vs ~2449).
     const expressionSection = (() => {
       if (!this.expressionSource) return '';
       const text = this.expressionSource.formatForPrompt(groupId);
