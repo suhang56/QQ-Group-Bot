@@ -464,6 +464,32 @@ CREATE TABLE IF NOT EXISTS expression_patterns (
 
 CREATE INDEX IF NOT EXISTS idx_expression_patterns_group_weight ON expression_patterns(group_id, weight DESC);
 
+-- groupmate_expression_samples: recurring groupmate expressions learned from non-bot messages.
+-- Replaces user→bot pair learning in expression_patterns (schema_version=1).
+-- Reader defaults to this table; expression_patterns kept on disk for rollback.
+CREATE TABLE IF NOT EXISTS groupmate_expression_samples (
+  id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id             TEXT    NOT NULL,
+  expression           TEXT    NOT NULL,
+  expression_hash      TEXT    NOT NULL,
+  speaker_user_ids     TEXT    NOT NULL,
+  speaker_count        INTEGER NOT NULL DEFAULT 1,
+  source_message_ids   TEXT    NOT NULL,
+  occurrence_count     INTEGER NOT NULL DEFAULT 1,
+  first_seen_at        INTEGER NOT NULL,
+  last_active_at       INTEGER NOT NULL,
+  checked_by           TEXT,
+  rejected             INTEGER NOT NULL DEFAULT 0,
+  modified_by          TEXT,
+  schema_version       INTEGER NOT NULL DEFAULT 2
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_gex_group_hash
+  ON groupmate_expression_samples(group_id, expression_hash);
+CREATE INDEX IF NOT EXISTS idx_gex_group_quality
+  ON groupmate_expression_samples(group_id, speaker_count DESC, occurrence_count DESC, last_active_at DESC);
+CREATE INDEX IF NOT EXISTS idx_gex_group_active
+  ON groupmate_expression_samples(group_id, last_active_at DESC);
+
 -- user_styles: per-user speaking style profiles.
 CREATE TABLE IF NOT EXISTS user_styles (
   group_id    TEXT    NOT NULL,

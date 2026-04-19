@@ -379,6 +379,7 @@ router.setSequenceGuard(sequenceGuard);
 const expressionLearner = new ExpressionLearner({
   messages: db.messages,
   expressionPatterns: db.expressionPatterns,
+  groupmateExpressions: db.groupmateExpressions,
   botUserId,
 });
 

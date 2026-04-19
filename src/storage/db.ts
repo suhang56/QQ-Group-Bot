@@ -673,6 +673,32 @@ export interface IExpressionPatternRepository {
   delete(groupId: string, situation: string, expression: string): void;
 }
 
+// ---- Groupmate expression samples (P3) ----
+
+export interface GroupmateExpressionSample {
+  id: number;
+  groupId: string;
+  expression: string;
+  expressionHash: string;
+  speakerUserIds: string[];
+  speakerCount: number;
+  sourceMessageIds: string[];
+  occurrenceCount: number;
+  firstSeenAt: number;
+  lastActiveAt: number;
+  checkedBy: string | null;
+  rejected: boolean;
+  schemaVersion: number;
+}
+
+export interface IGroupmateExpressionRepository {
+  upsert(groupId: string, expression: string, expressionHash: string, speakerUserId: string, sourceMessageId: string): void;
+  listQualified(groupId: string, limit: number): GroupmateExpressionSample[];
+  listAll(groupId: string): GroupmateExpressionSample[];
+  deleteDecayed(groupId: string, cutoffSeconds: number): number;
+  deleteById(id: number): void;
+}
+
 export interface StyleJsonData {
   catchphrases: string[];
   punctuationStyle: string;
@@ -2811,6 +2837,113 @@ class ExpressionPatternRepository implements IExpressionPatternRepository {
   }
 }
 
+// ---- Groupmate expression repository (P3) ----
+
+interface GroupmateExpressionRow {
+  id: number;
+  group_id: string;
+  expression: string;
+  expression_hash: string;
+  speaker_user_ids: string;
+  speaker_count: number;
+  source_message_ids: string;
+  occurrence_count: number;
+  first_seen_at: number;
+  last_active_at: number;
+  checked_by: string | null;
+  rejected: number;
+  modified_by: string | null;
+  schema_version: number;
+}
+
+function groupmateExprFromRow(r: GroupmateExpressionRow): GroupmateExpressionSample {
+  return {
+    id: r.id,
+    groupId: r.group_id,
+    expression: r.expression,
+    expressionHash: r.expression_hash,
+    speakerUserIds: JSON.parse(r.speaker_user_ids) as string[],
+    speakerCount: r.speaker_count,
+    sourceMessageIds: JSON.parse(r.source_message_ids) as string[],
+    occurrenceCount: r.occurrence_count,
+    firstSeenAt: r.first_seen_at,
+    lastActiveAt: r.last_active_at,
+    checkedBy: r.checked_by,
+    rejected: r.rejected !== 0,
+    schemaVersion: r.schema_version,
+  };
+}
+
+class GroupmateExpressionRepository implements IGroupmateExpressionRepository {
+  constructor(private readonly db: DatabaseSync) {}
+
+  upsert(groupId: string, expression: string, expressionHash: string, speakerUserId: string, sourceMessageId: string): void {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const existing = this.db.prepare(
+      'SELECT speaker_user_ids, source_message_ids, occurrence_count, speaker_count FROM groupmate_expression_samples WHERE group_id = ? AND expression_hash = ?'
+    ).get(groupId, expressionHash) as Pick<GroupmateExpressionRow, 'speaker_user_ids' | 'source_message_ids' | 'occurrence_count' | 'speaker_count'> | undefined;
+
+    if (!existing) {
+      this.db.prepare(`
+        INSERT INTO groupmate_expression_samples
+          (group_id, expression, expression_hash, speaker_user_ids, speaker_count, source_message_ids, occurrence_count, first_seen_at, last_active_at, schema_version)
+        VALUES (?, ?, ?, ?, 1, ?, 1, ?, ?, 2)
+      `).run(groupId, expression, expressionHash, JSON.stringify([speakerUserId]), JSON.stringify([sourceMessageId]), nowSec, nowSec);
+      return;
+    }
+
+    const speakers = JSON.parse(existing.speaker_user_ids) as string[];
+    const msgIds = JSON.parse(existing.source_message_ids) as string[];
+    const isNewSpeaker = !speakers.includes(speakerUserId);
+    if (isNewSpeaker) speakers.push(speakerUserId);
+    if (msgIds.length < 50 && !msgIds.includes(sourceMessageId)) msgIds.push(sourceMessageId);
+
+    this.db.prepare(`
+      UPDATE groupmate_expression_samples
+      SET speaker_user_ids = ?, speaker_count = ?, source_message_ids = ?,
+          occurrence_count = occurrence_count + 1, last_active_at = ?
+      WHERE group_id = ? AND expression_hash = ?
+    `).run(
+      JSON.stringify(speakers),
+      existing.speaker_count + (isNewSpeaker ? 1 : 0),
+      JSON.stringify(msgIds),
+      nowSec,
+      groupId,
+      expressionHash,
+    );
+  }
+
+  listQualified(groupId: string, limit: number): GroupmateExpressionSample[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM groupmate_expression_samples
+      WHERE group_id = ? AND rejected = 0
+        AND (occurrence_count >= 3 OR speaker_count >= 2)
+      ORDER BY speaker_count DESC, occurrence_count DESC, last_active_at DESC
+      LIMIT ?
+    `).all(groupId, limit) as unknown as GroupmateExpressionRow[];
+    return rows.map(groupmateExprFromRow);
+  }
+
+  listAll(groupId: string): GroupmateExpressionSample[] {
+    const rows = this.db.prepare(
+      'SELECT * FROM groupmate_expression_samples WHERE group_id = ? ORDER BY id'
+    ).all(groupId) as unknown as GroupmateExpressionRow[];
+    return rows.map(groupmateExprFromRow);
+  }
+
+  deleteDecayed(groupId: string, cutoffSeconds: number): number {
+    const result = this.db.prepare(`
+      DELETE FROM groupmate_expression_samples
+      WHERE group_id = ? AND last_active_at < ? AND occurrence_count < 3
+    `).run(groupId, cutoffSeconds) as { changes: number };
+    return result.changes;
+  }
+
+  deleteById(id: number): void {
+    this.db.prepare('DELETE FROM groupmate_expression_samples WHERE id = ?').run(id);
+  }
+}
+
 // ---- User style repository ----
 
 class UserStyleRepository implements IUserStyleRepository {
@@ -3122,6 +3255,7 @@ export class Database {
   readonly modRejections: IModRejectionRepository;
   readonly bandoriLives: IBandoriLiveRepository;
   readonly expressionPatterns: IExpressionPatternRepository;
+  readonly groupmateExpressions: IGroupmateExpressionRepository;
   readonly userStyles: IUserStyleRepository;
   readonly userStylesAggregate: IUserStyleAggregateRepository;
   readonly mood: IMoodRepository;
@@ -3162,6 +3296,7 @@ export class Database {
     this.modRejections = new ModRejectionRepository(this._db);
     this.bandoriLives = new BandoriLiveRepository(this._db);
     this.expressionPatterns = new ExpressionPatternRepository(this._db);
+    this.groupmateExpressions = new GroupmateExpressionRepository(this._db);
     this.userStyles = new UserStyleRepository(this._db);
     this.userStylesAggregate = new UserStyleAggregateRepository(this._db);
     this.mood = new MoodRepository(this._db);
@@ -3678,6 +3813,29 @@ export class Database {
       )
     `);
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_expression_patterns_group_weight ON expression_patterns(group_id, weight DESC)`);
+
+    // groupmate_expression_samples — P3 groupmate-only expression learning.
+    this._db.exec(`
+      CREATE TABLE IF NOT EXISTS groupmate_expression_samples (
+        id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id             TEXT    NOT NULL,
+        expression           TEXT    NOT NULL,
+        expression_hash      TEXT    NOT NULL,
+        speaker_user_ids     TEXT    NOT NULL,
+        speaker_count        INTEGER NOT NULL DEFAULT 1,
+        source_message_ids   TEXT    NOT NULL,
+        occurrence_count     INTEGER NOT NULL DEFAULT 1,
+        first_seen_at        INTEGER NOT NULL,
+        last_active_at       INTEGER NOT NULL,
+        checked_by           TEXT,
+        rejected             INTEGER NOT NULL DEFAULT 0,
+        modified_by          TEXT,
+        schema_version       INTEGER NOT NULL DEFAULT 2
+      )
+    `);
+    this._db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_gex_group_hash ON groupmate_expression_samples(group_id, expression_hash)`);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_gex_group_quality ON groupmate_expression_samples(group_id, speaker_count DESC, occurrence_count DESC, last_active_at DESC)`);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_gex_group_active ON groupmate_expression_samples(group_id, last_active_at DESC)`);
 
     // user_styles — per-user speaking style profiles (H1 layer 2).
     this._db.exec(`
