@@ -46,6 +46,7 @@ import { isDirectQuestion, isGroundedOpinionQuestion } from '../utils/is-direct-
 import { extractTermFromTopic } from './fact-topic-prefixes.js';
 import { buildFactualContextSignal } from './factual-context-signal.js';
 import { type BaseResultMeta, type ReplyMeta, type StickerMeta, type ChatResult } from '../utils/chat-result.js';
+import { pickAtFallback, classifyAtFallbackReason } from './fallback-pool.js';
 import { GroupmateVoice, type VoiceBlock } from './groupmate-voice.js';
 import { isAddresseeScopeViolation } from '../utils/sentinel.js';
 
@@ -2548,6 +2549,9 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       // Use whitelist-aware mface filtering: keep mface codes whose key is
       // in the group's learned sticker pool (P0-1 fix for mface strip bug)
       const mfaceKeys = this.localStickerRepo?.getMfaceKeys(groupId) ?? null;
+      // Capture explicit LLM opt-out BEFORE sanitize strips <skip> to empty.
+      // "..." is sentinel's emergency drop (forbidden content), not LLM choice.
+      const llmExplicitlySkipped = /^<skip>\s*$/i.test(text.trim());
       let processed = applyPersonaFilters(sanitize(text), mfaceKeys);
 
       // P3-4a: Entity guard — replace disparagement with neutral fallback
@@ -2629,13 +2633,18 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
         return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'guard' };
       }
 
-      // Claude explicitly skips this trigger
-      if (/^<skip>\s*$/i.test(processed)) {
+      // Claude explicitly skips this trigger (post-sanitize: <skip> becomes '' after postProcess strips it)
+      if (/^<skip>\s*$/i.test(processed) || (llmExplicitlySkipped && !processed)) {
         this.logger.debug({ groupId, trigger: triggerMessage.content }, 'Claude explicitly skipped');
         metaBuilder.setGuardPath('post-process');
+        if (isDirectTrigger) {
+          const reason = classifyAtFallbackReason(triggerMessage.content);
+          return { kind: 'fallback', text: pickAtFallback(triggerMessage.content), meta: metaBuilder.buildBase('fallback'), reasonCode: reason };
+        }
         return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'guard' };
       }
-      // Claude signals disinterest via "...", "。", or empty — drop silently
+      // Claude signals disinterest via "...", "。", or empty (non-skip) — drop silently.
+      // "..." is the sentinel's emergency-drop for forbidden content — keep as silent (security guard).
       if (!processed || processed === '...' || processed === '。') {
         this.logger.debug({ groupId }, 'Claude opted out — dropping reply silently');
         metaBuilder.setGuardPath('post-process');

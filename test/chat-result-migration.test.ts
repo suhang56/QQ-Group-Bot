@@ -83,19 +83,22 @@ describe('ChatResult migration — return type is always ChatResult', () => {
     }
   });
 
-  it('LLM returns <skip> → kind === silent', async () => {
+  it('LLM returns <skip> on non-direct trigger → kind === silent', async () => {
     const claude = makeClaude('<skip>');
     const chat = makeChat(claude, db);
-    const result = await chat.generateReply('g1', makeMsg({ rawContent: `[CQ:at,qq=${BOT_ID}] hello` }), []);
-    expect(isSilent(result)).toBe(true);
-    expect('text' in result).toBe(false);
+    // Non-direct: no @-mention, just ambient chat (low score → silent via engagement gate or skip)
+    const result = await chat.generateReply('g1', makeMsg({ rawContent: 'hello', chatMinScore: 999 }), []);
+    // Either silently gated (low score) or skipped — result is not sendable text
+    expect(isSendable(result)).toBe(false);
   });
 
-  it('silent result is NOT sendable', async () => {
+  it('LLM returns <skip> on direct @-mention → kind === fallback (bot-blank-needed-ack)', async () => {
     const claude = makeClaude('<skip>');
     const chat = makeChat(claude, db);
     const result = await chat.generateReply('g1', makeMsg({ rawContent: `[CQ:at,qq=${BOT_ID}] hello` }), []);
-    expect(isSendable(result)).toBe(false);
+    expect(result.kind).toBe('fallback');
+    expect('text' in result && typeof result.text).toBe('string');
+    expect(isSendable(result)).toBe(true);
   });
 
   it('reply result has meta.injectedFactIds as array', async () => {
