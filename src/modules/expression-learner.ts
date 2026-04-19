@@ -1,4 +1,4 @@
-import type { IMessageRepository, IExpressionPatternRepository, ExpressionPattern, Message } from '../storage/db.js';
+import type { IMessageRepository, IExpressionPatternRepository, IGroupmateExpressionRepository, ExpressionPattern, Message } from '../storage/db.js';
 import { createLogger } from '../utils/logger.js';
 import { sanitizeForPrompt, hasJailbreakPattern } from '../utils/prompt-sanitize.js';
 import { hasSpectatorJudgmentTemplate } from '../utils/sentinel.js';
@@ -11,9 +11,23 @@ const COMMAND_RE = /^\//;
 export const FEWSHOT_DEFAULT_N = 3;
 export const FEWSHOT_MAX_N = 5;
 
+function fnv1aHash(s: string): string {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = (h * 16777619) >>> 0;
+  }
+  return h.toString(16);
+}
+
+function compactExpression(s: string): string {
+  return s.replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
 export interface ExpressionLearnerOptions {
   messages: IMessageRepository;
   expressionPatterns: IExpressionPatternRepository;
+  groupmateExpressions: IGroupmateExpressionRepository;
   botUserId: string;
   logger?: Logger;
   decayDays?: number;
@@ -23,14 +37,20 @@ export interface ExpressionLearnerOptions {
 export class ExpressionLearner {
   private readonly messages: IMessageRepository;
   private readonly patterns: IExpressionPatternRepository;
+  private readonly groupmateExpressions: IGroupmateExpressionRepository;
   private readonly botUserId: string;
   private readonly logger: Logger;
   private readonly decayDays: number;
   private readonly maxPatternsPerGroup: number;
 
+  private static readonly PII_RE = /\d{11}|\d{5,}|小区|单元|门牌|身份证|手机号/;
+  private static readonly URL_RE = /https?:\/\//i;
+  private static readonly CQ_STRIP_RE = /\[CQ:[^\]]+\]/g;
+
   constructor(opts: ExpressionLearnerOptions) {
     this.messages = opts.messages;
     this.patterns = opts.expressionPatterns;
+    this.groupmateExpressions = opts.groupmateExpressions;
     this.botUserId = opts.botUserId;
     this.logger = opts.logger ?? createLogger('expression-learner');
     this.decayDays = opts.decayDays ?? 15;
@@ -44,6 +64,16 @@ export class ExpressionLearner {
     return false;
   }
 
+  private _shouldSkipGroupmate(content: string): boolean {
+    const stripped = content.replace(ExpressionLearner.CQ_STRIP_RE, '').trim();
+    if (stripped.length < 6 || stripped.length > 50) return true;
+    if (CQ_ONLY_RE.test(content)) return true;
+    if (COMMAND_RE.test(stripped)) return true;
+    if (ExpressionLearner.PII_RE.test(stripped)) return true;
+    if (ExpressionLearner.URL_RE.test(content)) return true;
+    return false;
+  }
+
   scan(groupId: string): void {
     const recent = this.messages.getRecent(groupId, 500);
     // getRecent returns DESC order — reverse to chronological
@@ -53,21 +83,50 @@ export class ExpressionLearner {
 
   /**
    * Pure-input variant used by bootstrap-corpus. Caller must pass messages in
-   * chronological (ASC) order. Returns the number of (user → bot) pairs upserted.
+   * chronological (ASC) order. Returns the number of groupmate expressions upserted.
    */
   scanOnMessages(groupId: string, msgs: ReadonlyArray<Message>): number {
+    // Legacy pair-learning path (user→bot). Env flag default=off.
+    if (process.env['LEGACY_INGEST_ENABLED'] === 'true') {
+      return this._scanLegacyPairs(groupId, msgs);
+    }
+
+    let inserted = 0;
+    for (const msg of msgs) {
+      // Only learn from groupmates — never from bot's own messages.
+      if (msg.userId === this.botUserId) continue;
+      if (hasSpectatorJudgmentTemplate(msg.content)) continue;
+      if (this._shouldSkipGroupmate(msg.content)) continue;
+      // Skip reply-to-bot metadata markers.
+      if (msg.content.startsWith('[CQ:reply') && msgs.some(
+        m => m.userId === this.botUserId && String(m.id) === msg.content.match(/id=(\d+)/)?.[1],
+      )) continue;
+
+      const stripped = msg.content.replace(ExpressionLearner.CQ_STRIP_RE, '').trim();
+      const expression = stripped.slice(0, 50);
+      const hash = fnv1aHash(compactExpression(expression));
+      const msgId = String(msg.id);
+
+      this.groupmateExpressions.upsert(groupId, expression, hash, msg.userId, msgId);
+      inserted++;
+    }
+
+    this.logger.debug({ groupId, scanned: inserted }, 'groupmate expression scan complete');
+    return inserted;
+  }
+
+  // Legacy path preserved for rollback via LEGACY_INGEST_ENABLED=true.
+  private _scanLegacyPairs(groupId: string, msgs: ReadonlyArray<Message>): number {
     let inserted = 0;
     for (let i = 0; i < msgs.length - 1; i++) {
       const userMsg = msgs[i]!;
       const botMsg = msgs[i + 1]!;
 
-      // Must be: non-bot → bot consecutive pair
       if (userMsg.userId === this.botUserId) continue;
       if (botMsg.userId !== this.botUserId) continue;
 
       if (this._shouldSkip(userMsg.content) || this._shouldSkip(botMsg.content)) continue;
 
-      // Filter spectator-judgment template from bot self-replies before persisting.
       if (hasSpectatorJudgmentTemplate(botMsg.content)) continue;
 
       const situation = userMsg.content.slice(0, 50);
@@ -77,7 +136,7 @@ export class ExpressionLearner {
       inserted++;
     }
 
-    this.logger.debug({ groupId, scannedPairs: inserted }, 'expression scan complete');
+    this.logger.debug({ groupId, scannedPairs: inserted }, 'expression scan complete (legacy)');
     return inserted;
   }
 
