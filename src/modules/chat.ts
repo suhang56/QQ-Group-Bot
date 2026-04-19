@@ -45,7 +45,8 @@ import { WebLookup, shouldLookupTerm, DEFAULT_COMMON_WORDS } from './web-lookup.
 import { isDirectQuestion, isGroundedOpinionQuestion } from '../utils/is-direct-question.js';
 import { extractTermFromTopic } from './fact-topic-prefixes.js';
 import { buildFactualContextSignal } from './factual-context-signal.js';
-import { CHAT_SILENT_SKIP } from '../utils/chat-control.js';
+import { type BaseResultMeta, type ReplyMeta, type StickerMeta, type ChatResult } from '../utils/chat-result.js';
+import { pickAtFallback, classifyAtFallbackReason } from './fallback-pool.js';
 import { GroupmateVoice, type VoiceBlock } from './groupmate-voice.js';
 import { isAddresseeScopeViolation } from '../utils/sentinel.js';
 
@@ -149,7 +150,7 @@ export function formatAddressingHint(rel: SocialRelation, nickname: string): str
 }
 
 export interface IChatModule {
-  generateReply(groupId: string, triggerMessage: GroupMessage, _recentMessages: GroupMessage[]): Promise<string | null>;
+  generateReply(groupId: string, triggerMessage: GroupMessage, _recentMessages: GroupMessage[]): Promise<ChatResult>;
   generatePrivateReply(
     groupId: string,
     userId: string,
@@ -159,15 +160,12 @@ export interface IChatModule {
   recordOutgoingMessage(groupId: string, msgId: number): void;
   markReplyToUser(groupId: string, userId: string): void;
   invalidateLore(groupId: string): void;
-  getLastStickerKey(groupId: string): string | null;
   tickStickerRefresh(groupId: string): void;
   getMoodTracker(): MoodTracker;
   noteAdminActivity(groupId: string, userId: string, nickname: string, content: string): void;
   /** W-A: per-message honest-gaps hook. Optional so older test stubs still
    *  satisfy IChatModule; router guards with typeof check. */
   recordHonestGapsMessage?(groupId: string, content: string, nowMs: number): void;
-  getEvasiveFlagForLastReply(groupId: string): boolean;
-  getInjectedFactIdsForLastReply(groupId: string): number[];
   getConsecutiveReplies(groupId: string): number;
   getActivityLevel(groupId: string): 'idle' | 'normal' | 'busy';
 }
@@ -828,6 +826,42 @@ export function buildMoodHint(mood: 'playful' | 'tense' | null): string {
 
 const MAX_OUTGOING_IDS = 50;
 
+class ReplyMetaBuilder {
+  private guardPath: BaseResultMeta['guardPath'] | undefined;
+  private promptVariant: BaseResultMeta['promptVariant'] | undefined;
+  private evasive = false;
+  private injectedFactIds: number[] = [];
+  private matchedFactIds: number[] = [];
+  private usedVoiceCount = 0;
+  private usedFactHint = false;
+
+  setGuardPath(g: BaseResultMeta['guardPath']): this { this.guardPath = g; return this; }
+  setPromptVariant(v: BaseResultMeta['promptVariant']): this { this.promptVariant = v; return this; }
+  setEvasive(e: boolean): this { this.evasive = e; return this; }
+  setFactIds(injected: number[], matched: number[]): this {
+    this.injectedFactIds = injected;
+    this.matchedFactIds = matched;
+    this.usedFactHint = matched.length > 0;
+    return this;
+  }
+  setVoiceCount(n: number): this { this.usedVoiceCount = n; return this; }
+
+  buildBase(decisionPath: BaseResultMeta['decisionPath']): BaseResultMeta {
+    return { decisionPath, guardPath: this.guardPath, promptVariant: this.promptVariant };
+  }
+  buildReply(decisionPath: BaseResultMeta['decisionPath']): ReplyMeta {
+    return {
+      decisionPath, guardPath: this.guardPath, promptVariant: this.promptVariant,
+      evasive: this.evasive, injectedFactIds: this.injectedFactIds,
+      matchedFactIds: this.matchedFactIds, usedVoiceCount: this.usedVoiceCount,
+      usedFactHint: this.usedFactHint,
+    };
+  }
+  buildSticker(key: string, score?: number): StickerMeta {
+    return { decisionPath: 'sticker', guardPath: this.guardPath, promptVariant: this.promptVariant, key, score };
+  }
+}
+
 export class ChatModule implements IChatModule {
   private readonly logger = createLogger('chat');
   private readonly debounceMs: number;
@@ -972,9 +1006,6 @@ export class ChatModule implements IChatModule {
     updatedAt: string;
     compiled: Array<{ name: string; re: RegExp; weight: number }>;
   }>();
-  // per-group: key of the most recent sticker the bot sent via sticker-first.
-  // Used by /sticker_ban to identify the target when admin says "don't use that one".
-  private readonly lastStickerKeyByGroup = new Map<string, string>();
   // per-group: active topic engagement state (set when bot replies, consumed in scoring)
   private readonly engagedTopic = new Map<string, { tokens: Set<string>; until: number; msgCount: number }>();
   // per-group: admin userId → { nickname, samples[] } (populated from live messages)
@@ -1013,12 +1044,7 @@ export class ChatModule implements IChatModule {
   private honestGapsTracker: { recordMessage(groupId: string, content: string, nowMs: number): void } | null = null;
   // Path A: on-demand jargon lookup via BM25+LLM inference.
   private onDemandLookup: OnDemandLookup | null = null;
-  // per-group: whether the last generateReply call returned an evasive reply
-  private readonly lastEvasiveReply = new Map<string, boolean>();
   private readonly conversationState = new ConversationStateTracker();
-  // per-group: fact ids injected into the system prompt of the last generateReply.
-  // Router reads this right after generateReply returns to wire into self-learning.rememberInjection.
-  private readonly lastInjectedFactIds = new Map<string, number[]>();
 
   private readonly loreDirPath: string;
   private readonly loreSizeCapBytes: number;
@@ -1375,29 +1401,12 @@ export class ChatModule implements IChatModule {
     return false;
   }
 
-  /**
-   * Returns whether the last generateReply call for a group produced an evasive reply.
-   * Router reads this synchronously right after generateReply returns.
-   */
-  getEvasiveFlagForLastReply(groupId: string): boolean {
-    return this.lastEvasiveReply.get(groupId) ?? false;
-  }
-
   getConsecutiveReplies(groupId: string): number {
     return this.consecutiveReplies.get(groupId) ?? 0;
   }
 
   getActivityLevel(groupId: string): 'idle' | 'normal' | 'busy' {
     return this.activityTracker.level(groupId);
-  }
-
-  /**
-   * Returns the fact ids that were injected into the most recent generateReply
-   * system prompt for this group. Router pairs this with the bot_replies row id
-   * to let self-learning remember what facts shaped a given reply.
-   */
-  getInjectedFactIdsForLastReply(groupId: string): number[] {
-    return this.lastInjectedFactIds.get(groupId) ?? [];
   }
 
   /** Record a message from a group admin/owner for speech-style mirroring. */
@@ -1490,11 +1499,6 @@ export class ChatModule implements IChatModule {
     }
   }
 
-  /** Return the key of the most recent sticker sent via sticker-first in this group, or null. */
-  getLastStickerKey(groupId: string): string | null {
-    return this.lastStickerKeyByGroup.get(groupId) ?? null;
-  }
-
   /** Evict lore + identity caches for a group so next message re-reads the updated file. */
   invalidateLore(groupId: string): void {
     if (this.loreLoader) {
@@ -1534,18 +1538,9 @@ export class ChatModule implements IChatModule {
     groupId: string,
     triggerMessage: GroupMessage,
     _recentMessages: GroupMessage[]
-  ): Promise<string | null> {
+  ): Promise<ChatResult> {
     this.knownGroups.add(groupId);
-
-    // Clear per-group volatile state at turn-start so early-return paths
-    // (pure @, react deflection, rate-limit, debounce, relay, etc.) don't
-    // let the prior turn's injectedFactIds / evasive flag leak into router
-    // bookkeeping and get associated with this turn's reply. The actual
-    // values are set later only if we reach the prompt-build / post-process
-    // stages; if an early return fires, the map simply stays empty for the
-    // next read.
-    this.lastInjectedFactIds.set(groupId, []);
-    this.lastEvasiveReply.set(groupId, false);
+    const metaBuilder = new ReplyMetaBuilder();
 
     // M6.4: snapshot consecutive-reply count as it stood at the moment this
     // peer message arrived, BEFORE any reset. Gate 5.6 reads this snapshot
@@ -1575,13 +1570,13 @@ export class ChatModule implements IChatModule {
 
     // Empty content after CQ stripping (and not a pure @-mention)
     if (!triggerMessage.content.trim() && !isPureAtMention) {
-      return null;
+      return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'timing' };
     }
 
     // Group reply rate limit
     if (!this._checkGroupLimit(groupId)) {
       this.logger.warn({ groupId }, 'Group chat reply rate limit reached — silent');
-      return null;
+      return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'timing' };
     }
 
     // Debounce: if another message came in within debounceMs, skip this one
@@ -1600,7 +1595,7 @@ export class ChatModule implements IChatModule {
           { groupId, userId: triggerMessage.userId, remainingMs: ignoreUntil - now },
           '@-spam silent-ignore window active — dropping message',
         );
-        return null;
+        return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'bot-triggered' };
       }
       // Expired — lazy cleanup
       this.atMentionIgnoreUntil.delete(ignoreKey);
@@ -1625,19 +1620,19 @@ export class ChatModule implements IChatModule {
         { groupId, userId: triggerMessage.userId, count: atSpamCount, ignoreForMs: this.atMentionCurseIgnoreMs },
         '@-spam curse+ignore fired',
       );
-      return phrase;
+      return { kind: 'reply', text: phrase, meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
     }
 
     const lastTrigger = this.debounceMap.get(groupId);
     this.debounceMap.set(groupId, now);
     if (lastTrigger !== undefined && now - lastTrigger < this.debounceMs) {
-      return null;
+      return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'timing' };
     }
 
     // In-flight lock
     if (this.inFlightGroups.has(groupId)) {
       this.logger.debug({ groupId }, 'Reply in-flight — dropping duplicate trigger');
-      return null;
+      return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'timing' };
     }
 
     // Pure @-mention: skip full chat pipeline, return at_only deflection
@@ -1645,7 +1640,8 @@ export class ChatModule implements IChatModule {
       this.lastProactiveReply.set(groupId, now);
       this.botSpeechTracking.set(groupId, { lastSpokeAt: now, msgsSinceSpoke: 0, engagementReceived: false });
       this._bumpConsecutive(groupId);
-      return this._generateDeflection('at_only', triggerMessage);
+      const atOnlyText = await this._generateDeflection('at_only', triggerMessage);
+      return { kind: 'fallback', text: atOnlyText, meta: metaBuilder.buildBase('fallback'), reasonCode: 'pure-at' };
     }
 
     // Vision: if message contains an image CQ, describe it and enrich content
@@ -1880,7 +1876,7 @@ export class ChatModule implements IChatModule {
     }, 'engagement decision');
 
     if (!engagementDecision.shouldReply) {
-      return null;
+      return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'guard' };
     }
 
     // Relay detection: pre-LLM gate. Code-level carveout; prompt rules at
@@ -1893,11 +1889,11 @@ export class ChatModule implements IChatModule {
         if (now - lastReplyMs >= 2 * 60 * 1000) {
           this.lastProactiveReply.set(groupId, now);
           this._bumpConsecutive(groupId);
-          return relayDetection.content;
+          return { kind: 'reply', text: relayDetection.content, meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
         }
       }
       // Relay detected but bot sits out — no LLM call
-      return null;
+      return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'timing' };
     }
 
     // Record last-reply timestamp for silence factor (applies to all replies)
@@ -1981,17 +1977,18 @@ export class ChatModule implements IChatModule {
       this._bumpConsecutive(groupId);
       if (isAdversarial) {
         const isCurse = this._teaseIncrement(groupId, triggerMessage.userId, now);
-        if (isCurse) return this._generateDeflection('curse', triggerMessage);
-        if (isHarass) return this._generateDeflection('curse', triggerMessage); // harassment → always curse-tier
-        if (isProbe) return this._generateDeflection('identity', triggerMessage);
+        if (isCurse) return { kind: 'reply', text: await this._generateDeflection('curse', triggerMessage), meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
+        if (isHarass) return { kind: 'reply', text: await this._generateDeflection('curse', triggerMessage), meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
+        if (isProbe) return { kind: 'reply', text: await this._generateDeflection('identity', triggerMessage), meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
         if (isTask) {
           const isRecite = /(背|接龙|续写|恩师|接下[一]?句|继续[背念说])/i.test(triggerMessage.content);
-          return this._generateDeflection(isRecite ? 'recite' : 'task', triggerMessage);
+          return { kind: 'reply', text: await this._generateDeflection(isRecite ? 'recite' : 'task', triggerMessage), meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
         }
-        return this._generateDeflection('memory', triggerMessage);
+        return { kind: 'reply', text: await this._generateDeflection('memory', triggerMessage), meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
       }
       // Non-adversarial react: low comprehension → confused deflection
-      return this._generateDeflection('confused', triggerMessage);
+      const confusedText = await this._generateDeflection('confused', triggerMessage);
+      return { kind: 'fallback', text: confusedText, meta: metaBuilder.buildBase('fallback'), reasonCode: 'low-comprehension-direct' };
     }
 
     // ── Mood update ───────────────────────────────────────────────────────
@@ -2340,7 +2337,7 @@ export class ChatModule implements IChatModule {
     const { text: factsBlock, injectedFactIds, matchedFactIds: matchedFactRetrievalIds, pinnedOnly: factsBlockPinnedOnly } =
       (await this.selfLearning?.formatFactsForPrompt(groupId, 50, triggerMessage.content))
       ?? { text: '', injectedFactIds: [], matchedFactIds: [], pinnedOnly: false };
-    this.lastInjectedFactIds.set(groupId, injectedFactIds);
+    metaBuilder.setFactIds(injectedFactIds, matchedFactRetrievalIds);
     // Used by hasRealFactHit below. factsBlock non-empty alone is NOT a
     // "trigger hit a fact" signal because pinned-newest + recency fallback
     // always populate it. Only retrieval hits (BM25/vector/Path A) count.
@@ -2404,6 +2401,7 @@ export class ChatModule implements IChatModule {
       activeMemeJokes: activeMemeJokes.length > 0 ? activeMemeJokes : undefined,
     };
     const variant = pickVariant(variantCtx);
+    metaBuilder.setPromptVariant(variant as BaseResultMeta['promptVariant']);
     const variantBlock = buildVariantSystemPrompt(variantCtx).systemPrompt;
     this.logger.debug({ groupId, variant, activeJokeHit, sensitiveEntityHit }, 'prompt variant selected');
 
@@ -2469,6 +2467,7 @@ export class ChatModule implements IChatModule {
           maxSamples: hasRealFactHit ? 4 : 12,
         })
       : { text: '', sampleCount: 0, speakerCount: 0, substantiveCount: 0, seed: 0 };
+    metaBuilder.setVoiceCount(voiceBlock.sampleCount);
     if (voiceBlock.sampleCount > 0) {
       this.logger.debug(
         { groupId, sampleCount: voiceBlock.sampleCount, speakerCount: voiceBlock.speakerCount,
@@ -2550,6 +2549,9 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       // Use whitelist-aware mface filtering: keep mface codes whose key is
       // in the group's learned sticker pool (P0-1 fix for mface strip bug)
       const mfaceKeys = this.localStickerRepo?.getMfaceKeys(groupId) ?? null;
+      // Capture explicit LLM opt-out BEFORE sanitize strips <skip> to empty.
+      // "..." is sentinel's emergency drop (forbidden content), not LLM choice.
+      const llmExplicitlySkipped = /^<skip>\s*$/i.test(text.trim());
       let processed = applyPersonaFilters(sanitize(text), mfaceKeys);
 
       // P3-4a: Entity guard — replace disparagement with neutral fallback
@@ -2605,17 +2607,19 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
         );
         if (isAddresseeScopeViolation(processed, dSpeakers)) {
           this.logger.info({ groupId, processed, dSpeakers }, 'addressee-scope guard: regen once');
+          metaBuilder.setGuardPath('addressee-regen');
           try {
             const scopeRegenResponse = await chatRequest(true);
             const scopeRegenText = applyPersonaFilters(sanitize(scopeRegenResponse.text), mfaceKeys);
             if (!scopeRegenText || isAddresseeScopeViolation(scopeRegenText, dSpeakers)) {
-              this.logger.info({ groupId, dSpeakers }, 'addressee-scope guard: regen fail → CHAT_SILENT_SKIP');
-              return CHAT_SILENT_SKIP;
+              this.logger.info({ groupId, dSpeakers }, 'addressee-scope guard: regen fail → silent');
+              return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'scope' };
             }
             // Skip near-dup for this regen output only (narrow)
-            return scopeRegenText;
+            metaBuilder.setEvasive(this._isEvasiveReply(scopeRegenText));
+            return { kind: 'reply', text: scopeRegenText, meta: metaBuilder.buildReply('normal'), reasonCode: 'engaged' };
           } catch {
-            return CHAT_SILENT_SKIP;
+            return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'scope' };
           }
         }
       }
@@ -2625,26 +2629,38 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
           { groupId, reply: processed, trigger: triggerMessage.content },
           'non-direct image reply invented story/staging — dropping',
         );
-        return null;
+        metaBuilder.setGuardPath('entity-guard');
+        return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'guard' };
       }
 
-      // Claude explicitly skips this trigger
-      if (/^<skip>\s*$/i.test(processed)) {
+      // Claude explicitly skips this trigger (post-sanitize: <skip> becomes '' after postProcess strips it)
+      if (/^<skip>\s*$/i.test(processed) || (llmExplicitlySkipped && !processed)) {
         this.logger.debug({ groupId, trigger: triggerMessage.content }, 'Claude explicitly skipped');
-        return null;
+        metaBuilder.setGuardPath('post-process');
+        if (isDirectTrigger) {
+          const reason = classifyAtFallbackReason(triggerMessage.content);
+          return { kind: 'fallback', text: pickAtFallback(triggerMessage.content), meta: metaBuilder.buildBase('fallback'), reasonCode: reason };
+        }
+        return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'guard' };
       }
-      // Claude signals disinterest via "...", "。", or empty — drop silently
+      // Claude signals disinterest via "...", "。", or empty (non-skip) — drop silently.
+      // "..." is the sentinel's emergency-drop for forbidden content — keep as silent (security guard).
       if (!processed || processed === '...' || processed === '。') {
         this.logger.debug({ groupId }, 'Claude opted out — dropping reply silently');
-        return null;
+        metaBuilder.setGuardPath('post-process');
+        return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'guard' };
       }
       // Confabulation detector: soft-drop if bot claims it already said something
       const confabFallback = checkConfabulation(processed, triggerMessage.content, { groupId });
-      if (confabFallback !== null) return null;
+      if (confabFallback !== null) {
+        metaBuilder.setGuardPath('confab-regen');
+        return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'confabulation' };
+      }
       // Echo detector: drop replies that are essentially the trigger parroted back
       if (isEcho(processed, triggerMessage.content)) {
         this.logger.info({ groupId, reply: processed, trigger: triggerMessage.content }, 'Echo detected — dropping reply silently');
-        return null;
+        metaBuilder.setGuardPath('post-process');
+        return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'guard' };
       }
       // Self-dedup: drop replies that are near-duplicates of a recent own reply.
       // Gemini sometimes re-generates the same response to a repeated trigger
@@ -2672,7 +2688,8 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       });
       if (nearDup) {
         this.logger.info({ groupId, reply: processed, duplicateOf: nearDup }, 'Near-duplicate of recent own reply — dropping');
-        return null;
+        metaBuilder.setGuardPath('near-dup');
+        return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'guard' };
       }
 
       // T2 tone-humanize: skeleton-level near-dup detection.
@@ -2689,7 +2706,8 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
         });
         if (skelDup) {
           this.logger.info({ groupId, reply: processed, skeletonDupOf: skelDup, skeleton: candidateSkeleton }, 'Skeleton near-dup detected — dropping');
-          return null;
+          metaBuilder.setGuardPath('near-dup');
+          return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'guard' };
         }
       }
 
@@ -2710,7 +2728,6 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
             );
             if (choice) {
               this.stickerFirst.suppressSticker(groupId, choice.key);
-              this.lastStickerKeyByGroup.set(groupId, choice.key);
               this._recordOwnReply(groupId, choice.cqCode);
               this._recordAffinityChat(
                 groupId,
@@ -2725,7 +2742,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
                 engagePathAffinityRecorded,
               );
               this.logger.info({ groupId, key: choice.key, score: choice.score }, 'sticker-first: sending sticker instead of text');
-              return choice.cqCode;
+              return { kind: 'sticker', cqCode: choice.cqCode, meta: metaBuilder.buildSticker(choice.key, choice.score), reasonCode: 'sticker-first' };
             }
           } catch (err) {
             this.logger.error({ err, groupId }, 'sticker-first: unhandled error — falling through to text');
@@ -2754,12 +2771,13 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
         until: Date.now() + 90_000,
         msgCount: 0,
       });
-      this.lastEvasiveReply.set(groupId, this._isEvasiveReply(processed));
-      return processed;
+      const isEvasive = this._isEvasiveReply(processed);
+      metaBuilder.setEvasive(isEvasive);
+      return { kind: 'reply', text: processed, meta: metaBuilder.buildReply(isDirect ? 'direct' : 'normal'), reasonCode: 'engaged' };
     } catch (err) {
       if (err instanceof ClaudeApiError || err instanceof ClaudeParseError) {
         this.logger.error({ err, groupId }, 'Claude API error in chat module — silent');
-        return null;
+        return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'guard' };
       }
       throw err;
     } finally {

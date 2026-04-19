@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ChatModule } from '../src/modules/chat.js';
+import { isSendable } from '../src/utils/chat-result.js';
 import { defaultGroupConfig } from '../src/config.js';
 import type { IClaudeClient, ClaudeResponse } from '../src/ai/claude.js';
 import type { GroupMessage } from '../src/adapter/napcat.js';
@@ -106,7 +107,7 @@ describe('ChatModule — M6.4 consecutive-reply cap', () => {
     const result = await chat.generateReply(
       GROUP_ID, makeMsg({ messageId: 'post-cap', content: '继续聊' }), [],
     );
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
     expect(claude.complete).not.toHaveBeenCalled();
     // Reset happened as part of the call.
     expect(readCount(chat, GROUP_ID)).toBe(0);
@@ -121,7 +122,7 @@ describe('ChatModule — M6.4 consecutive-reply cap', () => {
       rawContent: `[CQ:at,qq=${BOT_ID}] 说话`,
     });
     const result = await chat.generateReply(GROUP_ID, atMsg, []);
-    expect(result).not.toBeNull();
+    expect(result.kind).not.toBe('silent');
     // Counter should have reset AND then been bumped by the reply (value = 1).
     expect(readCount(chat, GROUP_ID)).toBe(1);
   });
@@ -137,7 +138,7 @@ describe('ChatModule — M6.4 consecutive-reply cap', () => {
       rawContent: '[CQ:reply,id=99999] 回复下',
     });
     const result = await chat.generateReply(GROUP_ID, replyMsg, []);
-    expect(result).not.toBeNull();
+    expect(result.kind).not.toBe('silent');
   });
 
   it('peer message (any) resets counter back to 0', async () => {
@@ -151,7 +152,7 @@ describe('ChatModule — M6.4 consecutive-reply cap', () => {
   it('count below cap lets non-direct msg proceed to Claude', async () => {
     seedCount(chat, GROUP_ID, MAX_CONSECUTIVE_BOT_REPLIES - 1);
     const result = await chat.generateReply(GROUP_ID, makeMsg({ content: 'hi there' }), []);
-    expect(result).not.toBeNull();
+    expect(result.kind).not.toBe('silent');
   });
 
   // ── Edge: deflection path bumps counter (sentinel path that bypasses _recordOwnReply) ──
@@ -192,7 +193,7 @@ describe('ChatModule — M6.4 consecutive-reply cap', () => {
     seedCount(debouncedChat, GROUP_ID, 5); // simulate bot monologued via proactive
     // Second peer msg arrives immediately → debounced inside generateReply, but reset still ran.
     const result = await debouncedChat.generateReply(GROUP_ID, makeMsg({ messageId: 'p2', content: '再说' }), []);
-    expect(result).toBeNull(); // debounced
+    expect(result.kind).toBe('silent'); // debounced
     expect(readCount(debouncedChat, GROUP_ID)).toBe(0); // reset fired despite debounce
   });
 
@@ -201,7 +202,7 @@ describe('ChatModule — M6.4 consecutive-reply cap', () => {
     seedCount(chat, GROUP_ID, 3);
     const ack = makeMsg({ content: '好的', rawContent: '好的' });
     const result = await chat.generateReply(GROUP_ID, ack, []);
-    expect(result).toBeNull(); // short ack → skip
+    expect(result.kind).toBe('silent'); // short ack → skip
     expect(readCount(chat, GROUP_ID)).toBe(0); // reset ran
   });
 

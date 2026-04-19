@@ -80,7 +80,7 @@ describe('ChatModule — M7 pre-chat-judge wiring', () => {
       rawContent: '今天天气真好',
     });
     const reply = await chat.generateReply(GROUP, msg, []);
-    expect(reply).not.toBeNull();
+    expect(reply.kind).not.toBe('silent');
   });
 
   it('verdict addressee=other-user + high conf → skip via Gate 3.5a', async () => {
@@ -106,7 +106,7 @@ describe('ChatModule — M7 pre-chat-judge wiring', () => {
 
     const msg = makeMsg();
     const reply = await chat.generateReply(GROUP, msg, []);
-    expect(reply).toBeNull();
+    expect(reply.kind).toBe('silent');
     expect((claude.complete as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
   });
 
@@ -122,7 +122,7 @@ describe('ChatModule — M7 pre-chat-judge wiring', () => {
     });
     // with minScore=-999 and no veto, should engage via normal scoring
     const reply = await chat.generateReply(GROUP, msg, []);
-    expect(reply).not.toBeNull();
+    expect(reply.kind).not.toBe('silent');
     expect(judge.judge).toHaveBeenCalled();
   });
 
@@ -145,7 +145,7 @@ describe('ChatModule — M7 pre-chat-judge wiring', () => {
       content: '你好',
     });
     const reply = await chat.generateReply(GROUP, msg, []);
-    expect(reply).not.toBeNull();
+    expect(reply.kind).not.toBe('silent');
     // direct trigger → judge should NOT have been called (skipJudge=true)
     expect(judge.judge).not.toHaveBeenCalled();
   });
@@ -166,7 +166,7 @@ describe('ChatModule — M7 pre-chat-judge wiring', () => {
 
     const msg = makeMsg({ content: '今天天气真好', rawContent: '今天天气真好' });
     const reply = await chat.generateReply(GROUP, msg, []);
-    expect(reply).toBeNull();
+    expect(reply.kind).toBe('silent');
   });
 
   it('verdict awkward=true but air-reading disabled → ignored (falls through)', async () => {
@@ -186,7 +186,7 @@ describe('ChatModule — M7 pre-chat-judge wiring', () => {
     const msg = makeMsg({ content: '今天天气真好', rawContent: '今天天气真好' });
     const reply = await chat.generateReply(GROUP, msg, []);
     // With air-reading off, awkwardVeto is false → falls through and engages
-    expect(reply).not.toBeNull();
+    expect(reply.kind).not.toBe('silent');
   });
 
   it('verdict shouldEngage=false + engageConfidence>=0.6 → skip via Gate 3.5c', async () => {
@@ -205,7 +205,7 @@ describe('ChatModule — M7 pre-chat-judge wiring', () => {
 
     const msg = makeMsg({ content: '今天天气真好', rawContent: '今天天气真好' });
     const reply = await chat.generateReply(GROUP, msg, []);
-    expect(reply).toBeNull();
+    expect(reply.kind).toBe('silent');
   });
 
   it('judge not invoked for adversarial trigger (skipJudge condition)', async () => {
@@ -251,7 +251,7 @@ describe('ChatModule — M7 pre-chat-judge wiring', () => {
       rawContent: '西瓜没看过她画的本子吗',
     });
     const reply = await chat.generateReply(GROUP, msg, []);
-    expect(reply).toBeNull();
+    expect(reply.kind).toBe('silent');
     expect((claude.complete as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
   });
 

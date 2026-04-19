@@ -108,7 +108,8 @@ describe('ChatModule — sticker-first integration (EC-18, EC-19, EC-20)', () =>
 
     const msg = makeMsg();
     const result = await chat.generateReply('g1', msg, []);
-    expect(result).toBe('[CQ:sticker-match]');
+    expect(result.kind).toBe('sticker');
+    expect('cqCode' in result && result.cqCode).toBe('[CQ:sticker-match]');
   });
 
   // ── Mode OFF: text returned normally ─────────────────────────────────────
@@ -130,7 +131,8 @@ describe('ChatModule — sticker-first integration (EC-18, EC-19, EC-20)', () =>
 
     const msg = makeMsg();
     const result = await chat.generateReply('g1', msg, []);
-    expect(result).toBe('这是文字回复');
+    expect(result.kind).toBe('reply');
+    expect('text' in result && result.text).toBe('这是文字回复');
   });
 
   // ── EC-20: generateReply returns null when LLM says <skip> ───────────────
@@ -152,7 +154,7 @@ describe('ChatModule — sticker-first integration (EC-18, EC-19, EC-20)', () =>
 
     const msg = makeMsg();
     const result = await chat.generateReply('g1', msg, []);
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
     // pickSticker must never have been called (intercept not reached when LLM returns skip)
     // We can verify by checking the repo was never queried
     expect(repo.getTopByGroup).not.toHaveBeenCalled();
@@ -179,7 +181,8 @@ describe('ChatModule — sticker-first integration (EC-18, EC-19, EC-20)', () =>
 
     const msg = makeMsg();
     const result = await chat.generateReply('g1', msg, []);
-    expect(result).toBe('文字回复');
+    expect(result.kind).toBe('reply');
+    expect('text' in result && result.text).toBe('文字回复');
     expect(embedder.embed).not.toHaveBeenCalled();
   });
 
@@ -212,7 +215,8 @@ describe('ChatModule — sticker-first integration (EC-18, EC-19, EC-20)', () =>
 
     const msg = makeMsg();
     const result = await chat.generateReply('g1', msg, []);
-    expect(result).toBe('开心的文字');
+    expect(result.kind).toBe('reply');
+    expect('text' in result && result.text).toBe('开心的文字');
   });
 
   // ── Sticker-first exception falls through to text ─────────────────────────
@@ -236,6 +240,7 @@ describe('ChatModule — sticker-first integration (EC-18, EC-19, EC-20)', () =>
 
     const msg = makeMsg();
     const result = await chat.generateReply('g1', msg, []);
-    expect(result).toBe('安全文字');
+    expect(result.kind).toBe('reply');
+    expect('text' in result && result.text).toBe('安全文字');
   });
 });

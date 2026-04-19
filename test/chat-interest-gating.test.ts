@@ -126,7 +126,7 @@ describe('ChatModule — interest-gating scoring', () => {
   describe('screenshot replay — four failure cases should not engage', () => {
     it('case 1: "别想了" out-of-nowhere — no interest match → skip', async () => {
       const result = await chat.generateReply(GROUP_ID, makeMsg({ content: '别想了' }), []);
-      expect(result).toBeNull();
+      expect(result.kind).toBe('silent');
     });
 
     it('case 2 literal: "西瓜没看过她画的本子吗" (screenshot bug) → bot stays silent', async () => {
@@ -145,7 +145,7 @@ describe('ChatModule — interest-gating scoring', () => {
         makeMsg({ userId: 'u3', content: '西瓜没看过她画的本子吗', rawContent: '西瓜没看过她画的本子吗' }),
         [],
       );
-      expect(result).toBeNull();
+      expect(result.kind).toBe('silent');
     });
 
     it('case 3 literal: "贯穿了我的整个二次元生涯了" (screenshot bug) → bot stays silent', async () => {
@@ -155,12 +155,12 @@ describe('ChatModule — interest-gating scoring', () => {
       // fandom feelings. Now: TASK_REQUEST doesn't fire on attributive "整个",
       // no interest match, no direct trigger → skip.
       const result = await chat.generateReply(GROUP_ID, makeMsg({ content: '贯穿了我的整个二次元生涯了' }), []);
-      expect(result).toBeNull();
+      expect(result.kind).toBe('silent');
     });
 
     it('case 4: "初中那几个" — no interest match at all → skip', async () => {
       const result = await chat.generateReply(GROUP_ID, makeMsg({ content: '初中那几个' }), []);
-      expect(result).toBeNull();
+      expect(result.kind).toBe('silent');
     });
   });
 
@@ -171,7 +171,7 @@ describe('ChatModule — interest-gating scoring', () => {
         makeMsg({ content: '我今天去秋叶原买了 MyGO 专辑', rawContent: '我今天去秋叶原买了 MyGO 专辑' }),
         [],
       );
-      expect(result).toBe('bot reply');
+      expect(result.kind).not.toBe('silent');
     });
   });
 });

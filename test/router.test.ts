@@ -8,10 +8,23 @@ import { Database } from '../src/storage/db.js';
 import { defaultGroupConfig } from '../src/config.js';
 import type { GroupMessage, INapCatAdapter } from '../src/adapter/napcat.js';
 import type { IClaudeClient } from '../src/ai/claude.js';
+import type { ChatResult } from '../src/utils/chat-result.js';
 import { initLogger } from '../src/utils/logger.js';
 import * as os from 'node:os';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+
+function makeReply(text: string): ChatResult {
+  return {
+    kind: 'reply', text,
+    meta: { decisionPath: 'normal', evasive: false, injectedFactIds: [], matchedFactIds: [], usedVoiceCount: 0, usedFactHint: false },
+    reasonCode: 'engaged',
+  };
+}
+
+function makeSilent(): ChatResult {
+  return { kind: 'silent', meta: { decisionPath: 'silent' }, reasonCode: 'timing' };
+}
 
 initLogger({ level: 'silent' });
 
@@ -575,14 +588,12 @@ describe('Router — multi-line chat reply dispatch', () => {
   it('single-line chat reply → adapter.send called once', async () => {
     const router = new Router(db, adapter, new RateLimiter());
     router.setChat({
-      generateReply: vi.fn().mockResolvedValue('一句话'),
+      generateReply: vi.fn().mockResolvedValue(makeReply('一句话')),
       recordOutgoingMessage: vi.fn(),
       markReplyToUser: vi.fn(),
       invalidateLore: vi.fn(),
       tickStickerRefresh: vi.fn(),
       noteAdminActivity: vi.fn(),
-      getEvasiveFlagForLastReply: vi.fn().mockReturnValue(false),
-      getInjectedFactIdsForLastReply: vi.fn().mockReturnValue([]),
     });
     await router.dispatch(makeMsg({ content: 'hello', rawContent: 'hello' }));
     expect(adapter.send).toHaveBeenCalledTimes(1);
@@ -592,14 +603,12 @@ describe('Router — multi-line chat reply dispatch', () => {
   it('two-line chat reply → adapter.send called twice', async () => {
     const router = new Router(db, adapter, new RateLimiter());
     router.setChat({
-      generateReply: vi.fn().mockResolvedValue('第一句\n第二句'),
+      generateReply: vi.fn().mockResolvedValue(makeReply('第一句\n第二句')),
       recordOutgoingMessage: vi.fn(),
       markReplyToUser: vi.fn(),
       invalidateLore: vi.fn(),
       tickStickerRefresh: vi.fn(),
       noteAdminActivity: vi.fn(),
-      getEvasiveFlagForLastReply: vi.fn().mockReturnValue(false),
-      getInjectedFactIdsForLastReply: vi.fn().mockReturnValue([]),
     });
     await router.dispatch(makeMsg({ content: 'hello', rawContent: 'hello' }));
     expect(adapter.send).toHaveBeenCalledTimes(2);
@@ -610,14 +619,12 @@ describe('Router — multi-line chat reply dispatch', () => {
   it('four-line reply capped at three sends', async () => {
     const router = new Router(db, adapter, new RateLimiter());
     router.setChat({
-      generateReply: vi.fn().mockResolvedValue('a\nb\nc\nd'),
+      generateReply: vi.fn().mockResolvedValue(makeReply('a\nb\nc\nd')),
       recordOutgoingMessage: vi.fn(),
       markReplyToUser: vi.fn(),
       invalidateLore: vi.fn(),
       tickStickerRefresh: vi.fn(),
       noteAdminActivity: vi.fn(),
-      getEvasiveFlagForLastReply: vi.fn().mockReturnValue(false),
-      getInjectedFactIdsForLastReply: vi.fn().mockReturnValue([]),
     });
     await router.dispatch(makeMsg({ content: 'hello', rawContent: 'hello' }));
     expect(adapter.send).toHaveBeenCalledTimes(3);
@@ -625,7 +632,7 @@ describe('Router — multi-line chat reply dispatch', () => {
 
   it('null chat reply → adapter.send not called', async () => {
     const router = new Router(db, adapter, new RateLimiter());
-    router.setChat({ generateReply: vi.fn().mockResolvedValue(null), recordOutgoingMessage: vi.fn(), markReplyToUser: vi.fn(), invalidateLore: vi.fn(), tickStickerRefresh: vi.fn(), noteAdminActivity: vi.fn(), getEvasiveFlagForLastReply: vi.fn().mockReturnValue(false), getInjectedFactIdsForLastReply: vi.fn().mockReturnValue([]) });
+    router.setChat({ generateReply: vi.fn().mockResolvedValue(makeSilent()), recordOutgoingMessage: vi.fn(), markReplyToUser: vi.fn(), invalidateLore: vi.fn(), tickStickerRefresh: vi.fn(), noteAdminActivity: vi.fn() });
     await router.dispatch(makeMsg({ content: 'hello', rawContent: 'hello' }));
     expect(adapter.send).not.toHaveBeenCalled();
   });
@@ -858,14 +865,12 @@ describe('Router — @-mention queue with quote-reply', () => {
 
   function makeChat(reply = '你好啊') {
     return {
-      generateReply: vi.fn().mockResolvedValue(reply),
+      generateReply: vi.fn().mockResolvedValue(makeReply(reply)),
       recordOutgoingMessage: vi.fn(),
       markReplyToUser: vi.fn(),
       invalidateLore: vi.fn(),
       tickStickerRefresh: vi.fn(),
       noteAdminActivity: vi.fn(),
-      getEvasiveFlagForLastReply: vi.fn().mockReturnValue(false),
-      getInjectedFactIdsForLastReply: vi.fn().mockReturnValue([]),
     };
   }
 
@@ -909,7 +914,7 @@ describe('Router — @-mention queue with quote-reply', () => {
     const chat = {
       // slow reply to keep first one in-flight
       generateReply: vi.fn().mockImplementation(
-        () => new Promise(r => setTimeout(() => r('ok'), 100))
+        () => new Promise(r => setTimeout(() => r(makeReply('ok')), 100))
       ),
       recordOutgoingMessage: vi.fn(),
       markReplyToUser: vi.fn(),
@@ -1138,7 +1143,7 @@ describe('Router — passive image describe', () => {
 
     // Chat module that always returns null (no reply)
     router.setChat({
-      generateReply: vi.fn().mockResolvedValue(null),
+      generateReply: vi.fn().mockResolvedValue(makeSilent()),
       recordOutgoingMessage: vi.fn(),
       destroy: vi.fn(),
     } as never);
@@ -1166,7 +1171,7 @@ describe('Router — passive image describe', () => {
 
     const describeFromMessage = vi.fn().mockResolvedValue('');
     router.setVisionService({ describeFromMessage } as never);
-    router.setChat({ generateReply: vi.fn().mockResolvedValue(null), recordOutgoingMessage: vi.fn(), destroy: vi.fn() } as never);
+    router.setChat({ generateReply: vi.fn().mockResolvedValue(makeSilent()), recordOutgoingMessage: vi.fn(), destroy: vi.fn() } as never);
 
     await router.dispatch(makeMsg({ rawContent: 'plain text message', content: 'plain text' }));
 

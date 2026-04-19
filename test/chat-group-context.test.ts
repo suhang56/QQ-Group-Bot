@@ -79,9 +79,9 @@ describe('chat group-context render — bot rows tagged as [你(...)]:', () => {
 
     const result = await chat.generateReply('g1', makeTriggerMsg(), db.messages.getRecent('g1', 20));
 
-    // <skip> sentinel → null reply is fine; we only care about the prompt the
+    // <skip> sentinel → silent result is fine; we only care about the prompt the
     // LLM was given.
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
     expect(claude.complete).toHaveBeenCalledTimes(1);
 
     expect(capture.prompt).toContain('[你(机器人)]: 羊宫妃那啊 那个声优');
