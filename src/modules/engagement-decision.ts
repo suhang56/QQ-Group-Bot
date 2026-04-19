@@ -256,7 +256,7 @@ export interface PreGenerateContext {
   groupId: string;
   /** Trigger message metadata */
   msg: { messageId: string; userId: string; content: string; timestamp: number };
-  /** Recent messages in the group (timestamps in milliseconds) */
+  /** Recent messages in the group (timestamps in epoch seconds) */
   recentMsgs: Array<{ userId: string; timestamp: number; messageId: string }>;
   nowSec: number;
   isDirect: boolean;

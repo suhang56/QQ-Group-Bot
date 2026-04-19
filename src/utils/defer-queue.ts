@@ -47,6 +47,26 @@ export class DeferQueue {
     return result;
   }
 
+  /** Pull ready items for a single group only (deadlineSec <= nowSec). Removes from queue. */
+  dequeueReadyForGroup(groupId: string, nowSec: number): DeferredItem[] {
+    const items = this.queue.get(groupId) ?? [];
+    const ready: DeferredItem[] = [];
+    const remaining: DeferredItem[] = [];
+    for (const item of items) {
+      if (item.deadlineSec <= nowSec) {
+        ready.push(item);
+      } else {
+        remaining.push(item);
+      }
+    }
+    if (remaining.length === 0) {
+      this.queue.delete(groupId);
+    } else {
+      this.queue.set(groupId, remaining);
+    }
+    return ready;
+  }
+
   /** Pull items that are stale (past deadlineSec + DEFER_TTL_SEC). Removes from queue. */
   removeStale(nowSec: number): DeferredItem[] {
     const result: DeferredItem[] = [];

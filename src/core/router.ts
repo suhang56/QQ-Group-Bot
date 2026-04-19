@@ -281,7 +281,7 @@ export class Router implements IRouter {
     if (!this.deferQueue) return;
     const nowSec = Math.floor(Date.now() / 1000);
     for (const groupId of this.deferQueue.getAllGroups()) {
-      const ready = this.deferQueue.dequeueReady(nowSec);
+      const ready = this.deferQueue.dequeueReadyForGroup(groupId, nowSec);
       if (ready.length > 0) {
         await this._recheckItems(groupId, ready, 'deadline');
       }
@@ -735,6 +735,23 @@ export class Router implements IRouter {
                 groupId: msg.groupId, msg, recentMsgs,
                 queuedAtSec: nowSec, deadlineSec: outcome.deadlineSec, recheckCount: 0,
               });
+              if (this.chatDecisionTracker) {
+                const deferResult: ChatResult = {
+                  kind: 'defer',
+                  untilSec: outcome.deadlineSec,
+                  targetMsgId: msg.messageId,
+                  reasonCode: outcome.reasonCode as 'rate-limit' | 'burst-settle' | 'cooldown',
+                  meta: { decisionPath: 'defer' },
+                };
+                this.chatDecisionTracker.captureDecision(deferResult, {
+                  groupId: msg.groupId,
+                  triggerMsgId: msg.messageId ?? null,
+                  targetMsgId: msg.messageId ?? null,
+                  triggerUserId: msg.userId ?? null,
+                  sentBotReplyId: null,
+                  nowSec,
+                });
+              }
               this.logger.debug({ groupId: msg.groupId, reasonCode: outcome.reasonCode,
                 deadlineSec: outcome.deadlineSec, queueDepth: this.deferQueue.size(msg.groupId) },
                 'pre-generate: deferred');

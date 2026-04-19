@@ -166,4 +166,38 @@ describe('DeferQueue', () => {
     const stale = q.removeStale(1000);
     expect(stale).toHaveLength(0);
   });
+
+  it('dequeueReadyForGroup: only dequeues expired items for specified group, not others', () => {
+    q.enqueue(makeItem({ groupId: 'g1', deadlineSec: 500 }));
+    q.enqueue(makeItem({ groupId: 'g2', deadlineSec: 500 }));
+    const ready = q.dequeueReadyForGroup('g1', 1000);
+    expect(ready).toHaveLength(1);
+    expect(ready[0]!.groupId).toBe('g1');
+    // g2 item must remain untouched
+    expect(q.size('g2')).toBe(1);
+  });
+
+  it('dequeueReadyForGroup: does not return future-deadline items', () => {
+    q.enqueue(makeItem({ groupId: 'g1', deadlineSec: 2000 }));
+    const ready = q.dequeueReadyForGroup('g1', 1000);
+    expect(ready).toHaveLength(0);
+    expect(q.size('g1')).toBe(1);
+  });
+
+  it('dequeueReadyForGroup: multi-group — each call is independent (cross-group bug guard)', () => {
+    q.enqueue(makeItem({ groupId: 'g1', msg: makeMsg({ messageId: 'g1-msg' }), deadlineSec: 500 }));
+    q.enqueue(makeItem({ groupId: 'g2', msg: makeMsg({ messageId: 'g2-msg' }), deadlineSec: 500 }));
+    const groups = q.getAllGroups();
+    const allReady: string[] = [];
+    for (const groupId of groups) {
+      const ready = q.dequeueReadyForGroup(groupId, 1000);
+      for (const item of ready) {
+        expect(item.groupId).toBe(groupId); // items must belong to the queried group
+        allReady.push(item.groupId);
+      }
+    }
+    expect(allReady).toHaveLength(2);
+    expect(allReady).toContain('g1');
+    expect(allReady).toContain('g2');
+  });
 });
