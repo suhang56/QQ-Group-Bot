@@ -1511,7 +1511,7 @@ export class ChatModule implements IChatModule {
       this.loreChunkAliasMap.delete(groupId);
       this.loreOverviewCache.delete(groupId);
     }
-    this.groupIdentityCache.delete(groupId);
+    this.groupIdentityCache.delete(`${groupId}:v2`);
     this.stickerSectionCache.delete(groupId);
     this.stickerRefreshCounter.set(groupId, 0);
   }
@@ -1521,7 +1521,7 @@ export class ChatModule implements IChatModule {
    * the fresh aggregate. Called from StyleLearner's onAggregateUpdated hook.
    */
   invalidateGroupIdentityCache(groupId: string): void {
-    this.groupIdentityCache.delete(groupId);
+    this.groupIdentityCache.delete(`${groupId}:v2`);
   }
 
   /** Increment per-group sticker legend counter; evicts sticker section cache when threshold hit. */
@@ -1530,7 +1530,7 @@ export class ChatModule implements IChatModule {
     this.stickerRefreshCounter.set(groupId, count);
     if (count >= this.stickerLegendRefreshEveryMsgs) {
       this.stickerSectionCache.delete(groupId);
-      this.groupIdentityCache.delete(groupId);
+      this.groupIdentityCache.delete(`${groupId}:v2`);
       this.stickerRefreshCounter.set(groupId, 0);
     }
   }
@@ -2380,12 +2380,6 @@ export class ChatModule implements IChatModule {
     const charModeActive = charModeActiveEarly;
     const tuningBlock = charModeActive ? null : this._loadTuning();
 
-    // M8.3: concrete few-shot grounding from expression-learner. Abstract
-    // "风格参考" block still lives in systemPrompt; this layer surfaces the
-    // raw (situation → expression) pairs to reinforce the bot's own voice.
-    const fewShotBlock = this.expressionSource
-      ? this.expressionSource.formatFewShotBlock(groupId, 3, triggerMessage.content)
-      : '';
 
     // P3-2: Pick prompt variant based on conversation context
     const convSnapshot = this.conversationState.getSnapshot(groupId);
@@ -2455,6 +2449,14 @@ export class ChatModule implements IChatModule {
       webLookupBlock: webLookupBlock || null,
       liveBlock: liveBlock || null,
     });
+    // R3: expression habit blocks evicted from identity cache; injected here
+    // so they can be gated on hasRealFactHit.
+    const expressionLateBlock = (!hasRealFactHit && this.expressionSource)
+      ? this.expressionSource.formatForPrompt(groupId)
+      : '';
+    const fewShotLateBlock = (!hasRealFactHit && this.expressionSource)
+      ? this.expressionSource.formatFewShotBlock(groupId, 3, triggerMessage.content)
+      : '';
     // Groupmate-voice: raw-quote few-shot block.
     // maxSamples reduced to 4 when facts present so voice doesn't crowd factual answer.
     const voiceBlock: VoiceBlock = (this.groupmateVoice && triggerMessage.userId !== this.botUserId)
@@ -2538,8 +2540,9 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
             ...(factsBlock ? [{ text: factsBlock, cache: true as const }] : []),
             ...(onDemandFactBlock ? [{ text: onDemandFactBlock, cache: false }] : []),
             ...(webLookupBlock ? [{ text: webLookupBlock, cache: false }] : []),
+            ...(expressionLateBlock ? [{ text: expressionLateBlock, cache: false }] : []),
+            ...(fewShotLateBlock ? [{ text: fewShotLateBlock, cache: false }] : []),
             ...(tuningBlock ? [{ text: tuningBlock, cache: true as const }] : []),
-            ...(fewShotBlock ? [{ text: fewShotBlock, cache: true as const }] : []),
           ],
       messages: [{ role: 'user', content: userContent }],
     });
@@ -4274,7 +4277,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     const lore = this._loadRelevantLore(groupId, triggerContent ?? '', immediateContext ?? []);
 
     // Check if we have a cached base (without lore) that's still valid
-    const cached = this.groupIdentityCache.get(groupId);
+    const cached = this.groupIdentityCache.get(`${groupId}:v2`);
     const hasPerMemberLore = this.loreLoader
       ? this.loreLoader.hasPerMemberLore(groupId)
       : this.loreAliasIndex.has(groupId) && (this.loreAliasIndex.get(groupId)?.size ?? 0) > 0;
@@ -4311,7 +4314,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
         .then(section => {
           this.stickerSectionCache.set(groupId, section);
           // Only invalidate identity cache if stickers actually loaded (worth rebuilding)
-          if (section) this.groupIdentityCache.delete(groupId);
+          if (section) this.groupIdentityCache.delete(`${groupId}:v2`);
         })
         .catch(err => this.logger.warn({ err, groupId }, 'Sticker section warm-up failed'));
     }
@@ -4359,16 +4362,6 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       if (!this.styleSource) return '';
       if (config?.activeCharacterId && this.charModule) return '';
       const text = this.styleSource.formatGroupAggregateForPrompt(groupId);
-      return text ? `\n\n${text}` : '';
-    })();
-
-    // M6.2a / P3: expression-learner — groupmate habits (reads groupmate_expression_samples by default).
-    // TODO(P3): skip block when hasRealFactHit=true (facts crowd out habit hints).
-    // Threading hasRealFactHit here requires restructuring the generateReply pipeline since
-    // _getGroupIdentityPrompt is called before hasRealFactHit is computed (line ~2062 vs ~2449).
-    const expressionSection = (() => {
-      if (!this.expressionSource) return '';
-      const text = this.expressionSource.formatForPrompt(groupId);
       return text ? `\n\n${text}` : '';
     })();
 
@@ -4449,13 +4442,13 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       return `\n\n${parts.join('\n')}`;
     })();
 
-    const text = `${personaBase}${adminStyleSection}${loreSection}${jargonSection}${honestGapsSection}${groupStyleSection}${expressionSection}${relationshipSection}${diarySection}${rulesBlock}${imageAwarenessLine}\n\n---\n简短自然（普通闲聊 1-3 句话；涉及列举 / 计数 / 时间线 / 多人信息且事实段落有料时允许 2-4 行展开）。群友提到群里的人名、梗、黑话，基于上面资料接一下；不知道的就"啥来的"，不要装懂。${rulesInstruction}${outputRules}`;
+    const text = `${personaBase}${adminStyleSection}${loreSection}${jargonSection}${honestGapsSection}${groupStyleSection}${relationshipSection}${diarySection}${rulesBlock}${imageAwarenessLine}\n\n---\n简短自然（普通闲聊 1-3 句话；涉及列举 / 计数 / 时间线 / 多人信息且事实段落有料时允许 2-4 行展开）。群友提到群里的人名、梗、黑话，基于上面资料接一下；不知道的就"啥来的"，不要装懂。${rulesInstruction}${outputRules}`;
 
     // Only cache the full text when NOT using per-member lore and NOT using
     // per-call relationship data and NOT using per-cycle honest-gaps/diary
     // sections (all vary between calls otherwise).
     if (!hasPerMemberLore && !hasRelationshipSource && !hasHonestGaps && !hasDiarySection) {
-      this.groupIdentityCache.set(groupId, { text, expiresAt: Date.now() + this.groupIdentityCacheTtlMs });
+      this.groupIdentityCache.set(`${groupId}:v2`, { text, expiresAt: Date.now() + this.groupIdentityCacheTtlMs });
     }
     this.logger.debug({ groupId, hasLore: !!lore, hasStickerSection: stickerSection.length > 0, perMemberLore: hasPerMemberLore }, 'Group identity prompt built');
     return text;
