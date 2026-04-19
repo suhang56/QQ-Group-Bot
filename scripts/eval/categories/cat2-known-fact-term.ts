@@ -11,14 +11,20 @@ export function queryCat2(db: DatabaseSync, groupId: string, limit: number): DbR
   if (terms.length === 0) return [];
 
   // Build one OR clause per term — avoids the O(N×M) correlated JOIN
+  // Escape LIKE metacharacters so topic strings like "%" or "_" match literally
+  // Escape metacharacters for LIKE with ESCAPE '!'
+  function escapeLike(s: string): string {
+    return s.replace(/!/g, '!!').replace(/%/g, '!%').replace(/_/g, '!_');
+  }
+
   const patterns: string[] = [];
   const bindings: string[] = [];
   for (const t of terms) {
-    patterns.push('m.content LIKE ?');
-    bindings.push('%' + t.topic + '%');
+    patterns.push("m.content LIKE ? ESCAPE '!'");
+    bindings.push('%' + escapeLike(t.topic) + '%');
     if (t.canonical_form) {
-      patterns.push('m.content LIKE ?');
-      bindings.push('%' + t.canonical_form + '%');
+      patterns.push("m.content LIKE ? ESCAPE '!'");
+      bindings.push('%' + escapeLike(t.canonical_form) + '%');
     }
   }
 
