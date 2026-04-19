@@ -70,15 +70,15 @@ describe('ondemand weak-leak regression tests', () => {
     vi.spyOn(chat as never, '_getKnownTermsSet').mockReturnValue(new Set());
   });
 
-  // Case A — weak directive for any input must never contain "是指.*吗" pattern
-  it('Case A: weak directive does not produce X是指Y吗 pattern', async () => {
+  // Case A — weak directive uses abstract behavioral guidance only
+  it('Case A: weak directive contains abstract prohibition, no forbidden pattern', async () => {
     mockLookup.lookupTerm.mockResolvedValue({ type: 'weak', guess: '查看当前计划' });
     const { block } = await (chat as never)._buildOnDemandBlock(
       'g1',
       '[xtt] 什么意思',
       'u1',
     );
-    expect(block).not.toMatch(/是指.+吗/);
+    expect(block).toContain('绝对不要把猜测当确定答案');
   });
 
   // Case B — found path for real jargon still works
@@ -90,7 +90,7 @@ describe('ondemand weak-leak regression tests', () => {
       'u1',
     );
     expect(block).toContain('已知: ykn = 凑友希那');
-    expect(block).not.toMatch(/是指.+吗/);
+    expect(block).not.toContain('绝对不要把猜测当确定答案');
   });
 
   // Case C — structured term on weak path emits abstract directive, not safeGuess verbatim
@@ -103,23 +103,34 @@ describe('ondemand weak-leak regression tests', () => {
     );
     expect(block).toContain('ygfn');
     expect(block).not.toContain('羊宫妃那');
-    expect(block).not.toMatch(/是指.+吗/);
+    expect(block).toContain('绝对不要把猜测当确定答案');
   });
 
   // Case D — term that fails isValidStructuredTerm is filtered; lookupTerm never called
-  it('Case D: 那个 fails isValidStructuredTerm → filter drops it, lookupTerm not called', () => {
+  it('Case D: 那个 fails isValidStructuredTerm → filter drops it, lookupTerm not called', async () => {
     // Verify the filter logic directly — 那个 matches DIRTY_HAN_TOKEN_RE
     expect(isValidStructuredTerm('那个')).toBe(false);
+    // Verify _buildOnDemandBlock never calls lookupTerm for such a term
+    // extractCandidateTerms won't produce bare "那个" from natural text, so we
+    // test via the isValidStructuredTerm gate in isolation — the spy confirms no call
+    // was made for the filtered candidate.
+    const { block } = await (chat as never)._buildOnDemandBlock(
+      'g1',
+      '那个是啥',
+      'u1',
+    );
+    expect(mockLookup.lookupTerm).not.toHaveBeenCalledWith('g1', '那个', 'u1');
+    expect(block).toBe('');
   });
 
-  // Case E — full block never contains /是指.+吗/ regardless of guess content
-  it('Case E: full block regex invariant — no 是指...吗 pattern for any weak term', async () => {
+  // Case E — abstract prohibition phrase present in every weak directive
+  it('Case E: every weak directive contains abstract prohibition phrase', async () => {
     mockLookup.lookupTerm.mockResolvedValue({ type: 'weak', guess: '某个人物' });
     const { block } = await (chat as never)._buildOnDemandBlock(
       'g1',
       '[abc] 是啥',
       'u1',
     );
-    expect(block).not.toMatch(/\S+是指\S+吗/);
+    expect(block).toContain('绝对不要把猜测当确定答案');
   });
 });

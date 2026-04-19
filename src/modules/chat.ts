@@ -3782,7 +3782,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
         const safeTerm = sanitizeForPrompt(term, 60);
         weakLines.push(
           `你对 ${safeTerm} 不太熟；如果对话涉及它，可以用群友口吻短反问（比如 "啥来的"、"这个什么东西" 或自然措辞），` +
-          `绝对不要把猜测当确定答案背出来，也不要用 "X是指Y吗" 句式。`,
+          `绝对不要把猜测当确定答案背出来。`,
         );
       } else if (outcome?.type === 'unknown') {
         // Legitimate "LLM looked and returned no answer" — fair game for askUnknown.
