@@ -8,7 +8,7 @@ export function queryCat2(db: DatabaseSync, groupId: string, limit: number): DbR
     SELECT topic, canonical_form FROM learned_facts
     WHERE group_id = ? AND status = 'active'
     ORDER BY updated_at DESC LIMIT 500
-  `).all(groupId) as Array<{ topic: string; canonical_form: string | null }>;
+  `).all(groupId) as Array<{ topic: string | null; canonical_form: string | null }>;
 
   if (terms.length === 0) return [];
 
