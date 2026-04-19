@@ -2,25 +2,22 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { DbRow } from '../types.js';
 
 export function queryCat6(db: DatabaseSync, groupId: string, limit: number): DbRow[] {
-  return db.prepare(`
-    SELECT m.*
-    FROM messages m
-    WHERE m.group_id = ?
-      AND m.deleted = 0
-      AND m.id IN (
-        SELECT m2.id
-        FROM messages m2
-        WHERE m2.group_id = ?
-          AND m2.deleted = 0
-          AND (
-            SELECT COUNT(*) FROM messages m3
-            WHERE m3.group_id = m2.group_id
-              AND m3.deleted = 0
-              AND m3.timestamp BETWEEN m2.timestamp - 15 AND m2.timestamp + 15
-              AND m3.id != m2.id
-          ) >= 4
-      )
-    ORDER BY m.id DESC
-    LIMIT ?
-  `).all(groupId, groupId, limit) as DbRow[];
+  // Bulk-fetch candidates then apply JS-side sliding window — avoids O(N²) correlated subquery
+  const candidates = db.prepare(`
+    SELECT * FROM messages
+    WHERE group_id = ? AND deleted = 0
+    ORDER BY id DESC LIMIT ?
+  `).all(groupId, limit * 20) as DbRow[];
+
+  const result: DbRow[] = [];
+  for (let i = 0; i < candidates.length && result.length < limit; i++) {
+    const t = candidates[i]!.timestamp;
+    let count = 0;
+    for (let j = 0; j < candidates.length; j++) {
+      if (j !== i && Math.abs(candidates[j]!.timestamp - t) <= 15) count++;
+    }
+    // >= 4 other messages in ±15s window
+    if (count >= 4) result.push(candidates[i]!);
+  }
+  return result;
 }
