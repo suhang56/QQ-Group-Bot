@@ -99,7 +99,7 @@ describe('ChatModule — ignored-suppression (Gate 5.5)', () => {
 
     claude.complete = vi.fn();
     const result = await chat.generateReply(GROUP_ID, makeMsg({ messageId: 'peer-4', content: '继续闲聊' }), []);
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
     expect(claude.complete).not.toHaveBeenCalled();
   });
 
@@ -116,7 +116,7 @@ describe('ChatModule — ignored-suppression (Gate 5.5)', () => {
       rawContent: `[CQ:at,qq=${BOT_ID}] hi`,
     });
     const result = await chat.generateReply(GROUP_ID, atMsg, []);
-    expect(result).not.toBeNull();
+    expect(result.kind).not.toBe('silent');
   });
 
   it('bot spoke recently + implicit-bot-ref message flips engagementReceived', async () => {
@@ -147,7 +147,7 @@ describe('ChatModule — ignored-suppression (Gate 5.5)', () => {
 
     const result = await low.generateReply(GROUP_ID, makeMsg({ content: '随便' }), []);
     // Not suppressed by Gate 5.5 (window expired) — passthrough chat engages.
-    expect(result).not.toBeNull();
+    expect(result.kind).not.toBe('silent');
   });
 
   it('engagementReceived=true prevents suppression', async () => {
@@ -158,6 +158,6 @@ describe('ChatModule — ignored-suppression (Gate 5.5)', () => {
     track.set(GROUP_ID, { lastSpokeAt: now, msgsSinceSpoke: 10, engagementReceived: true });
     const result = await low.generateReply(GROUP_ID, makeMsg({ content: '继续聊' }), []);
     // Not suppressed — someone earlier engaged.
-    expect(result).not.toBeNull();
+    expect(result.kind).not.toBe('silent');
   });
 });

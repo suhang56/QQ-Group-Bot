@@ -19,7 +19,6 @@ import type { IFatigueSource } from '../modules/fatigue.js';
 import type { WebLookup } from '../modules/web-lookup.js';
 import { extractTokens } from '../utils/text-tokenize.js';
 import { extractCandidateTerms } from '../utils/extract-candidate-terms.js';
-import { compareFactsByTrust } from '../modules/fact-topic-prefixes.js';
 import { isDirectQuestion, isGroundedOpinionQuestion } from '../utils/is-direct-question.js';
 import { BotErrorCode } from '../utils/errors.js';
 import { createLogger } from '../utils/logger.js';
@@ -28,8 +27,8 @@ import { resolveAtTarget } from '../utils/cqcode.js';
 import { expandForwards, purgeExpiredForwardCache } from './forward-expand.js';
 
 import { MOD_APPROVAL_ADMIN } from './constants.js';
-import { isChatSilentSkip } from '../utils/chat-control.js';
 import { isValidStructuredTerm } from '../modules/fact-topic-prefixes.js';
+import { isSendable } from '../utils/chat-result.js';
 
 const MAX_SPLIT_LINES = 3;
 const MOD_DM_HOURLY_CAP = 20;
@@ -146,6 +145,8 @@ export class Router implements IRouter {
   private readonly atMentionQueue = new Map<string, QueuedMention[]>();
   // @-mention burst tracking: per-group timestamps of recent @-mention replies
   private readonly atReplyTimestamps = new Map<string, number[]>();
+  // last sticker result per group for /sticker_ban (replaces chatModule.getLastStickerKey)
+  private readonly lastStickerKeyByGroup = new Map<string, string>();
   // in-flight lock for @-mention queue processing (separate from ChatModule's lock)
   private readonly atInFlight = new Set<string>();
   // pending harvest timers per group: prevents overlap
@@ -690,36 +691,57 @@ export class Router implements IRouter {
             }
           }
 
-          const reply = await this.chatModule.generateReply(msg.groupId, msg, recentMsgs);
-          if (isChatSilentSkip(reply)) {
-            // Intentionally suppressed — no send, no fallback pool, no bot_replies insert.
-            return;
-          }
-          if (reply) {
-            const wasEvasive = this.chatModule.getEvasiveFlagForLastReply(msg.groupId);
-            const injectedFactIds = this.chatModule.getInjectedFactIdsForLastReply(msg.groupId);
-            const botReplyId = await this._sendReply(msg.groupId, reply, undefined, {
-              module: 'chat',
-              triggerMsgId: msg.messageId,
-              triggerUserId: msg.userId,
-              triggerUserNickname: msg.nickname,
-              triggerContent: msg.content,
-            });
-            if (botReplyId !== null && this.selfLearning && injectedFactIds.length > 0) {
-              this.selfLearning.rememberInjection(msg.groupId, botReplyId, injectedFactIds);
-            }
-            if (wasEvasive && botReplyId !== null && this.selfLearning) {
-              if (botReplyId !== null) {
-                try { this.db.botReplies.markEvasive(botReplyId); } catch { /* non-fatal */ }
+          const result = await this.chatModule.generateReply(msg.groupId, msg, recentMsgs);
+          switch (result.kind) {
+            case 'reply': {
+              const botReplyId = await this._sendReply(msg.groupId, result.text, undefined, {
+                module: 'chat',
+                triggerMsgId: msg.messageId,
+                triggerUserId: msg.userId,
+                triggerUserNickname: msg.nickname,
+                triggerContent: msg.content,
+              });
+              if (botReplyId !== null && this.selfLearning && result.meta.injectedFactIds.length > 0) {
+                this.selfLearning.rememberInjection(msg.groupId, botReplyId, result.meta.injectedFactIds);
               }
-              this._scheduleHarvest(msg.groupId, botReplyId, msg.content);
-              // Online lookup fires immediately in parallel with the 60s harvest timer
-              void this.selfLearning.researchOnline({
-                groupId: msg.groupId,
-                evasiveBotReplyId: botReplyId,
-                originalTrigger: msg.content,
-              }).catch(err => this.logger.debug({ err, groupId: msg.groupId }, 'researchOnline rejected'));
+              if (result.meta.evasive && botReplyId !== null && this.selfLearning) {
+                try { this.db.botReplies.markEvasive(botReplyId); } catch { /* non-fatal */ }
+                this._scheduleHarvest(msg.groupId, botReplyId, msg.content);
+                void this.selfLearning.researchOnline({
+                  groupId: msg.groupId,
+                  evasiveBotReplyId: botReplyId,
+                  originalTrigger: msg.content,
+                }).catch(err => this.logger.debug({ err, groupId: msg.groupId }, 'researchOnline rejected'));
+              }
+              break;
             }
+            case 'sticker': {
+              this.lastStickerKeyByGroup.set(msg.groupId, result.meta.key);
+              await this._sendReply(msg.groupId, result.cqCode, undefined, {
+                module: 'chat',
+                triggerMsgId: msg.messageId,
+                triggerUserId: msg.userId,
+                triggerUserNickname: msg.nickname,
+                triggerContent: msg.content,
+              });
+              break;
+            }
+            case 'fallback': {
+              await this._sendReply(msg.groupId, result.text, undefined, {
+                module: 'chat',
+                triggerMsgId: msg.messageId,
+                triggerUserId: msg.userId,
+                triggerUserNickname: msg.nickname,
+                triggerContent: msg.content,
+              });
+              break;
+            }
+            case 'silent':
+            case 'defer':
+              // no send
+              break;
+            default:
+              result satisfies never;
           }
         }
       }
@@ -836,112 +858,65 @@ export class Router implements IRouter {
           nickname: m.nickname, role: 'member' as const,
           content: m.content, rawContent: m.content, timestamp: m.timestamp,
         }));
-        let reply = await this.chatModule.generateReply(groupId, item.msg, recentMsgs);
-        if (isChatSilentSkip(reply)) {
-          // Intentionally suppressed — stay silent, no bot_replies, no fallback pool.
-          return;
-        }
-        // Snapshot learning-signals from chatModule BEFORE any fallback path
-        // overwrites `reply`. If chat generated a real response (`reply` is
-        // non-null now), these come from the prompt-build / processing stage
-        // and should drive rememberInjection + evasive research. If chat
-        // returned null and the fallback path below produces a reply, the
-        // signals stay as their turn-start empty values (cleared in
-        // generateReply), so the learning hooks are correctly skipped.
-        const chatProducedReply = reply !== null;
-        const chatWasEvasive = chatProducedReply ? this.chatModule.getEvasiveFlagForLastReply(groupId) : false;
-        const chatInjectedFactIds = chatProducedReply ? this.chatModule.getInjectedFactIdsForLastReply(groupId) : [];
-
-        // Safety net: @-mention must never result in total silence. If chat
-        // returned null (sentinel drop / dedup / opt-out), pick a fallback
-        // that ROUGHLY matches the trigger intent so the reply doesn't sound
-        // like the bot didn't read the message. Falls through to a generic
-        // short ack only when no intent pattern matches.
-        if (!reply) {
-          const triggerText = (item.msg.content ?? '').trim();
-          // Fact-recovery pass: if chat returned null (likely from dedup/sentinel/
-          // guard drop) but the trigger is a direct/opinion question AND any term
-          // in it has a known fact, answer with the fact instead of a 不知道 pool
-          // deflection. Prevents the "generated correct fact answer → caught by
-          // near-dup guard → fallback to '不知道'" regression.
-          const isFactQuery = isDirectQuestion(triggerText) || isGroundedOpinionQuestion(triggerText);
-          if (isFactQuery) {
-            const candidates = extractCandidateTerms(triggerText);
-            for (const term of candidates) {
-              try {
-                const rows = this.db.learnedFacts.findActiveByTopicTerm(groupId, term);
-                if (rows.length === 0) continue;
-                const sorted = [...rows].sort(compareFactsByTrust);
-                const best = sorted[0]!;
-                const meaning = best.personaForm || best.canonicalForm || best.fact;
-                if (meaning && meaning.trim().length > 0) {
-                  reply = meaning.trim().slice(0, 200);
-                  this.logger.info({ groupId, userId: item.msg.userId, term, factId: best.id, triggerText }, '@-mention fact-recovery fallback — chat returned null but learned_facts had term');
-                  break;
-                }
-              } catch (err) {
-                this.logger.debug({ err, term }, 'fact-recovery fallback: findActiveByTopicTerm failed');
-              }
+        const result = await this.chatModule.generateReply(groupId, item.msg, recentMsgs);
+        // TODO P1.5: fact-recovery pass (router.ts:840-858 pre-P1) should move into ChatModule
+        let atBotReplyId: number | null = null;
+        switch (result.kind) {
+          case 'reply': {
+            atBotReplyId = await this._sendReply(groupId, result.text, item.sourceMsgId, {
+              module: 'chat',
+              triggerMsgId: item.msg.messageId,
+              triggerUserId: item.msg.userId,
+              triggerUserNickname: item.msg.nickname,
+              triggerContent: item.msg.content,
+            });
+            if (atBotReplyId !== null && this.selfLearning && result.meta.injectedFactIds.length > 0) {
+              this.selfLearning.rememberInjection(groupId, atBotReplyId, result.meta.injectedFactIds);
             }
+            if (result.meta.evasive && atBotReplyId !== null && this.selfLearning) {
+              try { this.db.botReplies.markEvasive(atBotReplyId); } catch { /* non-fatal */ }
+              this._scheduleHarvest(groupId, atBotReplyId, item.msg.content);
+              void this.selfLearning.researchOnline({
+                groupId,
+                evasiveBotReplyId: atBotReplyId,
+                originalTrigger: item.msg.content,
+              }).catch(err => this.logger.debug({ err, groupId }, 'researchOnline rejected (@ path)'));
+            }
+            break;
           }
+          case 'sticker': {
+            this.lastStickerKeyByGroup.set(groupId, result.meta.key);
+            atBotReplyId = await this._sendReply(groupId, result.cqCode, item.sourceMsgId, {
+              module: 'chat',
+              triggerMsgId: item.msg.messageId,
+              triggerUserId: item.msg.userId,
+              triggerUserNickname: item.msg.nickname,
+              triggerContent: item.msg.content,
+            });
+            break;
+          }
+          case 'fallback': {
+            atBotReplyId = await this._sendReply(groupId, result.text, item.sourceMsgId, {
+              module: 'chat',
+              triggerMsgId: item.msg.messageId,
+              triggerUserId: item.msg.userId,
+              triggerUserNickname: item.msg.nickname,
+              triggerContent: item.msg.content,
+            });
+            break;
+          }
+          case 'silent':
+            this.logger.debug({ groupId, reasonCode: result.reasonCode }, '@-mention silent');
+            break;
+          case 'defer':
+            this.logger.debug({ groupId, untilSec: result.untilSec }, '@-mention defer (P1: treated as silent)');
+            break;
+          default:
+            result satisfies never;
         }
-        if (!reply) {
-          const triggerText = (item.msg.content ?? '').trim();
-          const AT_FALLBACK_POOLS = {
-            // Request/imperative — bot declines without agreeing
-            request: ['不想', '不帮', '想啥呢', '做梦', '别闹', '想得美', '不干', '不不不'],
-            // Interrogative — bot admits seeing the question but doesn't answer.
-            // "不知道/不清楚" only fires when fact-recovery above also had nothing,
-            // so a bot 装傻 here is an honest "I really have no data" admission,
-            // not an accidental drop of a found fact.
-            question: ['不知道', '不清楚', '别问我', '懒得想', '问别人', '谁知道'],
-            // Exclamation/command — lazy ack
-            exclaim: ['嗯', '哦', '好', '收到', '行吧'],
-            // Generic short ack (matches old behavior, but now rarer)
-            generic: ['啊?', '咋了', '啥事', '?', '怎么了', '叫我干嘛', '什么'],
-          };
-          const requestRE = /^(@\S+\s*)?(帮|给我|替我|你来|快|去).+(吗|呀|啊|吧)?[。！!.]?$|霸凌|整|骂|教训|欺负/;
-          const questionRE = /[?？]|(怎么|为啥|为什么|咋|什么|哪|谁|几|多少).*[?？]?$/;
-          const exclaimRE = /[!！]$|好棒|牛|笑死|哈哈/;
-          const pool = requestRE.test(triggerText) ? AT_FALLBACK_POOLS.request
-                     : questionRE.test(triggerText) ? AT_FALLBACK_POOLS.question
-                     : exclaimRE.test(triggerText) ? AT_FALLBACK_POOLS.exclaim
-                     : AT_FALLBACK_POOLS.generic;
-          reply = pool[Math.floor(Math.random() * pool.length)]!;
-          this.logger.info({ groupId, userId: item.msg.userId, triggerText, fallbackPool: Object.entries(AT_FALLBACK_POOLS).find(([, v]) => v === pool)?.[0], reply }, '@-mention fallback deflection — chat returned null');
-        }
-
-        const atBotReplyId = await this._sendReply(groupId, reply, item.sourceMsgId, {
-          module: 'chat',
-          triggerMsgId: item.msg.messageId,
-          triggerUserId: item.msg.userId,
-          triggerUserNickname: item.msg.nickname,
-          triggerContent: item.msg.content,
-        });
-        timestamps.push(Date.now());
-        this.atReplyTimestamps.set(groupId, timestamps);
-
-        // Parity with non-@ path (router.ts:686-699): if chatModule produced
-        // the reply, feed its signals back into the learning loop.
-        //   - rememberInjection: record which fact IDs entered the prompt so
-        //     a later top-level correction can retract them
-        //   - markEvasive + researchOnline + _scheduleHarvest: if chat flagged
-        //     the reply as evasive, fire the online + passive harvest paths
-        //     so next time we have a real answer.
-        // Skipped for fallback-generated replies (fact-recovery / pool
-        // deflection) — those don't have injection memory or a clean
-        // evasive-vs-real distinction.
-        if (chatProducedReply && atBotReplyId !== null && this.selfLearning && chatInjectedFactIds.length > 0) {
-          this.selfLearning.rememberInjection(groupId, atBotReplyId, chatInjectedFactIds);
-        }
-        if (chatProducedReply && chatWasEvasive && atBotReplyId !== null && this.selfLearning) {
-          try { this.db.botReplies.markEvasive(atBotReplyId); } catch { /* non-fatal */ }
-          this._scheduleHarvest(groupId, atBotReplyId, item.msg.content);
-          void this.selfLearning.researchOnline({
-            groupId,
-            evasiveBotReplyId: atBotReplyId,
-            originalTrigger: item.msg.content,
-          }).catch(err => this.logger.debug({ err, groupId }, 'researchOnline rejected (@ path)'));
+        if (isSendable(result)) {
+          timestamps.push(Date.now());
+          this.atReplyTimestamps.set(groupId, timestamps);
         }
       }
     } finally {
@@ -2611,7 +2586,7 @@ ${ctxLine}
         await this.adapter.send(msg.groupId, '聊天模块没启动，没法封');
         return;
       }
-      const key = this.chatModule.getLastStickerKey(msg.groupId);
+      const key = this.lastStickerKeyByGroup.get(msg.groupId) ?? null;
       if (!key) {
         await this.adapter.send(msg.groupId, '没找到最近发送的表情包记录（bot 这次会话可能还没发过表情，或刚重启）');
         return;

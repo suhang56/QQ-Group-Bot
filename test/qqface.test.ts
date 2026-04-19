@@ -90,8 +90,9 @@ describe('ChatModule — QQ face emoji integration', () => {
     });
     const msg = makeMsg({ rawContent: `[CQ:at,qq=${BOT_ID}] hi` });
     const result = await chat.generateReply('g1', msg, []);
-    expect(result).not.toContain('[CQ:face,id=');
-    expect(result).toContain('哈哈');
+    expect(result.kind).not.toBe('silent');
+    expect('text' in result && result.text).not.toContain('[CQ:face,id=');
+    expect('text' in result && result.text).toContain('哈哈');
   });
 
   // Reply with only face codes → stripped → empty → dropped silently
@@ -102,7 +103,7 @@ describe('ChatModule — QQ face emoji integration', () => {
     });
     const msg = makeMsg({ rawContent: `[CQ:at,qq=${BOT_ID}] hi` });
     const result = await chat.generateReply('g1', msg, []);
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
   });
 
   // User message with faces → parseFaces extracts them (for future use)

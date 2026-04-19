@@ -45,8 +45,7 @@ import { WebLookup, shouldLookupTerm, DEFAULT_COMMON_WORDS } from './web-lookup.
 import { isDirectQuestion, isGroundedOpinionQuestion } from '../utils/is-direct-question.js';
 import { extractTermFromTopic } from './fact-topic-prefixes.js';
 import { buildFactualContextSignal } from './factual-context-signal.js';
-import { CHAT_SILENT_SKIP } from '../utils/chat-control.js';
-import type { BaseResultMeta, ReplyMeta, StickerMeta } from '../utils/chat-result.js';
+import { type BaseResultMeta, type ReplyMeta, type StickerMeta, type ChatResult } from '../utils/chat-result.js';
 import { GroupmateVoice, type VoiceBlock } from './groupmate-voice.js';
 import { isAddresseeScopeViolation } from '../utils/sentinel.js';
 
@@ -150,7 +149,7 @@ export function formatAddressingHint(rel: SocialRelation, nickname: string): str
 }
 
 export interface IChatModule {
-  generateReply(groupId: string, triggerMessage: GroupMessage, _recentMessages: GroupMessage[]): Promise<string | null>;
+  generateReply(groupId: string, triggerMessage: GroupMessage, _recentMessages: GroupMessage[]): Promise<ChatResult>;
   generatePrivateReply(
     groupId: string,
     userId: string,
@@ -160,15 +159,12 @@ export interface IChatModule {
   recordOutgoingMessage(groupId: string, msgId: number): void;
   markReplyToUser(groupId: string, userId: string): void;
   invalidateLore(groupId: string): void;
-  getLastStickerKey(groupId: string): string | null;
   tickStickerRefresh(groupId: string): void;
   getMoodTracker(): MoodTracker;
   noteAdminActivity(groupId: string, userId: string, nickname: string, content: string): void;
   /** W-A: per-message honest-gaps hook. Optional so older test stubs still
    *  satisfy IChatModule; router guards with typeof check. */
   recordHonestGapsMessage?(groupId: string, content: string, nowMs: number): void;
-  getEvasiveFlagForLastReply(groupId: string): boolean;
-  getInjectedFactIdsForLastReply(groupId: string): number[];
   getConsecutiveReplies(groupId: string): number;
   getActivityLevel(groupId: string): 'idle' | 'normal' | 'busy';
 }
@@ -1571,9 +1567,9 @@ export class ChatModule implements IChatModule {
     groupId: string,
     triggerMessage: GroupMessage,
     _recentMessages: GroupMessage[]
-  ): Promise<string | null> {
+  ): Promise<ChatResult> {
     this.knownGroups.add(groupId);
-    const _metaBuilder = new ReplyMetaBuilder(); // M2: accumulator — output unused until M4
+    const metaBuilder = new ReplyMetaBuilder();
 
     // Clear per-group volatile state at turn-start so early-return paths
     // (pure @, react deflection, rate-limit, debounce, relay, etc.) don't
@@ -1613,13 +1609,13 @@ export class ChatModule implements IChatModule {
 
     // Empty content after CQ stripping (and not a pure @-mention)
     if (!triggerMessage.content.trim() && !isPureAtMention) {
-      return null;
+      return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'timing' };
     }
 
     // Group reply rate limit
     if (!this._checkGroupLimit(groupId)) {
       this.logger.warn({ groupId }, 'Group chat reply rate limit reached — silent');
-      return null;
+      return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'timing' };
     }
 
     // Debounce: if another message came in within debounceMs, skip this one
@@ -1638,7 +1634,7 @@ export class ChatModule implements IChatModule {
           { groupId, userId: triggerMessage.userId, remainingMs: ignoreUntil - now },
           '@-spam silent-ignore window active — dropping message',
         );
-        return null;
+        return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'bot-triggered' };
       }
       // Expired — lazy cleanup
       this.atMentionIgnoreUntil.delete(ignoreKey);
@@ -1663,19 +1659,19 @@ export class ChatModule implements IChatModule {
         { groupId, userId: triggerMessage.userId, count: atSpamCount, ignoreForMs: this.atMentionCurseIgnoreMs },
         '@-spam curse+ignore fired',
       );
-      return phrase;
+      return { kind: 'reply', text: phrase, meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
     }
 
     const lastTrigger = this.debounceMap.get(groupId);
     this.debounceMap.set(groupId, now);
     if (lastTrigger !== undefined && now - lastTrigger < this.debounceMs) {
-      return null;
+      return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'timing' };
     }
 
     // In-flight lock
     if (this.inFlightGroups.has(groupId)) {
       this.logger.debug({ groupId }, 'Reply in-flight — dropping duplicate trigger');
-      return null;
+      return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'timing' };
     }
 
     // Pure @-mention: skip full chat pipeline, return at_only deflection
@@ -1683,7 +1679,8 @@ export class ChatModule implements IChatModule {
       this.lastProactiveReply.set(groupId, now);
       this.botSpeechTracking.set(groupId, { lastSpokeAt: now, msgsSinceSpoke: 0, engagementReceived: false });
       this._bumpConsecutive(groupId);
-      return this._generateDeflection('at_only', triggerMessage);
+      const atOnlyText = await this._generateDeflection('at_only', triggerMessage);
+      return { kind: 'fallback', text: atOnlyText, meta: metaBuilder.buildBase('fallback'), reasonCode: 'pure-at' };
     }
 
     // Vision: if message contains an image CQ, describe it and enrich content
@@ -1918,7 +1915,7 @@ export class ChatModule implements IChatModule {
     }, 'engagement decision');
 
     if (!engagementDecision.shouldReply) {
-      return null;
+      return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'guard' };
     }
 
     // Relay detection: pre-LLM gate. Code-level carveout; prompt rules at
@@ -1931,11 +1928,11 @@ export class ChatModule implements IChatModule {
         if (now - lastReplyMs >= 2 * 60 * 1000) {
           this.lastProactiveReply.set(groupId, now);
           this._bumpConsecutive(groupId);
-          return relayDetection.content;
+          return { kind: 'reply', text: relayDetection.content, meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
         }
       }
       // Relay detected but bot sits out — no LLM call
-      return null;
+      return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'timing' };
     }
 
     // Record last-reply timestamp for silence factor (applies to all replies)
@@ -2019,17 +2016,18 @@ export class ChatModule implements IChatModule {
       this._bumpConsecutive(groupId);
       if (isAdversarial) {
         const isCurse = this._teaseIncrement(groupId, triggerMessage.userId, now);
-        if (isCurse) return this._generateDeflection('curse', triggerMessage);
-        if (isHarass) return this._generateDeflection('curse', triggerMessage); // harassment → always curse-tier
-        if (isProbe) return this._generateDeflection('identity', triggerMessage);
+        if (isCurse) return { kind: 'reply', text: await this._generateDeflection('curse', triggerMessage), meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
+        if (isHarass) return { kind: 'reply', text: await this._generateDeflection('curse', triggerMessage), meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
+        if (isProbe) return { kind: 'reply', text: await this._generateDeflection('identity', triggerMessage), meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
         if (isTask) {
           const isRecite = /(背|接龙|续写|恩师|接下[一]?句|继续[背念说])/i.test(triggerMessage.content);
-          return this._generateDeflection(isRecite ? 'recite' : 'task', triggerMessage);
+          return { kind: 'reply', text: await this._generateDeflection(isRecite ? 'recite' : 'task', triggerMessage), meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
         }
-        return this._generateDeflection('memory', triggerMessage);
+        return { kind: 'reply', text: await this._generateDeflection('memory', triggerMessage), meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
       }
       // Non-adversarial react: low comprehension → confused deflection
-      return this._generateDeflection('confused', triggerMessage);
+      const confusedText = await this._generateDeflection('confused', triggerMessage);
+      return { kind: 'fallback', text: confusedText, meta: metaBuilder.buildBase('fallback'), reasonCode: 'low-comprehension-direct' };
     }
 
     // ── Mood update ───────────────────────────────────────────────────────
@@ -2379,7 +2377,7 @@ export class ChatModule implements IChatModule {
       (await this.selfLearning?.formatFactsForPrompt(groupId, 50, triggerMessage.content))
       ?? { text: '', injectedFactIds: [], matchedFactIds: [], pinnedOnly: false };
     this.lastInjectedFactIds.set(groupId, injectedFactIds);
-    _metaBuilder.setFactIds(injectedFactIds, matchedFactRetrievalIds);
+    metaBuilder.setFactIds(injectedFactIds, matchedFactRetrievalIds);
     // Used by hasRealFactHit below. factsBlock non-empty alone is NOT a
     // "trigger hit a fact" signal because pinned-newest + recency fallback
     // always populate it. Only retrieval hits (BM25/vector/Path A) count.
@@ -2443,7 +2441,7 @@ export class ChatModule implements IChatModule {
       activeMemeJokes: activeMemeJokes.length > 0 ? activeMemeJokes : undefined,
     };
     const variant = pickVariant(variantCtx);
-    _metaBuilder.setPromptVariant(variant as BaseResultMeta['promptVariant']);
+    metaBuilder.setPromptVariant(variant as BaseResultMeta['promptVariant']);
     const variantBlock = buildVariantSystemPrompt(variantCtx).systemPrompt;
     this.logger.debug({ groupId, variant, activeJokeHit, sensitiveEntityHit }, 'prompt variant selected');
 
@@ -2509,7 +2507,7 @@ export class ChatModule implements IChatModule {
           maxSamples: hasRealFactHit ? 4 : 12,
         })
       : { text: '', sampleCount: 0, speakerCount: 0, substantiveCount: 0, seed: 0 };
-    _metaBuilder.setVoiceCount(voiceBlock.sampleCount);
+    metaBuilder.setVoiceCount(voiceBlock.sampleCount);
     if (voiceBlock.sampleCount > 0) {
       this.logger.debug(
         { groupId, sampleCount: voiceBlock.sampleCount, speakerCount: voiceBlock.speakerCount,
@@ -2646,17 +2644,19 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
         );
         if (isAddresseeScopeViolation(processed, dSpeakers)) {
           this.logger.info({ groupId, processed, dSpeakers }, 'addressee-scope guard: regen once');
+          metaBuilder.setGuardPath('addressee-regen');
           try {
             const scopeRegenResponse = await chatRequest(true);
             const scopeRegenText = applyPersonaFilters(sanitize(scopeRegenResponse.text), mfaceKeys);
             if (!scopeRegenText || isAddresseeScopeViolation(scopeRegenText, dSpeakers)) {
-              this.logger.info({ groupId, dSpeakers }, 'addressee-scope guard: regen fail → CHAT_SILENT_SKIP');
-              return CHAT_SILENT_SKIP;
+              this.logger.info({ groupId, dSpeakers }, 'addressee-scope guard: regen fail → silent');
+              return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'scope' };
             }
             // Skip near-dup for this regen output only (narrow)
-            return scopeRegenText;
+            metaBuilder.setEvasive(this._isEvasiveReply(scopeRegenText));
+            return { kind: 'reply', text: scopeRegenText, meta: metaBuilder.buildReply('normal'), reasonCode: 'engaged' };
           } catch {
-            return CHAT_SILENT_SKIP;
+            return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'scope' };
           }
         }
       }
@@ -2666,26 +2666,33 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
           { groupId, reply: processed, trigger: triggerMessage.content },
           'non-direct image reply invented story/staging — dropping',
         );
-        return null;
+        metaBuilder.setGuardPath('entity-guard');
+        return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'guard' };
       }
 
       // Claude explicitly skips this trigger
       if (/^<skip>\s*$/i.test(processed)) {
         this.logger.debug({ groupId, trigger: triggerMessage.content }, 'Claude explicitly skipped');
-        return null;
+        metaBuilder.setGuardPath('post-process');
+        return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'guard' };
       }
       // Claude signals disinterest via "...", "。", or empty — drop silently
       if (!processed || processed === '...' || processed === '。') {
         this.logger.debug({ groupId }, 'Claude opted out — dropping reply silently');
-        return null;
+        metaBuilder.setGuardPath('post-process');
+        return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'guard' };
       }
       // Confabulation detector: soft-drop if bot claims it already said something
       const confabFallback = checkConfabulation(processed, triggerMessage.content, { groupId });
-      if (confabFallback !== null) return null;
+      if (confabFallback !== null) {
+        metaBuilder.setGuardPath('confab-regen');
+        return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'confabulation' };
+      }
       // Echo detector: drop replies that are essentially the trigger parroted back
       if (isEcho(processed, triggerMessage.content)) {
         this.logger.info({ groupId, reply: processed, trigger: triggerMessage.content }, 'Echo detected — dropping reply silently');
-        return null;
+        metaBuilder.setGuardPath('post-process');
+        return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'guard' };
       }
       // Self-dedup: drop replies that are near-duplicates of a recent own reply.
       // Gemini sometimes re-generates the same response to a repeated trigger
@@ -2713,7 +2720,8 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       });
       if (nearDup) {
         this.logger.info({ groupId, reply: processed, duplicateOf: nearDup }, 'Near-duplicate of recent own reply — dropping');
-        return null;
+        metaBuilder.setGuardPath('near-dup');
+        return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'guard' };
       }
 
       // T2 tone-humanize: skeleton-level near-dup detection.
@@ -2730,7 +2738,8 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
         });
         if (skelDup) {
           this.logger.info({ groupId, reply: processed, skeletonDupOf: skelDup, skeleton: candidateSkeleton }, 'Skeleton near-dup detected — dropping');
-          return null;
+          metaBuilder.setGuardPath('near-dup');
+          return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'guard' };
         }
       }
 
@@ -2751,7 +2760,6 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
             );
             if (choice) {
               this.stickerFirst.suppressSticker(groupId, choice.key);
-              this.lastStickerKeyByGroup.set(groupId, choice.key);
               this._recordOwnReply(groupId, choice.cqCode);
               this._recordAffinityChat(
                 groupId,
@@ -2766,7 +2774,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
                 engagePathAffinityRecorded,
               );
               this.logger.info({ groupId, key: choice.key, score: choice.score }, 'sticker-first: sending sticker instead of text');
-              return choice.cqCode;
+              return { kind: 'sticker', cqCode: choice.cqCode, meta: metaBuilder.buildSticker(choice.key, choice.score), reasonCode: 'sticker-first' };
             }
           } catch (err) {
             this.logger.error({ err, groupId }, 'sticker-first: unhandled error — falling through to text');
@@ -2795,13 +2803,14 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
         until: Date.now() + 90_000,
         msgCount: 0,
       });
-      this.lastEvasiveReply.set(groupId, this._isEvasiveReply(processed));
-      _metaBuilder.setEvasive(this._isEvasiveReply(processed));
-      return processed;
+      const isEvasive = this._isEvasiveReply(processed);
+      this.lastEvasiveReply.set(groupId, isEvasive);
+      metaBuilder.setEvasive(isEvasive);
+      return { kind: 'reply', text: processed, meta: metaBuilder.buildReply(isDirect ? 'direct' : 'normal'), reasonCode: 'engaged' };
     } catch (err) {
       if (err instanceof ClaudeApiError || err instanceof ClaudeParseError) {
         this.logger.error({ err, groupId }, 'Claude API error in chat module — silent');
-        return null;
+        return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'guard' };
       }
       throw err;
     } finally {

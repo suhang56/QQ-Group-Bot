@@ -17,6 +17,7 @@ import { Database } from '../src/storage/db.js';
 import { initLogger } from '../src/utils/logger.js';
 import type { IClaudeClient, ClaudeResponse } from '../src/ai/claude.js';
 import type { GroupMessage } from '../src/adapter/napcat.js';
+import { isSendable } from '../src/utils/chat-result.js';
 
 initLogger({ level: 'silent' });
 
@@ -109,8 +110,8 @@ describe('ChatModule — 5+ @-spam curse+ignore', () => {
       const r = await chat.generateReply('g1', makeAtMsg('u1', `msg${i}`, `m${i}`), []);
       // 4th triggers annoyance-mode directive, but not curse+ignore — so the
       // reply must NOT be a curse-pool phrase (it's a normal Claude reply).
-      expect(r).not.toBeNull();
-      expect(ATSPAM_CURSE_POOL).not.toContain(r!);
+      expect(r.kind).not.toBe('silent');
+      expect(ATSPAM_CURSE_POOL).not.toContain('text' in r ? r.text : '');
     }
     expect(internals.atMentionIgnoreUntil.has('g1:u1')).toBe(false);
   });
@@ -121,8 +122,8 @@ describe('ChatModule — 5+ @-spam curse+ignore', () => {
     }
     const callsBefore = (claude.complete as ReturnType<typeof vi.fn>).mock.calls.length;
     const r = await chat.generateReply('g1', makeAtMsg('u1', 'msg5', 'm5'), []);
-    expect(r).toBeTruthy();
-    expect(ATSPAM_CURSE_POOL).toContain(r!);
+    expect(r.kind).toBe('reply');
+    expect(ATSPAM_CURSE_POOL).toContain((r as Extract<typeof r, { kind: 'reply' }>).text);
     const callsAfter = (claude.complete as ReturnType<typeof vi.fn>).mock.calls.length;
     // Fast path must not incur an LLM call
     expect(callsAfter).toBe(callsBefore);
@@ -136,7 +137,7 @@ describe('ChatModule — 5+ @-spam curse+ignore', () => {
     }
     const callsBefore = (claude.complete as ReturnType<typeof vi.fn>).mock.calls.length;
     const r = await chat.generateReply('g1', makeAtMsg('u1', 'msg6', 'm6'), []);
-    expect(r).toBeNull();
+    expect(r.kind).toBe('silent');
     const callsAfter = (claude.complete as ReturnType<typeof vi.fn>).mock.calls.length;
     expect(callsAfter).toBe(callsBefore); // no LLM call during ignore
   });
@@ -149,8 +150,8 @@ describe('ChatModule — 5+ @-spam curse+ignore', () => {
     expect(internals.atMentionIgnoreUntil.has('g1:u1')).toBe(true);
     // u2 sends its first @ in the same group → must go through normal path
     const r = await chat.generateReply('g1', makeAtMsg('u2', 'hi', 'm-u2-1'), []);
-    expect(r).not.toBeNull();
-    expect(ATSPAM_CURSE_POOL).not.toContain(r!);
+    expect(r.kind).not.toBe('silent');
+    expect(ATSPAM_CURSE_POOL).not.toContain('text' in r ? r.text : '');
   });
 
   it('after ignore window expires → next @ goes through normal path', async () => {
@@ -163,8 +164,8 @@ describe('ChatModule — 5+ @-spam curse+ignore', () => {
     const historyKey = 'g1:u1';
     (chat as unknown as { atMentionHistory: Map<string, number[]> }).atMentionHistory.set(historyKey, []);
     const r = await chat.generateReply('g1', makeAtMsg('u1', 'back', 'm-back'), []);
-    expect(r).not.toBeNull();
-    expect(ATSPAM_CURSE_POOL).not.toContain(r!);
+    expect(r.kind).not.toBe('silent');
+    expect(ATSPAM_CURSE_POOL).not.toContain('text' in r ? r.text : '');
     // Expired entry was lazy-cleaned
     expect(internals.atMentionIgnoreUntil.has('g1:u1')).toBe(false);
   });
@@ -176,7 +177,7 @@ describe('ChatModule — 5+ @-spam curse+ignore', () => {
     expect(internals.atMentionIgnoreUntil.has('g1:u1')).toBe(true);
     const callsBefore = (claude.complete as ReturnType<typeof vi.fn>).mock.calls.length;
     const r = await chat.generateReply('g1', makePlainMsg('u1', 'hello everyone', 'm-plain'), []);
-    expect(r).toBeNull();
+    expect(r.kind).toBe('silent');
     const callsAfter = (claude.complete as ReturnType<typeof vi.fn>).mock.calls.length;
     expect(callsAfter).toBe(callsBefore);
   });
@@ -186,8 +187,8 @@ describe('ChatModule — 5+ @-spam curse+ignore', () => {
       await chat.generateReply('g1', makeAtMsg('u1', `msg${i}`, `m${i}`), []);
     }
     const r = await chat.generateReply('g1', makePlainMsg('u2', 'hi everyone', 'm-u2-plain'), []);
-    expect(r).not.toBeNull();
-    expect(ATSPAM_CURSE_POOL).not.toContain(r!);
+    expect(r.kind).not.toBe('silent');
+    expect(ATSPAM_CURSE_POOL).not.toContain('text' in r ? r.text : '');
   });
 
   it('curse phrase is deterministic — never LLM output text (curse uses fast-path, skips Claude)', async () => {
@@ -209,8 +210,10 @@ describe('ChatModule — 5+ @-spam curse+ignore', () => {
       await pickedChat.generateReply('g1', makeAtMsg('u1', `msg${i}`, `m${i}`), []);
     }
     const r = await pickedChat.generateReply('g1', makeAtMsg('u1', 'msg5', 'm5'), []);
-    expect(r).not.toBe(marker);
-    expect(ATSPAM_CURSE_POOL).toContain(r!);
+    expect(r.kind).toBe('reply');
+    const rText = (r as Extract<typeof r, { kind: 'reply' }>).text;
+    expect(rText).not.toBe(marker);
+    expect(ATSPAM_CURSE_POOL).toContain(rText);
   });
 
   it('per-user scope: user A at curse+ignore does not affect user B in same group', async () => {
@@ -228,8 +231,8 @@ describe('ChatModule — 5+ @-spam curse+ignore', () => {
     const callsBefore = (claude.complete as ReturnType<typeof vi.fn>).mock.calls.length;
     const r = await chat.generateReply('g1', makeAtMsg('uB', 'hey bot', 'm-b-1'), []);
     const callsAfter = (claude.complete as ReturnType<typeof vi.fn>).mock.calls.length;
-    expect(r).not.toBeNull();
-    expect(ATSPAM_CURSE_POOL).not.toContain(r!);
+    expect(r.kind).not.toBe('silent');
+    expect(ATSPAM_CURSE_POOL).not.toContain('text' in r ? r.text : '');
     expect(callsAfter).toBeGreaterThan(callsBefore);
     expect(internals.atMentionIgnoreUntil.has('g1:uB')).toBe(false);
   });
@@ -246,9 +249,9 @@ describe('ChatModule — 5+ @-spam curse+ignore', () => {
     const callsBefore = (claude.complete as ReturnType<typeof vi.fn>).mock.calls.length;
     const r = await chat.generateReply('g1', makeAtMsg('uB', 'hello there', 'm-b-1'), []);
     const callsAfter = (claude.complete as ReturnType<typeof vi.fn>).mock.calls.length;
-    expect(r).not.toBeNull();
+    expect(r.kind).not.toBe('silent');
     expect(callsAfter).toBeGreaterThan(callsBefore);
-    expect(ATSPAM_CURSE_POOL).not.toContain(r!);
+    expect(ATSPAM_CURSE_POOL).not.toContain('text' in r ? r.text : '');
   });
 
   it('ignore scope: groups are independent (g2 unaffected by g1 ignore)', async () => {
@@ -259,7 +262,7 @@ describe('ChatModule — 5+ @-spam curse+ignore', () => {
     // Same user, different group — untouched
     expect(internals.atMentionIgnoreUntil.has('g2:u1')).toBe(false);
     const r = await chat.generateReply('g2', makeAtMsg('u1', 'hi', 'm-g2'), []);
-    expect(r).not.toBeNull();
-    expect(ATSPAM_CURSE_POOL).not.toContain(r!);
+    expect(r.kind).not.toBe('silent');
+    expect(ATSPAM_CURSE_POOL).not.toContain('text' in r ? r.text : '');
   });
 });

@@ -66,7 +66,8 @@ describe('chat relay wiring', () => {
     const callsBefore = (claude.complete as ReturnType<typeof vi.fn>).mock.calls.length;
     const result = await chat.generateReply('g1', makeMsg('帅'), []);
 
-    expect(result).toBe('帅');
+    expect(result.kind).toBe('reply');
+    expect('text' in result && result.text).toBe('帅');
     expect((claude.complete as ReturnType<typeof vi.fn>).mock.calls.length).toBe(callsBefore);
 
     vi.restoreAllMocks();
@@ -79,7 +80,7 @@ describe('chat relay wiring', () => {
     const callsBefore = (claude.complete as ReturnType<typeof vi.fn>).mock.calls.length;
     const result = await chat.generateReply('g1', makeMsg('帅'), []);
 
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
     expect((claude.complete as ReturnType<typeof vi.fn>).mock.calls.length).toBe(callsBefore);
 
     vi.restoreAllMocks();
@@ -96,7 +97,7 @@ describe('chat relay wiring', () => {
     const callsBefore = (claude.complete as ReturnType<typeof vi.fn>).mock.calls.length;
     const result = await chat.generateReply('g1', makeMsg('帅'), []);
 
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
     expect((claude.complete as ReturnType<typeof vi.fn>).mock.calls.length).toBe(callsBefore);
 
     vi.restoreAllMocks();
@@ -115,6 +116,6 @@ describe('chat relay wiring', () => {
 
     // With chatMinScore=-999, the engagement gate passes; LLM must be called
     expect((claude.complete as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(callsBefore);
-    expect(result).not.toBeNull();
+    expect(result.kind).not.toBe('silent');
   });
 });

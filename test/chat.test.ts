@@ -75,7 +75,8 @@ describe('ChatModule — core behavior', () => {
 
   it('generateReply returns text from Claude', async () => {
     const result = await chat.generateReply('g1', makeMsg(), []);
-    expect(result).toBe('bot reply');
+    expect(result.kind).not.toBe('silent');
+    expect('text' in result && result.text).toBe('bot reply');
   });
 
   it('uses recent messages as few-shot context', async () => {
@@ -114,7 +115,7 @@ describe('ChatModule — core behavior', () => {
       rawContent: '[CQ:image,file=work.jpg] 我们淘宝店的客服工作实况',
     }), []);
 
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
   });
 
   it('allows story terms when the image caption itself grounds them', () => {
@@ -125,13 +126,13 @@ describe('ChatModule — core behavior', () => {
   it('returns null on ClaudeApiError (fail-safe)', async () => {
     (claude.complete as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new ClaudeApiError(new Error('timeout')));
     const result = await chat.generateReply('g1', makeMsg(), []);
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
   });
 
   it('returns null when group rate limit is exceeded', async () => {
     chat = makePassthroughChat(claude, db, { maxGroupRepliesPerMinute: 0 });
     const result = await chat.generateReply('g1', makeMsg(), []);
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
   });
 
   it('debounces consecutive messages (same group, within window)', async () => {
@@ -146,14 +147,14 @@ describe('ChatModule — core behavior', () => {
 
     const callCount = (claude.complete as ReturnType<typeof vi.fn>).mock.calls.length;
     expect(callCount).toBeLessThanOrEqual(1);
-    expect([r1, r2].filter(r => r === null).length).toBeGreaterThanOrEqual(1);
+    expect([r1, r2].filter(r => r.kind === 'silent').length).toBeGreaterThanOrEqual(1);
 
     vi.useRealTimers();
   });
 
   it('handles message with only CQ codes (empty content after strip)', async () => {
     const result = await chat.generateReply('g1', makeMsg({ content: '' }), []);
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
   });
 
   it('in-flight lock: concurrent @-mention sends exactly one reply', async () => {
@@ -177,7 +178,7 @@ describe('ChatModule — core behavior', () => {
     resolveFirst('哈哈好的');  // different from trigger '咪' so echo detector doesn't drop it
     const [r1, r2] = await Promise.all([p1, p2]);
 
-    const replies = [r1, r2].filter(r => r !== null);
+    const replies = [r1, r2].filter(r => r.kind !== 'silent');
     expect(replies).toHaveLength(1);
     expect(completeMock).toHaveBeenCalledTimes(1);
   });
@@ -230,7 +231,9 @@ describe('ChatModule — weighted participation scoring', () => {
     const chat = makeScoringChat({ chatMinScore: 999 }); // impossibly high threshold
     const msg = makeMsg({ rawContent: `[CQ:at,qq=${BOT_ID}] hello bot`, content: 'hello bot' });
     const result = await chat.generateReply('g1', msg, []);
-    expect(result).toBe('bot reply');
+    expect(result.kind).not.toBe('silent');
+
+    expect('text' in result && result.text).toBe('bot reply');
   });
 
   it('@-mention always replies even during burst', async () => {
@@ -240,7 +243,8 @@ describe('ChatModule — weighted participation scoring', () => {
     const chat = makeScoringChat({ chatMinScore: 999 });
     const msg = makeMsg({ rawContent: `[CQ:at,qq=${BOT_ID}] 在吗`, content: '在吗' });
     const result = await chat.generateReply('g1', msg, []);
-    expect(result).toBe('bot reply');
+    expect(result.kind).not.toBe('silent');
+    expect('text' in result && result.text).toBe('bot reply');
   });
 
   // 2. Reply-to-bot always responds (requires recordOutgoingMessage)
@@ -254,7 +258,8 @@ describe('ChatModule — weighted participation scoring', () => {
       content: 'thanks for that',
     });
     const result = await chat.generateReply('g1', msg, []);
-    expect(result).toBe('bot reply');
+    expect(result.kind).not.toBe('silent');
+    expect('text' in result && result.text).toBe('bot reply');
   });
 
   it('reply-to-OTHER-user is NOT treated as reply-to-bot', async () => {
@@ -270,7 +275,7 @@ describe('ChatModule — weighted participation scoring', () => {
     });
     // Score: replyToOther=-0.4, everything else 0 → total ≤ 0 < 0.5 → skip
     const result = await chat.generateReply('g1', msg, []);
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
   });
 
   // 3. 1-on-1 conversation between two other users → skip (the bug fix)
@@ -291,7 +296,7 @@ describe('ChatModule — weighted participation scoring', () => {
     });
     // Score: twoUser=-0.3, replyToOther=-0.4 → net ≤ -0.7 → definitely skip
     const result = await chat.generateReply('g1', msg, []);
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
   });
 
   // 4. 2-user rapid argument (burst) → skip
@@ -303,7 +308,7 @@ describe('ChatModule — weighted participation scoring', () => {
     const chat = makeScoringChat({ chatMinScore: 0.5, chatBurstWindowMs: 10_000, chatBurstCount: 5 });
     const msg = makeMsg({ content: '哈哈哈' });
     const result = await chat.generateReply('g1', msg, []);
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
   });
 
   // 5. Plain question after long silence should NOT pass (R2 snoopy-boundaries):
@@ -314,7 +319,7 @@ describe('ChatModule — weighted participation scoring', () => {
     const msg = makeMsg({ content: '吃啥呢', rawContent: '吃啥呢' });
     // score: silence=0.2 → 0.2 < 0.75 → skip
     const result = await chat.generateReply('g1', msg, []);
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
   });
 
   // 6. Lore keyword alone (0.2) + silence (0.2) is 0.4 — still below non-direct
@@ -335,7 +340,7 @@ describe('ChatModule — weighted participation scoring', () => {
     // loreKw=0.2, silence=0.2 → 0.4 < 0.75 → skip (new weights)
     const msg = makeMsg({ groupId: 'g-score-lore', content: 'ygfn 的服务器今天在线人数很多啊', rawContent: 'ygfn 的服务器今天在线人数很多啊' });
     const result = await chat.generateReply('g-score-lore', msg, []);
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
   });
 
   // 7. Burst blocks all non-direct messages regardless of other factors
@@ -350,7 +355,7 @@ describe('ChatModule — weighted participation scoring', () => {
     // question=0.6, burst=-0.5 → net 0.1 < 0.5 → skip
     const msg = makeMsg({ content: '这个问题好有意思啊你们觉得呢？', rawContent: '这个问题好有意思啊你们觉得呢？' });
     const result = await chat.generateReply('g1', msg, []);
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
   });
 
   // recordOutgoingMessage cap test
@@ -430,7 +435,8 @@ describe('ChatModule — mixed few-shot history', () => {
 
     const chat = makeChatWithCounts(20, 10);
     const result = await chat.generateReply('g1', makeMsg(), []);
-    expect(result).toBe('bot reply');
+    expect(result.kind).not.toBe('silent');
+    expect('text' in result && result.text).toBe('bot reply');
 
     const sample = db.messages.sampleRandomHistorical('g1', 20, 10);
     expect(sample).toHaveLength(0);
@@ -491,7 +497,8 @@ describe('ChatModule — mixed few-shot history', () => {
   it('empty group: both recent and historical are empty, reply still works', async () => {
     const chat = makeChatWithCounts(20, 10);
     const result = await chat.generateReply('g1', makeMsg(), []);
-    expect(result).toBe('bot reply');
+    expect(result.kind).not.toBe('silent');
+    expect('text' in result && result.text).toBe('bot reply');
   });
 
   it('single-message group: historical=0, reply still works', async () => {
@@ -500,7 +507,8 @@ describe('ChatModule — mixed few-shot history', () => {
 
     const chat = makeChatWithCounts(20, 10);
     const result = await chat.generateReply('g1', makeMsg(), []);
-    expect(result).toBe('bot reply');
+    expect(result.kind).not.toBe('silent');
+    expect('text' in result && result.text).toBe('bot reply');
 
     const sample = db.messages.sampleRandomHistorical('g1', 20, 10);
     expect(sample).toHaveLength(0);
@@ -533,7 +541,8 @@ describe('ChatModule — keyword retrieval and group identity', () => {
 
     const chat = makeChat();
     const result = await chat.generateReply('g1', makeMsg({ content: '我 你 他' }), []);
-    expect(result).toBe('bot reply');
+    expect(result.kind).not.toBe('silent');
+    expect('text' in result && result.text).toBe('bot reply');
 
     const call = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { messages: Array<{ content: string }> };
     const promptText = call.messages.map((m: { content: string }) => m.content).join(' ');
@@ -605,7 +614,8 @@ describe('ChatModule — keyword retrieval and group identity', () => {
   it('empty corpus: zero keyword matches + zero historical, reply still succeeds', async () => {
     const chat = makeChat();
     const result = await chat.generateReply('g1', makeMsg({ content: '邦多利是什么' }), []);
-    expect(result).toBe('bot reply');
+    expect(result.kind).not.toBe('silent');
+    expect('text' in result && result.text).toBe('bot reply');
 
     const call = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { messages: Array<{ content: string }> };
     const promptText = call.messages.map((m: { content: string }) => m.content).join(' ');
@@ -692,7 +702,8 @@ describe('ChatModule — group lore loading', () => {
     const chat = makeChatWithLoreDir('/nonexistent/path/that/does/not/exist');
     const msg = makeMsg({ content: '有人吗', rawContent: `[CQ:at,qq=${BOT_ID}] 有人吗` });
     const result = await chat.generateReply('g1', msg, []);
-    expect(result).toBe('bot reply');
+    expect(result.kind).not.toBe('silent');
+    expect('text' in result && result.text).toBe('bot reply');
 
     const call = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { system: Array<{ text: string }> };
     const systemText = call.system.map((s: { text: string }) => s.text).join(' ');
@@ -760,7 +771,8 @@ describe('ChatModule — sentinel: AI self-disclosure prevention', () => {
     claude.mockResolvedValue({ text: '哈哈今天天气不错', inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 });
     const chat = makeSentinelChat();
     const result = await chat.generateReply('g1', mentionMsg('天气'), []);
-    expect(result).toBe('哈哈今天天气不错');
+    expect(result.kind).not.toBe('silent');
+    expect('text' in result && result.text).toBe('哈哈今天天气不错');
     expect(claude.mock.calls.length).toBe(1);
   });
 
@@ -775,7 +787,8 @@ describe('ChatModule — sentinel: AI self-disclosure prevention', () => {
     });
     const chat = makeSentinelChat();
     const result = await chat.generateReply('g1', mentionMsg('哈'), []);
-    expect(result).toBe('笑死我了');
+    expect(result.kind).not.toBe('silent');
+    expect('text' in result && result.text).toBe('笑死我了');
     expect(claude.mock.calls.length).toBe(2);
   });
 
@@ -790,7 +803,8 @@ describe('ChatModule — sentinel: AI self-disclosure prevention', () => {
     });
     const chat = makeSentinelChat();
     const result = await chat.generateReply('g1', mentionMsg('算法题'), []);
-    expect(result).toBe('笑死这算法题都给你拒了');
+    expect(result.kind).not.toBe('silent');
+    expect('text' in result && result.text).toBe('笑死这算法题都给你拒了');
     expect(claude.mock.calls.length).toBe(2);
   });
 
@@ -801,7 +815,7 @@ describe('ChatModule — sentinel: AI self-disclosure prevention', () => {
     });
     const chat = makeSentinelChat();
     const result = await chat.generateReply('g1', mentionMsg('你好'), []);
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
     expect(claude.mock.calls.length).toBe(2);
   });
 
@@ -926,28 +940,28 @@ describe('ChatModule — identity probe deflection', () => {
   it('"你是不是 bot" → identity deflection', async () => {
     const chat = makeChat();
     const result = await chat.generateReply('g1', makeMsg({ content: '你是不是 bot' }), []);
-    expect(IDENTITY_DEFLECTIONS).toContain(result);
+    expect(IDENTITY_DEFLECTIONS).toContain('text' in result ? result.text : '');
     expect(claude).not.toHaveBeenCalled();
   });
 
   it('"你是真人吗" → identity deflection', async () => {
     const chat = makeChat();
     const result = await chat.generateReply('g1', makeMsg({ content: '你是真人吗' }), []);
-    expect(IDENTITY_DEFLECTIONS).toContain(result);
+    expect(IDENTITY_DEFLECTIONS).toContain('text' in result ? result.text : '');
     expect(claude).not.toHaveBeenCalled();
   });
 
   it('"你是AI吗" → identity deflection', async () => {
     const chat = makeChat();
     const result = await chat.generateReply('g1', makeMsg({ content: '你是AI吗' }), []);
-    expect(IDENTITY_DEFLECTIONS).toContain(result);
+    expect(IDENTITY_DEFLECTIONS).toContain('text' in result ? result.text : '');
     expect(claude).not.toHaveBeenCalled();
   });
 
   it('"bot 吧" → identity deflection', async () => {
     const chat = makeChat();
     const result = await chat.generateReply('g1', makeMsg({ content: 'bot 吧' }), []);
-    expect(IDENTITY_DEFLECTIONS).toContain(result);
+    expect(IDENTITY_DEFLECTIONS).toContain('text' in result ? result.text : '');
     expect(claude).not.toHaveBeenCalled();
   });
 
@@ -982,7 +996,7 @@ describe('ChatModule — identity probe deflection', () => {
       // Fresh chat + unique groupId to bypass debounce/rate-limit state
       const chat = makeChat();
       const r = await chat.generateReply(`g-${i}`, makeMsg({ content: '你是AI吗' }), []);
-      if (r) results.add(r);
+      if ('text' in r) results.add(r.text);
     }
     // With 6 options and 30 draws, probability of all same < 0.001%
     expect(results.size).toBeGreaterThan(1);
@@ -1078,21 +1092,21 @@ describe('ChatModule — task request deflection', () => {
   it('"写一首诗" → canned deflection, Claude not called', async () => {
     const chat = makeChat();
     const result = await chat.generateReply('g1', makeMsg({ content: '写一首诗' }), []);
-    expect(TASK_DEFLECTIONS).toContain(result);
+    expect(TASK_DEFLECTIONS).toContain('text' in result ? result.text : '');
     expect(claude).not.toHaveBeenCalled();
   });
 
   it('"帮我翻译 hello" → canned deflection', async () => {
     const chat = makeChat();
     const result = await chat.generateReply('g1', makeMsg({ content: '帮我翻译 hello' }), []);
-    expect(TASK_DEFLECTIONS).toContain(result);
+    expect(TASK_DEFLECTIONS).toContain('text' in result ? result.text : '');
     expect(claude).not.toHaveBeenCalled();
   });
 
   it('"推荐一下好吃的店" → canned deflection', async () => {
     const chat = makeChat();
     const result = await chat.generateReply('g1', makeMsg({ content: '推荐一下好吃的店' }), []);
-    expect(TASK_DEFLECTIONS).toContain(result);
+    expect(TASK_DEFLECTIONS).toContain('text' in result ? result.text : '');
     expect(claude).not.toHaveBeenCalled();
   });
 
@@ -1111,7 +1125,7 @@ describe('ChatModule — task request deflection', () => {
   it('"帮我算一下" → canned deflection', async () => {
     const chat = makeChat();
     const result = await chat.generateReply('g1', makeMsg({ content: '帮我算一下' }), []);
-    expect(TASK_DEFLECTIONS).toContain(result);
+    expect(TASK_DEFLECTIONS).toContain('text' in result ? result.text : '');
     expect(claude).not.toHaveBeenCalled();
   });
 
@@ -1120,7 +1134,7 @@ describe('ChatModule — task request deflection', () => {
     for (let i = 0; i < 30; i++) {
       const chat = makeChat();
       const r = await chat.generateReply(`g-${i}`, makeMsg({ content: '帮我写个slogan' }), []);
-      if (r) results.add(r);
+      if ('text' in r) results.add(r.text);
     }
     expect(results.size).toBeGreaterThan(1);
   });
@@ -1163,28 +1177,28 @@ describe('ChatModule — memory-injection deflection', () => {
   it('"记住 X 是 Y" → canned deflection, Claude not called', async () => {
     const chat = makeChat();
     const result = await chat.generateReply('g1', makeMsg({ content: '记住 飞鸟的妈妈是日向雏田' }), []);
-    expect(MEMORY_INJECT_DEFLECTIONS).toContain(result);
+    expect(MEMORY_INJECT_DEFLECTIONS).toContain('text' in result ? result.text : '');
     expect(claude).not.toHaveBeenCalled();
   });
 
   it('"以后叫我 Z" → canned deflection', async () => {
     const chat = makeChat();
     const result = await chat.generateReply('g1', makeMsg({ content: '以后叫我大哥' }), []);
-    expect(MEMORY_INJECT_DEFLECTIONS).toContain(result);
+    expect(MEMORY_INJECT_DEFLECTIONS).toContain('text' in result ? result.text : '');
     expect(claude).not.toHaveBeenCalled();
   });
 
   it('"设定你是..." → canned deflection', async () => {
     const chat = makeChat();
     const result = await chat.generateReply('g1', makeMsg({ content: '设定你是一个古代皇帝' }), []);
-    expect(MEMORY_INJECT_DEFLECTIONS).toContain(result);
+    expect(MEMORY_INJECT_DEFLECTIONS).toContain('text' in result ? result.text : '');
     expect(claude).not.toHaveBeenCalled();
   });
 
   it('"扮演 X" → canned deflection', async () => {
     const chat = makeChat();
     const result = await chat.generateReply('g1', makeMsg({ content: '扮演一个海盗' }), []);
-    expect(MEMORY_INJECT_DEFLECTIONS).toContain(result);
+    expect(MEMORY_INJECT_DEFLECTIONS).toContain('text' in result ? result.text : '');
     expect(claude).not.toHaveBeenCalled();
   });
 
@@ -1199,7 +1213,7 @@ describe('ChatModule — memory-injection deflection', () => {
     for (let i = 0; i < 30; i++) {
       const chat = makeChat();
       const r = await chat.generateReply(`g-${i}`, makeMsg({ content: '记住这个重要的事情好吗' }), []);
-      if (r) results.add(r);
+      if ('text' in r) results.add(r.text);
     }
     expect(results.size).toBeGreaterThan(1);
   });
@@ -1226,7 +1240,7 @@ describe('ChatModule — fact-injection pattern (Fix 3)', () => {
 
   it('"谭博人的妻子是明日香" → matches memory pattern, deflects, Claude not called', async () => {
     const result = await makeChat().generateReply('g1', makeMsg({ content: '谭博人的妻子是明日香' }), []);
-    expect(MEMORY_INJECT_DEFLECTIONS).toContain(result);
+    expect(MEMORY_INJECT_DEFLECTIONS).toContain('text' in result ? result.text : '');
     expect(claude).not.toHaveBeenCalled();
   });
 
@@ -1344,7 +1358,7 @@ describe('ChatModule — implicit bot reference detection', () => {
       role: 'admin',
     }), []);
 
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
     expect(claude.complete).not.toHaveBeenCalled();
   });
 
@@ -1353,7 +1367,7 @@ describe('ChatModule — implicit bot reference detection', () => {
     // simulate bot recently posted by marking lastProactiveReply
     chat['lastProactiveReply'].set('g1', Date.now() - 15_000); // 15s ago
     const result = await chat.generateReply('g1', makeMsg({ content: '现在又变笨了' }), []);
-    expect(result).not.toBeNull();
+    expect(result.kind).not.toBe('silent');
   });
 
   it('"现在又变笨了" 5 min after bot post → no boost (score stays low, no reply)', async () => {
@@ -1372,13 +1386,13 @@ describe('ChatModule — implicit bot reference detection', () => {
     const chat = makeChat();
     // no recent bot post at all
     const result = await chat.generateReply('g1', makeMsg({ content: '小号 吃饭了吗' }), []);
-    expect(result).not.toBeNull();
+    expect(result.kind).not.toBe('silent');
   });
 
   it('"QAQ 你在吗" → boost (alias keyword)', async () => {
     const chat = makeChat();
     const result = await chat.generateReply('g1', makeMsg({ content: 'QAQ 你在吗' }), []);
-    expect(result).not.toBeNull();
+    expect(result.kind).not.toBe('silent');
   });
 
   it('"他今天吃饭了" with bot silent 5 min → no boost (pronoun alone, no window)', async () => {
@@ -1387,27 +1401,27 @@ describe('ChatModule — implicit bot reference detection', () => {
     chat['lastProactiveReply'].set('g1', Date.now() - 300_000); // 5 min ago
     // Non-question, short, no lore kw, no alias, pronoun outside 60s window → score 0 → skip
     const result = await chat.generateReply('g1', makeMsg({ content: '他今天吃饭了' }), []);
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
   });
 
   it('"他今天吃饭了" within 30s of bot post → boost (pronoun + recent window)', async () => {
     const chat = makeChat();
     chat['lastProactiveReply'].set('g1', Date.now() - 10_000); // 10s ago
     const result = await chat.generateReply('g1', makeMsg({ content: '他今天吃饭了' }), []);
-    expect(result).not.toBeNull();
+    expect(result.kind).not.toBe('silent');
   });
 
   it('"今天天气好" → no boost, no reply (unrelated)', async () => {
     const chat = makeChat({ lurkerReplyChance: 0 });
     chat['lastProactiveReply'].set('g1', Date.now() - 300_000);
     const result = await chat.generateReply('g1', makeMsg({ content: '今天天气好' }), []);
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
   });
 
   it('"小号 帮我写诗" → task-request deflected before score check', async () => {
     const chat = makeChat();
     const result = await chat.generateReply('g1', makeMsg({ content: '小号 帮我写诗' }), []);
-    expect(TASK_DEFLECTIONS).toContain(result);
+    expect(TASK_DEFLECTIONS).toContain('text' in result ? result.text : '');
     expect((claude.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
   });
 });
@@ -1432,25 +1446,26 @@ describe('ChatModule — soft score gate + Claude-driven silence', () => {
   it('Claude returns "..." → reply dropped (null returned)', async () => {
     const { chat } = makeChat('...');
     const result = await chat.generateReply('g1', makeMsg({ content: '随便说点什么' }), []);
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
   });
 
   it('Claude returns empty string → reply dropped', async () => {
     const { chat } = makeChat('');
     const result = await chat.generateReply('g1', makeMsg({ content: '随便说点什么' }), []);
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
   });
 
   it('Claude returns "。" → reply dropped', async () => {
     const { chat } = makeChat('。');
     const result = await chat.generateReply('g1', makeMsg({ content: '随便说点什么' }), []);
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
   });
 
   it('Claude returns real text → reply sent normally', async () => {
     const { chat } = makeChat('好啊');
     const result = await chat.generateReply('g1', makeMsg({ content: '今天吃啥' }), []);
-    expect(result).toBe('好啊');
+    expect(result.kind).not.toBe('silent');
+    expect('text' in result && result.text).toBe('好啊');
   });
 
   it('chatMinScore default is 0.45 (middle ground after 0.25 too eager / 0.7 too quiet)', () => {
@@ -1590,8 +1605,8 @@ describe('ChatModule — curse escalation for repeat teasers', () => {
   it('single identity probe → polite deflection, NOT curse', async () => {
     const chat = makeChat();
     const result = await chat.generateReply('g1', probeMsg, []);
-    expect(IDENTITY_DEFLECTIONS).toContain(result);
-    expect(CURSE_DEFLECTIONS).not.toContain(result);
+    expect(IDENTITY_DEFLECTIONS).toContain('text' in result ? result.text : '');
+    expect(CURSE_DEFLECTIONS).not.toContain('text' in result ? result.text : '');
   });
 
   // 2. Three probes in 5 min → 3rd triggers curse pool
@@ -1600,7 +1615,7 @@ describe('ChatModule — curse escalation for repeat teasers', () => {
     await chat.generateReply('g1', probeMsg, []);
     await chat.generateReply('g1', probeMsg, []);
     const result = await chat.generateReply('g1', probeMsg, []);
-    expect(CURSE_DEFLECTIONS).toContain(result);
+    expect(CURSE_DEFLECTIONS).toContain('text' in result ? result.text : '');
   });
 
   // 3. Probes spread over 20 min → decay resets count, stays polite
@@ -1611,8 +1626,8 @@ describe('ChatModule — curse escalation for repeat teasers', () => {
     chat['teaseCounter'].set('g1:u1', { count: 2, lastHit: now - 20 * 60_000 });
     // Next hit: entry is expired → count resets to 1, below threshold
     const result = await chat.generateReply('g1', probeMsg, []);
-    expect(IDENTITY_DEFLECTIONS).toContain(result);
-    expect(CURSE_DEFLECTIONS).not.toContain(result);
+    expect(IDENTITY_DEFLECTIONS).toContain('text' in result ? result.text : '');
+    expect(CURSE_DEFLECTIONS).not.toContain('text' in result ? result.text : '');
   });
 
   // 4. User A teased 3x → curse; User B single probe → polite
@@ -1621,11 +1636,11 @@ describe('ChatModule — curse escalation for repeat teasers', () => {
     await chat.generateReply('g1', probeMsg, []);
     await chat.generateReply('g1', probeMsg, []);
     const resultA = await chat.generateReply('g1', probeMsg, []);
-    expect(CURSE_DEFLECTIONS).toContain(resultA);
+    expect(CURSE_DEFLECTIONS).toContain('text' in resultA ? resultA.text : '');
 
     const resultB = await chat.generateReply('g1', userBProbe, []);
-    expect(IDENTITY_DEFLECTIONS).toContain(resultB);
-    expect(CURSE_DEFLECTIONS).not.toContain(resultB);
+    expect(IDENTITY_DEFLECTIONS).toContain('text' in resultB ? resultB.text : '');
+    expect(CURSE_DEFLECTIONS).not.toContain('text' in resultB ? resultB.text : '');
   });
 
   // 5. 3 hits in 14 min → curse; if expired → polite
@@ -1635,12 +1650,12 @@ describe('ChatModule — curse escalation for repeat teasers', () => {
     // Set 2 prior hits 13 min ago (within 14 min window)
     chat['teaseCounter'].set('g1:u1', { count: 2, lastHit: now - 13 * 60_000 });
     const resultCurse = await chat.generateReply('g1', probeMsg, []);
-    expect(CURSE_DEFLECTIONS).toContain(resultCurse);
+    expect(CURSE_DEFLECTIONS).toContain('text' in resultCurse ? resultCurse.text : '');
 
     // Now reset and set hits 15 min ago (outside 14 min window)
     chat['teaseCounter'].set('g1:u1', { count: 2, lastHit: now - 15 * 60_000 });
     const resultPolite = await chat.generateReply('g1', probeMsg, []);
-    expect(IDENTITY_DEFLECTIONS).toContain(resultPolite);
+    expect(IDENTITY_DEFLECTIONS).toContain('text' in resultPolite ? resultPolite.text : '');
   });
 
   // 6. Normal chat from same user does NOT increment counter
@@ -1692,7 +1707,8 @@ describe('ChatModule — conversational continuity boost', () => {
     // With continuity: 0.6 >= 0.5 → responds
     const msg = makeMsg({ userId: 'u1', content: '在干什么', rawContent: '在干什么' });
     const result = await chat.generateReply('g1', msg, []);
-    expect(result).toBe('bot reply');
+    expect(result.kind).not.toBe('silent');
+    expect('text' in result && result.text).toBe('bot reply');
   });
 
   // 2. Follow-up after window expires → no boost → bot skips
@@ -1702,7 +1718,7 @@ describe('ChatModule — conversational continuity boost', () => {
     await new Promise(r => setTimeout(r, 5)); // wait for window to expire
     const msg = makeMsg({ userId: 'u1', content: '在干什么', rawContent: '在干什么' });
     const result = await chat.generateReply('g1', msg, []);
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
   });
 
   // 3. Cross-user: only user B gets continuity boost, not user A
@@ -1713,7 +1729,7 @@ describe('ChatModule — conversational continuity boost', () => {
     // u1 sends a plain follow-up — no continuity boost for u1
     const msgA = makeMsg({ userId: 'u1', content: '也想知道', rawContent: '也想知道' });
     const resultA = await chat.generateReply('g1', msgA, []);
-    expect(resultA).toBeNull(); // u1 gets no boost
+    expect(resultA.kind).toBe('silent'); // u1 gets no boost
   });
 
   // 4. Cross-group: continuity in group A doesn't bleed into group B
@@ -1722,7 +1738,7 @@ describe('ChatModule — conversational continuity boost', () => {
     chat.markReplyToUser('g1', 'u1'); // boost in g1
     const msgG2 = makeMsg({ groupId: 'g2', userId: 'u1', content: '在干什么', rawContent: '在干什么' });
     const result = await chat.generateReply('g2', msgG2, []);
-    expect(result).toBeNull(); // no boost in g2
+    expect(result.kind).toBe('silent'); // no boost in g2
   });
 
   // 5. Proactive/silence-breaker replies do NOT mark user continuity
@@ -1731,7 +1747,7 @@ describe('ChatModule — conversational continuity boost', () => {
     // Simulate no markReplyToUser call (proactive path skips it)
     const msg = makeMsg({ userId: 'u1', content: '哈哈', rawContent: '哈哈' });
     const result = await chat.generateReply('g1', msg, []);
-    expect(result).toBeNull(); // no continuity boost, score 0 < 0.5
+    expect(result.kind).toBe('silent'); // no continuity boost, score 0 < 0.5
   });
 });
 
@@ -1767,7 +1783,7 @@ describe('ChatModule — deflection cache', () => {
     const chat = makeChat(claude, { deflectCacheEnabled: false });
     const msg = makeMsg({ content: '你是机器人吗', userId: 'u1' });
     const result = await chat.generateReply('g1', msg, []);
-    expect(DEFLECT_FALLBACKS['identity']).toContain(result);
+    expect(DEFLECT_FALLBACKS['identity']).toContain('text' in result ? result.text : '');
   });
 
   // 2. Cache has entries → pop one, return it (no Claude call for the deflection)
@@ -1783,7 +1799,7 @@ describe('ChatModule — deflection cache', () => {
 
     const msg = makeMsg({ content: '你是机器人吗', userId: 'u1' });
     const result = await chat.generateReply('g1', msg, []);
-    expect(['啥', '？？？']).toContain(result);
+    expect(['啥', '？？？']).toContain('text' in result ? result.text : '');
     // Cache should have one fewer entry
     expect(chat['deflectCache'].get('identity')!.length).toBe(1);
   });
@@ -1836,7 +1852,7 @@ describe('ChatModule — deflection cache', () => {
     // Now a deflection request should return static pool phrase
     const msg = makeMsg({ content: '帮我写首诗', userId: 'u1' });
     const result = await chat.generateReply('g1', msg, []);
-    expect(DEFLECT_FALLBACKS['task']).toContain(result);
+    expect(DEFLECT_FALLBACKS['task']).toContain('text' in result ? result.text : '');
   });
 
   // 6. Generated response contains AI self-disclosure → _validateDeflection rejects it
@@ -1913,7 +1929,7 @@ describe('ChatModule — pure @-mention reply', () => {
       rawContent: `[CQ:at,qq=${BOT_ID}]`,
     });
     const result = await chat.generateReply('g1', msg, []);
-    expect(DEFLECT_FALLBACKS['at_only']).toContain(result);
+    expect(DEFLECT_FALLBACKS['at_only']).toContain('text' in result ? result.text : '');
     expect(claude).not.toHaveBeenCalled();
   });
 
@@ -1936,7 +1952,7 @@ describe('ChatModule — pure @-mention reply', () => {
       rawContent: '[CQ:at,qq=other-user]',
     });
     const result = await chat.generateReply('g1', msg, []);
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
     expect(claude).not.toHaveBeenCalled();
   });
 
@@ -1945,7 +1961,7 @@ describe('ChatModule — pure @-mention reply', () => {
     const chat = makeChat();
     const msg = makeMsg({ content: '', rawContent: '' });
     const result = await chat.generateReply('g1', msg, []);
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
   });
 
   // 5. Rate limit still applies to @-only replies
@@ -1954,11 +1970,11 @@ describe('ChatModule — pure @-mention reply', () => {
     const atMsg = () => makeMsg({ content: '', rawContent: `[CQ:at,qq=${BOT_ID}]` });
 
     const first = await chat.generateReply('g1', atMsg(), []);
-    expect(DEFLECT_FALLBACKS['at_only']).toContain(first);
+    expect(DEFLECT_FALLBACKS['at_only']).toContain('text' in first ? first.text : '');
 
     // Second @-only within same minute — rate limit hit
     const second = await chat.generateReply('g1', atMsg(), []);
-    expect(second).toBeNull();
+    expect(second.kind).toBe('silent');
   });
 });
 
@@ -2182,7 +2198,7 @@ describe('ChatModule — self-repetition avoidance', () => {
     );
     db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'why', timestamp: Math.floor(Date.now() / 1000), deleted: false });
     const result = await chat.generateReply('g1', makeMsg({ content: 'why' }), []);
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
     expect(claude).not.toHaveBeenCalled();
   });
 });
@@ -2207,7 +2223,7 @@ describe('ChatModule — echo detection and face stripping', () => {
     );
     db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: trigger, timestamp: Math.floor(Date.now() / 1000), deleted: false });
     const result = await chat.generateReply('g1', makeMsg({ content: trigger }), []);
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
   });
 
   it('strips [CQ:face,id=N] from bot output before returning', async () => {
@@ -2222,8 +2238,8 @@ describe('ChatModule — echo detection and face stripping', () => {
     );
     db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'hi', timestamp: Math.floor(Date.now() / 1000), deleted: false });
     const result = await chat.generateReply('g1', makeMsg({ content: 'hi' }), []);
-    expect(result).not.toContain('[CQ:face,id=');
-    expect(result).toContain('笑死');
+    expect('text' in result ? result.text : '').not.toContain('[CQ:face,id=');
+    expect('text' in result ? result.text : '').toContain('笑死');
   });
 
   it('strips [CQ:mface,...] in bot output (market stickers banned)', async () => {
@@ -2239,8 +2255,8 @@ describe('ChatModule — echo detection and face stripping', () => {
     );
     db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: 'hi', timestamp: Math.floor(Date.now() / 1000), deleted: false });
     const result = await chat.generateReply('g1', makeMsg({ content: 'hi' }), []);
-    expect(result).not.toContain('[CQ:mface,');
-    expect(result).toContain('哈哈');
+    expect('text' in result ? result.text : '').not.toContain('[CQ:mface,');
+    expect('text' in result ? result.text : '').toContain('哈哈');
   });
 
   it('allows short trigger echoes through (< 4 char guard prevents false kills)', async () => {
@@ -2260,7 +2276,8 @@ describe('ChatModule — echo detection and face stripping', () => {
     );
     db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: shortTrigger, timestamp: Math.floor(Date.now() / 1000), deleted: false });
     const result = await chat.generateReply('g1', makeMsg({ content: shortTrigger }), []);
-    expect(result, `short trigger "${shortTrigger}" should pass through`).toBe(shortTrigger);
+    expect(result.kind, `short trigger "${shortTrigger}" should pass through`).not.toBe('silent');
+    expect('text' in result && result.text).toBe(shortTrigger);
   });
 
   it('passes through a non-echo reply even for short triggers', async () => {
@@ -2276,7 +2293,8 @@ describe('ChatModule — echo detection and face stripping', () => {
     );
     db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: trigger, timestamp: Math.floor(Date.now() / 1000), deleted: false });
     const result = await chat.generateReply('g1', makeMsg({ content: trigger }), []);
-    expect(result).toBe('哈哈笑死');
+    expect(result.kind).not.toBe('silent');
+    expect('text' in result && result.text).toBe('哈哈笑死');
   });
 });
 
@@ -2324,7 +2342,7 @@ describe('ChatModule — confabulation guard', () => {
     db.messages.insert({ groupId: 'g1', userId: 'u1', nickname: 'Alice', content: '你说过什么', timestamp: Math.floor(Date.now() / 1000), deleted: false });
     // Confabulation is now soft-dropped (returns null instead of the confabulated reply)
     const result = await chat.generateReply('g1', makeMsg({ content: '你说过什么' }), []);
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
     // Verify checkConfabulation detects the pattern
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     checkConfabulation('我都说过了有啥区别', '你说过什么', { groupId: 'g1' });
@@ -2573,33 +2591,34 @@ describe('ChatModule — <skip> output drops reply', () => {
 
   it('<skip> exact → null', async () => {
     const result = await makeChat('<skip>').generateReply('g1', makeMsg({ content: '随便' }), []);
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
   });
 
   it('<SKIP> uppercase → null', async () => {
     const result = await makeChat('<SKIP>').generateReply('g1', makeMsg({ content: '随便' }), []);
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
   });
 
   it('<skip> with trailing newline → null', async () => {
     const result = await makeChat('<skip>\n').generateReply('g1', makeMsg({ content: '随便' }), []);
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
   });
 
   it('<skip> with surrounding whitespace → null', async () => {
     const result = await makeChat('  <skip>  ').generateReply('g1', makeMsg({ content: '随便' }), []);
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
   });
 
   it('normal reply is NOT treated as skip', async () => {
     const result = await makeChat('好的啊').generateReply('g1', makeMsg({ content: '随便' }), []);
-    expect(result).toBe('好的啊');
+    expect(result.kind).not.toBe('silent');
+    expect('text' in result && result.text).toBe('好的啊');
   });
 
   it('"<skip> 但我想说一句" is NOT a pure skip → passes through', async () => {
     const result = await makeChat('<skip> 但我想说一句').generateReply('g1', makeMsg({ content: '随便' }), []);
     // Not purely <skip>, so it goes through postProcess (will be returned as-is or stripped)
-    expect(result).not.toBeNull();
+    expect(result.kind).not.toBe('silent');
   });
 });
 
@@ -2696,9 +2715,9 @@ describe('ChatModule — topicStick engagement factor', () => {
     // Combine with a question mark to hit question=0.6 → total ≥ 0.5
     const followUp = makeMsg({ content: 'roselia fire 你也喜欢吗？', rawContent: 'roselia fire 你也喜欢吗？' });
     const result = await chat.generateReply('g1', followUp, []);
-    expect(result).not.toBeNull();
-    expect(typeof result).toBe('string');
-    expect(result as string).toContain('第二条');
+    expect(result.kind).not.toBe('silent');
+    expect('text' in result ? typeof result.text : typeof result).toBe('string');
+    expect('text' in result ? result.text : '').toContain('第二条');
   });
 
   it('different-topic message does not get topicStick boost', async () => {
@@ -2713,7 +2732,7 @@ describe('ChatModule — topicStick engagement factor', () => {
     const msg = makeMsg({ content: '今天天气', rawContent: '今天天气' });
     const result = await chat.generateReply('g1', msg, []);
     // No topicStick, no question, no silence → score ≤ 0 → skip
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
   });
 
   it('topicStick expiry does not grant boost (no topicStick factor)', async () => {
@@ -2730,7 +2749,7 @@ describe('ChatModule — topicStick engagement factor', () => {
     // score = 0 (no question, no silence, no lore kw, no length) → < 0.3 → skip
     const msg = makeMsg({ content: 'roselia fire', rawContent: 'roselia fire' });
     const result = await chat.generateReply('g1', msg, []);
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
   });
 
   it('topicStick boost decays from 0.4 to 0.2 after 3 messages', async () => {
@@ -2746,7 +2765,7 @@ describe('ChatModule — topicStick engagement factor', () => {
     // topicStick=0.2 at msgCount≥3. With chatMinScore=0.35, 0.2 < 0.35 → skip
     const msg = makeMsg({ content: 'roselia fire band', rawContent: 'roselia fire band' });
     const result = await chat.generateReply('g1', msg, []);
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
   });
 
   it('topicStick clears engagedTopic after 5 on-topic messages (old entry removed, new one created by reply)', async () => {
@@ -2776,7 +2795,7 @@ describe('ChatModule — topicStick engagement factor', () => {
     const msg = makeMsg({ content: 'roselia 挺好的', rawContent: 'roselia 挺好的' });
     const result = await chat.generateReply('g1', msg, []);
     // topicStick=0, no question, no silence → score ≤ 0 → skip
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
   });
 });
 
@@ -2815,7 +2834,7 @@ describe('ChatModule — metaIdentityProbe scoring factor', () => {
     const msg = makeMsg({ content: '现在是哪个人格', rawContent: '现在是哪个人格' });
     const result = await chat.generateReply('g1', msg, []);
 
-    expect(result).not.toBeNull();
+    expect(result.kind).not.toBe('silent');
     expect(claude.complete).toHaveBeenCalled();
   });
 
@@ -2827,7 +2846,7 @@ describe('ChatModule — metaIdentityProbe scoring factor', () => {
     const msg = makeMsg({ content: '现在是哪个人格', rawContent: '现在是哪个人格' });
     const result = await chat.generateReply('g1', msg, []);
 
-    expect(result).toBeNull();
+    expect(result.kind).toBe('silent');
     expect(claude.complete).not.toHaveBeenCalled();
   });
 
@@ -2991,7 +3010,7 @@ describe('ChatModule — formatFactsForPrompt injection into system prompt', () 
       { botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999, moodProactiveEnabled: false, deflectCacheEnabled: false },
     );
     const msg = makeMsg({ content: '有人吗', rawContent: `[CQ:at,qq=${BOT_ID}] 有人吗` });
-    await expect(chat.generateReply('g1', msg, [])).resolves.toBe('好啊');
+    await expect(chat.generateReply('g1', msg, [])).resolves.toMatchObject({ kind: 'reply', text: '好啊' });
   });
 });
 
