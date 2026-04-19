@@ -103,19 +103,60 @@ if (WEB_LOOKUP_ENABLED) {
 }
 
 // 2b. PID lock — prevent duplicate instances
+//
+// Previous behavior: on pm2 restart, the OLD bot was sometimes still alive
+// briefly while the new instance started (graceful SIGTERM shutdown in flight).
+// Old instance's `process.on('exit')` handler often didn't fire cleanly on
+// Windows, leaving a stale pid file pointing to a dying/zombie process. New
+// instance read the "still alive" pid and exited. Each pm2 auto-restart
+// reproduced the race → restart loop.
+//
+// Fix: (1) retry up to 3 times with 2s sleep to give the old instance time to
+// finish exiting on its own; (2) if still alive after the retries, force-kill
+// and take over — pm2 guarantees only one intended instance, so a stubborn
+// leftover is always a shutdown-race, never an intentional second node; (3)
+// install SIGTERM/SIGINT/SIGHUP cleanup handlers so graceful pm2 shutdown
+// unlinks the pid reliably on both Unix and Windows.
 const pidPath = path.join(process.cwd(), 'data', 'bot.pid');
-if (fs.existsSync(pidPath)) {
-  const oldPid = parseInt(fs.readFileSync(pidPath, 'utf8').trim(), 10);
-  if (!isNaN(oldPid)) {
-    try {
-      process.kill(oldPid, 0); // throws ESRCH if dead
-      logger.fatal({ oldPid }, 'another bot instance is running — refusing to start');
-      process.exit(1);
-    } catch { /* dead process — ok to take over */ }
+
+async function acquirePidLock(): Promise<void> {
+  const MAX_RETRIES = 3;
+  const RETRY_DELAY_MS = 2000;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (!fs.existsSync(pidPath)) break;
+    const oldPid = parseInt(fs.readFileSync(pidPath, 'utf8').trim(), 10);
+    if (isNaN(oldPid) || oldPid === process.pid) break;
+    let alive = false;
+    try { process.kill(oldPid, 0); alive = true; } catch { /* dead */ }
+    if (!alive) break;
+    if (attempt < MAX_RETRIES) {
+      logger.warn({ oldPid, attempt: attempt + 1, maxRetries: MAX_RETRIES }, 'pid-lock held by another process — waiting for it to exit');
+      await new Promise<void>(resolve => setTimeout(resolve, RETRY_DELAY_MS));
+      continue;
+    }
+    // Exhausted retries — force-kill the leftover and take over. pm2 doesn't
+    // intentionally run two instances so this is always a shutdown-race victim.
+    logger.warn({ oldPid }, 'pid-lock still held after retries — force-killing leftover and taking over');
+    try { process.kill(oldPid, 'SIGKILL' as NodeJS.Signals); } catch { /* already dead */ }
   }
+  fs.writeFileSync(pidPath, String(process.pid));
 }
-fs.writeFileSync(pidPath, String(process.pid));
-process.on('exit', () => { try { fs.unlinkSync(pidPath); } catch { /* ignore */ } });
+await acquirePidLock();
+
+const cleanupPidFile = (): void => {
+  try {
+    if (fs.existsSync(pidPath)) {
+      const current = parseInt(fs.readFileSync(pidPath, 'utf8').trim(), 10);
+      if (current === process.pid) fs.unlinkSync(pidPath);
+    }
+  } catch { /* ignore */ }
+};
+process.on('exit', cleanupPidFile);
+// Windows pm2 sends SIGTERM on graceful restart — without this handler the
+// 'exit' hook alone doesn't fire cleanly and the pid file survives.
+process.on('SIGTERM', () => { cleanupPidFile(); process.exit(0); });
+process.on('SIGINT', () => { cleanupPidFile(); process.exit(0); });
+process.on('SIGHUP', () => { cleanupPidFile(); process.exit(0); });
 
 // 3. Open DB (step 2 of bootstrap order per architecture.md)
 const dbPath = process.env['DB_PATH'] ?? 'data/bot.db';
