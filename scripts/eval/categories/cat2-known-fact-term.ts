@@ -2,17 +2,18 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { DbRow } from '../types.js';
 
 export function queryCat2(db: DatabaseSync, groupId: string, limit: number): DbRow[] {
+  // ORDER BY updated_at DESC: prefer recently-active facts over oldest rows,
+  // avoiding coverage bias from default table order on 5k+ fact corpus.
   const terms = db.prepare(`
     SELECT topic, canonical_form FROM learned_facts
     WHERE group_id = ? AND status = 'active'
-    LIMIT 200
+    ORDER BY updated_at DESC LIMIT 500
   `).all(groupId) as Array<{ topic: string; canonical_form: string | null }>;
 
   if (terms.length === 0) return [];
 
   // Build one OR clause per term — avoids the O(N×M) correlated JOIN
-  // Escape LIKE metacharacters so topic strings like "%" or "_" match literally
-  // Escape metacharacters for LIKE with ESCAPE '!'
+  // ESCAPE '!': escape !, %, _ in topic strings so they match literally
   function escapeLike(s: string): string {
     return s.replace(/!/g, '!!').replace(/%/g, '!%').replace(/_/g, '!_');
   }
