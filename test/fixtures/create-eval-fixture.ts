@@ -150,6 +150,28 @@ db.prepare(
    VALUES (?, ?, 3, 10, 2, 1, ?, ?)`
 ).run(GROUP, 'phrasex', BASE, BASE);
 
+// R6.1c CJK regression: unbroken-CJK sentences must hit findKnownFactSource.
+// Previously extractTokens didn't segment CJK runs so '接龙说是最新的' stayed 1
+// token and never matched stored '接龙'. R6.1c moves to substring-based
+// labeling aligned with queryCat2's LIKE semantics — these rows are the
+// soul-rule regression guard.
+
+// Canonical-form stored as CJK — tests canonical source on CJK substring
+db.prepare(
+  `INSERT OR IGNORE INTO learned_facts (group_id, topic, fact, confidence, status, created_at, updated_at, canonical_form, persona_form)
+   VALUES (?, ?, ?, 1.0, 'active', ?, ?, ?, ?)`
+).run(GROUP, '樱花-topic-sentinel', '樱花=sakura', BASE, BASE, '樱花', null);
+
+// meme_graph row with CJK canonical='接龙' — tests meme source on CJK substring
+db.prepare(
+  `INSERT OR IGNORE INTO meme_graph (group_id, canonical, variants, meaning, total_count, confidence, status, created_at, updated_at)
+   VALUES (?, ?, ?, ?, 1, 0.8, 'active', ?, ?)`
+).run(GROUP, '接龙', JSON.stringify([]), 'chain-reply meme', BASE, BASE);
+
+// Messages: unbroken CJK sentences containing the stored terms
+msg('u1', 'Alice', '樱花来了吗', '樱花来了吗', BASE + 120);       // matches canonical='樱花'
+msg('u2', 'Bob', '接龙说是最新的', '接龙说是最新的', BASE + 121); // matches meme canonical='接龙'
+
 // Null-topic rows — must NOT crash queryCat2 (regression guard for R6.1 hotfix)
 // Row with null topic but valid canonical_form: should still match via canonical_form
 db.prepare(

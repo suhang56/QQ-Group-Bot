@@ -1,5 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
-import type { DbRow } from '../types.js';
+import type { DbRow, KnownFactSource } from '../types.js';
 
 /** R6.1a: cat2 is hard-capped at 50 even when perCategoryTarget is higher. */
 export const CAT2_MAX = 50;
@@ -20,16 +20,53 @@ function escapeLike(s: string): string {
  *   6. jargon_candidates.content (promoted: is_jargon=2 OR promoted=1)
  *   7. phrase_candidates.content (promoted: is_jargon=2 OR promoted=1)
  */
-function collectTerms(db: DatabaseSync, groupId: string): string[] {
-  const terms = new Set<string>();
+/** R6.1c: per-term source tag used by both queryCat2 (via collectTerms) and
+ *  weak-label.findKnownFactSource (via collectTermsWithSource). */
+export interface SourcedTerm {
+  readonly term: string;
+  readonly source: Exclude<KnownFactSource, null>;
+}
 
-  // Source 1+2+3+4: learned_facts
+/**
+ * R6.1c priority order for duplicate-term resolution.
+ * Lower rank = higher priority. Must match the documented priority in
+ * types.ts KnownFactSource so weak-label output is deterministic when the
+ * same string appears in multiple source tables.
+ */
+const SOURCE_PRIORITY: Record<Exclude<KnownFactSource, null>, number> = {
+  topic: 0,
+  canonical: 1,
+  persona: 2,
+  fact: 3,
+  meme: 4,
+  jargon: 5,
+  phrase: 6,
+};
+
+/**
+ * R6.1c: collect all recall terms from the 4 cat2 source tables, tagged with
+ * the table/column they came from. When the same term appears under multiple
+ * sources, the highest-priority source wins.
+ *
+ * Exported for use by scripts/eval/weak-label.ts — aligns weak-label's
+ * knownFactSource with the exact row set queryCat2 samples from.
+ */
+export function collectTermsWithSource(db: DatabaseSync, groupId: string): SourcedTerm[] {
+  const byTerm = new Map<string, Exclude<KnownFactSource, null>>();
+  const put = (t: string | null | undefined, s: Exclude<KnownFactSource, null>) => {
+    if (!t) return;
+    const prev = byTerm.get(t);
+    if (prev === undefined || SOURCE_PRIORITY[s] < SOURCE_PRIORITY[prev]) {
+      byTerm.set(t, s);
+    }
+  };
+
+  // learned_facts — topic / canonical / (persona) / fact
   let factsQuery = `
     SELECT topic, canonical_form, fact FROM learned_facts
     WHERE group_id = ? AND status = 'active'
     ORDER BY updated_at DESC LIMIT 500
   `;
-  // Check if persona_form column exists
   let hasPersonaForm = false;
   try {
     db.prepare(`SELECT persona_form FROM learned_facts LIMIT 0`).all();
@@ -53,13 +90,13 @@ function collectTerms(db: DatabaseSync, groupId: string): string[] {
   }>;
 
   for (const r of factRows) {
-    if (r.topic) terms.add(r.topic);
-    if (r.canonical_form) terms.add(r.canonical_form);
-    if (r.fact) terms.add(r.fact);
-    if (hasPersonaForm && r.persona_form) terms.add(r.persona_form);
+    put(r.topic, 'topic');
+    put(r.canonical_form, 'canonical');
+    if (hasPersonaForm) put(r.persona_form, 'persona');
+    put(r.fact, 'fact');
   }
 
-  // Source 5: meme_graph.canonical + variants (if table exists)
+  // meme_graph — canonical + variants (if table exists)
   try {
     const memeRows = db.prepare(`
       SELECT canonical, variants FROM meme_graph
@@ -68,13 +105,12 @@ function collectTerms(db: DatabaseSync, groupId: string): string[] {
     `).all(groupId) as Array<{ canonical: string; variants: string }>;
 
     for (const r of memeRows) {
-      if (r.canonical) terms.add(r.canonical);
-      // variants is a JSON array of strings
+      put(r.canonical, 'meme');
       try {
         const vs: unknown = JSON.parse(r.variants ?? '[]');
         if (Array.isArray(vs)) {
           for (const v of vs) {
-            if (typeof v === 'string' && v) terms.add(v);
+            if (typeof v === 'string' && v) put(v, 'meme');
           }
         }
       } catch {
@@ -85,37 +121,36 @@ function collectTerms(db: DatabaseSync, groupId: string): string[] {
     // meme_graph table doesn't exist
   }
 
-  // Source 6: jargon_candidates promoted rows
+  // jargon_candidates promoted
   try {
     const jargonRows = db.prepare(`
       SELECT content FROM jargon_candidates
       WHERE group_id = ? AND (is_jargon = 2 OR promoted = 1)
       ORDER BY count DESC LIMIT 200
     `).all(groupId) as Array<{ content: string }>;
-
-    for (const r of jargonRows) {
-      if (r.content) terms.add(r.content);
-    }
+    for (const r of jargonRows) put(r.content, 'jargon');
   } catch {
     // table doesn't exist
   }
 
-  // Source 7: phrase_candidates promoted rows
+  // phrase_candidates promoted
   try {
     const phraseRows = db.prepare(`
       SELECT content FROM phrase_candidates
       WHERE group_id = ? AND (is_jargon = 2 OR promoted = 1)
       ORDER BY count DESC LIMIT 200
     `).all(groupId) as Array<{ content: string }>;
-
-    for (const r of phraseRows) {
-      if (r.content) terms.add(r.content);
-    }
+    for (const r of phraseRows) put(r.content, 'phrase');
   } catch {
     // table doesn't exist
   }
 
-  return [...terms];
+  return [...byTerm].map(([term, source]) => ({ term, source }));
+}
+
+/** R6.1c: thin wrapper kept for backward compat within queryCat2. */
+export function collectTerms(db: DatabaseSync, groupId: string): string[] {
+  return collectTermsWithSource(db, groupId).map(t => t.term);
 }
 
 /** SQLite expression tree depth limit — keep OR clauses well under 1000. */

@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { SampledRow, WeakReplayLabel, WeakLabeledRow, ExpectedAct, ExpectedDecision, KnownFactSource } from './types.js';
-import { extractTokens } from '../../src/modules/honest-gaps.js';
+import { collectTermsWithSource, type SourcedTerm } from './categories/cat2-known-fact-term.js';
 
 const R4_DEPLOY_EPOCH = 1700000000; // approx R4 deploy date; rows before this may have legacy few-shot
 
@@ -26,12 +26,36 @@ function isDirect(row: SampledRow, botQQ: string): boolean {
   return raw.includes(`[CQ:at,qq=${botQQ}`) || raw.includes('[CQ:reply,');
 }
 
+/**
+ * R6.1c: computed independently from triggerContext — NOT from row.category.
+ *
+ * This must NOT rely on anything the sampler decided, so a cat7-sampled row
+ * whose triggerContext doesn't actually contain echoes can legitimately
+ * receive isRelay=false (precision signal for R6.2 gold labelers).
+ *
+ * Rules (stricter than queryCat7's sampling window):
+ *   1. Fast-path: row.content in RELAY_SET → true.
+ *   2. Echo-in-window: 2+ triggerContext rows with content === row.content
+ *      AND whose timestamp is within 30s of row.timestamp.
+ *
+ * Sampler's window is 5 messages regardless of time; labeler tightens with
+ * a 30s ceiling — that's where the two can legitimately disagree.
+ */
 function isRelayPattern(row: SampledRow): boolean {
-  if (RELAY_SET.has(row.content.trim())) return true;
   const trimmed = row.content.trim();
+  if (RELAY_SET.has(trimmed)) return true;
   if (trimmed.length < 2) return false;
-  const contextMatches = row.triggerContext.filter(c => c.content.trim() === trimmed);
-  return contextMatches.length >= 2;
+
+  const windowStart = row.timestamp - 30;
+  const windowEnd = row.timestamp + 30;
+  let echoCount = 0;
+  for (const c of row.triggerContext) {
+    if (c.content.trim() !== trimmed) continue;
+    if (c.timestamp < windowStart || c.timestamp > windowEnd) continue;
+    echoCount++;
+    if (echoCount >= 2) return true;
+  }
+  return false;
 }
 
 function isConflictHeat(row: SampledRow): boolean {
@@ -89,133 +113,60 @@ function isBurstWindow(row: SampledRow): boolean {
 }
 
 /**
- * R6.1b: scans all 7 cat2 recall sources with token equality. Returns the
- * highest-priority matching source, or null when no source matches.
+ * R6.1c: aligned with queryCat2's sampling semantics.
+ *
+ * Cat2 samples rows via `content LIKE '%term%'` (substring) across 7 recall
+ * sources. Previously findKnownFactSource used extractTokens + equality,
+ * which broke on unsegmented CJK (`'接龙说是'` stayed one token and never
+ * matched stored `'接龙'`). Result: ~100% of cat2 rows had
+ * hasKnownFactTerm=false on real DB.
+ *
+ * New rule: load the same Sourced term list queryCat2 fetches, sort by
+ * priority, scan `row.content` via `includes(term)`, short-circuit on first
+ * hit. Guarantees sampler/labeler see the same row set.
  *
  * Priority: topic > canonical > persona > fact > meme > jargon > phrase.
- *
- * Perf: one query per source table regardless of token count — tokens are
- * batched into WHERE value IN (?, ?, ...). Previously N×M queries per row
- * (N tokens × M sources) caused quadratic blowup on real DB.
  */
+
+// Cache of priority-sorted term lists, keyed by groupId. The DatabaseSync is
+// bound per sampling run so cache is naturally bounded by unique group count.
+const termCache = new WeakMap<DatabaseSync, Map<string, SourcedTerm[]>>();
+
+const SOURCE_RANK: Record<Exclude<KnownFactSource, null>, number> = {
+  topic: 0, canonical: 1, persona: 2, fact: 3, meme: 4, jargon: 5, phrase: 6,
+};
+
+function getSortedTerms(db: DatabaseSync, groupId: string): SourcedTerm[] {
+  let perDb = termCache.get(db);
+  if (!perDb) {
+    perDb = new Map();
+    termCache.set(db, perDb);
+  }
+  const cached = perDb.get(groupId);
+  if (cached) return cached;
+  const terms = collectTermsWithSource(db, groupId);
+  // Prefer longer terms first within the same source rank, so '接龙说是'
+  // beats '接龙' when both would hit (more specific match wins).
+  terms.sort((a, b) => {
+    const ra = SOURCE_RANK[a.source];
+    const rb = SOURCE_RANK[b.source];
+    if (ra !== rb) return ra - rb;
+    return b.term.length - a.term.length;
+  });
+  perDb.set(groupId, terms);
+  return terms;
+}
+
 function findKnownFactSource(db: DatabaseSync, groupId: string, content: string): KnownFactSource {
-  const tokens = extractTokens(content);
-  if (tokens.length === 0) return null;
-
-  const tokenSet = new Set(tokens);
-  const placeholders = tokens.map(() => '?').join(',');
-
-  // Detect persona_form column once per call (schema-static; negligible cost).
-  let hasPersonaForm = false;
-  try {
-    db.prepare(`SELECT persona_form FROM learned_facts LIMIT 0`).all();
-    hasPersonaForm = true;
-  } catch {
-    // column not present
+  if (!content) return null;
+  const terms = getSortedTerms(db, groupId);
+  for (const { term, source } of terms) {
+    // Sentence-length facts pollute substring matching; match queryCat2's
+    // validTerm filter (term.length <= 50).
+    if (term.length > 50) continue;
+    if (term.length < 1) continue;
+    if (content.includes(term)) return source;
   }
-
-  // Query 1 — learned_facts: single scan, pick highest-priority column match.
-  // We select all rows whose topic/canonical/persona/fact equals ANY token,
-  // then sort by column priority on the JS side.
-  const factsCols = hasPersonaForm
-    ? 'topic, canonical_form, persona_form, fact'
-    : 'topic, canonical_form, NULL as persona_form, fact';
-  const factsWhere = hasPersonaForm
-    ? `(topic IN (${placeholders}) OR canonical_form IN (${placeholders}) OR persona_form IN (${placeholders}) OR fact IN (${placeholders}))`
-    : `(topic IN (${placeholders}) OR canonical_form IN (${placeholders}) OR fact IN (${placeholders}))`;
-  const factsBindings = hasPersonaForm
-    ? [groupId, ...tokens, ...tokens, ...tokens, ...tokens]
-    : [groupId, ...tokens, ...tokens, ...tokens];
-  try {
-    const rows = db.prepare(`
-      SELECT ${factsCols} FROM learned_facts
-      WHERE group_id = ? AND status = 'active' AND ${factsWhere}
-      LIMIT 100
-    `).all(...factsBindings) as Array<{
-      topic: string | null;
-      canonical_form: string | null;
-      persona_form: string | null;
-      fact: string | null;
-    }>;
-
-    // Priority: topic > canonical > persona > fact
-    let best: KnownFactSource = null;
-    const rank: Record<Exclude<KnownFactSource, null>, number> = {
-      topic: 0, canonical: 1, persona: 2, fact: 3, meme: 4, jargon: 5, phrase: 6,
-    };
-    for (const r of rows) {
-      if (r.topic !== null && tokenSet.has(r.topic)) {
-        if (best === null || rank.topic < rank[best]) best = 'topic';
-      }
-      if (r.canonical_form !== null && tokenSet.has(r.canonical_form)) {
-        if (best === null || rank.canonical < rank[best]) best = 'canonical';
-      }
-      if (hasPersonaForm && r.persona_form !== null && tokenSet.has(r.persona_form)) {
-        if (best === null || rank.persona < rank[best]) best = 'persona';
-      }
-      if (r.fact !== null && tokenSet.has(r.fact)) {
-        if (best === null || rank.fact < rank[best]) best = 'fact';
-      }
-      if (best === 'topic') break; // highest priority — short-circuit
-    }
-    if (best !== null) return best;
-  } catch {
-    // learned_facts missing — unlikely, but don't fail the whole function
-  }
-
-  // Query 2 — meme_graph: canonical column is batchable; variants is a JSON
-  // string so we still LIKE-scan but batched with OR clauses over tokens.
-  try {
-    const likeClauses = tokens.map(() => 'variants LIKE ?').join(' OR ');
-    const likeBindings = tokens.map(t => `%"${t}"%`);
-    const memeRows = db.prepare(`
-      SELECT canonical, variants FROM meme_graph
-      WHERE group_id = ? AND status IN ('active', 'manual_edit')
-        AND (canonical IN (${placeholders}) OR ${likeClauses})
-      LIMIT 50
-    `).all(groupId, ...tokens, ...likeBindings) as Array<{ canonical: string; variants: string }>;
-
-    for (const r of memeRows) {
-      if (tokenSet.has(r.canonical)) return 'meme';
-      try {
-        const vs: unknown = JSON.parse(r.variants ?? '[]');
-        if (Array.isArray(vs)) {
-          for (const v of vs) {
-            if (typeof v === 'string' && tokenSet.has(v)) return 'meme';
-          }
-        }
-      } catch {
-        // malformed JSON — skip
-      }
-    }
-  } catch {
-    // meme_graph table missing
-  }
-
-  // Query 3 — jargon_candidates: single batched IN.
-  try {
-    const jargonHit = db.prepare(`
-      SELECT 1 FROM jargon_candidates
-      WHERE group_id = ? AND content IN (${placeholders}) AND (is_jargon = 2 OR promoted = 1)
-      LIMIT 1
-    `).get(groupId, ...tokens);
-    if (jargonHit) return 'jargon';
-  } catch {
-    // table missing
-  }
-
-  // Query 4 — phrase_candidates: single batched IN.
-  try {
-    const phraseHit = db.prepare(`
-      SELECT 1 FROM phrase_candidates
-      WHERE group_id = ? AND content IN (${placeholders}) AND (is_jargon = 2 OR promoted = 1)
-      LIMIT 1
-    `).get(groupId, ...tokens);
-    if (phraseHit) return 'phrase';
-  } catch {
-    // table missing
-  }
-
   return null;
 }
 

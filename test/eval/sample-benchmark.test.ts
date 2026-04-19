@@ -740,6 +740,140 @@ describe('sample-benchmark integration', () => {
       db.close();
     });
   });
+
+  // ============================================================
+  // R6.1c regression tests — M1 (CJK substring) + M3 (relay independence)
+  // ============================================================
+
+  describe('R6.1c: CJK unbroken-substring fact match (soul-rule regression)', () => {
+    // SOUL-RULE: unbroken CJK sentences containing a stored CJK term must hit
+    // findKnownFactSource. R6.1b's extractTokens+IN approach missed this
+    // because '接龙说是最新的' stayed one token and never equaled '接龙'.
+    it('canonical="樱花" stored, message "樱花来了吗" → knownFactSource="canonical"', () => {
+      const db = new DatabaseSync(FIXTURE, { readOnly: true } as Parameters<typeof DatabaseSync>[1]);
+      const row: SampledRow = {
+        id: 'test:cjk-1', groupId: GROUP, messageId: 0, sourceMessageId: null,
+        userId: 'u1', nickname: 'Alice', timestamp: 1700000120,
+        content: '樱花来了吗', rawContent: '樱花来了吗',
+        triggerContext: [], triggerContextAfter: [],
+        category: 2, categoryLabel: 'known_fact_term', samplingSeed: 1,
+        contentHash: 'x', contextHash: 'x',
+      };
+      const labeled = applyWeakLabel(row, db, BOT_QQ);
+      expect(labeled).not.toBeNull();
+      expect(labeled!.label.hasKnownFactTerm).toBe(true);
+      expect(labeled!.label.knownFactSource).toBe('canonical');
+      db.close();
+    });
+
+    it('meme canonical="接龙" stored, message "接龙说是最新的" → knownFactSource="meme"', () => {
+      const db = new DatabaseSync(FIXTURE, { readOnly: true } as Parameters<typeof DatabaseSync>[1]);
+      const row: SampledRow = {
+        id: 'test:cjk-2', groupId: GROUP, messageId: 0, sourceMessageId: null,
+        userId: 'u1', nickname: 'Alice', timestamp: 1700000121,
+        content: '接龙说是最新的', rawContent: '接龙说是最新的',
+        triggerContext: [], triggerContextAfter: [],
+        category: 2, categoryLabel: 'known_fact_term', samplingSeed: 1,
+        contentHash: 'x', contextHash: 'x',
+      };
+      const labeled = applyWeakLabel(row, db, BOT_QQ);
+      expect(labeled).not.toBeNull();
+      expect(labeled!.label.hasKnownFactTerm).toBe(true);
+      expect(labeled!.label.knownFactSource).toBe('meme');
+      db.close();
+    });
+
+    it('cat2 sampled rows hasKnownFactTerm ratio >= 70% after R6.1c', async () => {
+      const { rawRows } = await sample(1, 50);
+      const db = new DatabaseSync(FIXTURE, { readOnly: true } as Parameters<typeof DatabaseSync>[1]);
+      const cat2Rows = rawRows.filter(r => r.category === 2);
+      expect(cat2Rows.length).toBeGreaterThan(0);
+      let hits = 0;
+      for (const row of cat2Rows) {
+        const labeled = applyWeakLabel(row, db, BOT_QQ);
+        if (labeled?.label.hasKnownFactTerm) hits++;
+      }
+      const rate = hits / cat2Rows.length;
+      expect(rate, `cat2 hasKnownFactTerm rate ${hits}/${cat2Rows.length}`).toBeGreaterThanOrEqual(0.7);
+      db.close();
+    });
+  });
+
+  describe('R6.1c: isRelay independence from row.category', () => {
+    // Labeler must disagree with sampler when triggerContext lacks echoes —
+    // that's the precision signal R6.2 gold labelers rely on.
+    it('cat7-labeled row with empty triggerContext + non-RELAY_SET content → isRelay=false', () => {
+      const db = new DatabaseSync(FIXTURE, { readOnly: true } as Parameters<typeof DatabaseSync>[1]);
+      const row: SampledRow = {
+        id: 'test:relay-indep', groupId: GROUP, messageId: 0, sourceMessageId: null,
+        userId: 'u1', nickname: 'Alice', timestamp: 1700000000,
+        content: '哈哈', rawContent: '哈哈',
+        triggerContext: [],  // deliberately empty — sampler claimed cat7 but no echo evidence
+        triggerContextAfter: [],
+        category: 7, categoryLabel: 'relay', samplingSeed: 1,
+        contentHash: 'x', contextHash: 'x',
+      };
+      const labeled = applyWeakLabel(row, db, BOT_QQ);
+      expect(labeled).not.toBeNull();
+      expect(labeled!.label.isRelay).toBe(false);
+      db.close();
+    });
+
+    it('cat7-labeled row with triggerContext >30s away → isRelay=false (time gate)', () => {
+      const db = new DatabaseSync(FIXTURE, { readOnly: true } as Parameters<typeof DatabaseSync>[1]);
+      const row: SampledRow = {
+        id: 'test:relay-time', groupId: GROUP, messageId: 0, sourceMessageId: null,
+        userId: 'u1', nickname: 'Alice', timestamp: 1700001000,
+        content: '哈哈', rawContent: '哈哈',
+        triggerContext: [
+          { id: 1, userId: 'u2', nickname: 'B', content: '哈哈', timestamp: 1700000000 }, // 1000s earlier
+          { id: 2, userId: 'u3', nickname: 'C', content: '哈哈', timestamp: 1700000500 }, // 500s earlier
+        ],
+        triggerContextAfter: [],
+        category: 7, categoryLabel: 'relay', samplingSeed: 1,
+        contentHash: 'x', contextHash: 'x',
+      };
+      const labeled = applyWeakLabel(row, db, BOT_QQ);
+      expect(labeled).not.toBeNull();
+      expect(labeled!.label.isRelay).toBe(false);
+      db.close();
+    });
+
+    it('fast-path RELAY_SET token → isRelay=true regardless of context', () => {
+      const db = new DatabaseSync(FIXTURE, { readOnly: true } as Parameters<typeof DatabaseSync>[1]);
+      const row: SampledRow = {
+        id: 'test:relay-fast', groupId: GROUP, messageId: 0, sourceMessageId: null,
+        userId: 'u1', nickname: 'Alice', timestamp: 1700000000,
+        content: '扣1', rawContent: '扣1',
+        triggerContext: [],
+        triggerContextAfter: [],
+        category: 9, categoryLabel: 'normal_chimein', samplingSeed: 1,
+        contentHash: 'x', contextHash: 'x',
+      };
+      const labeled = applyWeakLabel(row, db, BOT_QQ);
+      expect(labeled).not.toBeNull();
+      expect(labeled!.label.isRelay).toBe(true);
+    });
+
+    it('2+ triggerContext echoes within 30s → isRelay=true (echo path)', () => {
+      const db = new DatabaseSync(FIXTURE, { readOnly: true } as Parameters<typeof DatabaseSync>[1]);
+      const row: SampledRow = {
+        id: 'test:relay-echo', groupId: GROUP, messageId: 0, sourceMessageId: null,
+        userId: 'u1', nickname: 'Alice', timestamp: 1700000020,
+        content: '哈哈', rawContent: '哈哈',
+        triggerContext: [
+          { id: 1, userId: 'u2', nickname: 'B', content: '哈哈', timestamp: 1700000000 },
+          { id: 2, userId: 'u3', nickname: 'C', content: '哈哈', timestamp: 1700000010 },
+        ],
+        triggerContextAfter: [],
+        category: 7, categoryLabel: 'relay', samplingSeed: 1,
+        contentHash: 'x', contextHash: 'x',
+      };
+      const labeled = applyWeakLabel(row, db, BOT_QQ);
+      expect(labeled).not.toBeNull();
+      expect(labeled!.label.isRelay).toBe(true);
+    });
+  });
 });
 
 // Helper used in test 20
