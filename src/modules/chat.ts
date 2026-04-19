@@ -44,7 +44,7 @@ import { OnDemandLookup } from './on-demand-lookup.js';
 import { extractCandidateTerms } from '../utils/extract-candidate-terms.js';
 import { WebLookup, shouldLookupTerm, DEFAULT_COMMON_WORDS } from './web-lookup.js';
 import { isDirectQuestion, isGroundedOpinionQuestion } from '../utils/is-direct-question.js';
-import { extractTermFromTopic } from './fact-topic-prefixes.js';
+import { extractTermFromTopic, isValidStructuredTerm } from './fact-topic-prefixes.js';
 import { buildFactualContextSignal } from './factual-context-signal.js';
 import { type BaseResultMeta, type ReplyMeta, type StickerMeta, type ChatResult } from '../utils/chat-result.js';
 import { pickAtFallback, classifyAtFallbackReason } from './fallback-pool.js';
@@ -3761,7 +3761,10 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     userId: string,
   ): Promise<{ block: string; foundTerms: ReadonlySet<string> }> {
     if (!this.onDemandLookup) return { block: '', foundTerms: new Set() };
-    const candidates = extractCandidateTerms(content);
+    let candidates = extractCandidateTerms(content);
+    // Drop non-structured candidates before any lookup — prevents grammar fragments
+    // like "现在策略" reaching the weak path and leaking as LLM-fabricated definitions.
+    candidates = candidates.filter(isValidStructuredTerm);
     if (candidates.length === 0) return { block: '', foundTerms: new Set() };
     const foundLines: string[] = [];
     const weakLines: string[] = [];
@@ -3777,8 +3780,10 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
         this.logger.info({ groupId, term, meaning: outcome.meaning }, 'ondemand-lookup: meaning injected');
       } else if (outcome?.type === 'weak') {
         const safeTerm = sanitizeForPrompt(term, 60);
-        const safeGuess = sanitizeForPrompt(outcome.guess, 100);
-        weakLines.push(`你猜 ${safeTerm} 可能是指 ${safeGuess}，可以反问 "${safeTerm}是指${safeGuess}吗"`);
+        weakLines.push(
+          `你对 ${safeTerm} 不太熟；如果对话涉及它，可以用群友口吻短反问（比如 "啥来的"、"这个什么东西" 或自然措辞），` +
+          `绝对不要把猜测当确定答案背出来，也不要用 "X是指Y吗" 句式。`,
+        );
       } else if (outcome?.type === 'unknown') {
         // Legitimate "LLM looked and returned no answer" — fair game for askUnknown.
         unknownTerms.push(sanitizeForPrompt(term, 60));
