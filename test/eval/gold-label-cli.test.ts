@@ -488,7 +488,7 @@ function makeSample(over: Partial<SampleRecord> = {}): SampleRecord {
 
 const PROGRESS: Progress = { current: 1, total: 1, labeled: 0, skipped: 0 };
 
-describe('R6.2.1 renderer raw-content display', () => {
+describe('R6.2.2 renderer pretty-print CQ integration (DEV-READY §4b)', () => {
   let writeSpy: ReturnType<typeof vi.spyOn>;
   let captured: string;
   beforeEach(() => {
@@ -502,34 +502,93 @@ describe('R6.2.1 renderer raw-content display', () => {
     writeSpy.mockRestore();
   });
 
-  it('trigger line preserves [CQ:at,qq=…] verbatim from triggerRawContent', () => {
+  it('trigger [CQ:at,qq=<botQQ>] renders as [@bot]', () => {
     renderSample(
-      makeSample({ triggerContent: '请我喝奶茶', triggerRawContent: '[CQ:at,qq=1705075399] 请我喝奶茶' }),
+      makeSample({
+        triggerContent: '请我喝奶茶',
+        triggerRawContent: '[CQ:at,qq=9999] 请我喝奶茶',
+      }),
       defaultLabelState(),
       PROGRESS,
+      '9999',
     );
-    expect(captured).toContain('[CQ:at,qq=1705075399]');
+    expect(captured).toContain('[@bot]');
+    expect(captured).not.toContain('[CQ:at,qq=9999]');
   });
 
-  it('contextBefore line preserves [CQ:reply,id=…] verbatim', () => {
+  it('context [CQ:reply,id=...] renders as [reply:<id>]', () => {
     renderSample(
-      makeSample({ contextBefore: [makeMessageRow({ content: '好啊', rawContent: '[CQ:reply,id=2001]好啊' })] }),
+      makeSample({
+        contextBefore: [makeMessageRow({ content: '好啊', rawContent: '[CQ:reply,id=2001]好啊' })],
+      }),
       defaultLabelState(),
       PROGRESS,
+      '9999',
     );
-    expect(captured).toContain('[CQ:reply,id=2001]');
+    expect(captured).toContain('[reply:2001]');
+    expect(captured).not.toContain('[CQ:reply,id=2001]');
   });
 
-  it('contextAfter line preserves [CQ:image,file=…] verbatim', () => {
+  it('contextAfter [CQ:image,summary=&#91;猫咪&#93;,file=abc] renders as [img:猫咪] (spec §4b canonical)', () => {
     renderSample(
-      makeSample({ contextAfter: [makeMessageRow({ content: '', rawContent: '[CQ:image,file=abc.jpg]' })] }),
+      makeSample({
+        triggerContent: '',
+        triggerRawContent: '[CQ:image,summary=&#91;猫咪&#93;,file=abc] 看看',
+      }),
       defaultLabelState(),
       PROGRESS,
+      null,
     );
-    expect(captured).toContain('[CQ:image,file=abc.jpg]');
+    expect(captured).toContain('[img:猫咪] 看看');
+    expect(captured).not.toContain('[CQ:image');
+    expect(captured).not.toContain('&#91;');
   });
 
-  it('null rawContent falls back to stripped content — no "null" literal, no CQ tag', () => {
+  it('contextAfter [CQ:image,file=...] (no summary) renders as [img]', () => {
+    renderSample(
+      makeSample({
+        contextAfter: [makeMessageRow({
+          content: '',
+          rawContent: '[CQ:image,file=abc.jpg]',
+        })],
+      }),
+      defaultLabelState(),
+      PROGRESS,
+      null,
+    );
+    expect(captured).toContain('[img]');
+    expect(captured).not.toContain('file=abc.jpg');
+  });
+
+  it('pretty-print runs BEFORE truncate: long raw tag w/ short summary survives 60-char truncate', () => {
+    const longRaw = `[CQ:image,file=${'a'.repeat(80)}.jpg,summary=&#91;短&#93;]`;
+    renderSample(
+      makeSample({
+        triggerContent: '',
+        triggerRawContent: longRaw,
+      }),
+      defaultLabelState(),
+      PROGRESS,
+      null,
+    );
+    expect(captured).toContain('[img:短]');
+  });
+
+  it('non-bot [CQ:at,qq=X] with botQQ=null → [@user:X]', () => {
+    renderSample(
+      makeSample({
+        triggerContent: 'hi',
+        triggerRawContent: '[CQ:at,qq=123] hi',
+      }),
+      defaultLabelState(),
+      PROGRESS,
+      null,
+    );
+    expect(captured).toContain('[@user:123]');
+    expect(captured).not.toContain('[@bot]');
+  });
+
+  it('old-schema regression: null rawContent falls through to content; no throw, no undefined leak', () => {
     renderSample(
       makeSample({
         triggerContent: 'ykn 是谁啊',
@@ -538,10 +597,12 @@ describe('R6.2.1 renderer raw-content display', () => {
       }),
       defaultLabelState(),
       PROGRESS,
+      null,
     );
     expect(captured).toContain('ykn 是谁啊');
     expect(captured).toContain('啥情况这是');
     expect(captured).not.toContain('[CQ:');
+    expect(captured).not.toMatch(/\bundefined\b/);
     expect(captured).not.toMatch(/\bnull\b/);
   });
 
@@ -550,6 +611,7 @@ describe('R6.2.1 renderer raw-content display', () => {
       makeSample({ triggerContent: '啥情况这是', triggerRawContent: '啥情况这是' }),
       defaultLabelState(),
       PROGRESS,
+      null,
     );
     expect(captured).toContain('啥情况这是');
     expect(captured).not.toContain('[CQ:');

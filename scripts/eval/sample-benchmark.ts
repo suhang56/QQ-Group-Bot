@@ -130,22 +130,45 @@ function fetchContext(
   groupId: string,
   rowId: number,
 ): { before: ContextMessage[]; after: ContextMessage[] } {
+  type CtxRow = {
+    id: number;
+    user_id: string;
+    nickname: string;
+    content: string;
+    raw_content: string | null;
+    timestamp: number;
+  };
+
   const before = (db.prepare(`
-    SELECT id, user_id, nickname, content, timestamp
+    SELECT id, user_id, nickname, content, raw_content, timestamp
     FROM messages
     WHERE group_id = ? AND id < ? AND deleted = 0
     ORDER BY id DESC LIMIT 5
-  `).all(groupId, rowId) as Array<{ id: number; user_id: string; nickname: string; content: string; timestamp: number }>)
+  `).all(groupId, rowId) as CtxRow[])
     .reverse()
-    .map(r => ({ id: r.id, userId: r.user_id, nickname: r.nickname, content: r.content, timestamp: r.timestamp }));
+    .map(r => ({
+      id: r.id,
+      userId: r.user_id,
+      nickname: r.nickname,
+      content: r.content,
+      rawContent: r.raw_content,
+      timestamp: r.timestamp,
+    }));
 
   const after = (db.prepare(`
-    SELECT id, user_id, nickname, content, timestamp
+    SELECT id, user_id, nickname, content, raw_content, timestamp
     FROM messages
     WHERE group_id = ? AND id > ? AND deleted = 0
     ORDER BY id ASC LIMIT 3
-  `).all(groupId, rowId) as Array<{ id: number; user_id: string; nickname: string; content: string; timestamp: number }>)
-    .map(r => ({ id: r.id, userId: r.user_id, nickname: r.nickname, content: r.content, timestamp: r.timestamp }));
+  `).all(groupId, rowId) as CtxRow[])
+    .map(r => ({
+      id: r.id,
+      userId: r.user_id,
+      nickname: r.nickname,
+      content: r.content,
+      rawContent: r.raw_content,
+      timestamp: r.timestamp,
+    }));
 
   return { before, after };
 }

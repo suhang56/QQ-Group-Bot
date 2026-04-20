@@ -7,6 +7,7 @@
 import type { SampleRecord } from './reader.js';
 import type { GoldAct, GoldDecision, GoldLabel } from './types.js';
 import { HELP_TEXT } from './shortcuts.js';
+import { prettyPrintCq } from './pretty-cq.js';
 
 const C = {
   reset: '\x1b[0m',
@@ -69,7 +70,12 @@ function truncate(s: string, max: number): string {
   return s.slice(0, max - 1) + '…';
 }
 
-export function renderSample(sample: SampleRecord, state: LabelState, progress: Progress): void {
+export function renderSample(
+  sample: SampleRecord,
+  state: LabelState,
+  progress: Progress,
+  botQQ: string | null = null,
+): void {
   const lines: string[] = [];
   lines.push('\x1b[2J\x1b[H');
   lines.push(SEP_EQ);
@@ -80,16 +86,16 @@ export function renderSample(sample: SampleRecord, state: LabelState, progress: 
 
   lines.push(` ${C.dim}CONTEXT (${sample.contextBefore.length} prior):${C.reset}`);
   for (const m of sample.contextBefore) {
-    lines.push(`   ${C.dim}${ts(m.ts)}${C.reset}  ${m.user.padEnd(12)} ${truncate(m.rawContent ?? m.content, 60)}`);
+    lines.push(`   ${C.dim}${ts(m.ts)}${C.reset}  ${m.user.padEnd(12)} ${truncate(prettyPrintCq(m.rawContent ?? m.content, botQQ), 60)}`);
   }
   lines.push('');
   lines.push(
-    ` ${C.boldYellow}>>>  ${ts(sample.triggerTs)}  ${sample.triggerUser.padEnd(12)} ${truncate(sample.triggerRawContent ?? sample.triggerContent, 60)}  <<<${C.reset}`,
+    ` ${C.boldYellow}>>>  ${ts(sample.triggerTs)}  ${sample.triggerUser.padEnd(12)} ${truncate(prettyPrintCq(sample.triggerRawContent ?? sample.triggerContent, botQQ), 60)}  <<<${C.reset}`,
   );
   lines.push('');
   lines.push(` ${C.dim}AFTER (${sample.contextAfter.length}):${C.reset}`);
   for (const m of sample.contextAfter) {
-    lines.push(`   ${C.dim}${ts(m.ts)}${C.reset}  ${m.user.padEnd(12)} ${truncate(m.rawContent ?? m.content, 60)}`);
+    lines.push(`   ${C.dim}${ts(m.ts)}${C.reset}  ${m.user.padEnd(12)} ${truncate(prettyPrintCq(m.rawContent ?? m.content, botQQ), 60)}`);
   }
   lines.push(SEP_DASH);
 

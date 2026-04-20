@@ -34,6 +34,8 @@ export interface SessionOpts {
   now?: () => Date;
   /** ms for quit-double-press timeout; set to 0 to disable (tests). Default 3000. */
   quitTimeoutMs?: number;
+  /** R6.2.2: bot QQ used to render CQ:at,qq=<botQQ> as [@bot] in display. null = no @bot coercion. */
+  botQQ?: string | null;
 }
 
 const defaultDelay = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms));
@@ -97,6 +99,7 @@ export async function handleEdit(
   promptNotesLine: () => Promise<string>,
   now: () => Date,
   existingLabels: Map<string, GoldLabel>,
+  botQQ: string | null = null,
 ): Promise<boolean> {
   if (history.length === 0) {
     renderWarning('(no previous labels — nothing to edit)');
@@ -127,7 +130,7 @@ export async function handleEdit(
     notes: chosen.notes,
   };
   const progress: Progress = { current: 0, total: 0, labeled: existingLabels.size, skipped: 0 };
-  renderSample(sample, state, progress);
+  renderSample(sample, state, progress, botQQ);
 
   while (true) {
     const k = await readKey();
@@ -141,7 +144,7 @@ export async function handleEdit(
       renderWarning(`unknown key: ${action.key}`);
       continue;
     }
-    renderSample(sample, state, progress);
+    renderSample(sample, state, progress, botQQ);
     if (state.goldAct && state.goldDecision) {
       const updated = buildLabel(chosen.sampleId, state, now());
       await updateLabel(outputPath, updated);
@@ -182,6 +185,7 @@ export async function runSession(opts: SessionOpts): Promise<SessionStats> {
   const delay = opts.delay ?? defaultDelay;
   const now = opts.now ?? (() => new Date());
   const quitTimeoutMs = typeof opts.quitTimeoutMs === 'number' ? opts.quitTimeoutMs : 3000;
+  const botQQ = opts.botQQ ?? null;
 
   const existingLabels = await readExistingLabels(opts.outputPath);
   const history: GoldLabel[] = [...existingLabels.values()];
@@ -219,7 +223,7 @@ export async function runSession(opts: SessionOpts): Promise<SessionStats> {
       labeled: stats.labeled,
       skipped: stats.skipped,
     };
-    renderSample(sample, state, progress);
+    renderSample(sample, state, progress, botQQ);
 
     // Inner key loop for this sample
     // Exits when: committed (act+decision both set), skipped, or quit confirmed.
@@ -247,6 +251,7 @@ export async function runSession(opts: SessionOpts): Promise<SessionStats> {
           opts.promptNotesLine,
           now,
           existingLabels,
+          botQQ,
         );
       } else if (action.type === 'quit') {
         const confirmed = await handleQuit(state, opts.readKey, quitTimeoutMs, stats.labeled);
@@ -261,7 +266,7 @@ export async function runSession(opts: SessionOpts): Promise<SessionStats> {
         ...progress,
         labeled: stats.labeled,
         skipped: stats.skipped,
-      });
+      }, botQQ);
 
       if (state.goldAct && state.goldDecision) {
         const label = buildLabel(sample.sampleId, state, now());
