@@ -1,467 +1,319 @@
 #!/usr/bin/env tsx
 /**
- * R6.2.3 Gold Sanity Script.
+ * R6.2.3 gold sanity audit — read-only.
  *
- * Read-only audit of weak benchmark + human gold labels. Zero src/ edits.
+ * Reads gold JSONL + matching benchmark-weak-labeled JSONL and prints four
+ * sections to stderr: distributions, coverage, weak-vs-gold disagreement,
+ * and five suspicious-row filters. Stdout is intentionally unused; a future
+ * --json flag (DESIGN-NOTE §7) would emit a machine-readable digest there.
  *
- * Usage:
- *   npx tsx scripts/eval/summarize-gold.ts \
- *     --gold data/eval/gold/gold-smoke-50.jsonl \
- *     --benchmark data/eval/benchmark-weak-labeled.jsonl \
- *     [--under-cover-threshold 20] [--no-color] [--json]
- *
- * Exit codes: 0 ok, 1 missing/invalid args, 2 file read error, 3 no gold rows labeled.
+ * Known non-bug: weak labels have no `silence` value in ExpectedAct, so gold
+ * rows with goldAct=silence always appear as disagreement cells. This is
+ * intentional — see DESIGN-NOTE §9.
  */
 
-import { promises as fsp } from 'node:fs';
-import type { WeakLabeledRow } from './types.js';
+import { createReadStream } from 'node:fs';
+import { createInterface } from 'node:readline';
+
 import { CATEGORY_LABELS } from './types.js';
-import type { GoldLabel } from './gold/types.js';
-import { validateGoldLabel, GOLD_ACTS, GOLD_DECISIONS } from './gold/types.js';
+import type { GoldLabel, GoldAct, GoldDecision } from './gold/types.js';
+import { validateGoldLabel, GOLD_ACTS } from './gold/types.js';
+import { readSamples, type SampleRecord } from './gold/reader.js';
 
 // ---------- Types ----------
 
-export interface JoinedRecord {
+export interface JoinedRow {
   sampleId: string;
-  weak: WeakLabeledRow;
-  gold: GoldLabel | null;
+  sample: SampleRecord;
+  gold: GoldLabel;
+  category: number;
+  categoryLabel: string;
 }
 
-export type FilterId =
-  | 'bait_direct_silent'
-  | 'sticker_on_non_conversational'
-  | 'silent_decision_non_silence_act'
-  | 'relay_act_weak_not_relay'
-  | 'factterm_no_fact_reply';
+export interface LoadResult {
+  joined: JoinedRow[];
+  orphanedGoldIds: string[];
+  goldTotal: number;
+  benchTotal: number;
+}
+
+export type FilterName =
+  | 'bait_silent'
+  | 'sticker_on_meta_act'
+  | 'silent_with_nonsilence_act'
+  | 'relay_mismatch'
+  | 'cat2_fact_denied_reply';
 
 export interface FilterHit {
-  filterId: FilterId;
   sampleId: string;
   snippet: string;
 }
 
-export interface Distributions {
-  goldAct: Record<string, number>;
-  goldDecision: Record<string, number>;
-  factNeeded: { true: number; false: number };
-  allowBanter: { true: number; false: number };
-  allowSticker: { true: number; false: number };
-  totalLabeled: number;
-  totalBenchmark: number;
-}
-
-export interface CategoryCoverage {
-  category: number;
-  label: string;
-  benchmark: number;
-  labeled: number;
-  status: 'ok' | 'under' | 'uncovered';
-}
-
-export interface ConfusionRow {
-  weakAct: string;
-  goldAct: string;
-  count: number;
-}
-
-export interface SummarizeReport {
-  distributions: Distributions;
-  coverage: CategoryCoverage[];
-  confusion: ConfusionRow[];
-  suspicious: Record<FilterId, FilterHit[]>;
-}
-
-const FILTER_IDS: FilterId[] = [
-  'bait_direct_silent',
-  'sticker_on_non_conversational',
-  'silent_decision_non_silence_act',
-  'relay_act_weak_not_relay',
-  'factterm_no_fact_reply',
+const FILTER_ORDER: FilterName[] = [
+  'bait_silent',
+  'sticker_on_meta_act',
+  'silent_with_nonsilence_act',
+  'relay_mismatch',
+  'cat2_fact_denied_reply',
 ];
 
-const FILTER_HIT_CAP = 20;
+const PER_FILTER_CAP = 20;
+const UNDER_THRESHOLD = 20;
+const RULE = '\u2500'.repeat(78);
 
-// ---------- Loaders (§9) ----------
-
-function isPlainObject(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
-}
-
-function coerceWeakRow(raw: unknown): WeakLabeledRow | null {
-  if (!isPlainObject(raw)) return null;
-  const { id, category, label, content } = raw;
-  if (typeof id !== 'string' || id.length === 0) return null;
-  if (typeof category !== 'number') return null;
-  if (typeof content !== 'string') return null;
-  if (!isPlainObject(label)) return null;
-  if (typeof label.isRelay !== 'boolean') return null;
-  if (typeof label.expectedAct !== 'string') return null;
-  return raw as unknown as WeakLabeledRow;
-}
-
-export async function loadBenchmark(path: string): Promise<WeakLabeledRow[]> {
-  let text: string;
-  try {
-    text = await fsp.readFile(path, 'utf8');
-  } catch (e) {
-    process.stderr.write(`loadBenchmark: cannot read ${path}: ${String(e)}\n`);
-    process.exit(2);
-  }
-  const out: WeakLabeledRow[] = [];
-  const lines = text.split('\n');
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!.trim();
-    if (line.length === 0) continue;
-    let obj: unknown;
-    try {
-      obj = JSON.parse(line);
-    } catch {
-      process.stderr.write(`loadBenchmark: skip malformed JSON at line ${i + 1}\n`);
-      continue;
-    }
-    const row = coerceWeakRow(obj);
-    if (!row) {
-      process.stderr.write(`loadBenchmark: skip missing required keys at line ${i + 1}\n`);
-      continue;
-    }
-    out.push(row);
-  }
-  return out;
-}
+// ---------- Gold loader (§5.2) ----------
 
 export async function loadGold(path: string): Promise<GoldLabel[]> {
-  let text: string;
+  let stream;
   try {
-    text = await fsp.readFile(path, 'utf8');
+    stream = createReadStream(path, { encoding: 'utf8' });
   } catch (e) {
-    process.stderr.write(`loadGold: cannot read ${path}: ${String(e)}\n`);
-    process.exit(2);
+    process.stderr.write(`[loadGold] cannot open ${path}: ${String(e)}\n`);
+    process.exit(1);
   }
+  const rl = createInterface({ input: stream, crlfDelay: Infinity });
   const bySampleId = new Map<string, GoldLabel>();
-  const lines = text.split('\n');
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!.trim();
-    if (line.length === 0) continue;
-    let obj: unknown;
-    try {
-      obj = JSON.parse(line);
-    } catch {
-      process.stderr.write(`loadGold: skip malformed JSON at line ${i + 1}\n`);
-      continue;
+  let lineNo = 0;
+  try {
+    for await (const line of rl) {
+      lineNo++;
+      const trimmed = line.trim();
+      if (trimmed.length === 0) continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(trimmed);
+      } catch {
+        process.stderr.write(`[loadGold] malformed JSON at line ${lineNo} — skipped\n`);
+        continue;
+      }
+      let validated: GoldLabel;
+      try {
+        validated = validateGoldLabel(parsed);
+      } catch (e) {
+        const sid =
+          typeof parsed === 'object' && parsed !== null && typeof (parsed as { sampleId?: unknown }).sampleId === 'string'
+            ? (parsed as { sampleId: string }).sampleId
+            : '<no-id>';
+        process.stderr.write(`[loadGold] invalid row (sampleId=${sid}) at line ${lineNo}: ${String(e)}\n`);
+        continue;
+      }
+      bySampleId.set(validated.sampleId, validated);
     }
-    let validated: GoldLabel;
-    try {
-      validated = validateGoldLabel(obj);
-    } catch (e) {
-      process.stderr.write(`loadGold: skip invalid row at line ${i + 1}: ${String(e)}\n`);
-      continue;
-    }
-    // Dedup by sampleId, last wins (matches label-gold CLI writer).
-    bySampleId.set(validated.sampleId, validated);
+  } finally {
+    rl.close();
+    stream.close();
   }
   return [...bySampleId.values()];
 }
 
-// ---------- Join (§5.2) ----------
+// ---------- Join (§5.3) ----------
 
-export function joinRecords(
-  weak: WeakLabeledRow[],
-  gold: GoldLabel[],
-): JoinedRecord[] {
-  const goldMap = new Map<string, GoldLabel>();
-  for (const g of gold) goldMap.set(g.sampleId, g);
-  return weak.map(w => ({
-    sampleId: w.id,
-    weak: w,
-    gold: goldMap.get(w.id) ?? null,
-  }));
-}
-
-// ---------- Distributions (§5.3) ----------
-
-function emptyBoolCount(): { true: number; false: number } {
-  return { true: 0, false: 0 };
-}
-
-export function computeDistributions(joined: JoinedRecord[]): Distributions {
-  const goldAct: Record<string, number> = {};
-  const goldDecision: Record<string, number> = {};
-  const factNeeded = emptyBoolCount();
-  const allowBanter = emptyBoolCount();
-  const allowSticker = emptyBoolCount();
-  let totalLabeled = 0;
-  const totalBenchmark = joined.length;
-
-  for (const j of joined) {
-    if (j.gold === null) continue;
-    totalLabeled++;
-    goldAct[j.gold.goldAct] = (goldAct[j.gold.goldAct] ?? 0) + 1;
-    goldDecision[j.gold.goldDecision] = (goldDecision[j.gold.goldDecision] ?? 0) + 1;
-    if (j.gold.factNeeded) factNeeded.true++; else factNeeded.false++;
-    if (j.gold.allowBanter) allowBanter.true++; else allowBanter.false++;
-    if (j.gold.allowSticker) allowSticker.true++; else allowSticker.false++;
-  }
-
-  return {
-    goldAct,
-    goldDecision,
-    factNeeded,
-    allowBanter,
-    allowSticker,
-    totalLabeled,
-    totalBenchmark,
-  };
-}
-
-// ---------- Coverage (§5.4) ----------
-
-export function computeCoverage(
-  joined: JoinedRecord[],
-  underThreshold: number,
-): CategoryCoverage[] {
-  const benchmark = new Array(10).fill(0);
-  const labeled = new Array(10).fill(0);
-  for (const j of joined) {
-    const c = j.weak.category;
-    if (c >= 1 && c <= 10) {
-      benchmark[c - 1]++;
-      if (j.gold !== null) labeled[c - 1]++;
+export function join(bench: SampleRecord[], gold: GoldLabel[]): LoadResult {
+  const benchById = new Map<string, SampleRecord>();
+  for (const s of bench) benchById.set(s.sampleId, s);
+  const joined: JoinedRow[] = [];
+  const orphanedGoldIds: string[] = [];
+  for (const g of gold) {
+    const s = benchById.get(g.sampleId);
+    if (!s) {
+      orphanedGoldIds.push(g.sampleId);
+      continue;
     }
-  }
-  const out: CategoryCoverage[] = [];
-  for (let c = 1; c <= 10; c++) {
-    const lb = labeled[c - 1];
-    let status: 'ok' | 'under' | 'uncovered';
-    if (lb === 0) status = 'uncovered';
-    else if (lb < underThreshold) status = 'under';
-    else status = 'ok';
-    out.push({
-      category: c,
-      label: CATEGORY_LABELS[c - 1] ?? `cat${c}`,
-      benchmark: benchmark[c - 1],
-      labeled: lb,
-      status,
+    const category = typeof (s as unknown as { category: unknown }).category === 'number'
+      ? (s as unknown as { category: number }).category
+      : 0;
+    joined.push({
+      sampleId: g.sampleId,
+      sample: s,
+      gold: g,
+      category,
+      categoryLabel: CATEGORY_LABELS[category - 1] ?? '?',
     });
   }
-  return out;
+  return { joined, orphanedGoldIds, goldTotal: gold.length, benchTotal: bench.length };
 }
 
-// ---------- Confusion (§5.5) ----------
+// ---------- Snippet helper (§11.3) ----------
 
-export function computeConfusion(joined: JoinedRecord[]): ConfusionRow[] {
-  const counts = new Map<string, number>();
-  for (const j of joined) {
-    if (j.gold === null) continue;
-    const key = `${j.weak.label.expectedAct}\u0000${j.gold.goldAct}`;
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
-  const rows: ConfusionRow[] = [];
-  for (const [key, count] of counts) {
-    const [weakAct, goldAct] = key.split('\u0000');
-    rows.push({ weakAct: weakAct!, goldAct: goldAct!, count });
-  }
-  rows.sort((a, b) => b.count - a.count);
-  return rows;
+function stripCQ(raw: string): string {
+  return raw.replace(/\[CQ:[^\]]+\]/g, '').trim();
 }
 
-// ---------- Filter predicates (§6) ----------
-
-export function isBaitDirectSilent(j: JoinedRecord): boolean {
-  return j.gold !== null
-    && j.weak.category === 1
-    && j.gold.goldDecision === 'silent';
+export function makeSnippet(triggerContent: string): string {
+  const stripped = stripCQ(triggerContent);
+  const noNewline = stripped.replace(/\r?\n/g, '\u23ce');
+  const collapsed = noNewline.replace(/\s+/g, ' ').trim();
+  return collapsed.length > 60 ? collapsed.slice(0, 59) + '\u2026' : collapsed;
 }
 
-export function isStickerOnNonConversational(j: JoinedRecord): boolean {
-  return j.gold !== null
-    && j.gold.allowSticker === true
-    && (j.gold.goldAct === 'conflict_handle'
-      || j.gold.goldAct === 'meta_admin_status'
-      || j.gold.goldAct === 'bot_status_query');
+// ---------- Filter predicates (§11.1) ----------
+
+export function isBaitSilent(r: JoinedRow): boolean {
+  return r.category === 1 && r.gold.goldDecision === 'silent';
 }
 
-export function isSilentDecisionNonSilenceAct(j: JoinedRecord): boolean {
-  return j.gold !== null
-    && j.gold.goldDecision === 'silent'
-    && j.gold.goldAct !== 'silence';
+export function isStickerOnMetaAct(r: JoinedRow): boolean {
+  return r.gold.allowSticker === true
+    && (r.gold.goldAct === 'conflict_handle'
+      || r.gold.goldAct === 'meta_admin_status'
+      || r.gold.goldAct === 'bot_status_query');
 }
 
-export function isRelayActWeakNotRelay(j: JoinedRecord): boolean {
-  return j.gold !== null
-    && j.gold.goldAct === 'relay'
-    && j.weak.label.isRelay === false;
+export function isSilentWithNonsilenceAct(r: JoinedRow): boolean {
+  return r.gold.goldDecision === 'silent' && r.gold.goldAct !== 'silence';
 }
 
-export function isFacttermNoFactReply(j: JoinedRecord): boolean {
-  return j.gold !== null
-    && j.weak.category === 2
-    && j.gold.factNeeded === false
-    && j.gold.goldDecision === 'reply';
+export function isRelayMismatch(r: JoinedRow): boolean {
+  return r.gold.goldAct === 'relay' && r.sample.weakLabel.isRelay === false;
 }
 
-const PREDICATES: Record<FilterId, (j: JoinedRecord) => boolean> = {
-  bait_direct_silent: isBaitDirectSilent,
-  sticker_on_non_conversational: isStickerOnNonConversational,
-  silent_decision_non_silence_act: isSilentDecisionNonSilenceAct,
-  relay_act_weak_not_relay: isRelayActWeakNotRelay,
-  factterm_no_fact_reply: isFacttermNoFactReply,
+export function isCat2FactDeniedReply(r: JoinedRow): boolean {
+  return r.category === 2 && r.gold.factNeeded === false && r.gold.goldDecision === 'reply';
+}
+
+const PREDICATES: Record<FilterName, (r: JoinedRow) => boolean> = {
+  bait_silent: isBaitSilent,
+  sticker_on_meta_act: isStickerOnMetaAct,
+  silent_with_nonsilence_act: isSilentWithNonsilenceAct,
+  relay_mismatch: isRelayMismatch,
+  cat2_fact_denied_reply: isCat2FactDeniedReply,
 };
 
-export function snippet(raw: string | null | undefined, content: string): string {
-  const src = (raw && raw.length > 0 ? raw : content) ?? '';
-  const oneline = src.replace(/\s+/g, ' ').trim();
-  return oneline.length > 60 ? oneline.slice(0, 57) + '\u2026' : oneline;
+// ---------- Section 1 — Distributions (§8) ----------
+
+export function renderDistributions(joined: JoinedRow[]): string[] {
+  const actCounts: Record<GoldAct, number> = {
+    direct_chat: 0, chime_in: 0, conflict_handle: 0, summarize: 0,
+    bot_status_query: 0, relay: 0, meta_admin_status: 0, object_react: 0, silence: 0,
+  };
+  const decisionCounts: Record<GoldDecision, number> = { reply: 0, silent: 0, defer: 0 };
+  const bools = {
+    factNeeded: { t: 0, f: 0 },
+    allowBanter: { t: 0, f: 0 },
+    allowSticker: { t: 0, f: 0 },
+  };
+  for (const r of joined) {
+    actCounts[r.gold.goldAct]++;
+    decisionCounts[r.gold.goldDecision]++;
+    if (r.gold.factNeeded) bools.factNeeded.t++; else bools.factNeeded.f++;
+    if (r.gold.allowBanter) bools.allowBanter.t++; else bools.allowBanter.f++;
+    if (r.gold.allowSticker) bools.allowSticker.t++; else bools.allowSticker.f++;
+  }
+
+  const lines: string[] = ['SECTION 1 — DISTRIBUTIONS', ''];
+  lines.push(' goldAct:');
+  for (const act of GOLD_ACTS) {
+    lines.push(`   ${act.padEnd(18)} ${String(actCounts[act])}`);
+  }
+  lines.push('');
+  lines.push(' goldDecision:');
+  const decisionOrder: GoldDecision[] = ['reply', 'silent', 'defer'];
+  for (const dec of decisionOrder) {
+    lines.push(`   ${dec.padEnd(18)} ${String(decisionCounts[dec])}`);
+  }
+  lines.push('');
+  lines.push(' booleans (true / false):');
+  lines.push(`   factNeeded         ${bools.factNeeded.t} / ${bools.factNeeded.f}`);
+  lines.push(`   allowBanter        ${bools.allowBanter.t} / ${bools.allowBanter.f}`);
+  lines.push(`   allowSticker       ${bools.allowSticker.t} / ${bools.allowSticker.f}`);
+  return lines;
 }
 
-export function applyFilters(joined: JoinedRecord[]): Record<FilterId, FilterHit[]> {
-  const out: Record<FilterId, FilterHit[]> = {
-    bait_direct_silent: [],
-    sticker_on_non_conversational: [],
-    silent_decision_non_silence_act: [],
-    relay_act_weak_not_relay: [],
-    factterm_no_fact_reply: [],
-  };
-  for (const j of joined) {
-    for (const id of FILTER_IDS) {
-      if (out[id].length >= FILTER_HIT_CAP) continue;
-      if (PREDICATES[id](j)) {
-        out[id].push({
-          filterId: id,
-          sampleId: j.sampleId,
-          snippet: snippet(j.weak.rawContent, j.weak.content),
-        });
+// ---------- Section 2 — Coverage (§9) ----------
+
+export function renderCoverage(joined: JoinedRow[], orphanedCount: number): string[] {
+  const perCat = new Array<number>(10).fill(0);
+  for (const r of joined) {
+    if (r.category >= 1 && r.category <= 10) perCat[r.category - 1]++;
+  }
+  const lines: string[] = ['SECTION 2 — COVERAGE MATRIX', ''];
+  for (let c = 1; c <= 10; c++) {
+    const n = perCat[c - 1]!;
+    const catCol = c < 10 ? `cat ${c} ` : `cat${c} `;
+    const label = (CATEGORY_LABELS[c - 1] ?? '?').padEnd(22);
+    const nCol = `N=${String(n).padStart(4)}`;
+    let status: string;
+    if (n === 0) status = '!! UNCOVERED';
+    else if (n < UNDER_THRESHOLD) status = '!! under';
+    else status = 'ok';
+    lines.push(` ${catCol} ${label} ${nCol}  ${status}`);
+  }
+  lines.push('');
+  lines.push(`-- total labeled=${joined.length} orphaned=${orphanedCount}`);
+  return lines;
+}
+
+// ---------- Section 3 — Disagreement (§10) ----------
+
+export function sortDisagreementRows(
+  rows: Array<{ weak: string; gold: string; count: number }>,
+): Array<{ weak: string; gold: string; count: number }> {
+  return [...rows].sort((a, b) => {
+    if (b.count !== a.count) return b.count - a.count;
+    if (a.weak !== b.weak) return a.weak < b.weak ? -1 : 1;
+    if (a.gold !== b.gold) return a.gold < b.gold ? -1 : 1;
+    return 0;
+  });
+}
+
+export function renderDisagreement(joined: JoinedRow[]): string[] {
+  const counts = new Map<string, { weak: string; gold: string; count: number }>();
+  for (const r of joined) {
+    const weak = r.sample.weakLabel.expectedAct;
+    const gold = r.gold.goldAct;
+    const key = `${weak}\u0000${gold}`;
+    const existing = counts.get(key);
+    if (existing) existing.count++;
+    else counts.set(key, { weak, gold, count: 1 });
+  }
+  const sorted = sortDisagreementRows([...counts.values()]);
+  const lines: string[] = ['SECTION 3 — WEAK vs GOLD DISAGREEMENT', ''];
+  lines.push(' expectedAct     →  goldAct                 count');
+  for (const row of sorted) {
+    const weakCol = row.weak.padEnd(14);
+    const goldCol = row.gold.padEnd(20);
+    const countCol = String(row.count).padStart(6);
+    lines.push(` ${weakCol} → ${goldCol} ${countCol}`);
+  }
+  const total = joined.length;
+  const diag = sorted.filter(r => r.weak === r.gold).reduce((s, r) => s + r.count, 0);
+  const pct = total === 0 ? '0.0' : ((diag / total) * 100).toFixed(1);
+  lines.push('');
+  lines.push(` agreement = ${diag} / ${total}  (${pct}%)`);
+  return lines;
+}
+
+// ---------- Section 4 — Suspicious (§11) ----------
+
+export function renderSuspicious(joined: JoinedRow[]): string[] {
+  const lines: string[] = [
+    'SECTION 4 — SUSPICIOUS ROWS (five filters; row may appear in >1)',
+    '',
+  ];
+  let first = true;
+  for (const name of FILTER_ORDER) {
+    if (!first) lines.push('');
+    first = false;
+    const pred = PREDICATES[name];
+    const hits: FilterHit[] = [];
+    let total = 0;
+    for (const r of joined) {
+      if (!pred(r)) continue;
+      total++;
+      if (hits.length < PER_FILTER_CAP) {
+        hits.push({ sampleId: r.sampleId, snippet: makeSnippet(r.sample.triggerContent) });
       }
     }
-  }
-  return out;
-}
-
-// ---------- Report (§5.8) ----------
-
-export function buildReport(
-  joined: JoinedRecord[],
-  underThreshold: number,
-): SummarizeReport {
-  return {
-    distributions: computeDistributions(joined),
-    coverage: computeCoverage(joined, underThreshold),
-    confusion: computeConfusion(joined),
-    suspicious: applyFilters(joined),
-  };
-}
-
-// ---------- Renderers (§5.9, §7) ----------
-
-const C_RESET = '\x1b[0m';
-const C_HEADER = '\x1b[1;37m';
-const C_OK = '\x1b[32m';
-const C_UNDER = '\x1b[33m';
-const C_UNCOV = '\x1b[31m';
-const C_FILTER_HEAD = '\x1b[1;33m';
-const C_SAMPLE = '\x1b[36m';
-
-function color(on: boolean, code: string, s: string): string {
-  return on ? `${code}${s}${C_RESET}` : s;
-}
-
-function pct(n: number, total: number): string {
-  if (total === 0) return '0.0%';
-  return `${((n / total) * 100).toFixed(1)}%`;
-}
-
-function sortedEntries(dist: Record<string, number>): Array<[string, number]> {
-  return Object.entries(dist).sort((a, b) => b[1] - a[1]);
-}
-
-function renderDistTable(
-  title: string,
-  dist: Record<string, number>,
-  total: number,
-  useColor: boolean,
-): string {
-  const lines: string[] = [color(useColor, C_HEADER, `  ${title}`)];
-  for (const [label, count] of sortedEntries(dist)) {
-    lines.push(`    ${label.padEnd(22)} : ${String(count).padStart(5)} (${pct(count, total)})`);
-  }
-  return lines.join('\n') + '\n';
-}
-
-function renderBoolDist(
-  title: string,
-  b: { true: number; false: number },
-  total: number,
-  useColor: boolean,
-): string {
-  const lines: string[] = [color(useColor, C_HEADER, `  ${title}`)];
-  lines.push(`    true                   : ${String(b.true).padStart(5)} (${pct(b.true, total)})`);
-  lines.push(`    false                  : ${String(b.false).padStart(5)} (${pct(b.false, total)})`);
-  return lines.join('\n') + '\n';
-}
-
-export function renderHumanReport(r: SummarizeReport, useColor: boolean): string {
-  const d = r.distributions;
-  const parts: string[] = [];
-
-  // 1. Header
-  parts.push(color(useColor, C_HEADER, '== Gold Sanity Summary =='));
-  parts.push(
-    `Labeled ${d.totalLabeled} / ${d.totalBenchmark} benchmark rows (${pct(d.totalLabeled, d.totalBenchmark)})`
-  );
-  parts.push('');
-
-  // 2. Distributions
-  parts.push(color(useColor, C_HEADER, '[distributions]'));
-  parts.push(renderDistTable('goldAct', d.goldAct, d.totalLabeled, useColor));
-  parts.push(renderDistTable('goldDecision', d.goldDecision, d.totalLabeled, useColor));
-  parts.push(renderBoolDist('factNeeded', d.factNeeded, d.totalLabeled, useColor));
-  parts.push(renderBoolDist('allowBanter', d.allowBanter, d.totalLabeled, useColor));
-  parts.push(renderBoolDist('allowSticker', d.allowSticker, d.totalLabeled, useColor));
-
-  // 3. Coverage
-  parts.push(color(useColor, C_HEADER, '[coverage]'));
-  parts.push('  cat  label                      benchmark  labeled  status');
-  for (const row of r.coverage) {
-    const code = row.status === 'ok' ? C_OK : row.status === 'under' ? C_UNDER : C_UNCOV;
-    const statusText = color(useColor, code, row.status);
-    parts.push(
-      `  ${String(row.category).padStart(2)}   ${row.label.padEnd(24)}   ${String(row.benchmark).padStart(8)}   ${String(row.labeled).padStart(6)}  ${statusText}`
-    );
-  }
-  parts.push('');
-
-  // 4. Confusion
-  parts.push(color(useColor, C_HEADER, '[confusion]'));
-  parts.push('  weakAct                goldAct                count');
-  if (r.confusion.length === 0) {
-    parts.push('  (no labeled rows)');
-  } else {
-    for (const row of r.confusion) {
-      parts.push(
-        `  ${row.weakAct.padEnd(22)} ${row.goldAct.padEnd(22)} ${String(row.count).padStart(5)}`
-      );
-    }
-  }
-  parts.push('');
-
-  // 5. Suspicious
-  parts.push(color(useColor, C_HEADER, '[suspicious]'));
-  for (const id of FILTER_IDS) {
-    const hits = r.suspicious[id];
-    const header = `  [${id}] \u2014 ${hits.length} hits`;
-    parts.push(color(useColor, C_FILTER_HEAD, header));
+    lines.push(`[${name}]  N=${total}`);
+    if (hits.length === 0) continue;
+    const idWidth = hits.reduce((m, h) => Math.max(m, h.sampleId.length), 0);
     for (const h of hits) {
-      parts.push(`    ${color(useColor, C_SAMPLE, h.sampleId)}  ${h.snippet}`);
+      lines.push(`  ${h.sampleId.padEnd(idWidth)}  ${h.snippet}`);
     }
-    if (hits.length === FILTER_HIT_CAP) {
-      parts.push(`    \u2026 capped at ${FILTER_HIT_CAP}; re-run with --json for full list`);
-    }
+    const extra = total - hits.length;
+    if (extra > 0) lines.push(`  \u2026 +${extra} more`);
   }
-
-  return parts.join('\n') + '\n';
-}
-
-export function renderJsonReport(r: SummarizeReport): string {
-  return JSON.stringify(r, null, 2);
+  return lines;
 }
 
 // ---------- CLI ----------
@@ -469,28 +321,17 @@ export function renderJsonReport(r: SummarizeReport): string {
 interface CliArgs {
   gold: string;
   benchmark: string;
-  underThreshold: number;
-  noColor: boolean;
-  json: boolean;
 }
 
 function parseArgs(argv: string[]): CliArgs {
   const args = argv.slice(2);
   let gold = '';
   let benchmark = '';
-  let underThreshold = 20;
-  let noColor = false;
-  let json = false;
-
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === '--gold' && args[i + 1]) gold = args[++i]!;
     else if (a === '--benchmark' && args[i + 1]) benchmark = args[++i]!;
-    else if (a === '--under-cover-threshold' && args[i + 1]) underThreshold = parseInt(args[++i]!, 10);
-    else if (a === '--no-color') noColor = true;
-    else if (a === '--json') json = true;
   }
-
   if (!gold) {
     process.stderr.write('Missing --gold\n');
     process.exit(1);
@@ -499,48 +340,46 @@ function parseArgs(argv: string[]): CliArgs {
     process.stderr.write('Missing --benchmark\n');
     process.exit(1);
   }
-  if (!Number.isFinite(underThreshold) || underThreshold < 0) {
-    process.stderr.write('--under-cover-threshold must be non-negative integer\n');
-    process.exit(1);
-  }
-
-  return { gold, benchmark, underThreshold, noColor, json };
+  return { gold, benchmark };
 }
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv);
-  const weak = await loadBenchmark(args.benchmark);
+
+  const bench: SampleRecord[] = [];
+  try {
+    for await (const s of readSamples(args.benchmark)) bench.push(s);
+  } catch (e) {
+    process.stderr.write(`[readSamples] cannot read ${args.benchmark}: ${String(e)}\n`);
+    process.exit(1);
+  }
+
   const gold = await loadGold(args.gold);
-  if (gold.length === 0) {
-    process.stderr.write('No gold rows \u2014 nothing to audit.\n');
-    process.exit(3);
-  }
-  const joined = joinRecords(weak, gold);
-  const report = buildReport(joined, args.underThreshold);
+  const { joined, orphanedGoldIds, goldTotal } = join(bench, gold);
 
-  const useColor = !args.noColor && !!process.stderr.isTTY;
+  const orphanSuffix = orphanedGoldIds.length > 0 ? ` orphaned=${orphanedGoldIds.length}` : '';
+  process.stderr.write(
+    `SUMMARIZE-GOLD  gold=${args.gold}  benchmark=${args.benchmark}  rows=${joined.length}/${goldTotal}${orphanSuffix}\n`,
+  );
 
-  // stderr human view unless caller asked for json-only pipe mode.
-  const stderrSilent = args.json && args.noColor;
-  if (!stderrSilent) {
-    process.stderr.write(renderHumanReport(report, useColor));
-  }
-  if (args.json) {
-    process.stdout.write(renderJsonReport(report) + '\n');
+  const sections: string[][] = [
+    renderDistributions(joined),
+    renderCoverage(joined, orphanedGoldIds.length),
+    renderDisagreement(joined),
+    renderSuspicious(joined),
+  ];
+  for (const lines of sections) {
+    process.stderr.write('\n' + RULE + '\n');
+    for (const ln of lines) process.stderr.write(ln + '\n');
   }
   process.exit(0);
 }
-
-// Keep these exports callable from tests; avoid dead-code elimination complaints.
-export const _allFilterIds = FILTER_IDS;
-export const _allActs = GOLD_ACTS;
-export const _allDecisions = GOLD_DECISIONS;
 
 const arg1 = process.argv[1] ?? '';
 const isMain = arg1.endsWith('summarize-gold.ts') || arg1.endsWith('summarize-gold.js');
 if (isMain) {
   main().catch(e => {
     process.stderr.write(String(e) + '\n');
-    process.exit(2);
+    process.exit(1);
   });
 }

@@ -1,8 +1,8 @@
 /**
  * R6.2.3 summarize-gold tests.
  *
- * All pure-function tests use inlined in-memory fixtures. Loader test writes
- * small tmp JSONL files and cleans up in afterEach.
+ * Pure-function tests use in-memory fixtures; loader/integration tests write
+ * tmp JSONL files and clean up in afterEach.
  */
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
@@ -11,30 +11,27 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
-import type { WeakLabeledRow, WeakReplayLabel, ExpectedAct } from '../../scripts/eval/types.js';
+import type { WeakReplayLabel, ExpectedAct } from '../../scripts/eval/types.js';
+import type { SampleRecord } from '../../scripts/eval/gold/reader.js';
 import type { GoldLabel, GoldAct, GoldDecision } from '../../scripts/eval/gold/types.js';
 import {
-  joinRecords,
-  computeDistributions,
-  computeCoverage,
-  computeConfusion,
-  applyFilters,
-  buildReport,
-  isBaitDirectSilent,
-  isStickerOnNonConversational,
-  isSilentDecisionNonSilenceAct,
-  isRelayActWeakNotRelay,
-  isFacttermNoFactReply,
-  loadBenchmark,
   loadGold,
-  renderJsonReport,
-  renderHumanReport,
-  snippet,
-  type JoinedRecord,
-  type FilterId,
+  join,
+  makeSnippet,
+  renderDistributions,
+  renderCoverage,
+  renderDisagreement,
+  renderSuspicious,
+  sortDisagreementRows,
+  isBaitSilent,
+  isStickerOnMetaAct,
+  isSilentWithNonsilenceAct,
+  isRelayMismatch,
+  isCat2FactDeniedReply,
+  type JoinedRow,
 } from '../../scripts/eval/summarize-gold.js';
 
-// ---------- Fixture helpers ----------
+// ---------- Fixtures ----------
 
 function buildWeakLabel(overrides: Partial<WeakReplayLabel> = {}): WeakReplayLabel {
   return {
@@ -54,33 +51,24 @@ function buildWeakLabel(overrides: Partial<WeakReplayLabel> = {}): WeakReplayLab
   };
 }
 
-function buildWeak(
+function buildSample(
   sampleId: string,
   category: number,
-  isRelay: boolean,
   expectedAct: ExpectedAct,
-  content: string,
-  rawContent: string | null = null,
-): WeakLabeledRow {
+  isRelay: boolean,
+  triggerContent: string,
+): SampleRecord {
   return {
-    id: sampleId,
-    groupId: 'g1',
-    messageId: 1,
-    sourceMessageId: null,
-    userId: 'u1',
-    nickname: 'n1',
-    timestamp: 0,
-    content,
-    rawContent,
-    triggerContext: [],
-    triggerContextAfter: [],
+    sampleId,
+    triggerContent,
+    triggerRawContent: null,
+    triggerUser: 'u',
+    triggerTs: 0,
+    contextBefore: [],
+    contextAfter: [],
+    weakLabel: buildWeakLabel({ expectedAct, isRelay }),
     category,
-    categoryLabel: `cat${category}`,
-    samplingSeed: 0,
-    contentHash: 'h',
-    contextHash: 'h',
-    label: buildWeakLabel({ isRelay, expectedAct }),
-  };
+  } as SampleRecord;
 }
 
 function buildGold(
@@ -102,234 +90,30 @@ function buildGold(
   };
 }
 
-function joinOne(weak: WeakLabeledRow, gold: GoldLabel | null): JoinedRecord {
-  return { sampleId: weak.id, weak, gold };
+function buildJoined(
+  sampleId: string,
+  category: number,
+  expectedAct: ExpectedAct,
+  isRelay: boolean,
+  goldAct: GoldAct,
+  goldDecision: GoldDecision,
+  goldOverrides: Partial<Omit<GoldLabel, 'sampleId' | 'goldAct' | 'goldDecision'>> = {},
+  content = 'x',
+): JoinedRow {
+  const sample = buildSample(sampleId, category, expectedAct, isRelay, content);
+  const gold = buildGold(sampleId, goldAct, goldDecision, goldOverrides);
+  return {
+    sampleId,
+    sample,
+    gold,
+    category,
+    categoryLabel: `cat${category}`,
+  };
 }
 
-// ---------- 10.1 Distributions ----------
+// ---------- 13.1 loadGold + join ----------
 
-describe('computeDistributions', () => {
-  it('sums act and decision distributions over labeled rows only', () => {
-    const w1 = buildWeak('s1', 1, false, 'direct_chat', 'hi');
-    const w2 = buildWeak('s2', 2, false, 'chime_in', 'yo');
-    const w3 = buildWeak('s3', 3, false, 'chime_in', 'ya');
-    const w4 = buildWeak('s4', 3, false, 'chime_in', 'no-gold');
-    const g1 = buildGold('s1', 'direct_chat', 'reply', { factNeeded: true, allowBanter: true, allowSticker: false });
-    const g2 = buildGold('s2', 'chime_in', 'silent', { factNeeded: false, allowBanter: false, allowSticker: true });
-    const g3 = buildGold('s3', 'silence', 'silent', { factNeeded: false, allowBanter: true, allowSticker: false });
-    const joined = joinRecords([w1, w2, w3, w4], [g1, g2, g3]);
-    const d = computeDistributions(joined);
-    expect(d.totalBenchmark).toBe(4);
-    expect(d.totalLabeled).toBe(3);
-    expect(d.totalLabeled).toBeLessThan(d.totalBenchmark);
-    expect(d.goldAct).toEqual({ direct_chat: 1, chime_in: 1, silence: 1 });
-    expect(d.goldDecision).toEqual({ reply: 1, silent: 2 });
-    expect(d.factNeeded).toEqual({ true: 1, false: 2 });
-    expect(d.allowBanter).toEqual({ true: 2, false: 1 });
-    expect(d.allowSticker).toEqual({ true: 1, false: 2 });
-  });
-});
-
-// ---------- 10.2 Coverage ----------
-
-describe('computeCoverage', () => {
-  function makeBenchSweep(labeledCat1: number): JoinedRecord[] {
-    const joined: JoinedRecord[] = [];
-    for (let c = 1; c <= 10; c++) {
-      for (let k = 0; k < 25; k++) {
-        const id = `c${c}-${k}`;
-        const w = buildWeak(id, c, false, 'direct_chat', 'x');
-        const hasGold = c === 1 && k < labeledCat1;
-        joined.push({
-          sampleId: id,
-          weak: w,
-          gold: hasGold ? buildGold(id, 'direct_chat', 'reply') : null,
-        });
-      }
-    }
-    return joined;
-  }
-
-  it('marks uncovered cats (labeled=0) red, under when below threshold, ok otherwise', () => {
-    const cov = computeCoverage(makeBenchSweep(5), 20);
-    expect(cov).toHaveLength(10);
-    expect(cov[0]).toMatchObject({ category: 1, benchmark: 25, labeled: 5, status: 'under' });
-    for (let c = 2; c <= 10; c++) {
-      expect(cov[c - 1]).toMatchObject({ category: c, benchmark: 25, labeled: 0, status: 'uncovered' });
-    }
-  });
-
-  it('cat 1 labeled=25 threshold=20 → ok', () => {
-    const cov = computeCoverage(makeBenchSweep(25), 20);
-    expect(cov[0]!.status).toBe('ok');
-  });
-
-  it('boundary: labeled=20 threshold=20 → ok, labeled=19 → under', () => {
-    expect(computeCoverage(makeBenchSweep(20), 20)[0]!.status).toBe('ok');
-    expect(computeCoverage(makeBenchSweep(19), 20)[0]!.status).toBe('under');
-  });
-});
-
-// ---------- 10.3 Confusion ----------
-
-describe('computeConfusion', () => {
-  it('sums weakAct×goldAct pairs, omits gold=null, sorts desc', () => {
-    const rows: JoinedRecord[] = [];
-    for (let i = 0; i < 3; i++) {
-      const w = buildWeak(`a${i}`, 5, false, 'bot_status_query', 'x');
-      rows.push(joinOne(w, buildGold(`a${i}`, 'silence', 'silent')));
-    }
-    const w4 = buildWeak('a4', 5, false, 'bot_status_query', 'x');
-    rows.push(joinOne(w4, buildGold('a4', 'direct_chat', 'reply')));
-    const w5 = buildWeak('a5', 5, false, 'bot_status_query', 'x');
-    rows.push(joinOne(w5, null));
-
-    const conf = computeConfusion(rows);
-    expect(conf).toHaveLength(2);
-    expect(conf[0]).toEqual({ weakAct: 'bot_status_query', goldAct: 'silence', count: 3 });
-    expect(conf[1]).toEqual({ weakAct: 'bot_status_query', goldAct: 'direct_chat', count: 1 });
-    expect(conf.reduce((s, r) => s + r.count, 0)).toBe(4);
-  });
-});
-
-// ---------- 10.4 Filter predicates (each: 1 match, 1 near-miss, null-gold=false) ----------
-
-describe('isBaitDirectSilent', () => {
-  it('match: cat=1, decision=silent', () => {
-    const w = buildWeak('s1', 1, false, 'direct_chat', 'x');
-    expect(isBaitDirectSilent(joinOne(w, buildGold('s1', 'silence', 'silent')))).toBe(true);
-  });
-  it('miss: cat=1, decision=reply', () => {
-    const w = buildWeak('s1', 1, false, 'direct_chat', 'x');
-    expect(isBaitDirectSilent(joinOne(w, buildGold('s1', 'direct_chat', 'reply')))).toBe(false);
-  });
-  it('null gold → false', () => {
-    const w = buildWeak('s1', 1, false, 'direct_chat', 'x');
-    expect(isBaitDirectSilent(joinOne(w, null))).toBe(false);
-  });
-});
-
-describe('isStickerOnNonConversational', () => {
-  it('match: allowSticker=true, goldAct=meta_admin_status', () => {
-    const w = buildWeak('s1', 5, false, 'meta_admin_status', 'x');
-    expect(isStickerOnNonConversational(
-      joinOne(w, buildGold('s1', 'meta_admin_status', 'reply', { allowSticker: true })),
-    )).toBe(true);
-  });
-  it('miss: allowSticker=true, goldAct=chime_in', () => {
-    const w = buildWeak('s1', 5, false, 'chime_in', 'x');
-    expect(isStickerOnNonConversational(
-      joinOne(w, buildGold('s1', 'chime_in', 'reply', { allowSticker: true })),
-    )).toBe(false);
-  });
-  it('null gold → false', () => {
-    const w = buildWeak('s1', 5, false, 'meta_admin_status', 'x');
-    expect(isStickerOnNonConversational(joinOne(w, null))).toBe(false);
-  });
-});
-
-describe('isSilentDecisionNonSilenceAct', () => {
-  it('match: decision=silent, act=chime_in', () => {
-    const w = buildWeak('s1', 3, false, 'chime_in', 'x');
-    expect(isSilentDecisionNonSilenceAct(
-      joinOne(w, buildGold('s1', 'chime_in', 'silent')),
-    )).toBe(true);
-  });
-  it('miss: decision=silent, act=silence', () => {
-    const w = buildWeak('s1', 10, false, 'chime_in', 'x');
-    expect(isSilentDecisionNonSilenceAct(
-      joinOne(w, buildGold('s1', 'silence', 'silent')),
-    )).toBe(false);
-  });
-  it('null gold → false', () => {
-    const w = buildWeak('s1', 3, false, 'chime_in', 'x');
-    expect(isSilentDecisionNonSilenceAct(joinOne(w, null))).toBe(false);
-  });
-});
-
-describe('isRelayActWeakNotRelay', () => {
-  it('match: goldAct=relay, weak.isRelay=false', () => {
-    const w = buildWeak('s1', 9, false, 'chime_in', 'x');
-    expect(isRelayActWeakNotRelay(
-      joinOne(w, buildGold('s1', 'relay', 'reply')),
-    )).toBe(true);
-  });
-  it('miss: goldAct=relay, weak.isRelay=true', () => {
-    const w = buildWeak('s1', 7, true, 'relay', 'x');
-    expect(isRelayActWeakNotRelay(
-      joinOne(w, buildGold('s1', 'relay', 'reply')),
-    )).toBe(false);
-  });
-  it('null gold → false', () => {
-    const w = buildWeak('s1', 9, false, 'chime_in', 'x');
-    expect(isRelayActWeakNotRelay(joinOne(w, null))).toBe(false);
-  });
-});
-
-describe('isFacttermNoFactReply', () => {
-  it('match: cat=2, factNeeded=false, decision=reply', () => {
-    const w = buildWeak('s1', 2, false, 'direct_chat', 'x');
-    expect(isFacttermNoFactReply(
-      joinOne(w, buildGold('s1', 'direct_chat', 'reply', { factNeeded: false })),
-    )).toBe(true);
-  });
-  it('miss: cat=2, factNeeded=true, decision=reply', () => {
-    const w = buildWeak('s1', 2, false, 'direct_chat', 'x');
-    expect(isFacttermNoFactReply(
-      joinOne(w, buildGold('s1', 'direct_chat', 'reply', { factNeeded: true })),
-    )).toBe(false);
-  });
-  it('null gold → false', () => {
-    const w = buildWeak('s1', 2, false, 'direct_chat', 'x');
-    expect(isFacttermNoFactReply(joinOne(w, null))).toBe(false);
-  });
-});
-
-// ---------- 10.5 applyFilters cap ----------
-
-describe('applyFilters', () => {
-  it('caps each filter bucket at 20 hits', () => {
-    const joined: JoinedRecord[] = [];
-    for (let i = 0; i < 25; i++) {
-      const id = `s${i}`;
-      const w = buildWeak(id, 3, false, 'chime_in', 'x');
-      joined.push(joinOne(w, buildGold(id, 'chime_in', 'silent')));
-    }
-    const hits = applyFilters(joined);
-    expect(hits.silent_decision_non_silence_act).toHaveLength(20);
-    expect(hits.silent_decision_non_silence_act.every(h => h.filterId === 'silent_decision_non_silence_act')).toBe(true);
-  });
-});
-
-// ---------- 10.6 Rendering ----------
-
-describe('renderJsonReport', () => {
-  it('round-trips: JSON.parse(render(r)) deep-equals r', () => {
-    const w1 = buildWeak('s1', 1, false, 'direct_chat', 'hello');
-    const g1 = buildGold('s1', 'direct_chat', 'reply');
-    const rep = buildReport(joinRecords([w1], [g1]), 20);
-    expect(JSON.parse(renderJsonReport(rep))).toEqual(rep);
-  });
-});
-
-describe('renderHumanReport', () => {
-  const w1 = buildWeak('s1', 1, false, 'direct_chat', 'hello');
-  const g1 = buildGold('s1', 'direct_chat', 'reply');
-  const rep = buildReport(joinRecords([w1], [g1]), 20);
-
-  it('no ANSI bytes when useColor=false', () => {
-    expect(renderHumanReport(rep, false)).not.toMatch(/\x1b\[/);
-  });
-
-  it('contains section-header ANSI escape when useColor=true', () => {
-    const out = renderHumanReport(rep, true);
-    expect(out).toMatch(/\x1b\[1;37m/);
-  });
-});
-
-// ---------- 10.7 Loader ----------
-
-describe('loadGold', () => {
+describe('loadGold + join', () => {
   const tmpFiles: string[] = [];
   afterEach(async () => {
     while (tmpFiles.length > 0) {
@@ -338,15 +122,20 @@ describe('loadGold', () => {
     }
   });
 
-  it('skips malformed JSON + missing-required rows, warns to stderr', async () => {
+  it('loads valid rows, skips malformed + missing + bad-enum, dedups last-wins, warns on stderr', async () => {
     const tmp = path.join(os.tmpdir(), `gold-load-${randomUUID()}.jsonl`);
     tmpFiles.push(tmp);
-    const valid = buildGold('s1', 'direct_chat', 'reply');
+    const v1 = buildGold('s1', 'direct_chat', 'reply');
+    const v1dup = buildGold('s1', 'silence', 'silent');
+    const malformed = '{not json';
+    const missingSampleId = JSON.stringify({ goldAct: 'direct_chat', goldDecision: 'reply' });
+    const badAct = JSON.stringify({ ...v1, sampleId: 'sBad', goldAct: 'not_a_real_act' });
     const body = [
-      JSON.stringify(valid),
-      '{not json',
-      JSON.stringify({ sampleId: 's2' }), // missing required fields
-      '',
+      JSON.stringify(v1),
+      malformed,
+      missingSampleId,
+      badAct,
+      JSON.stringify(v1dup),
     ].join('\n');
     await fsp.writeFile(tmp, body, 'utf8');
 
@@ -355,28 +144,219 @@ describe('loadGold', () => {
       const rows = await loadGold(tmp);
       expect(rows).toHaveLength(1);
       expect(rows[0]!.sampleId).toBe('s1');
+      expect(rows[0]!.goldAct).toBe('silence');
+      expect(rows[0]!.goldDecision).toBe('silent');
       const warnings = writeSpy.mock.calls.map(c => String(c[0]));
-      expect(warnings.some(w => /malformed JSON/i.test(w))).toBe(true);
-      expect(warnings.some(w => /invalid row/i.test(w))).toBe(true);
+      expect(warnings.filter(w => /malformed JSON/i.test(w))).toHaveLength(1);
+      expect(warnings.filter(w => /invalid row/i.test(w))).toHaveLength(2);
     } finally {
       writeSpy.mockRestore();
     }
   });
 
-  it('dedup by sampleId — last wins', async () => {
-    const tmp = path.join(os.tmpdir(), `gold-dedup-${randomUUID()}.jsonl`);
-    tmpFiles.push(tmp);
-    const first = buildGold('s1', 'direct_chat', 'reply');
-    const second = buildGold('s1', 'silence', 'silent');
-    await fsp.writeFile(tmp, [JSON.stringify(first), JSON.stringify(second)].join('\n'), 'utf8');
-    const rows = await loadGold(tmp);
-    expect(rows).toHaveLength(1);
-    expect(rows[0]!.goldAct).toBe('silence');
-    expect(rows[0]!.goldDecision).toBe('silent');
+  it('join: inner only, orphans separate, counts set', () => {
+    const bench: SampleRecord[] = [
+      buildSample('a', 1, 'direct_chat', false, 'x'),
+      buildSample('b', 2, 'direct_chat', false, 'x'),
+      buildSample('c', 3, 'chime_in', false, 'x'),
+    ];
+    const gold: GoldLabel[] = [
+      buildGold('a', 'direct_chat', 'reply'),
+      buildGold('z1', 'chime_in', 'silent'),
+      buildGold('z2', 'silence', 'silent'),
+    ];
+    const result = join(bench, gold);
+    expect(result.joined).toHaveLength(1);
+    expect(result.joined[0]!.sampleId).toBe('a');
+    expect(result.joined[0]!.category).toBe(1);
+    expect(result.orphanedGoldIds.sort()).toEqual(['z1', 'z2']);
+    expect(result.goldTotal).toBe(3);
+    expect(result.benchTotal).toBe(3);
   });
 });
 
-describe('loadBenchmark', () => {
+// ---------- 13.2 renderDistributions ----------
+
+describe('renderDistributions', () => {
+  it('prints all 9 acts and 3 decisions even when count is zero; matches counts', () => {
+    const joined: JoinedRow[] = [
+      buildJoined('a1', 1, 'direct_chat', false, 'direct_chat', 'reply', { factNeeded: true, allowBanter: true }),
+      buildJoined('a2', 1, 'direct_chat', false, 'direct_chat', 'reply'),
+      buildJoined('a3', 3, 'chime_in', false, 'chime_in', 'silent', { allowSticker: true }),
+      buildJoined('a4', 3, 'chime_in', false, 'silence', 'silent'),
+    ];
+    const out = renderDistributions(joined).join('\n');
+    expect(out).toContain('direct_chat        2');
+    expect(out).toContain('chime_in           1');
+    expect(out).toContain('silence            1');
+    expect(out).toContain('conflict_handle    0');
+    expect(out).toContain('summarize          0');
+    expect(out).toContain('reply              2');
+    expect(out).toContain('silent             2');
+    expect(out).toContain('defer              0');
+    expect(out).toContain('factNeeded         1 / 3');
+    expect(out).toContain('allowBanter        1 / 3');
+    expect(out).toContain('allowSticker       1 / 3');
+  });
+});
+
+// ---------- 13.3 renderCoverage boundary ----------
+
+describe('renderCoverage', () => {
+  function sweep(counts: Record<number, number>): JoinedRow[] {
+    const rows: JoinedRow[] = [];
+    for (const [catStr, n] of Object.entries(counts)) {
+      const c = Number(catStr);
+      for (let i = 0; i < n; i++) {
+        rows.push(buildJoined(`c${c}_${i}`, c, 'direct_chat', false, 'direct_chat', 'reply'));
+      }
+    }
+    return rows;
+  }
+
+  it('marks cat<20 under, cat=0 UNCOVERED, cat>=20 ok at boundary', () => {
+    const joined = sweep({ 1: 25, 2: 20, 3: 19 });
+    const out = renderCoverage(joined, 0).join('\n');
+    expect(out).toMatch(/cat 1.*N=\s*25\s+ok/);
+    expect(out).toMatch(/cat 2.*N=\s*20\s+ok/);
+    expect(out).toMatch(/cat 3.*N=\s*19\s+!! under/);
+    expect(out).toMatch(/cat 7.*N=\s*0\s+!! UNCOVERED/);
+    expect(out).toContain('-- total labeled=64 orphaned=0');
+  });
+
+  it('appends orphaned=<N> when passed in', () => {
+    const out = renderCoverage(sweep({ 1: 1 }), 3).join('\n');
+    expect(out).toContain('-- total labeled=1 orphaned=3');
+  });
+});
+
+// ---------- 13.4 sortDisagreementRows ----------
+
+describe('sortDisagreementRows', () => {
+  it('count desc, then weak asc, then gold asc', () => {
+    const input = [
+      { weak: 'a', gold: 'b', count: 2 },
+      { weak: 'a', gold: 'a', count: 5 },
+      { weak: 'b', gold: 'b', count: 5 },
+    ];
+    const out = sortDisagreementRows(input);
+    expect(out.map(r => [r.weak, r.gold, r.count])).toEqual([
+      ['a', 'a', 5],
+      ['b', 'b', 5],
+      ['a', 'b', 2],
+    ]);
+  });
+});
+
+// ---------- 13.5 renderDisagreement ----------
+
+describe('renderDisagreement', () => {
+  it('emits agreement line with diag-sum / total and percentage', () => {
+    const rows: JoinedRow[] = [];
+    for (let i = 0; i < 6; i++) {
+      rows.push(buildJoined(`d${i}`, 1, 'direct_chat', false, 'direct_chat', 'reply'));
+    }
+    for (let i = 0; i < 4; i++) {
+      rows.push(buildJoined(`o${i}`, 3, 'chime_in', false, 'silence', 'silent'));
+    }
+    const out = renderDisagreement(rows).join('\n');
+    expect(out).toContain('agreement = 6 / 10  (60.0%)');
+  });
+
+  it('empty joined → agreement = 0 / 0 (0.0%) with no divide-by-zero', () => {
+    const out = renderDisagreement([]).join('\n');
+    expect(out).toContain('agreement = 0 / 0  (0.0%)');
+  });
+});
+
+// ---------- 13.6 Filter predicates ----------
+
+describe('filter predicates', () => {
+  it('isBaitSilent: match cat=1+silent, miss cat=1+reply', () => {
+    expect(isBaitSilent(buildJoined('s', 1, 'direct_chat', false, 'silence', 'silent'))).toBe(true);
+    expect(isBaitSilent(buildJoined('s', 1, 'direct_chat', false, 'direct_chat', 'reply'))).toBe(false);
+  });
+  it('isStickerOnMetaAct: match allowSticker+meta_admin_status, miss allowSticker+chime_in', () => {
+    expect(isStickerOnMetaAct(
+      buildJoined('s', 5, 'direct_chat', false, 'meta_admin_status', 'reply', { allowSticker: true }),
+    )).toBe(true);
+    expect(isStickerOnMetaAct(
+      buildJoined('s', 5, 'direct_chat', false, 'chime_in', 'reply', { allowSticker: true }),
+    )).toBe(false);
+  });
+  it('isSilentWithNonsilenceAct: match silent+chime_in, miss silent+silence', () => {
+    expect(isSilentWithNonsilenceAct(
+      buildJoined('s', 3, 'chime_in', false, 'chime_in', 'silent'),
+    )).toBe(true);
+    expect(isSilentWithNonsilenceAct(
+      buildJoined('s', 3, 'chime_in', false, 'silence', 'silent'),
+    )).toBe(false);
+  });
+  it('isRelayMismatch: match goldAct=relay+isRelay=false, miss goldAct=relay+isRelay=true', () => {
+    expect(isRelayMismatch(
+      buildJoined('s', 9, 'chime_in', false, 'relay', 'reply'),
+    )).toBe(true);
+    expect(isRelayMismatch(
+      buildJoined('s', 7, 'relay', true, 'relay', 'reply'),
+    )).toBe(false);
+  });
+  it('isCat2FactDeniedReply: match cat=2+factNeeded=false+reply, miss cat=2+factNeeded=true+reply', () => {
+    expect(isCat2FactDeniedReply(
+      buildJoined('s', 2, 'direct_chat', false, 'direct_chat', 'reply', { factNeeded: false }),
+    )).toBe(true);
+    expect(isCat2FactDeniedReply(
+      buildJoined('s', 2, 'direct_chat', false, 'direct_chat', 'reply', { factNeeded: true }),
+    )).toBe(false);
+  });
+});
+
+// ---------- 13.7 renderSuspicious cap ----------
+
+describe('renderSuspicious', () => {
+  it('caps at 20 rows, appends +<M> more trailer, empty filters render N=0', () => {
+    const joined: JoinedRow[] = [];
+    for (let i = 0; i < 25; i++) {
+      joined.push(buildJoined(`big${i}`, 3, 'chime_in', false, 'chime_in', 'silent'));
+    }
+    const out = renderSuspicious(joined);
+    const text = out.join('\n');
+    expect(text).toContain('[silent_with_nonsilence_act]  N=25');
+    const block = text.split('[relay_mismatch]')[0]!;
+    const rowLines = block.split('\n').filter(l => /^\s{2}big\d+/.test(l));
+    expect(rowLines).toHaveLength(20);
+    expect(text).toContain('  \u2026 +5 more');
+    expect(text).toContain('[bait_silent]  N=0');
+    expect(text).toContain('[sticker_on_meta_act]  N=0');
+    expect(text).toContain('[relay_mismatch]  N=0');
+    expect(text).toContain('[cat2_fact_denied_reply]  N=0');
+  });
+});
+
+// ---------- 13.8 makeSnippet ----------
+
+describe('makeSnippet', () => {
+  it('short text passes through', () => {
+    expect(makeSnippet('hello world')).toBe('hello world');
+  });
+  it('long text truncated to 60 chars ending with ellipsis', () => {
+    const out = makeSnippet('a'.repeat(100));
+    expect(out).toHaveLength(60);
+    expect(out.endsWith('\u2026')).toBe(true);
+  });
+  it('newlines map to ⏎', () => {
+    expect(makeSnippet('line1\nline2')).toBe('line1\u23celine2');
+  });
+  it('CQ segments stripped, leading/trailing space trimmed', () => {
+    expect(makeSnippet('[CQ:image,file=x] caption')).toBe('caption');
+  });
+  it('multi-CQ + inner whitespace collapsed', () => {
+    expect(makeSnippet('hi   [CQ:face,id=1]  there')).toBe('hi there');
+  });
+});
+
+// ---------- 13.9 Integration ----------
+
+describe('integration end-to-end', () => {
   const tmpFiles: string[] = [];
   afterEach(async () => {
     while (tmpFiles.length > 0) {
@@ -385,95 +365,85 @@ describe('loadBenchmark', () => {
     }
   });
 
-  it('skips malformed JSON + missing required keys', async () => {
-    const tmp = path.join(os.tmpdir(), `bench-load-${randomUUID()}.jsonl`);
-    tmpFiles.push(tmp);
-    const good = buildWeak('w1', 1, false, 'direct_chat', 'hi');
-    const body = [
-      JSON.stringify(good),
-      '{not json',
-      JSON.stringify({ id: 'w2', category: 2 }), // missing label, content
-      '',
-    ].join('\n');
-    await fsp.writeFile(tmp, body, 'utf8');
+  it('10 bench + 8 gold (2 orphans) + 1 malformed line → rows=6/8 orphaned=2, sections present', async () => {
+    const benchTmp = path.join(os.tmpdir(), `bench-${randomUUID()}.jsonl`);
+    const goldTmp = path.join(os.tmpdir(), `gold-${randomUUID()}.jsonl`);
+    tmpFiles.push(benchTmp, goldTmp);
 
+    const benchRows: unknown[] = [];
+    const expectedActs: ExpectedAct[] = [
+      'direct_chat', 'direct_chat', 'chime_in', 'chime_in', 'relay',
+      'direct_chat', 'chime_in', 'chime_in', 'direct_chat', 'direct_chat',
+    ];
+    const cats = [1, 2, 3, 7, 7, 1, 9, 3, 1, 1];
+    for (let i = 0; i < 10; i++) {
+      benchRows.push({
+        id: `b${i}`,
+        groupId: 'g',
+        messageId: i,
+        sourceMessageId: null,
+        userId: 'u',
+        nickname: 'n',
+        timestamp: 0,
+        content: `msg-${i}`,
+        rawContent: null,
+        triggerContext: [],
+        triggerContextAfter: [],
+        category: cats[i],
+        categoryLabel: `cat${cats[i]}`,
+        samplingSeed: 42,
+        contentHash: 'h',
+        contextHash: 'h',
+        label: buildWeakLabel({ expectedAct: expectedActs[i]!, isRelay: cats[i] === 7 }),
+      });
+    }
+
+    const goldRows = [
+      buildGold('b0', 'silence', 'silent'),
+      buildGold('b1', 'direct_chat', 'reply', { factNeeded: false }),
+      buildGold('b2', 'chime_in', 'silent'),
+      buildGold('b3', 'relay', 'reply'),
+      buildGold('b4', 'relay', 'reply'),
+      buildGold('b5', 'silence', 'silent'),
+      buildGold('orph1', 'chime_in', 'silent'),
+      buildGold('orph2', 'direct_chat', 'reply'),
+    ];
+
+    await fsp.writeFile(benchTmp, benchRows.map(r => JSON.stringify(r)).join('\n'), 'utf8');
+    await fsp.writeFile(
+      goldTmp,
+      [...goldRows.map(r => JSON.stringify(r)), '{not json'].join('\n'),
+      'utf8',
+    );
+
+    const { readSamples } = await import('../../scripts/eval/gold/reader.js');
+    const bench: SampleRecord[] = [];
     const writeSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
-      const rows = await loadBenchmark(tmp);
-      expect(rows).toHaveLength(1);
-      expect(rows[0]!.id).toBe('w1');
+      for await (const s of readSamples(benchTmp)) bench.push(s);
+      const gold = await loadGold(goldTmp);
+      const result = join(bench, gold);
+      expect(result.joined).toHaveLength(6);
+      expect(result.orphanedGoldIds.sort()).toEqual(['orph1', 'orph2']);
+      expect(result.goldTotal).toBe(8);
+      expect(result.benchTotal).toBe(10);
+
+      const sections = [
+        renderDistributions(result.joined),
+        renderCoverage(result.joined, result.orphanedGoldIds.length),
+        renderDisagreement(result.joined),
+        renderSuspicious(result.joined),
+      ];
+      const combined = sections.map(s => s.join('\n')).join('\n');
+      expect(combined).toContain('SECTION 1 — DISTRIBUTIONS');
+      expect(combined).toContain('SECTION 2 — COVERAGE MATRIX');
+      expect(combined).toContain('SECTION 3 — WEAK vs GOLD DISAGREEMENT');
+      expect(combined).toContain('SECTION 4 — SUSPICIOUS ROWS');
+      expect(combined).toContain('orphaned=2');
+      // b0 and b5 are cat=1+decision=silent → bait_silent fires for both.
+      expect(combined).toMatch(/\[bait_silent\]\s+N=2/);
     } finally {
       writeSpy.mockRestore();
     }
   });
 });
-
-// ---------- 10.8 Integration ----------
-
-describe('buildReport integration', () => {
-  const tmpFiles: string[] = [];
-  afterEach(async () => {
-    while (tmpFiles.length > 0) {
-      const p = tmpFiles.pop()!;
-      try { await fsp.unlink(p); } catch { /* ignore */ }
-    }
-  });
-
-  it('5-row weak + 3-row gold → counts line up, coverage len 10', async () => {
-    const weakTmp = path.join(os.tmpdir(), `bench-${randomUUID()}.jsonl`);
-    const goldTmp = path.join(os.tmpdir(), `gold-${randomUUID()}.jsonl`);
-    tmpFiles.push(weakTmp, goldTmp);
-
-    const weakRows = [
-      buildWeak('i1', 1, false, 'direct_chat', 'a'),
-      buildWeak('i2', 2, false, 'direct_chat', 'b'),
-      buildWeak('i3', 3, false, 'chime_in', 'c'),
-      buildWeak('i4', 9, false, 'chime_in', 'd'),
-      buildWeak('i5', 10, false, 'chime_in', 'e'),
-    ];
-    const goldRows = [
-      buildGold('i1', 'silence', 'silent'),               // hits bait_direct_silent (cat=1, decision=silent); act=silence so NOT silent_decision_non_silence_act
-      buildGold('i2', 'direct_chat', 'reply'),            // hits factterm_no_fact_reply (cat=2, factNeeded=false)
-      buildGold('i3', 'relay', 'reply'),                  // hits relay_act_weak_not_relay (weak.isRelay=false)
-    ];
-    await fsp.writeFile(weakTmp, weakRows.map(r => JSON.stringify(r)).join('\n'), 'utf8');
-    await fsp.writeFile(goldTmp, goldRows.map(r => JSON.stringify(r)).join('\n'), 'utf8');
-
-    const weak = await loadBenchmark(weakTmp);
-    const gold = await loadGold(goldTmp);
-    const report = buildReport(joinRecords(weak, gold), 20);
-
-    expect(report.distributions.totalLabeled).toBe(3);
-    expect(report.distributions.totalBenchmark).toBe(5);
-    expect(report.coverage).toHaveLength(10);
-    expect(report.suspicious.bait_direct_silent).toHaveLength(1);
-    expect(report.suspicious.bait_direct_silent[0]!.sampleId).toBe('i1');
-    expect(report.suspicious.silent_decision_non_silence_act).toHaveLength(0);
-    expect(report.suspicious.factterm_no_fact_reply).toHaveLength(1);
-    expect(report.suspicious.relay_act_weak_not_relay).toHaveLength(1);
-    expect(report.suspicious.sticker_on_non_conversational).toHaveLength(0);
-  });
-});
-
-// ---------- Misc helpers ----------
-
-describe('snippet helper', () => {
-  it('prefers rawContent when present', () => {
-    expect(snippet('raw-text', 'content-fallback')).toBe('raw-text');
-  });
-  it('falls back to content when raw is null/empty', () => {
-    expect(snippet(null, 'content-fallback')).toBe('content-fallback');
-    expect(snippet('', 'content-fallback')).toBe('content-fallback');
-  });
-  it('collapses whitespace, truncates over 60 chars with ellipsis', () => {
-    const long = 'a'.repeat(80);
-    const out = snippet(null, long);
-    expect(out.length).toBeLessThanOrEqual(60);
-    expect(out.endsWith('\u2026')).toBe(true);
-    expect(snippet(null, 'a\n\nb  c')).toBe('a b c');
-  });
-});
-
-// satisfy noUnusedLocals for FilterId import
-const _filterIdForTypeCheck: FilterId = 'bait_direct_silent';
-void _filterIdForTypeCheck;
