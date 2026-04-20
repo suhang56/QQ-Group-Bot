@@ -33,6 +33,8 @@ import type { ChatResult } from '../utils/chat-result.js';
 import type { ChatDecisionTracker } from '../modules/chat-decision-tracker.js';
 import { DeferQueue, type DeferredItem } from '../utils/defer-queue.js';
 import { evaluatePreGenerate } from '../modules/engagement-decision.js';
+import { classifyPath } from './classify-path.js';
+import { detectRelay } from '../modules/relay-detector.js';
 
 const MAX_SPLIT_LINES = 3;
 const MOD_DM_HOURLY_CAP = 20;
@@ -673,11 +675,58 @@ export class Router implements IRouter {
         if (isAtMention) {
           await this._enqueueAtMention(msg, config);
         } else {
+          // R2a: pure path classification — frontloads direct / hard-bypass / ultra-light
+          // decisions ahead of the sticker-first + pre-generate timing gate so that
+          // direct signals (reply-to-bot) are not silenced by organic-chat compliance.
+          const isReplyToBot = !!this.botUserId
+            && msg.rawContent.includes('[CQ:reply,')
+            && recentMsgs.some(m => m.userId === this.botUserId);
+          const trimmedR2a = msg.content.trim();
+          const isSlashCommand = trimmedR2a.startsWith('/');
+          const slashCmdName = isSlashCommand
+            ? (trimmedR2a.slice(1).split(/\s+/)[0]?.toLowerCase() ?? '')
+            : '';
+          const commandIsRegistered = isSlashCommand && slashCmdName.length > 0
+            && this.commands.has(slashCmdName);
+          const relayDetectionR2a = detectRelay(
+            this.db.messages.getRecent(msg.groupId, 10),
+            this.botUserId ?? '',
+          );
+          const pathKind = classifyPath({
+            isAtMention: false,
+            isReplyToBot,
+            isSlashCommand,
+            commandIsRegistered,
+            relay: relayDetectionR2a,
+          });
+          this.logger.debug({
+            groupId: msg.groupId, userId: msg.userId, pathKind,
+            relayKind: relayDetectionR2a?.kind ?? null,
+          }, `path-classifier:${pathKind}`);
+
+          if (pathKind === 'direct') {
+            // reply-to-bot: same enqueue path as @-mention
+            await this._enqueueAtMention(msg, config);
+            return;
+          }
+          if (pathKind === 'hard-bypass') {
+            // Defensive: command dispatch at line 525 should have already handled this.
+            // Reaching here means a registered command slipped past the admin/openCmds
+            // gate (non-admin user running an admin-only command) — timing gate must
+            // not silence it; chat pipeline is inappropriate. Return silently.
+            return;
+          }
+          // pathKind === 'ultra-light' bypasses sticker-first + timing gate; chat.ts's
+          // internal detectRelay branch fires and either echoes or silently sits out,
+          // without organic-chat timing compliance suppressing the relay participation.
+          const skipTimingAndSticker = pathKind === 'ultra-light';
+
           // Sticker-first intercept: try matching a sticker before invoking the
           // full ChatModule — but skip when query is a direct/opinion question
           // (those need factual answers, not stickers) or when a known structured
           // fact term is in the message.
-          let skipStickerFirst = isDirectQuestion(msg.content) || isGroundedOpinionQuestion(msg.content);
+          let skipStickerFirst = skipTimingAndSticker
+            || isDirectQuestion(msg.content) || isGroundedOpinionQuestion(msg.content);
           if (!skipStickerFirst) {
             const cands = extractCandidateTerms(msg.content)
               .filter(isValidStructuredTerm)
@@ -716,8 +765,10 @@ export class Router implements IRouter {
             }
           }
 
-          // P5: pre-generate timing gate (organic path)
-          if (this.deferQueue) {
+          // P5: pre-generate timing gate (organic path). R2a: ultra-light paths
+          // (relay echo/vote/claim) skip the gate — relay-detection runs again
+          // inside chat.ts generateReply and either echoes or sits out locally.
+          if (this.deferQueue && !skipTimingAndSticker) {
             const nowSec = Math.floor(Date.now() / 1000);
             const hasKnownFactTerm = this._hasKnownFactTermPreview(msg.groupId, msg.content);
             const recentNegativeScore = this._computeRecentNegativeScore(msg.groupId);
