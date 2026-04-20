@@ -35,8 +35,13 @@ Rationale:
 
 - `src/core/classify-path.ts` (**NEW**) — pure `classifyPath(ctx)` function + `PathKind` type + `ClassifyCtx` interface.
 - `src/core/router.ts` (**MODIFY**) — splice classification + branching between line 675 (`} else {`) and line 680 (existing `let skipStickerFirst = ...`).
+- `src/modules/chat.ts` (**MODIFY, scope widening**) — compute `isDirectForGateBypass` (same signal shape as router's direct classifier) and guard the three internal timing gates in `generateReply`: `_checkGroupLimit` (1592), `debounceMap` (1643), and `inFlightGroups` (1648). `atMentionIgnoreUntil` (per-user @-spam curse+ignore) is NOT bypassed — it is legitimate abuse protection, not a timing gate. Rename unused `_recentMessages` parameter to `recentMessages` so the CQ:reply-to-bot signal can use it.
 - `test/core/classify-path.test.ts` (**NEW**) — pure-fn unit tests (9 edge cases from PLAN §3 + 100× purity snapshot).
 - `test/core/router-r2a-integration.test.ts` (**NEW**) — wiring test: burst + `@bot` reaches `_enqueueAtMention`, burst + plain chat reaches `evaluatePreGenerate`, burst + `/kick`-style admin cmd short-circuits at line 525 (pre-existing behavior, R2a regression guard).
+- `test/chat-r2a-rate-limit-bypass.test.ts` (**NEW**) — ChatModule-level coverage: rate limit / debounce / in-flight bypasses for @bot and reply-to-bot; non-direct baselines preserved; `atMentionIgnoreUntil` remains honored for direct @s from ignored users.
+- `test/chat.test.ts` (**MODIFY, one test**) — flip prior `rate limit blocks at_only reply` to verify R2a bypass; adds a comment citing PLAN Scope #4 as the superseding spec.
+
+**Scope-widening rationale (chat.ts)**: the Architect's original §1 listed only router.ts, but the R6.3 replay runner (`scripts/eval/replay-runner.ts:197`) invokes `chat.generateReply` directly, not via `router.dispatch`. Without the chat-level guard, the router splice is structurally correct but invisible to the replay acceptance gate. `_checkGroupLimit` / `debounceMap` / `inFlightGroups` are all timing gates covered by PLAN Scope #4 "direct override skips timing gate" — extending scope to chat.ts is the smallest change that makes the direct override end-to-end. Approved by team-lead after initial replay showed 47/48 direct-at-silenced unchanged from baseline.
 
 **No changes**: schema.sql, engagement-decision.ts, relay-detector.ts.
 

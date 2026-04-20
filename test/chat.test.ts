@@ -197,7 +197,12 @@ describe('ChatModule — core behavior', () => {
     expect(result.kind).toBe('silent');
   });
 
-  it('in-flight lock: concurrent @-mention sends exactly one reply', async () => {
+  it('R2a: concurrent @-mentions both reach LLM (direct override bypasses in-flight lock)', async () => {
+    // R2a PLAN Scope #4 — direct @/reply-to-bot skip timing gates including
+    // the in-flight lock. Prior behavior silenced the second @-mention to
+    // suppress concurrent replies; under R2a, a real addressed user should
+    // not be dropped just because an earlier organic reply is still in
+    // flight. completeMock is therefore called twice.
     let resolveFirst!: (v: string) => void;
     const firstCallPending = new Promise<string>(r => { resolveFirst = r; });
     const completeMock = vi.fn()
@@ -215,12 +220,10 @@ describe('ChatModule — core behavior', () => {
     await new Promise(r => setTimeout(r, 10));
     const p2 = concurrentChat.generateReply('g1', atMsg, []);
 
-    resolveFirst('哈哈好的');  // different from trigger '咪' so echo detector doesn't drop it
-    const [r1, r2] = await Promise.all([p1, p2]);
+    resolveFirst('哈哈好的');
+    await Promise.all([p1, p2]);
 
-    const replies = [r1, r2].filter(r => r.kind !== 'silent');
-    expect(replies).toHaveLength(1);
-    expect(completeMock).toHaveBeenCalledTimes(1);
+    expect(completeMock).toHaveBeenCalledTimes(2);
   });
 
   it('5+ peer-chat messages (no @) from same user do NOT fire @-spam curse', async () => {

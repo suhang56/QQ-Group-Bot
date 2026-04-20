@@ -1575,13 +1575,13 @@ export class ChatModule implements IChatModule {
       return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'timing' };
     }
 
-    // R2a: direct override — @bot / reply-to-bot bypasses group rate limit.
-    // Rationale: PLAN Scope #4 "direct override skips timing gate". Signal shape
-    // mirrors router.ts:634/636 (raw CQ match + recent-messages bot presence) so
-    // direct detection is consistent across router splice and chat-level guard.
-    // The pure @-mention carve-out at line 1574 is separate; here we bypass only
-    // the group-wide rate limit, leaving atMentionIgnoreUntil (per-user abuse
-    // throttle, line 1593) and all downstream gates unchanged.
+    // R2a: direct override — @bot / reply-to-bot bypasses every timing gate
+    // in this function (rate limit, debounce, in-flight lock). Rationale: PLAN
+    // Scope #4 "direct override skips timing gate". Signal shape mirrors
+    // router.ts:634/636 (raw CQ match + recent-messages bot presence) so direct
+    // detection is consistent across the router splice and chat-level guards.
+    // atMentionIgnoreUntil (per-user @-spam curse+ignore, line 1606+) is
+    // legitimate abuse protection, NOT a timing gate — it is not bypassed.
     const isDirectForGateBypass =
       (!!this.botUserId && triggerMessage.rawContent.includes(`[CQ:at,qq=${this.botUserId}]`))
       || (!!this.botUserId
@@ -1638,14 +1638,21 @@ export class ChatModule implements IChatModule {
       return { kind: 'reply', text: phrase, meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
     }
 
+    // Debounce timing gate (R2a: skipped for direct @/reply-to-bot).
+    // debounceMap is still updated on direct paths — downstream proactive gates
+    // read the signal, so invariance of last-trigger tracking is preserved;
+    // only the silent-return is conditioned on direct.
     const lastTrigger = this.debounceMap.get(groupId);
     this.debounceMap.set(groupId, now);
-    if (lastTrigger !== undefined && now - lastTrigger < this.debounceMs) {
+    if (!isDirectForGateBypass
+      && lastTrigger !== undefined
+      && now - lastTrigger < this.debounceMs) {
       return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'timing' };
     }
 
-    // In-flight lock
-    if (this.inFlightGroups.has(groupId)) {
+    // In-flight lock (R2a: skipped for direct @/reply-to-bot — a direct address
+    // should not silently lose to an in-flight organic-chat reply).
+    if (!isDirectForGateBypass && this.inFlightGroups.has(groupId)) {
       this.logger.debug({ groupId }, 'Reply in-flight — dropping duplicate trigger');
       return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'timing' };
     }

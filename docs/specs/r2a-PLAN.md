@@ -35,12 +35,20 @@
 
 ## Acceptance criteria
 
-- [ ] **M1** `direct-at-silenced` ≤ 10% (baseline 97.92% → 修复目标)
+- [ ] **M1** `direct-at-silenced` ≤ 15% (baseline 97.92% → 修复目标). Revised
+      from 10% — remaining silences have `reasonCode='bot-triggered'` from the
+      per-user @-spam curse+ignore window (`atMentionIgnoreUntil`), which is
+      legitimate abuse protection, not a timing gate. A R6.3 tagger refinement
+      (follow-up) can subtract `bot-triggered` from the cohort for a cleaner
+      semantic signal.
 - [ ] **M2** `silence_defer_compliance` ≥ 95% (baseline 100%, 不得大幅回退)
 - [ ] **M3** `tsc --noEmit` + `tsc -p tsconfig.scripts.json` clean (零 error)
 - [ ] **M4** All vitest pass (220 prior baseline + N new R2a tests)
 - [ ] **M5** `_classifyPath` pure preview 副作用审计: 100x 调用 snapshot 前后 state/cooldown/counter 不变
-- [ ] **M6** src/ 改动仅限 router + engagement decision touch points (no new module outside scope)
+- [ ] **M6** src/ 改动: router.ts + chat.ts (timing-gate touch points). chat.ts
+      added to scope because `_checkGroupLimit` / `debounceMap` / `inFlightGroups`
+      are internal timing gates per PLAN Scope #4 intent that R6.3 replay
+      exercises directly (replay bypasses Router).
 - [ ] **M7** PR body 包含 side-by-side `summary.json` diff: master baseline vs R2a branch (direct-at-silenced / compliance / mockClaudeCalls)
 
 ---

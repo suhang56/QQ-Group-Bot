@@ -159,3 +159,192 @@ describe('ChatModule R2a — direct override bypasses group rate limit', () => {
     expect(result.kind).toBe('silent');
   });
 });
+
+// Separate chat factory for debounce cases — needs a non-zero debounceMs and
+// loose rate limit so only the debounce gate fires.
+function makeChatDebounce(claude: IClaudeClient, db: Database): ChatModule {
+  return new ChatModule(claude, db, {
+    botUserId: BOT_ID,
+    debounceMs: 5_000,
+    chatMinScore: -999,
+    maxGroupRepliesPerMinute: 1000,
+  });
+}
+
+describe('ChatModule R2a — direct override bypasses debounce', () => {
+  let db: Database;
+  let claude: IClaudeClient;
+  let chat: ChatModule;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    claude = makeClaude();
+    chat = makeChatDebounce(claude, db);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    db.close();
+  });
+
+  it('baseline: non-direct follow-up within debounce window is silenced', async () => {
+    await chat.generateReply('g1', makeMsg({ content: 'first', messageId: 'm1' }), []);
+    const second = await chat.generateReply(
+      'g1',
+      makeMsg({ content: 'second', messageId: 'm2' }),
+      [],
+    );
+    expect(second.kind).toBe('silent');
+    if (second.kind === 'silent') expect(second.reasonCode).toBe('timing');
+  });
+
+  it('direct @bot bypasses debounce window (LLM reached)', async () => {
+    await chat.generateReply('g1', makeMsg({ content: 'first', messageId: 'm1' }), []);
+    const callsBefore = (claude.complete as ReturnType<typeof vi.fn>).mock.calls.length;
+    const atMsg = makeMsg({
+      content: 'hey bot',
+      rawContent: `[CQ:at,qq=${BOT_ID}]hey bot`,
+      messageId: 'm2',
+    });
+    await chat.generateReply('g1', atMsg, []);
+    expect(
+      (claude.complete as ReturnType<typeof vi.fn>).mock.calls.length,
+    ).toBeGreaterThan(callsBefore);
+  });
+
+  it('direct reply-to-bot bypasses debounce window', async () => {
+    await chat.generateReply('g1', makeMsg({ content: 'first', messageId: 'm1' }), []);
+    const callsBefore = (claude.complete as ReturnType<typeof vi.fn>).mock.calls.length;
+    const botRecent: GroupMessage = {
+      messageId: '9001',
+      groupId: 'g1',
+      userId: BOT_ID,
+      nickname: 'bot',
+      role: 'member',
+      content: 'earlier bot reply',
+      rawContent: 'earlier bot reply',
+      timestamp: Math.floor(Date.now() / 1000) - 1,
+    };
+    const replyMsg = makeMsg({
+      content: 'yo',
+      rawContent: '[CQ:reply,id=9001]yo',
+      messageId: 'm2',
+    });
+    await chat.generateReply('g1', replyMsg, [botRecent]);
+    expect(
+      (claude.complete as ReturnType<typeof vi.fn>).mock.calls.length,
+    ).toBeGreaterThan(callsBefore);
+  });
+
+  it('debounceMap is still updated on direct paths (signal preserved for proactive gates)', async () => {
+    await chat.generateReply('g1', makeMsg({ content: 'first', messageId: 'm1' }), []);
+    const atMsg = makeMsg({
+      content: 'hey bot',
+      rawContent: `[CQ:at,qq=${BOT_ID}]hey bot`,
+      messageId: 'm2',
+    });
+    await chat.generateReply('g1', atMsg, []);
+    // Immediate non-direct follow-up must still be debounced — proves the
+    // direct call DID update debounceMap.
+    const third = await chat.generateReply(
+      'g1',
+      makeMsg({ content: 'third', messageId: 'm3' }),
+      [],
+    );
+    expect(third.kind).toBe('silent');
+    if (third.kind === 'silent') expect(third.reasonCode).toBe('timing');
+  });
+});
+
+describe('ChatModule R2a — direct override bypasses in-flight lock', () => {
+  let db: Database;
+  let claude: IClaudeClient;
+  let chat: ChatModule;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    claude = makeClaude();
+    chat = new ChatModule(claude, db, {
+      botUserId: BOT_ID,
+      debounceMs: 0,
+      chatMinScore: -999,
+      maxGroupRepliesPerMinute: 1000,
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    db.close();
+  });
+
+  it('non-direct message is silenced while a reply is in-flight for the group', async () => {
+    const inFlight = (chat as unknown as { inFlightGroups: Set<string> }).inFlightGroups;
+    inFlight.add('g1');
+    try {
+      const result = await chat.generateReply(
+        'g1',
+        makeMsg({ content: 'blocked', messageId: 'm1' }),
+        [],
+      );
+      expect(result.kind).toBe('silent');
+      if (result.kind === 'silent') expect(result.reasonCode).toBe('timing');
+    } finally {
+      inFlight.delete('g1');
+    }
+  });
+
+  it('direct @bot bypasses the in-flight lock', async () => {
+    const inFlight = (chat as unknown as { inFlightGroups: Set<string> }).inFlightGroups;
+    inFlight.add('g1');
+    try {
+      const atMsg = makeMsg({
+        content: 'direct',
+        rawContent: `[CQ:at,qq=${BOT_ID}]direct`,
+        messageId: 'm1',
+      });
+      const result = await chat.generateReply('g1', atMsg, []);
+      // Bypass must not short-circuit at the in-flight gate; if anything
+      // silences, it must be a non-timing downstream reason.
+      if (result.kind === 'silent') expect(result.reasonCode).not.toBe('timing');
+    } finally {
+      inFlight.delete('g1');
+    }
+  });
+});
+
+describe('ChatModule R2a — atMentionIgnoreUntil is NOT bypassed (legitimate abuse protection)', () => {
+  let db: Database;
+  let claude: IClaudeClient;
+  let chat: ChatModule;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    claude = makeClaude();
+    chat = new ChatModule(claude, db, {
+      botUserId: BOT_ID,
+      debounceMs: 0,
+      chatMinScore: -999,
+      maxGroupRepliesPerMinute: 1000,
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    db.close();
+  });
+
+  it('direct @ from an ignored user still silences with bot-triggered reason', async () => {
+    const ignoreMap = (chat as unknown as {
+      atMentionIgnoreUntil: Map<string, number>;
+    }).atMentionIgnoreUntil;
+    ignoreMap.set('g1:peer', Date.now() + 60_000);
+    const atMsg = makeMsg({
+      content: 'direct',
+      rawContent: `[CQ:at,qq=${BOT_ID}]direct`,
+      messageId: 'm1',
+    });
+    const result = await chat.generateReply('g1', atMsg, []);
+    expect(result.kind).toBe('silent');
+    if (result.kind === 'silent') expect(result.reasonCode).toBe('bot-triggered');
+  });
+});
