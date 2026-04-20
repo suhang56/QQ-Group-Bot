@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false
+  },
+  "include": [
+    "scripts/eval/label-gold.ts",
+    "scripts/eval/gold/**/*",
+    "scripts/eval/types.ts",
+    "src/**/*"
+  ],
+  "exclude": ["node_modules", "dist", "test"]
+}

@@ -11,7 +11,7 @@
     "test": "cross-env NODE_OPTIONS=--experimental-sqlite vitest run --coverage",
     "test:watch": "cross-env NODE_OPTIONS=--experimental-sqlite vitest",
     "test:integration": "cross-env NODE_OPTIONS=--experimental-sqlite vitest run --testPathPattern=integration",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.scripts.json",
     "import-history": "cross-env NODE_OPTIONS=--experimental-sqlite tsx scripts/import-history.ts"
   },
   "dependencies": {
