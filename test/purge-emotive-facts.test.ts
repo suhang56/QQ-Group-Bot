@@ -130,4 +130,43 @@ describe('purge-emotive-facts CLI', () => {
     expect(status).toBe(2);
     expect(stderr).toContain('Usage');
   });
+
+  it("Case E: pending-status emotive row is purged, superseded emotive row is not", () => {
+    const db = new DatabaseSync(dbPath);
+    const ins = db.prepare(`
+      INSERT INTO learned_facts (id, group_id, topic, fact, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    // Real-prod motivation shape: emotive row at status='pending'. Different term
+    // from id=1 to keep fixture distinct (multiple rows can share a topic string in prod).
+    ins.run(6, 'g1', 'ondemand-lookup:好烦', 'meaning-pending-emotive', 'pending', SEED_UPDATED_AT, SEED_UPDATED_AT);
+    // Pending ondemand non-emotive — must NOT flip
+    ins.run(7, 'g1', 'ondemand-lookup:xtt', 'meaning-pending-valid', 'pending', SEED_UPDATED_AT, SEED_UPDATED_AT);
+    // Superseded emotive — historical, must NOT flip (per team-lead)
+    ins.run(8, 'g1', 'ondemand-lookup:累死了', 'meaning-superseded-emotive', 'superseded', SEED_UPDATED_AT, SEED_UPDATED_AT);
+    db.close();
+
+    // Dry-run first — verify 4 found (3 active emotive + 1 pending emotive), 0 writes
+    const dry = runScript(['--db-path', dbPath]);
+    expect(dry.status).toBe(0);
+    expect(dry.stdout).toContain('4 found, 0 would update');
+    const dryRows = readAll(dbPath);
+    for (const row of dryRows) {
+      expect(row.updated_at).toBe(SEED_UPDATED_AT);
+    }
+
+    // Apply — flips 4 (3 active + 1 pending), leaves superseded + non-emotive + non-ondemand
+    const apply = runScript(['--db-path', dbPath, '--apply']);
+    expect(apply.status).toBe(0);
+    expect(apply.stdout).toContain('4 found, 4 updated');
+    const rows = readAll(dbPath);
+    expect(rows).toHaveLength(8);
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    expect(byId.get(6)?.status).toBe('rejected');
+    expect(byId.get(6)?.updated_at).toBeGreaterThan(SEED_UPDATED_AT);
+    expect(byId.get(7)?.status).toBe('pending');
+    expect(byId.get(7)?.updated_at).toBe(SEED_UPDATED_AT);
+    expect(byId.get(8)?.status).toBe('superseded');
+    expect(byId.get(8)?.updated_at).toBe(SEED_UPDATED_AT);
+  });
 });

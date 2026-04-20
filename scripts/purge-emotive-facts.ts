@@ -19,7 +19,7 @@ const db = new DatabaseSync(dbPath);
 try {
   const rows = db
     .prepare(
-      "SELECT id, topic, fact, status FROM learned_facts WHERE topic LIKE 'ondemand-lookup:%' AND status = 'active'",
+      "SELECT id, topic, fact, status FROM learned_facts WHERE topic LIKE 'ondemand-lookup:%' AND status IN ('active', 'pending')",
     )
     .all() as Array<{ id: number; topic: string; fact: string; status: string }>;
 
