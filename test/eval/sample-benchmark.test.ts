@@ -221,8 +221,8 @@ describe('sample-benchmark integration', () => {
       content: '扣1',
       rawContent: `[CQ:at,qq=${BOT_QQ}]扣1`,
       triggerContext: [
-        { id: 1, userId: 'u2', nickname: 'B', content: '扣1', timestamp: 1699999990 },
-        { id: 2, userId: 'u3', nickname: 'C', content: '扣1', timestamp: 1699999991 },
+        { id: 1, userId: 'u2', nickname: 'B', content: '扣1', rawContent: null, timestamp: 1699999990 },
+        { id: 2, userId: 'u3', nickname: 'C', content: '扣1', rawContent: null, timestamp: 1699999991 },
       ],
       triggerContextAfter: [],
       category: 7,
@@ -329,6 +329,43 @@ describe('sample-benchmark integration', () => {
     for (const row of rawRows) {
       expect(typeof row.contextHash).toBe('string');
       expect(row.contextHash.length).toBeGreaterThan(0);
+    }
+  });
+
+  // ---- R6.2.2: context rows carry rawContent from DB ----
+  it('R6.2.2: triggerContext / triggerContextAfter entries include rawContent field', async () => {
+    const { rawRows, exitCode } = await sample(1, 10);
+    expect(exitCode).toBe(0);
+    // At least one sampled row should have non-empty context to validate.
+    const rowsWithCtx = rawRows.filter(
+      r => r.triggerContext.length > 0 || r.triggerContextAfter.length > 0,
+    );
+    expect(rowsWithCtx.length).toBeGreaterThan(0);
+    for (const row of rowsWithCtx) {
+      for (const ctx of [...row.triggerContext, ...row.triggerContextAfter]) {
+        // Field must be present (null or string — never undefined).
+        expect(Object.prototype.hasOwnProperty.call(ctx, 'rawContent')).toBe(true);
+        const v = (ctx as { rawContent: unknown }).rawContent;
+        expect(v === null || typeof v === 'string').toBe(true);
+      }
+    }
+  });
+
+  it('R6.2.2: sampled jsonl preserves context rawContent round-trip', async () => {
+    const { rawRows, exitCode } = await sample(1, 10);
+    expect(exitCode).toBe(0);
+    const raw = readFileSync(path.join(OUT_DIR, 'benchmark-raw.jsonl'), 'utf8');
+    const lines = raw.split('\n').filter(l => l.trim().length > 0);
+    expect(lines.length).toBe(rawRows.length);
+    // Find a row with non-empty context
+    const sampleLine = lines.find(l => {
+      const obj = JSON.parse(l);
+      return Array.isArray(obj.triggerContext) && obj.triggerContext.length > 0;
+    });
+    expect(sampleLine).toBeDefined();
+    const parsed = JSON.parse(sampleLine!);
+    for (const ctx of parsed.triggerContext) {
+      expect('rawContent' in ctx).toBe(true);
     }
   });
 
@@ -826,8 +863,8 @@ describe('sample-benchmark integration', () => {
         userId: 'u1', nickname: 'Alice', timestamp: 1700001000,
         content: '哈哈', rawContent: '哈哈',
         triggerContext: [
-          { id: 1, userId: 'u2', nickname: 'B', content: '哈哈', timestamp: 1700000000 }, // 1000s earlier
-          { id: 2, userId: 'u3', nickname: 'C', content: '哈哈', timestamp: 1700000500 }, // 500s earlier
+          { id: 1, userId: 'u2', nickname: 'B', content: '哈哈', rawContent: null, timestamp: 1700000000 }, // 1000s earlier
+          { id: 2, userId: 'u3', nickname: 'C', content: '哈哈', rawContent: null, timestamp: 1700000500 }, // 500s earlier
         ],
         triggerContextAfter: [],
         category: 7, categoryLabel: 'relay', samplingSeed: 1,
@@ -862,8 +899,8 @@ describe('sample-benchmark integration', () => {
         userId: 'u1', nickname: 'Alice', timestamp: 1700000020,
         content: '哈哈', rawContent: '哈哈',
         triggerContext: [
-          { id: 1, userId: 'u2', nickname: 'B', content: '哈哈', timestamp: 1700000000 },
-          { id: 2, userId: 'u3', nickname: 'C', content: '哈哈', timestamp: 1700000010 },
+          { id: 1, userId: 'u2', nickname: 'B', content: '哈哈', rawContent: null, timestamp: 1700000000 },
+          { id: 2, userId: 'u3', nickname: 'C', content: '哈哈', rawContent: null, timestamp: 1700000010 },
         ],
         triggerContextAfter: [],
         category: 7, categoryLabel: 'relay', samplingSeed: 1,

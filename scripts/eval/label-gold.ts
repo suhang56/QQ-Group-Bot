@@ -22,11 +22,12 @@ interface ParsedArgs {
   input: string;
   output: string;
   limit?: number;
+  botQQ?: string;
 }
 
 function usage(): never {
   process.stderr.write(
-    'Usage: tsx scripts/eval/label-gold.ts --input <path> --output <path> [--limit <N>]\n',
+    'Usage: tsx scripts/eval/label-gold.ts --input <path> --output <path> [--limit <N>] [--bot-qq <qq>]\n',
   );
   process.exit(1);
 }
@@ -35,6 +36,7 @@ function parseArgs(argv: string[]): ParsedArgs {
   let input: string | undefined;
   let output: string | undefined;
   let limit: number | undefined;
+  let botQQ: string | undefined;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--input') {
@@ -48,6 +50,8 @@ function parseArgs(argv: string[]): ParsedArgs {
         process.exit(1);
       }
       limit = n;
+    } else if (a === '--bot-qq') {
+      botQQ = argv[++i];
     } else if (a === '--help' || a === '-h') {
       usage();
     } else {
@@ -56,7 +60,10 @@ function parseArgs(argv: string[]): ParsedArgs {
     }
   }
   if (!input || !output) usage();
-  return limit === undefined ? { input, output } : { input, output, limit };
+  const out: ParsedArgs = { input, output };
+  if (limit !== undefined) out.limit = limit;
+  if (botQQ !== undefined) out.botQQ = botQQ;
+  return out;
 }
 
 async function main(): Promise<void> {
@@ -120,6 +127,7 @@ async function main(): Promise<void> {
       inputPath: args.input,
       outputPath: args.output,
       ...(typeof args.limit === 'number' ? { limit: args.limit } : {}),
+      ...(typeof args.botQQ === 'string' ? { botQQ: args.botQQ } : {}),
       total,
       readKey,
       promptNotesLine,

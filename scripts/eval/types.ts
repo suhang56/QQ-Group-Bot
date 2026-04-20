@@ -55,6 +55,8 @@ export interface ContextMessage {
   userId: string;
   nickname: string;
   content: string;
+  /** R6.2.2: raw_content column for CQ-aware display; null when not backfilled. */
+  rawContent: string | null;
   timestamp: number;
 }
 
