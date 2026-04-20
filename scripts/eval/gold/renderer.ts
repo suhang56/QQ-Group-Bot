@@ -80,16 +80,16 @@ export function renderSample(sample: SampleRecord, state: LabelState, progress: 
 
   lines.push(` ${C.dim}CONTEXT (${sample.contextBefore.length} prior):${C.reset}`);
   for (const m of sample.contextBefore) {
-    lines.push(`   ${C.dim}${ts(m.ts)}${C.reset}  ${m.user.padEnd(12)} ${truncate(m.content, 60)}`);
+    lines.push(`   ${C.dim}${ts(m.ts)}${C.reset}  ${m.user.padEnd(12)} ${truncate(m.rawContent ?? m.content, 60)}`);
   }
   lines.push('');
   lines.push(
-    ` ${C.boldYellow}>>>  ${ts(sample.triggerTs)}  ${sample.triggerUser.padEnd(12)} ${truncate(sample.triggerContent, 60)}  <<<${C.reset}`,
+    ` ${C.boldYellow}>>>  ${ts(sample.triggerTs)}  ${sample.triggerUser.padEnd(12)} ${truncate(sample.triggerRawContent ?? sample.triggerContent, 60)}  <<<${C.reset}`,
   );
   lines.push('');
   lines.push(` ${C.dim}AFTER (${sample.contextAfter.length}):${C.reset}`);
   for (const m of sample.contextAfter) {
-    lines.push(`   ${C.dim}${ts(m.ts)}${C.reset}  ${m.user.padEnd(12)} ${truncate(m.content, 60)}`);
+    lines.push(`   ${C.dim}${ts(m.ts)}${C.reset}  ${m.user.padEnd(12)} ${truncate(m.rawContent ?? m.content, 60)}`);
   }
   lines.push(SEP_DASH);
 
