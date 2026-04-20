@@ -10,8 +10,19 @@
   "include": [
     "scripts/eval/label-gold.ts",
     "scripts/eval/summarize-gold.ts",
-    "scripts/eval/gold/**/*",
     "scripts/eval/types.ts",
+    "scripts/eval/replay-types.ts",
+    "scripts/eval/banter-regex.ts",
+    "scripts/eval/classify-utterance.ts",
+    "scripts/eval/violation-tags.ts",
+    "scripts/eval/mock-llm.ts",
+    "scripts/eval/replay-fixture-builder.ts",
+    "scripts/eval/replay-cli-args.ts",
+    "scripts/eval/replay-runner-core.ts",
+    "scripts/eval/replay-summary.ts",
+    "scripts/eval/replay-runner.ts",
+    "scripts/eval/build-synthetic-replay-db.ts",
+    "scripts/eval/gold/**/*",
     "src/**/*"
   ],
   "exclude": ["node_modules", "dist", "test"]

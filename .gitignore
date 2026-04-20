@@ -16,6 +16,12 @@ data/eval/*.json
 !data/eval/gold/
 data/eval/gold/*.jsonl
 
+# R6.3 replay-runner output (gitignored; owner-runner regenerates post-merge)
+!data/eval/replay/
+data/eval/replay/*.jsonl
+data/eval/replay/*.json
+data/eval/replay/.tmp/
+
 # SQLite WAL journals (transient, recreated by sqlite on every access)
 *.sqlite-shm
 *.sqlite-wal

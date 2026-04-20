@@ -1,0 +1,2 @@
+{"sampleId":"958751334:9001","goldAct":"silence","goldDecision":"silent","targetOk":true,"factNeeded":false,"allowBanter":false,"allowSticker":false,"labeledAt":"2026-04-20T00:00:00Z"}
+{"sampleId":"958751334:9002","goldAct":"direct_chat","goldDecision":"reply","targetOk":true,"factNeeded":false,"allowBanter":true,"allowSticker":false,"labeledAt":"2026-04-20T00:00:00Z"}
