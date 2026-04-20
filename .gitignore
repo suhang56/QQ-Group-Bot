@@ -12,6 +12,9 @@ coverage/
 !data/eval/
 data/eval/*.jsonl
 data/eval/*.json
+# R6.2 gold-label output (un-ignore the subdir so git doesn't refuse mkdir, ignore jsonl within)
+!data/eval/gold/
+data/eval/gold/*.jsonl
 
 # SQLite WAL journals (transient, recreated by sqlite on every access)
 *.sqlite-shm
