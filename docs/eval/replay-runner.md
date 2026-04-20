@@ -131,7 +131,46 @@ The integration test `test/eval/replay-runner-mock.test.ts` asserts
 `mockClaude.callCount > 0 && mockClaude.realNetworkCalls === 0`. Smoke
 runbook (DEV-READY §10.3) also captures `sha256sum bot.db` before/after.
 
-## Smoke baseline runbook
+## Smoke vs full-baseline (fidelity tradeoff)
+
+The smoke path (`test/eval/replay-runner-mock.test.ts` + committed
+`test/fixtures/replay-prod-db-synthetic.sqlite`) is **deterministic and
+repeatable** but **not full-fidelity**:
+
+- Synthetic fixture DB holds 2 seeded message rows. `this.db.messages.getRecent(...)`
+  returns empty/near-empty lists for groupIds not in the fixture — the
+  context window chat.ts reads is much thinner than production.
+- Scoring paths fed by real mood/affinity/fact DB state take shorter
+  branches against the cold fixture.
+- When `--prod-db` contains the string `synthetic`, the runner emits a
+  `[smoke]` stderr prefix flagging this explicitly.
+
+Use the smoke path to validate schema, wiring, and tag computation — not to
+measure production compliance rates.
+
+### Owner-runner full baseline (post-merge, not part of R6.3 PR)
+
+For the real headline metric, the owner reruns against the production
+sqlite snapshot with an absolute path. Example (Windows dev box):
+
+```
+cross-env NODE_OPTIONS=--experimental-sqlite \
+  npx tsx scripts/eval/replay-runner.ts \
+    --gold       data/eval/gold/gold-493.jsonl \
+    --benchmark  data/eval/r6-1c/benchmark-weak-labeled.jsonl \
+    --output-dir data/eval/replay/master-baseline \
+    --llm-mode   mock \
+    --prod-db    D:/QQ-Group-Bot/data/bot.db \
+    --bot-qq     1705075399 \
+    --group-id   958751334 \
+    --timeout-ms 10000
+```
+
+Outputs land in `data/eval/replay/master-baseline/` (gitignored). Owner
+captures `sha256sum bot.db` before and after; the runner's tmp-copy
+invariant guarantees the source is untouched.
+
+## 20-sample smoke runbook
 
 See `docs/specs/r6-3-DEV-READY.md` §10 (owner-runner runs the 20-sample
-smoke, then post-merge the full 493-row baseline — artifacts gitignored).
+smoke with real prod DB + full 493-row baseline — artifacts gitignored).

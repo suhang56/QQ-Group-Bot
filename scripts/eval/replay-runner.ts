@@ -140,6 +140,13 @@ export async function runReplay(args: ReturnType<typeof parseArgs>): Promise<Run
   };
   process.on('exit', cleanup);
 
+  if (args.prodDbPath.includes('synthetic')) {
+    process.stderr.write(
+      '[smoke] synthetic fixture DB; recent-history context will be sparse. ' +
+      'For full-fidelity baseline use owner-runner runbook (docs/eval/replay-runner.md §Smoke vs full-baseline).\n',
+    );
+  }
+
   process.stderr.write(
     `replay-runner: gold=${args.goldPath} benchmark=${args.benchmarkPath} ` +
     `output=${args.outputDir} limit=${args.limit ?? 'all'} timeout=${args.perSampleTimeoutMs}ms\n`,
