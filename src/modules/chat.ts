@@ -45,6 +45,7 @@ import { extractCandidateTerms } from '../utils/extract-candidate-terms.js';
 import { WebLookup, shouldLookupTerm, DEFAULT_COMMON_WORDS } from './web-lookup.js';
 import { isDirectQuestion, isGroundedOpinionQuestion } from '../utils/is-direct-question.js';
 import { extractTermFromTopic, isValidStructuredTerm } from './fact-topic-prefixes.js';
+import { isEmotivePhrase } from '../utils/is-emotive-phrase.js';
 import { buildFactualContextSignal } from './factual-context-signal.js';
 import { type BaseResultMeta, type ReplyMeta, type StickerMeta, type ChatResult } from '../utils/chat-result.js';
 import { pickAtFallback, classifyAtFallbackReason } from './fallback-pool.js';
@@ -3845,7 +3846,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     let candidates = extractCandidateTerms(content);
     // Drop non-structured candidates before any lookup — prevents grammar fragments
     // like "现在策略" reaching the weak path and leaking as LLM-fabricated definitions.
-    candidates = candidates.filter(isValidStructuredTerm);
+    candidates = candidates.filter(isValidStructuredTerm).filter(t => !isEmotivePhrase(t));
     if (candidates.length === 0) return { block: '', foundTerms: new Set() };
     const foundLines: string[] = [];
     const weakLines: string[] = [];
