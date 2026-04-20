@@ -11,7 +11,7 @@ import type { ChatResult } from '../../src/utils/chat-result.js';
 import type { UtteranceAct } from './replay-types.js';
 
 const META_STATUS_RE = /^(禁言|踢|警告|管理|群规|违规|删了|撤回|别在群里)/;
-const RELAY_ECHO_RE = /^(接(\s|$)|1\s*$|\+1|收到\s*$|来了\s*$)/;
+const RELAY_ECHO_RE = /^(接(\s|$)|1\s*$|\+1\s*$|收到\s*$|来了\s*$)/;
 const BOT_STATUS_RE = /^(我|本喵|我的|这边)(在|刚刚|今天|没|还没|已经)/;
 
 export function classifyUtterance(result: ChatResult): UtteranceAct {

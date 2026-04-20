@@ -70,4 +70,25 @@ describe('classifyUtterance', () => {
   it('strips [mock:...] sentinel before matching', () => {
     expect(classifyUtterance(reply('[mock:deadbeef] 禁言他'))).toBe('meta_admin_status');
   });
+
+  // Negative relay-boundary tests — reviewer HIGH finding on `\+1` branch
+  it('reply "+1 好" → unknown (not relay; trailing content)', () => {
+    expect(classifyUtterance(reply('+1 好'))).toBe('unknown');
+  });
+
+  it('reply "+1看过" → unknown (not relay; no boundary)', () => {
+    expect(classifyUtterance(reply('+1看过'))).toBe('unknown');
+  });
+
+  it('reply "收到了" → unknown (not relay; trailing content)', () => {
+    expect(classifyUtterance(reply('收到了'))).toBe('unknown');
+  });
+
+  it('reply "+1" alone → relay (bare token)', () => {
+    expect(classifyUtterance(reply('+1'))).toBe('relay');
+  });
+
+  it('reply "收到" alone → relay', () => {
+    expect(classifyUtterance(reply('收到'))).toBe('relay');
+  });
 });
