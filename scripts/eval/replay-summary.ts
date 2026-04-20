@@ -113,6 +113,10 @@ export function aggregateSummary(args: {
     for (const r of rows) {
       const gold = goldByKey.get(r.sampleId);
       if (!gold) continue;
+      // R2.5: reconstruct per-guard fired flags from stored reasonCode /
+      // guardPath (same derivation as replay-runner-core's live projection).
+      const rc = r.reasonCode ?? null;
+      const gp = r.guardPath ?? null;
       const projected: ProjectedRow = {
         category: r.category,
         resultKind: r.resultKind,
@@ -120,7 +124,11 @@ export function aggregateSummary(args: {
         targetMsgId: r.targetMsgId,
         matchedFactIds: r.matchedFactIds,
         replyText: r.replyText,
-        reasonCode: r.reasonCode ?? null,
+        reasonCode: rc,
+        dampenerFired: rc === 'dampener' || rc === 'dampener-ack',
+        selfEchoFired: rc === 'self-echo' || gp === 'self-echo-regen',
+        scopeGuardFired: rc === 'scope' && gp === 'addressee-regen',
+        botNotAddresseeFired: rc === 'scope' && gp !== 'addressee-regen',
       };
       if (!rule(gold, projected)) continue;
       denom++;

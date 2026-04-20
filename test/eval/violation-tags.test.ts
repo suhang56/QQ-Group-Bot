@@ -30,6 +30,10 @@ function row(overrides: Partial<ProjectedRow> = {}): ProjectedRow {
     matchedFactIds: [],
     replyText: '好的',
     reasonCode: 'engaged',
+    dampenerFired: false,
+    selfEchoFired: false,
+    scopeGuardFired: false,
+    botNotAddresseeFired: false,
     ...overrides,
   };
 }
@@ -266,7 +270,72 @@ describe('DENOMINATOR_RULES coverage', () => {
       expect(typeof DENOMINATOR_RULES[t]).toBe('function');
     }
   });
-  it('exposes exactly 13 tags (10 base + 3 R2a cause-split)', () => {
-    expect(ALL_VIOLATION_TAGS.length).toBe(13);
+  it('exposes exactly 17 tags (10 base + 3 R2a cause-split + 4 R2.5 guards)', () => {
+    expect(ALL_VIOLATION_TAGS.length).toBe(17);
+  });
+});
+
+describe('computeViolationTags — R2.5 guard cause-split', () => {
+  it('positive: cat1 + silent + dampenerFired → fires repeated-low-info-direct-overreply', () => {
+    const r = row({ category: 1, resultKind: 'silent', reasonCode: 'dampener', dampenerFired: true });
+    expect(computeViolationTags(gold(), r, TRIGGER_ID))
+      .toContain('repeated-low-info-direct-overreply');
+  });
+  it('negative: cat1 + reply + dampenerFired → no fire (silence-success gate)', () => {
+    const r = row({ category: 1, resultKind: 'reply', dampenerFired: true });
+    expect(computeViolationTags(gold(), r, TRIGGER_ID))
+      .not.toContain('repeated-low-info-direct-overreply');
+  });
+
+  it('positive: silent + selfEchoFired → fires self-amplified-annoyance', () => {
+    const r = row({ category: 1, resultKind: 'silent', reasonCode: 'self-echo', selfEchoFired: true });
+    expect(computeViolationTags(gold(), r, TRIGGER_ID))
+      .toContain('self-amplified-annoyance');
+  });
+  it('negative: reply + selfEchoFired=false → no fire', () => {
+    const r = row({ resultKind: 'reply', selfEchoFired: false });
+    expect(computeViolationTags(gold(), r, TRIGGER_ID))
+      .not.toContain('self-amplified-annoyance');
+  });
+
+  it('positive: silent + scopeGuardFired → fires group-address-in-small-scene', () => {
+    const r = row({ category: 1, resultKind: 'silent', reasonCode: 'scope', scopeGuardFired: true });
+    expect(computeViolationTags(gold(), r, TRIGGER_ID))
+      .toContain('group-address-in-small-scene');
+  });
+
+  it('positive: silent + botNotAddresseeFired → fires bot-not-addressee-replied', () => {
+    const r = row({ category: 1, resultKind: 'silent', reasonCode: 'scope', botNotAddresseeFired: true });
+    expect(computeViolationTags(gold(), r, TRIGGER_ID))
+      .toContain('bot-not-addressee-replied');
+  });
+
+  it('multiple guards fire independently + all present in declaration order', () => {
+    const r = row({
+      category: 1, resultKind: 'silent', reasonCode: 'scope',
+      scopeGuardFired: true, botNotAddresseeFired: true,
+    });
+    const out = computeViolationTags(gold(), r, TRIGGER_ID);
+    expect(out).toContain('group-address-in-small-scene');
+    expect(out).toContain('bot-not-addressee-replied');
+    const iScope = out.indexOf('group-address-in-small-scene');
+    const iBot = out.indexOf('bot-not-addressee-replied');
+    expect(iScope).toBeLessThan(iBot);
+  });
+
+  it('denominator — SF1 guard denominator gates on category===1', () => {
+    expect(DENOMINATOR_RULES['repeated-low-info-direct-overreply'](gold(), row({ category: 1 })))
+      .toBe(true);
+    expect(DENOMINATOR_RULES['repeated-low-info-direct-overreply'](gold(), row({ category: 5 })))
+      .toBe(false);
+  });
+
+  it('denominator — SF2 (self-amplified) denominator wider: reply OR silent', () => {
+    expect(DENOMINATOR_RULES['self-amplified-annoyance'](gold(), row({ resultKind: 'reply' })))
+      .toBe(true);
+    expect(DENOMINATOR_RULES['self-amplified-annoyance'](gold(), row({ resultKind: 'silent' })))
+      .toBe(true);
+    expect(DENOMINATOR_RULES['self-amplified-annoyance'](gold(), row({ resultKind: 'sticker' })))
+      .toBe(false);
   });
 });

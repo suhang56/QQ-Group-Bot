@@ -65,7 +65,10 @@ describe('replay-runner integration — mock mode', () => {
     const summary = JSON.parse(fs.readFileSync(sumPath, 'utf8'));
     expect(summary.silenceDeferCompliance.rate).toBeGreaterThanOrEqual(0);
     expect(summary.silenceDeferCompliance.rate).toBeLessThanOrEqual(1);
-    expect(Object.keys(summary.violationCounts).length).toBe(13);
+    // R2.5 added 4 guard-cause tags (repeated-low-info-direct-overreply,
+    // self-amplified-annoyance, group-address-in-small-scene,
+    // bot-not-addressee-replied) to ALL_VIOLATION_TAGS.
+    expect(Object.keys(summary.violationCounts).length).toBe(17);
 
     // Zero side effect: synthetic fixture sha256 must be unchanged.
     assertNoProdContamination(FIXTURE_DB, before);

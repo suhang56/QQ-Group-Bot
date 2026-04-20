@@ -229,6 +229,22 @@ export async function runReplayRow(args: RunReplayRowArgs): Promise<ReplayRow> {
   const utteranceAct: UtteranceAct =
     result.kind === 'error' ? 'none' : classifyUtterance(result);
 
+  // R2.5 — derive per-guard fired flags from reasonCode / meta.guardPath.
+  // reasonCode is the primary signal for silent paths (SF1 → 'dampener',
+  // SF2 → 'self-echo', SF3 → 'scope'). When scope fires we need to
+  // distinguish bot-not-addressee vs 你们-in-small-scene — the former uses
+  // reasonCode 'scope' with NO meta.guardPath, the latter with guardPath
+  // 'addressee-regen' (existing) or none when fast-path silent. Since SF3
+  // 你们-filter reuses the addressee-regen guardPath, we key off it;
+  // bot-not-addressee path sets no guardPath.
+  const reasonCode = result.kind === 'error' ? null : (result.reasonCode ?? null);
+  const guardPath =
+    result.kind === 'error' || result.kind === 'reply' || result.kind === 'sticker'
+      ? (result.kind === 'reply' ? (result.meta.guardPath ?? null) : null)
+      : (result.kind === 'silent' || result.kind === 'fallback' || result.kind === 'defer')
+        ? (result.meta.guardPath ?? null)
+        : null;
+
   const projected: ProjectedRow = {
     category: args.category,
     resultKind: result.kind,
@@ -242,7 +258,11 @@ export async function runReplayRow(args: RunReplayRowArgs): Promise<ReplayRow> {
         : result.kind === 'sticker'
           ? result.cqCode
           : null,
-    reasonCode: result.kind === 'error' ? null : (result.reasonCode ?? null),
+    reasonCode,
+    dampenerFired: reasonCode === 'dampener' || reasonCode === 'dampener-ack',
+    selfEchoFired: reasonCode === 'self-echo' || guardPath === 'self-echo-regen',
+    scopeGuardFired: reasonCode === 'scope' && guardPath === 'addressee-regen',
+    botNotAddresseeFired: reasonCode === 'scope' && guardPath !== 'addressee-regen',
   };
 
   const violationTags = computeViolationTags(args.gold, projected, args.triggerMessage.messageId);
