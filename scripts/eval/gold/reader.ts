@@ -12,6 +12,7 @@ import type { WeakReplayLabel, ContextMessage } from '../types.js';
 
 export interface MessageRow {
   content: string;
+  rawContent: string | null;
   user: string;
   ts: number;
 }
@@ -19,6 +20,7 @@ export interface MessageRow {
 export interface SampleRecord {
   sampleId: string;
   triggerContent: string;
+  triggerRawContent: string | null;
   triggerUser: string;
   triggerTs: number;
   contextBefore: MessageRow[];
@@ -46,8 +48,14 @@ export function getDiagnostics(filePath: string): ReaderDiagnostics {
   };
 }
 
-function mapContextMessage(m: ContextMessage): MessageRow {
-  return { content: m.content, user: m.nickname, ts: m.timestamp };
+function mapContextMessage(m: ContextMessage & { rawContent?: unknown; raw_content?: unknown }): MessageRow {
+  const raw =
+    typeof m.rawContent === 'string' && m.rawContent.length > 0
+      ? m.rawContent
+      : typeof m.raw_content === 'string' && m.raw_content.length > 0
+        ? m.raw_content
+        : null;
+  return { content: m.content, rawContent: raw, user: m.nickname, ts: m.timestamp };
 }
 
 function coerceSampleRecord(obj: Record<string, unknown>): SampleRecord | null {
@@ -67,10 +75,18 @@ function coerceSampleRecord(obj: Record<string, unknown>): SampleRecord | null {
   if (!Array.isArray(after)) return null;
   if (typeof label !== 'object' || label === null) return null;
 
+  const rawContent =
+    typeof obj.rawContent === 'string' && obj.rawContent.length > 0
+      ? obj.rawContent
+      : typeof obj.raw_content === 'string' && obj.raw_content.length > 0
+        ? obj.raw_content
+        : null;
+
   const record: SampleRecord = {
     ...obj,
     sampleId: id,
     triggerContent: content,
+    triggerRawContent: rawContent,
     triggerUser: nickname,
     triggerTs: timestamp,
     contextBefore: (before as ContextMessage[]).map(mapContextMessage),

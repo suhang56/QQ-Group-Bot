@@ -59,6 +59,8 @@ msg('u4', 'Dave', '', '[CQ:face,id=0]', BASE + 33);
 // R6.1b: 2 distinct empty images with different file= — must get different contentHash
 msg('u5', 'Eve', '', '[CQ:image,file=unique-A.jpg,url=u1]', BASE + 34);
 msg('u6', 'Frank', '', '[CQ:image,file=unique-B.jpg,url=u2]', BASE + 35);
+// R6.2.1: CQ:reply row for gold-label renderer raw-content tests
+msg('u7', 'Grace', '好啊', '[CQ:reply,id=2001]好啊', BASE + 36);
 
 // Cat 5 — bot status context (3 rows)
 msg('u1', 'Alice', '机器人怎么了', '机器人怎么了', BASE + 40);

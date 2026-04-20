@@ -18,6 +18,8 @@ import { readSamples, getDiagnostics } from '../../scripts/eval/gold/reader.js';
 import { keyToAction } from '../../scripts/eval/gold/shortcuts.js';
 import { runSession, sanitizeNotes, handleEdit } from '../../scripts/eval/gold/session.js';
 import { validateGoldLabel, type GoldLabel } from '../../scripts/eval/gold/types.js';
+import { renderSample, defaultLabelState, type Progress } from '../../scripts/eval/gold/renderer.js';
+import type { SampleRecord, MessageRow } from '../../scripts/eval/gold/reader.js';
 
 // ---- Fixtures ----
 
@@ -463,5 +465,93 @@ describe('session — runSession', () => {
     const labels = await readExistingLabels(outputPath);
     const first = [...labels.values()][0]!;
     expect(first.notes?.length).toBe(500);
+  });
+});
+
+function makeMessageRow(over: Partial<MessageRow> = {}): MessageRow {
+  return { content: 'hi', rawContent: null, user: 'X', ts: 1_700_000_000, ...over };
+}
+
+function makeSample(over: Partial<SampleRecord> = {}): SampleRecord {
+  return {
+    sampleId: 's1',
+    triggerContent: 'plain',
+    triggerRawContent: null,
+    triggerUser: 'Alice',
+    triggerTs: 1_700_000_000,
+    contextBefore: [],
+    contextAfter: [],
+    weakLabel: makeWeakLabel(),
+    ...over,
+  };
+}
+
+const PROGRESS: Progress = { current: 1, total: 1, labeled: 0, skipped: 0 };
+
+describe('R6.2.1 renderer raw-content display', () => {
+  let writeSpy: ReturnType<typeof vi.spyOn>;
+  let captured: string;
+  beforeEach(() => {
+    captured = '';
+    writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+      captured += String(chunk);
+      return true;
+    });
+  });
+  afterEach(() => {
+    writeSpy.mockRestore();
+  });
+
+  it('trigger line preserves [CQ:at,qq=…] verbatim from triggerRawContent', () => {
+    renderSample(
+      makeSample({ triggerContent: '请我喝奶茶', triggerRawContent: '[CQ:at,qq=1705075399] 请我喝奶茶' }),
+      defaultLabelState(),
+      PROGRESS,
+    );
+    expect(captured).toContain('[CQ:at,qq=1705075399]');
+  });
+
+  it('contextBefore line preserves [CQ:reply,id=…] verbatim', () => {
+    renderSample(
+      makeSample({ contextBefore: [makeMessageRow({ content: '好啊', rawContent: '[CQ:reply,id=2001]好啊' })] }),
+      defaultLabelState(),
+      PROGRESS,
+    );
+    expect(captured).toContain('[CQ:reply,id=2001]');
+  });
+
+  it('contextAfter line preserves [CQ:image,file=…] verbatim', () => {
+    renderSample(
+      makeSample({ contextAfter: [makeMessageRow({ content: '', rawContent: '[CQ:image,file=abc.jpg]' })] }),
+      defaultLabelState(),
+      PROGRESS,
+    );
+    expect(captured).toContain('[CQ:image,file=abc.jpg]');
+  });
+
+  it('null rawContent falls back to stripped content — no "null" literal, no CQ tag', () => {
+    renderSample(
+      makeSample({
+        triggerContent: 'ykn 是谁啊',
+        triggerRawContent: null,
+        contextBefore: [makeMessageRow({ content: '啥情况这是', rawContent: null })],
+      }),
+      defaultLabelState(),
+      PROGRESS,
+    );
+    expect(captured).toContain('ykn 是谁啊');
+    expect(captured).toContain('啥情况这是');
+    expect(captured).not.toContain('[CQ:');
+    expect(captured).not.toMatch(/\bnull\b/);
+  });
+
+  it('plain text rows with rawContent === content render unchanged (no regression)', () => {
+    renderSample(
+      makeSample({ triggerContent: '啥情况这是', triggerRawContent: '啥情况这是' }),
+      defaultLabelState(),
+      PROGRESS,
+    );
+    expect(captured).toContain('啥情况这是');
+    expect(captured).not.toContain('[CQ:');
   });
 });
