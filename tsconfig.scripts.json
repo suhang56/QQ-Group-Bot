@@ -9,6 +9,7 @@
   },
   "include": [
     "scripts/eval/label-gold.ts",
+    "scripts/eval/summarize-gold.ts",
     "scripts/eval/gold/**/*",
     "scripts/eval/types.ts",
     "src/**/*"
