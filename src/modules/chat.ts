@@ -52,6 +52,9 @@ import { pickAtFallback, classifyAtFallbackReason } from './fallback-pool.js';
 import { GroupmateVoice, type VoiceBlock } from './groupmate-voice.js';
 import { isAddresseeScopeViolation } from '../utils/sentinel.js';
 import { isStickerTokenOutput, makeStickerTokenChoices, resolveStickerTokenOutput, type StickerTokenChoice } from '../utils/sticker-tokens.js';
+import { DirectCooldown, isRepeatedLowInfoDirectOverreply, pickNeutralAck } from '../core/direct-cooldown.js';
+import { SelfEchoGuard, isSelfAmplifiedAnnoyance } from './guards/self-echo-guard.js';
+import { isBotNotAddresseeReplied } from './guards/scope-addressee-guard.js';
 
 // Path A stub: { term, meaning } pairs extracted from user message.
 // Path A dev replaces null meanings with corpus results when merged.
@@ -1001,6 +1004,14 @@ export class ChatModule implements IChatModule {
   // M6.4: per-group consecutive bot-reply counter; resets on any peer message
   // (even debounced). Bumped on every real bot output, including deflections.
   private readonly consecutiveReplies = new BoundedMap<string, number>(200);
+  // R2.5 SF1: per-(groupId, userId) direct-reply cooldown (low-info dampener).
+  // Records lastReplyAtSec + lastContent whenever the direct path produces a
+  // non-silent reply. Pre-LLM predicate runs at every direct trigger.
+  private readonly directCooldown = new DirectCooldown(500);
+  // R2.5 SF2: per-groupId bot-output emotive history (self-amplification guard).
+  // Records every bot reply text in _recordOwnReply; post-LLM sentinel inspects
+  // last 3 within 5-min window to reject repeated-annoyance loops.
+  private readonly selfEchoGuard = new SelfEchoGuard(200);
   // M7.2: per-group peer-activity tracker. Feeds engagement-decision Gate 6
   // so busy groups get a stricter threshold and idle groups get a softer one.
   private readonly activityTracker = new GroupActivityTracker();
@@ -1228,6 +1239,11 @@ export class ChatModule implements IChatModule {
   }
 
   private _recordOwnReply(groupId: string, reply: string): void {
+    // R2.5 SF2: capture bot's own reply text for self-amplification-guard
+    // sliding window (last 3 within 5min). Runs FIRST so a throw below still
+    // records the reply for the sentinel on the next turn.
+    this.selfEchoGuard.record(groupId, reply, Math.floor(Date.now() / 1000));
+
     let arr = this.botRecentOutputs.get(groupId) ?? [];
     arr = [...arr, reply];
     const BOT_OUTPUT_WINDOW = 10;
@@ -1542,6 +1558,36 @@ export class ChatModule implements IChatModule {
     triggerMessage: GroupMessage,
     recentMessages: GroupMessage[]
   ): Promise<ChatResult> {
+    const result = await this._generateReplyImpl(groupId, triggerMessage, recentMessages);
+    // R2.5 SF1 direct-cooldown record. Runs once per turn on the direct path
+    // (at-bot / reply-to-bot) for any non-silent, non-dampener-ack outcome —
+    // dampener-ack path records inline with the ack content as lastContent.
+    // Kept OUTSIDE _generateReplyImpl so every return branch is covered.
+    const isDirect = !!this.botUserId
+      && (
+        triggerMessage.rawContent.includes(`[CQ:at,qq=${this.botUserId}]`)
+        || this._isReplyToBot(triggerMessage)
+      );
+    if (
+      isDirect
+      && result.kind !== 'silent'
+      && result.reasonCode !== 'dampener-ack'
+    ) {
+      this.directCooldown.record(
+        groupId,
+        triggerMessage.userId,
+        triggerMessage.content.trim(),
+        Math.floor(Date.now() / 1000),
+      );
+    }
+    return result;
+  }
+
+  private async _generateReplyImpl(
+    groupId: string,
+    triggerMessage: GroupMessage,
+    recentMessages: GroupMessage[]
+  ): Promise<ChatResult> {
     this.knownGroups.add(groupId);
     const metaBuilder = new ReplyMetaBuilder();
 
@@ -1665,6 +1711,118 @@ export class ChatModule implements IChatModule {
       this._bumpConsecutive(groupId);
       const atOnlyText = await this._generateDeflection('at_only', triggerMessage);
       return { kind: 'fallback', text: atOnlyText, meta: metaBuilder.buildBase('fallback'), reasonCode: 'pure-at' };
+    }
+
+    // ── R2.5 SF1 + SF3 pre-LLM guards ─────────────────────────────────────
+    // Runs BEFORE vision/LLM so guard fires cost no model tokens.
+    //
+    // SF1 (low-info direct dampener): when the same user has @bot or
+    // reply-to-bot'd within 60s, and the new content is ≤6 chars AND barely
+    // differs from the prior trigger, either silently drop OR return a neutral
+    // ack (50/50). Exceptions: fact-term present, real question — both let
+    // through. Admin/command paths are hard-bypassed upstream (router.ts
+    // isSlashCommand + MOD_APPROVAL_ADMIN direct-DM never hit this flow).
+    //
+    // SF3 bot-not-addressee: when the trigger has NO @bot, NO reply-to-bot,
+    // NO fact term, NO bot-status keyword, silently drop — bot is just not
+    // relevant to this exchange. Cheap string checks only.
+    {
+      const nowSec = Math.floor(now / 1000);
+      const stripped = triggerMessage.content.trim();
+      const isBotAt = !!this.botUserId
+        && triggerMessage.rawContent.includes(`[CQ:at,qq=${this.botUserId}]`);
+      // Use outgoing-msg-id set (authoritative) rather than recent-messages
+      // heuristic so reply-to-bot detection matches _isReplyToBot semantics.
+      const isReplyToBot = this._isReplyToBot(triggerMessage);
+      const isDirectBroad = isBotAt || isReplyToBot || isDirectForGateBypass;
+      const factCandidates = extractCandidateTerms(stripped);
+      const hasFactTerm = factCandidates.some(t => isValidStructuredTerm(t));
+
+      // SF1 — direct-path only (at-or-reply-to-bot). Skip when fact-term
+      // present or the user is asking a real question.
+      if (isDirectBroad && !hasFactTerm && !isDirectQuestion(stripped)) {
+        const cdEntry = this.directCooldown.get(groupId, triggerMessage.userId);
+        if (isRepeatedLowInfoDirectOverreply(stripped, cdEntry, nowSec)) {
+          this.logger.info(
+            {
+              groupId,
+              userId: triggerMessage.userId,
+              content: stripped,
+              lastReplyAtSec: cdEntry?.lastReplyAtSec,
+              nowSec,
+              tag: 'repeated-low-info-direct-overreply',
+            },
+            'dampener_fired',
+          );
+          // Record this trigger as the new baseline so the NEXT poke compares
+          // against the dampened content, not the last reply content.
+          this.directCooldown.record(groupId, triggerMessage.userId, stripped, nowSec);
+          if (Math.random() < 0.5) {
+            return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'dampener' };
+          }
+          const ack = pickNeutralAck();
+          this.lastProactiveReply.set(groupId, now);
+          this.botSpeechTracking.set(groupId, { lastSpokeAt: now, msgsSinceSpoke: 0, engagementReceived: false });
+          this._bumpConsecutive(groupId);
+          return { kind: 'fallback', text: ack, meta: metaBuilder.buildBase('fallback'), reasonCode: 'dampener-ack' };
+        }
+      }
+
+      // SF3 — bot-not-addressee silent path. PLAN wording: "@target != bot
+      // AND no fact term AND no bot-status keyword → silent". Only fires
+      // when the trigger is ADDRESSED to someone else (has a CQ:at to a
+      // non-bot user OR is a reply-to-non-bot), and none of the four
+      // exemption signals are present. Triggers with NO CQ:at and NO
+      // CQ:reply are ambient chatter — not silenced by this guard (upstream
+      // engagement gates decide those).
+      const hasAtNonBot = /\[CQ:at,qq=(\d+)\]/.test(triggerMessage.rawContent)
+        && !isBotAt;
+      const hasReplyToNonBot = triggerMessage.rawContent.includes('[CQ:reply,')
+        && !isReplyToBot;
+      const isAddressedElsewhere = hasAtNonBot || hasReplyToNonBot;
+      // Images/mfaces in the trigger or the reply-target broaden bot
+      // relevance — the user may be asking the bot to weigh in on media.
+      // Skip SF3 silence when any image CQ is present in raw trigger OR
+      // the reply-quote target has media (vision pipeline still triggers).
+      let hasImageCQ = /\[CQ:(?:image|mface),/.test(triggerMessage.rawContent);
+      if (!hasImageCQ) {
+        // Accept any reply-id token (test fixtures use non-numeric source
+        // message ids like 'slow-99'; production uses numeric message_id).
+        const replyMatch = triggerMessage.rawContent.match(/\[CQ:reply,id=([^\],]+)/);
+        if (replyMatch) {
+          const quoted = this.db.messages.findBySourceId(replyMatch[1]!);
+          if (quoted && /\[CQ:(?:image|mface),/.test(quoted.rawContent)) {
+            hasImageCQ = true;
+          }
+        }
+      }
+      if (!hasImageCQ) {
+        // Fallback: any image in the immediate recent-context window
+        // (Priority-2 equivalent to chat vision pipeline) — if the exchange
+        // the user is replying to shows an image, bot is relevant.
+        for (const m of recentMessages) {
+          if (m.userId === this.botUserId) continue;
+          if (/\[CQ:(?:image|mface),/.test(m.rawContent)) {
+            hasImageCQ = true;
+            break;
+          }
+        }
+      }
+      const BOT_STATUS_RE = /bot|机器人|你(?:在|醒|睡|忙|好)/i;
+      const hasBotStatusKw = BOT_STATUS_RE.test(stripped);
+      if (isAddressedElsewhere
+          && !hasImageCQ
+          && isBotNotAddresseeReplied(isBotAt, isReplyToBot, hasFactTerm, hasBotStatusKw)) {
+        this.logger.info(
+          {
+            groupId,
+            userId: triggerMessage.userId,
+            tag: 'bot-not-addressee-replied',
+          },
+          'scope_guard_fired',
+        );
+        return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'scope' };
+      }
     }
 
     // Vision: if message contains an image CQ, describe it and enrich content
@@ -2691,6 +2849,42 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
             return { kind: 'reply', text: scopeRegenText, meta: metaBuilder.buildReply('normal'), reasonCode: 'engaged' };
           } catch {
             return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'scope' };
+          }
+        }
+      }
+
+      // ── R2.5 SF2: Self-amplification guard ─────────────────────────────
+      // Mirror addressee-scope regen-once-then-silent pattern. Fires when
+      // bot's last ≥2 of 3 outputs (within 5-min window) contained an emotive
+      // stem AND the current candidate also contains one — breaks empathy-
+      // echo loops. Echo exemption (AQ1): if the candidate is a substring of
+      // the user's literal trigger, the bot is just quoting the user back,
+      // not self-amplifying — allow through.
+      {
+        const nowSecForGuard = Math.floor(Date.now() / 1000);
+        const botHistory = this.selfEchoGuard.getRecent(groupId, nowSecForGuard);
+        if (isSelfAmplifiedAnnoyance(processed, botHistory, triggerMessage.content)) {
+          this.logger.info(
+            {
+              groupId,
+              candidate: processed,
+              botHistorySnippet: botHistory.slice(-3).map(e => e.text),
+              tag: 'self-amplified-annoyance',
+            },
+            'self_echo_guard_fired',
+          );
+          metaBuilder.setGuardPath('self-echo-regen');
+          try {
+            const echoRegenResponse = await chatRequest(true);
+            const echoRegenText = applyPersonaFilters(sanitize(echoRegenResponse.text), mfaceKeys);
+            if (!echoRegenText
+                || isSelfAmplifiedAnnoyance(echoRegenText, botHistory, triggerMessage.content)) {
+              this.logger.info({ groupId }, 'self-echo guard: regen fail → silent');
+              return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'self-echo' };
+            }
+            processed = echoRegenText;
+          } catch {
+            return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'self-echo' };
           }
         }
       }

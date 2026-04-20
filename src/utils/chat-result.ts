@@ -8,7 +8,8 @@ export interface BaseResultMeta {
     | 'near-dup'
     | 'qa-guard'
     | 'outsider-guard'
-    | 'post-process';
+    | 'post-process'
+    | 'self-echo-regen';
   promptVariant?: 'banter' | 'default' | 'careful' | 'char';
 }
 
@@ -28,8 +29,8 @@ export interface StickerMeta extends BaseResultMeta {
 export type ChatResult =
   | { kind: 'reply';    text: string;                meta: ReplyMeta;              reasonCode: string }
   | { kind: 'sticker';  cqCode: string;              meta: StickerMeta;            reasonCode: string }
-  | { kind: 'fallback'; text: string;                meta: BaseResultMeta;         reasonCode: 'pure-at' | 'low-comprehension-direct' | 'bot-blank-needed-ack' }
-  | { kind: 'silent';                                meta: BaseResultMeta;         reasonCode: 'guard' | 'scope' | 'confabulation' | 'timing' | 'bot-triggered' | 'downrated' }
+  | { kind: 'fallback'; text: string;                meta: BaseResultMeta;         reasonCode: 'pure-at' | 'low-comprehension-direct' | 'bot-blank-needed-ack' | 'dampener-ack' }
+  | { kind: 'silent';                                meta: BaseResultMeta;         reasonCode: 'guard' | 'scope' | 'confabulation' | 'timing' | 'bot-triggered' | 'downrated' | 'dampener' | 'self-echo' }
   | { kind: 'defer';    untilSec: number; targetMsgId: string; meta: BaseResultMeta; reasonCode: 'rate-limit' | 'burst-settle' | 'cooldown' };
 
 export function isSendable(r: ChatResult): r is Extract<ChatResult, { kind: 'reply' | 'sticker' | 'fallback' }> {

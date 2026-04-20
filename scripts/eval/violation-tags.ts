@@ -25,7 +25,13 @@ export type ViolationTag =
   | 'banter-when-not-allowed'
   | 'object-react-missed'
   | 'meta-status-misclassified'
-  | 'target-mismatch';
+  | 'target-mismatch'
+  // R2.5 — per-guard silence-success tags (symmetric with direct-at-silenced
+  // cause-split). Fire on resultKind==='silent' with the matching row flag.
+  | 'repeated-low-info-direct-overreply'
+  | 'self-amplified-annoyance'
+  | 'group-address-in-small-scene'
+  | 'bot-not-addressee-replied';
 
 export const ALL_VIOLATION_TAGS: readonly ViolationTag[] = [
   'gold-silent-but-replied',
@@ -41,6 +47,10 @@ export const ALL_VIOLATION_TAGS: readonly ViolationTag[] = [
   'object-react-missed',
   'meta-status-misclassified',
   'target-mismatch',
+  'repeated-low-info-direct-overreply',
+  'self-amplified-annoyance',
+  'group-address-in-small-scene',
+  'bot-not-addressee-replied',
 ] as const;
 
 export interface ProjectedRow {
@@ -52,6 +62,14 @@ export interface ProjectedRow {
   replyText: string | null;
   /** R2a: per-result reasonCode used by cause-split direct-at-silenced sub-tags. */
   reasonCode: string | null;
+  /** R2.5: SF1 direct-low-info dampener fired this turn. */
+  dampenerFired: boolean;
+  /** R2.5: SF2 self-amplified-annoyance sentinel rejected the candidate. */
+  selfEchoFired: boolean;
+  /** R2.5: SF3 你们-in-small-scene spectator filter fired. */
+  scopeGuardFired: boolean;
+  /** R2.5: SF3 bot-not-addressee silent path fired. */
+  botNotAddresseeFired: boolean;
 }
 
 function isOutputted(k: ReplayResultKind): boolean {
@@ -121,6 +139,23 @@ export function computeViolationTags(
     tags.push('target-mismatch');
   }
 
+  // R2.5 — per-guard silence-success tags. Fire when the specific guard
+  // recorded its firing flag AND the final outcome was silent (silence
+  // succeeded). Symmetric with direct-at-silenced-by-timing: we're counting
+  // CORRECTLY-silenced rows per cause to track guard prevalence.
+  if (row.resultKind === 'silent' && row.dampenerFired) {
+    tags.push('repeated-low-info-direct-overreply');
+  }
+  if (row.resultKind === 'silent' && row.selfEchoFired) {
+    tags.push('self-amplified-annoyance');
+  }
+  if (row.resultKind === 'silent' && row.scopeGuardFired) {
+    tags.push('group-address-in-small-scene');
+  }
+  if (row.resultKind === 'silent' && row.botNotAddresseeFired) {
+    tags.push('bot-not-addressee-replied');
+  }
+
   return tags;
 }
 
@@ -142,4 +177,10 @@ export const DENOMINATOR_RULES: Record<ViolationTag, (gold: GoldLabel, row: Proj
   'object-react-missed':       (g) => g.goldAct === 'object_react',
   'meta-status-misclassified': (g, r) => g.goldAct === 'meta_admin_status' && r.resultKind === 'reply',
   'target-mismatch':           (_g, r) => isOutputted(r.resultKind),
+  // R2.5: direct-path guards' denominators mirror direct-at-silenced (category 1).
+  'repeated-low-info-direct-overreply': (_g, r) => r.category === 1,
+  'bot-not-addressee-replied':          (_g, r) => r.category === 1,
+  'group-address-in-small-scene':       (_g, r) => r.category === 1,
+  // SF2 runs post-LLM on any reply-or-silent outcome — denominator widens.
+  'self-amplified-annoyance':           (_g, r) => r.resultKind === 'reply' || r.resultKind === 'silent',
 };

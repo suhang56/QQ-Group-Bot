@@ -1,4 +1,4 @@
-const EMOTIVE_ALLOWLIST: ReadonlySet<string> = new Set(['笑死', '笑死我', '死鬼']);
+import { EMOTIVE_ALLOWLIST } from './emotive-stems.js';
 
 const EMOTIVE_EXCLAMATION_RE =
   /^(?:烦|气|累|困|哭|崩|麻|无语|烦死|气死|累死|困死|麻了|崩了)(?:了|死了|啊|呀|吧|呢|哦)?$/u;
