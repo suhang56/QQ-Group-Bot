@@ -1539,7 +1539,7 @@ export class ChatModule implements IChatModule {
   async generateReply(
     groupId: string,
     triggerMessage: GroupMessage,
-    _recentMessages: GroupMessage[]
+    recentMessages: GroupMessage[]
   ): Promise<ChatResult> {
     this.knownGroups.add(groupId);
     const metaBuilder = new ReplyMetaBuilder();
@@ -1575,8 +1575,21 @@ export class ChatModule implements IChatModule {
       return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'timing' };
     }
 
-    // Group reply rate limit
-    if (!this._checkGroupLimit(groupId)) {
+    // R2a: direct override — @bot / reply-to-bot bypasses group rate limit.
+    // Rationale: PLAN Scope #4 "direct override skips timing gate". Signal shape
+    // mirrors router.ts:634/636 (raw CQ match + recent-messages bot presence) so
+    // direct detection is consistent across router splice and chat-level guard.
+    // The pure @-mention carve-out at line 1574 is separate; here we bypass only
+    // the group-wide rate limit, leaving atMentionIgnoreUntil (per-user abuse
+    // throttle, line 1593) and all downstream gates unchanged.
+    const isDirectForGateBypass =
+      (!!this.botUserId && triggerMessage.rawContent.includes(`[CQ:at,qq=${this.botUserId}]`))
+      || (!!this.botUserId
+        && triggerMessage.rawContent.includes('[CQ:reply,')
+        && recentMessages.some(m => m.userId === this.botUserId));
+
+    // Group reply rate limit (skipped for direct @/reply-to-bot per R2a)
+    if (!isDirectForGateBypass && !this._checkGroupLimit(groupId)) {
       this.logger.warn({ groupId }, 'Group chat reply rate limit reached — silent');
       return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'timing' };
     }
@@ -2615,7 +2628,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       // (qa-report, coreference, outsider-tone, insult-echo). On any failure,
       // regenerate via hardened request and continue the loop. Cap at 2 iters
       // so p95 latency stays bounded even when multiple guards fail together.
-      const recentHumanContents = _recentMessages
+      const recentHumanContents = recentMessages
         .filter(m => m.userId !== this.botUserId)
         .slice(-4)
         .map(m => m.content);

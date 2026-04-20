@@ -2004,17 +2004,20 @@ describe('ChatModule — pure @-mention reply', () => {
     expect(result.kind).toBe('silent');
   });
 
-  // 5. Rate limit still applies to @-only replies
-  it('rate limit blocks at_only reply when limit reached', async () => {
+  // R2a: direct @-mention bypasses group rate limit (PLAN Scope #4). This
+  // supersedes the prior "rate limit blocks at_only reply" expectation —
+  // direct signals must never be silenced by organic-chat timing compliance.
+  it('R2a: at_only reply bypasses group rate limit when limit reached', async () => {
     const chat = makeChat({ maxGroupRepliesPerMinute: 1 });
     const atMsg = () => makeMsg({ content: '', rawContent: `[CQ:at,qq=${BOT_ID}]` });
 
     const first = await chat.generateReply('g1', atMsg(), []);
     expect(DEFLECT_FALLBACKS['at_only']).toContain('text' in first ? first.text : '');
 
-    // Second @-only within same minute — rate limit hit
+    // Second @-only within same minute — rate limit bypassed, at_only fallback fires again
     const second = await chat.generateReply('g1', atMsg(), []);
-    expect(second.kind).toBe('silent');
+    expect(second.kind).not.toBe('silent');
+    expect(DEFLECT_FALLBACKS['at_only']).toContain('text' in second ? second.text : '');
   });
 });
 
