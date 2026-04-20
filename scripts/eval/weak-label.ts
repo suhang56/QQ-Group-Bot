@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
-import type { SampledRow, WeakReplayLabel, WeakLabeledRow, ExpectedAct, ExpectedDecision } from './types.js';
-import { extractTokens } from '../../src/modules/honest-gaps.js';
+import type { SampledRow, WeakReplayLabel, WeakLabeledRow, ExpectedAct, ExpectedDecision, KnownFactSource } from './types.js';
+import { collectTermsWithSource, type SourcedTerm } from './categories/cat2-known-fact-term.js';
 
 const R4_DEPLOY_EPOCH = 1700000000; // approx R4 deploy date; rows before this may have legacy few-shot
 
@@ -26,12 +26,36 @@ function isDirect(row: SampledRow, botQQ: string): boolean {
   return raw.includes(`[CQ:at,qq=${botQQ}`) || raw.includes('[CQ:reply,');
 }
 
+/**
+ * R6.1c: computed independently from triggerContext — NOT from row.category.
+ *
+ * This must NOT rely on anything the sampler decided, so a cat7-sampled row
+ * whose triggerContext doesn't actually contain echoes can legitimately
+ * receive isRelay=false (precision signal for R6.2 gold labelers).
+ *
+ * Rules (stricter than queryCat7's sampling window):
+ *   1. Fast-path: row.content in RELAY_SET → true.
+ *   2. Echo-in-window: 2+ triggerContext rows with content === row.content
+ *      AND whose timestamp is within 30s of row.timestamp.
+ *
+ * Sampler's window is 5 messages regardless of time; labeler tightens with
+ * a 30s ceiling — that's where the two can legitimately disagree.
+ */
 function isRelayPattern(row: SampledRow): boolean {
-  if (RELAY_SET.has(row.content.trim())) return true;
   const trimmed = row.content.trim();
+  if (RELAY_SET.has(trimmed)) return true;
   if (trimmed.length < 2) return false;
-  const contextMatches = row.triggerContext.filter(c => c.content.trim() === trimmed);
-  return contextMatches.length >= 2;
+
+  const windowStart = row.timestamp - 30;
+  const windowEnd = row.timestamp + 30;
+  let echoCount = 0;
+  for (const c of row.triggerContext) {
+    if (c.content.trim() !== trimmed) continue;
+    if (c.timestamp < windowStart || c.timestamp > windowEnd) continue;
+    echoCount++;
+    if (echoCount >= 2) return true;
+  }
+  return false;
 }
 
 function isConflictHeat(row: SampledRow): boolean {
@@ -48,6 +72,16 @@ function isSummarizeRequest(row: SampledRow): boolean {
 
 function isQuestion(row: SampledRow): boolean {
   return QUESTION_END_RE.test(row.content) || QUESTION_START_RE.test(row.content);
+}
+
+/** R6.1a: empty-content rows with a media CQ code — valid object_react candidates.
+ *  R6.1b: `face` added so `[CQ:face,id=0]` + empty content is not wrongly filtered at line 121.
+ *  Must stay in sync with isPureImageOrMface / queryCat4. */
+function isEmptyBecauseMediaOnly(row: SampledRow): boolean {
+  const content = row.content ?? '';
+  if (content.trim() !== '') return false;
+  const raw = row.rawContent ?? '';
+  return /\[CQ:(?:image|mface|face|video|record)[^\]]*\]/.test(raw);
 }
 
 function isPureImageOrMface(row: SampledRow): boolean {
@@ -78,20 +112,62 @@ function isBurstWindow(row: SampledRow): boolean {
   return nearby.length >= 4;
 }
 
-function hasKnownFactTerm(db: DatabaseSync, groupId: string, content: string): boolean {
-  const tokens = extractTokens(content);
-  if (tokens.length === 0) return false;
-  for (const tok of tokens) {
-    const hit = db.prepare(`
-      SELECT 1 FROM learned_facts
-      WHERE group_id = ?
-        AND status = 'active'
-        AND (topic = ? OR canonical_form = ?)
-      LIMIT 1
-    `).get(groupId, tok, tok);
-    if (hit) return true;
+/**
+ * R6.1c: aligned with queryCat2's sampling semantics.
+ *
+ * Cat2 samples rows via `content LIKE '%term%'` (substring) across 7 recall
+ * sources. Previously findKnownFactSource used extractTokens + equality,
+ * which broke on unsegmented CJK (`'接龙说是'` stayed one token and never
+ * matched stored `'接龙'`). Result: ~100% of cat2 rows had
+ * hasKnownFactTerm=false on real DB.
+ *
+ * New rule: load the same Sourced term list queryCat2 fetches, sort by
+ * priority, scan `row.content` via `includes(term)`, short-circuit on first
+ * hit. Guarantees sampler/labeler see the same row set.
+ *
+ * Priority: topic > canonical > persona > fact > meme > jargon > phrase.
+ */
+
+// Cache of priority-sorted term lists, keyed by groupId. The DatabaseSync is
+// bound per sampling run so cache is naturally bounded by unique group count.
+const termCache = new WeakMap<DatabaseSync, Map<string, SourcedTerm[]>>();
+
+const SOURCE_RANK: Record<Exclude<KnownFactSource, null>, number> = {
+  topic: 0, canonical: 1, persona: 2, fact: 3, meme: 4, jargon: 5, phrase: 6,
+};
+
+function getSortedTerms(db: DatabaseSync, groupId: string): SourcedTerm[] {
+  let perDb = termCache.get(db);
+  if (!perDb) {
+    perDb = new Map();
+    termCache.set(db, perDb);
   }
-  return false;
+  const cached = perDb.get(groupId);
+  if (cached) return cached;
+  const terms = collectTermsWithSource(db, groupId);
+  // Prefer longer terms first within the same source rank, so '接龙说是'
+  // beats '接龙' when both would hit (more specific match wins).
+  terms.sort((a, b) => {
+    const ra = SOURCE_RANK[a.source];
+    const rb = SOURCE_RANK[b.source];
+    if (ra !== rb) return ra - rb;
+    return b.term.length - a.term.length;
+  });
+  perDb.set(groupId, terms);
+  return terms;
+}
+
+function findKnownFactSource(db: DatabaseSync, groupId: string, content: string): KnownFactSource {
+  if (!content) return null;
+  const terms = getSortedTerms(db, groupId);
+  for (const { term, source } of terms) {
+    // Sentence-length facts pollute substring matching; match queryCat2's
+    // validTerm filter (term.length <= 50).
+    if (term.length > 50) continue;
+    if (term.length < 1) continue;
+    if (content.includes(term)) return source;
+  }
+  return null;
 }
 
 function detectRiskFlags(row: SampledRow, matchedCategories: number[]): string[] {
@@ -110,8 +186,10 @@ export function applyWeakLabel(
   botQQ: string,
 ): WeakLabeledRow | null {
   if (isAdminCommand(row)) return null;
+  if (row.content.trim() === '' && !isEmptyBecauseMediaOnly(row)) return null;
 
-  const knownFact = hasKnownFactTerm(db, row.groupId, row.content);
+  const knownFactSource = findKnownFactSource(db, row.groupId, row.content);
+  const knownFact = knownFactSource !== null;
   const direct = isDirect(row, botQQ);
   const relay = isRelayPattern(row);
   const conflict = isConflictHeat(row);
@@ -119,6 +197,8 @@ export function applyWeakLabel(
   const burst = isBurstWindow(row);
   const pureImage = isPureImageOrMface(row);
   const imageCaption = isImageWithShortCaption(row);
+  // R6.1a: empty-with-media rows are valid object_react; empty-without-media are bad samples
+  const emptyMediaOnly = isEmptyBecauseMediaOnly(row);
   const pluralYou = (row.rawContent ?? row.content).includes('你们');
 
   // Track which categories would match (for multi-category-match flag)
@@ -184,9 +264,11 @@ export function applyWeakLabel(
     expectedAct,
     expectedDecision,
     hasKnownFactTerm: knownFact,
+    knownFactSource,
     hasRealFactHit: knownFact,
     allowPluralYou: pluralYou,
-    isObjectReact: pureImage || imageCaption,
+    // R6.1a: emptyMediaOnly rows are valid object_react; empty-without-media get false here
+    isObjectReact: pureImage || imageCaption || emptyMediaOnly,
     isBotStatusContext: botStatus,
     isBurst: burst,
     isRelay: relay,
