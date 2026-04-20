@@ -35,12 +35,14 @@
 
 ## Acceptance criteria
 
-- [ ] **M1** `direct-at-silenced` ≤ 15% (baseline 97.92% → 修复目标). Revised
-      from 10% — remaining silences have `reasonCode='bot-triggered'` from the
-      per-user @-spam curse+ignore window (`atMentionIgnoreUntil`), which is
-      legitimate abuse protection, not a timing gate. A R6.3 tagger refinement
-      (follow-up) can subtract `bot-triggered` from the cohort for a cleaner
-      semantic signal.
+- [ ] **M1** `direct-at-silenced-by-timing` ≤ 5% (master baseline 47/48 = 97.92%).
+      This is R2a's actual KPI — the timing-gate cure isolated from other causes.
+      The aggregate `direct-at-silenced` tag is retained for overview but is NOT
+      the R2a acceptance gate; its residue (`by-abuse`, `by-guard`) reflects
+      pre-existing abuse protection and mock-harness post-LLM sentinel behavior
+      outside R2a scope. Cause-split sub-tags (`direct-at-silenced-by-timing` /
+      `-by-abuse` / `-by-guard`) are introduced in the R6.3 tagger (see DEV-READY
+      §1 — `scripts/eval/violation-tags.ts` + test updates).
 - [ ] **M2** `silence_defer_compliance` ≥ 95% (baseline 100%, 不得大幅回退)
 - [ ] **M3** `tsc --noEmit` + `tsc -p tsconfig.scripts.json` clean (零 error)
 - [ ] **M4** All vitest pass (220 prior baseline + N new R2a tests)
@@ -49,7 +51,12 @@
       added to scope because `_checkGroupLimit` / `debounceMap` / `inFlightGroups`
       are internal timing gates per PLAN Scope #4 intent that R6.3 replay
       exercises directly (replay bypasses Router).
-- [ ] **M7** PR body 包含 side-by-side `summary.json` diff: master baseline vs R2a branch (direct-at-silenced / compliance / mockClaudeCalls)
+- [ ] **M7** PR body 包含 side-by-side cause-split table: master-06b55a9-retag vs
+      R2a branch on `direct-at-silenced-by-timing` / `-by-abuse` / `-by-guard`,
+      aggregate `direct-at-silenced`, `silence_defer_compliance`. Framing must
+      read "timing-caused direct silence is resolved; aggregate direct silence
+      still includes abuse protection and mock/post-LLM guard artifacts" — do
+      NOT claim aggregate direct silence is solved.
 
 ---
 

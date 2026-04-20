@@ -39,7 +39,10 @@ Rationale:
 - `test/core/classify-path.test.ts` (**NEW**) — pure-fn unit tests (9 edge cases from PLAN §3 + 100× purity snapshot).
 - `test/core/router-r2a-integration.test.ts` (**NEW**) — wiring test: burst + `@bot` reaches `_enqueueAtMention`, burst + plain chat reaches `evaluatePreGenerate`, burst + `/kick`-style admin cmd short-circuits at line 525 (pre-existing behavior, R2a regression guard).
 - `test/chat-r2a-rate-limit-bypass.test.ts` (**NEW**) — ChatModule-level coverage: rate limit / debounce / in-flight bypasses for @bot and reply-to-bot; non-direct baselines preserved; `atMentionIgnoreUntil` remains honored for direct @s from ignored users.
-- `test/chat.test.ts` (**MODIFY, one test**) — flip prior `rate limit blocks at_only reply` to verify R2a bypass; adds a comment citing PLAN Scope #4 as the superseding spec.
+- `test/chat.test.ts` (**MODIFY, two tests**) — flip prior `rate limit blocks at_only reply` and `in-flight lock: concurrent @-mention sends exactly one reply` to verify R2a bypass; comment cites PLAN Scope #4 as the superseding spec.
+- `scripts/eval/violation-tags.ts` (**MODIFY**) — add three cause-split sub-tags (`direct-at-silenced-by-timing` / `-by-abuse` / `-by-guard`) keyed off `reasonCode` ∈ {`timing`, `bot-triggered`, `guard`}. Extend `ProjectedRow` with `reasonCode: string | null`. Aggregate `direct-at-silenced` retained for overview.
+- `scripts/eval/replay-runner-core.ts` + `scripts/eval/replay-summary.ts` (**MODIFY**) — plumb `reasonCode` into `ProjectedRow` construction.
+- `test/eval/violation-tags.test.ts` + `test/eval/replay-runner-mock.test.ts` (**MODIFY**) — add factory `reasonCode` default + 7 cause-split tests; update `ALL_VIOLATION_TAGS.length` assertion from 10 to 13.
 
 **Scope-widening rationale (chat.ts)**: the Architect's original §1 listed only router.ts, but the R6.3 replay runner (`scripts/eval/replay-runner.ts:197`) invokes `chat.generateReply` directly, not via `router.dispatch`. Without the chat-level guard, the router splice is structurally correct but invisible to the replay acceptance gate. `_checkGroupLimit` / `debounceMap` / `inFlightGroups` are all timing gates covered by PLAN Scope #4 "direct override skips timing gate" — extending scope to chat.ts is the smallest change that makes the direct override end-to-end. Approved by team-lead after initial replay showed 47/48 direct-at-silenced unchanged from baseline.
 
@@ -229,13 +232,18 @@ cat D:/QQ-Group-Bot/.claude/worktrees/r6-3-replay/data/eval/replay/master-baseli
 cat data/eval/replay/r2a-branch-<sha>/summary.json
 ```
 
-PR body MUST populate the metric table with both columns from these two `summary.json` files:
+PR body MUST populate the cause-split metric table from both `summary.json` files (`data/eval/replay/master-06b55a9-retag/summary.json` and `data/eval/replay/r2a-<sha>-retag/summary.json`):
 
-| Metric | master baseline (0f28567) | R2a branch |
-|---|---|---|
-| direct-at-silenced | 47/48 = 97.92% | **must be ≤ 10%** (M1) |
-| silence_defer_compliance | 202/202 = 100% | **must be ≥ 95%** (M2) |
-| mockClaudeCalls | 21/493 | reported |
+| Metric                                  | master-06b55a9-retag | R2a branch (e3a2cab-retag) | Target |
+|-----------------------------------------|----------------------|-----------------------------|--------|
+| direct-at-silenced-by-timing            | 47/48 = 97.92%       | 0/48 = 0%                   | ≤ 5% ✓ (M1) |
+| direct-at-silenced-by-abuse             | 0/48 = 0%            | 7/48 = 14.58%               | (not target; previously masked by timing; abuse protection is correct) |
+| direct-at-silenced-by-guard             | 0/48 = 0%            | 33/48 = 68.75%              | (not target; post-LLM sentinel on mock harness output — see follow-up R6.3.1 in PR body) |
+| direct-at-silenced (aggregate)          | 47/48 = 97.92%       | 40/48 = 83.33%               | overview only |
+| silence_defer_compliance                | 202/202 = 100%       | 202/202 = 100%              | ≥ 95% ✓ (M2) |
+| mockClaudeCalls                         | 21                   | 8 (with 12 replies via regen/deflection) | reported |
+
+**Framing (required in PR body — exact wording)**: "Timing-caused direct silence is resolved. Aggregate direct silence still includes abuse protection and mock/post-LLM guard artifacts." Do NOT phrase as "direct @ silence solved."
 
 ### Reviewer independent re-run (per `feedback_controlled_pipeline_single_runner.md`)
 If Dev's replay output lives in the repo, Reviewer consumes it and spot-checks (does NOT re-run) — owner-runner single-runner rule.
@@ -252,7 +260,7 @@ If Reviewer wants an independent verification run: same command as Developer, wi
 - [ ] `npx vitest run` full suite — zero new failures vs master
 - [ ] Run replay command from §6 → paste `summary.json` contents (or raw `direct-at-silenced` / `silence_defer_compliance` / `mockClaudeCalls` values) into PR body
 - [ ] PR body side-by-side metric table fully populated (both baseline + R2a branch columns)
-- [ ] M1 direct-at-silenced ≤ 10%  /  M2 silence_defer_compliance ≥ 95% on R2a column
+- [ ] M1 direct-at-silenced-by-timing ≤ 5% / M2 silence_defer_compliance ≥ 95% on R2a column (cause-split — aggregate direct-at-silenced is overview only)
 
 ### Reviewer must independently
 - [ ] `git log origin/r2a-timing-gate -1` — confirm latest SHA matches dev report

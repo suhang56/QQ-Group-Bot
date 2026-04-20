@@ -242,6 +242,7 @@ export async function runReplayRow(args: RunReplayRowArgs): Promise<ReplayRow> {
         : result.kind === 'sticker'
           ? result.cqCode
           : null,
+    reasonCode: result.kind === 'error' ? null : (result.reasonCode ?? null),
   };
 
   const violationTags = computeViolationTags(args.gold, projected, args.triggerMessage.messageId);

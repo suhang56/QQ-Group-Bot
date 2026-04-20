@@ -65,7 +65,7 @@ describe('replay-runner integration — mock mode', () => {
     const summary = JSON.parse(fs.readFileSync(sumPath, 'utf8'));
     expect(summary.silenceDeferCompliance.rate).toBeGreaterThanOrEqual(0);
     expect(summary.silenceDeferCompliance.rate).toBeLessThanOrEqual(1);
-    expect(Object.keys(summary.violationCounts).length).toBe(10);
+    expect(Object.keys(summary.violationCounts).length).toBe(13);
 
     // Zero side effect: synthetic fixture sha256 must be unchanged.
     assertNoProdContamination(FIXTURE_DB, before);
