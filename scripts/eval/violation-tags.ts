@@ -16,6 +16,9 @@ export type ViolationTag =
   | 'gold-silent-but-replied'
   | 'gold-defer-but-replied'
   | 'direct-at-silenced'
+  | 'direct-at-silenced-by-timing'
+  | 'direct-at-silenced-by-abuse'
+  | 'direct-at-silenced-by-guard'
   | 'fact-needed-no-fact'
   | 'fact-not-needed-used-fact'
   | 'sticker-when-not-allowed'
@@ -28,6 +31,9 @@ export const ALL_VIOLATION_TAGS: readonly ViolationTag[] = [
   'gold-silent-but-replied',
   'gold-defer-but-replied',
   'direct-at-silenced',
+  'direct-at-silenced-by-timing',
+  'direct-at-silenced-by-abuse',
+  'direct-at-silenced-by-guard',
   'fact-needed-no-fact',
   'fact-not-needed-used-fact',
   'sticker-when-not-allowed',
@@ -44,6 +50,8 @@ export interface ProjectedRow {
   targetMsgId: string | null;
   matchedFactIds: number[] | null;
   replyText: string | null;
+  /** R2a: per-result reasonCode used by cause-split direct-at-silenced sub-tags. */
+  reasonCode: string | null;
 }
 
 function isOutputted(k: ReplayResultKind): boolean {
@@ -69,7 +77,15 @@ export function computeViolationTags(
 
   if (gold.goldDecision === 'silent' && outputted) tags.push('gold-silent-but-replied');
   if (gold.goldDecision === 'defer' && outputted) tags.push('gold-defer-but-replied');
-  if (row.category === 1 && row.resultKind === 'silent') tags.push('direct-at-silenced');
+  if (row.category === 1 && row.resultKind === 'silent') {
+    // R2a: aggregate tag kept for overview; cause-split sub-tags are the
+    // per-layer KPIs. Only one of by-timing / by-abuse / by-guard fires per
+    // row (they partition on disjoint reasonCode values).
+    tags.push('direct-at-silenced');
+    if (row.reasonCode === 'timing') tags.push('direct-at-silenced-by-timing');
+    else if (row.reasonCode === 'bot-triggered') tags.push('direct-at-silenced-by-abuse');
+    else if (row.reasonCode === 'guard') tags.push('direct-at-silenced-by-guard');
+  }
   if (gold.factNeeded && row.resultKind === 'reply' && factCount === 0) {
     tags.push('fact-needed-no-fact');
   }
@@ -116,6 +132,9 @@ export const DENOMINATOR_RULES: Record<ViolationTag, (gold: GoldLabel, row: Proj
   'gold-silent-but-replied':   (g) => g.goldDecision === 'silent',
   'gold-defer-but-replied':    (g) => g.goldDecision === 'defer',
   'direct-at-silenced':        (_g, r) => r.category === 1,
+  'direct-at-silenced-by-timing': (_g, r) => r.category === 1,
+  'direct-at-silenced-by-abuse':  (_g, r) => r.category === 1,
+  'direct-at-silenced-by-guard':  (_g, r) => r.category === 1,
   'fact-needed-no-fact':       (g, r) => g.factNeeded === true && r.resultKind === 'reply',
   'fact-not-needed-used-fact': (g, r) => g.factNeeded === false && r.resultKind === 'reply',
   'sticker-when-not-allowed':  (g) => g.allowSticker === false,

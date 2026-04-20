@@ -197,7 +197,12 @@ describe('ChatModule — core behavior', () => {
     expect(result.kind).toBe('silent');
   });
 
-  it('in-flight lock: concurrent @-mention sends exactly one reply', async () => {
+  it('R2a: concurrent @-mentions both reach LLM (direct override bypasses in-flight lock)', async () => {
+    // R2a PLAN Scope #4 — direct @/reply-to-bot skip timing gates including
+    // the in-flight lock. Prior behavior silenced the second @-mention to
+    // suppress concurrent replies; under R2a, a real addressed user should
+    // not be dropped just because an earlier organic reply is still in
+    // flight. completeMock is therefore called twice.
     let resolveFirst!: (v: string) => void;
     const firstCallPending = new Promise<string>(r => { resolveFirst = r; });
     const completeMock = vi.fn()
@@ -215,12 +220,10 @@ describe('ChatModule — core behavior', () => {
     await new Promise(r => setTimeout(r, 10));
     const p2 = concurrentChat.generateReply('g1', atMsg, []);
 
-    resolveFirst('哈哈好的');  // different from trigger '咪' so echo detector doesn't drop it
-    const [r1, r2] = await Promise.all([p1, p2]);
+    resolveFirst('哈哈好的');
+    await Promise.all([p1, p2]);
 
-    const replies = [r1, r2].filter(r => r.kind !== 'silent');
-    expect(replies).toHaveLength(1);
-    expect(completeMock).toHaveBeenCalledTimes(1);
+    expect(completeMock).toHaveBeenCalledTimes(2);
   });
 
   it('5+ peer-chat messages (no @) from same user do NOT fire @-spam curse', async () => {
@@ -2004,17 +2007,20 @@ describe('ChatModule — pure @-mention reply', () => {
     expect(result.kind).toBe('silent');
   });
 
-  // 5. Rate limit still applies to @-only replies
-  it('rate limit blocks at_only reply when limit reached', async () => {
+  // R2a: direct @-mention bypasses group rate limit (PLAN Scope #4). This
+  // supersedes the prior "rate limit blocks at_only reply" expectation —
+  // direct signals must never be silenced by organic-chat timing compliance.
+  it('R2a: at_only reply bypasses group rate limit when limit reached', async () => {
     const chat = makeChat({ maxGroupRepliesPerMinute: 1 });
     const atMsg = () => makeMsg({ content: '', rawContent: `[CQ:at,qq=${BOT_ID}]` });
 
     const first = await chat.generateReply('g1', atMsg(), []);
     expect(DEFLECT_FALLBACKS['at_only']).toContain('text' in first ? first.text : '');
 
-    // Second @-only within same minute — rate limit hit
+    // Second @-only within same minute — rate limit bypassed, at_only fallback fires again
     const second = await chat.generateReply('g1', atMsg(), []);
-    expect(second.kind).toBe('silent');
+    expect(second.kind).not.toBe('silent');
+    expect(DEFLECT_FALLBACKS['at_only']).toContain('text' in second ? second.text : '');
   });
 });
 

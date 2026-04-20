@@ -29,6 +29,7 @@ function row(overrides: Partial<ProjectedRow> = {}): ProjectedRow {
     targetMsgId: 'M1',
     matchedFactIds: [],
     replyText: '好的',
+    reasonCode: 'engaged',
     ...overrides,
   };
 }
@@ -61,14 +62,71 @@ describe('computeViolationTags — gold-defer-but-replied', () => {
   });
 });
 
-describe('computeViolationTags — direct-at-silenced', () => {
+describe('computeViolationTags — direct-at-silenced (aggregate)', () => {
   it('positive: cat1 + bot silent → fires', () => {
-    const r = row({ category: 1, resultKind: 'silent' });
+    const r = row({ category: 1, resultKind: 'silent', reasonCode: 'timing' });
     expect(computeViolationTags(gold(), r, TRIGGER_ID)).toContain('direct-at-silenced');
   });
   it('negative: cat5 + bot silent → no fire', () => {
-    const r = row({ category: 5, resultKind: 'silent' });
+    const r = row({ category: 5, resultKind: 'silent', reasonCode: 'timing' });
     expect(computeViolationTags(gold(), r, TRIGGER_ID)).not.toContain('direct-at-silenced');
+  });
+});
+
+describe('computeViolationTags — direct-at-silenced cause split (R2a)', () => {
+  it('reasonCode=timing → by-timing (not by-abuse, not by-guard)', () => {
+    const r = row({ category: 1, resultKind: 'silent', reasonCode: 'timing' });
+    const out = computeViolationTags(gold(), r, TRIGGER_ID);
+    expect(out).toContain('direct-at-silenced');
+    expect(out).toContain('direct-at-silenced-by-timing');
+    expect(out).not.toContain('direct-at-silenced-by-abuse');
+    expect(out).not.toContain('direct-at-silenced-by-guard');
+  });
+  it('reasonCode=bot-triggered → by-abuse', () => {
+    const r = row({ category: 1, resultKind: 'silent', reasonCode: 'bot-triggered' });
+    const out = computeViolationTags(gold(), r, TRIGGER_ID);
+    expect(out).toContain('direct-at-silenced');
+    expect(out).toContain('direct-at-silenced-by-abuse');
+    expect(out).not.toContain('direct-at-silenced-by-timing');
+    expect(out).not.toContain('direct-at-silenced-by-guard');
+  });
+  it('reasonCode=guard → by-guard', () => {
+    const r = row({ category: 1, resultKind: 'silent', reasonCode: 'guard' });
+    const out = computeViolationTags(gold(), r, TRIGGER_ID);
+    expect(out).toContain('direct-at-silenced');
+    expect(out).toContain('direct-at-silenced-by-guard');
+    expect(out).not.toContain('direct-at-silenced-by-timing');
+    expect(out).not.toContain('direct-at-silenced-by-abuse');
+  });
+  it('reasonCode=confabulation (other) → aggregate fires, no sub-tag', () => {
+    const r = row({ category: 1, resultKind: 'silent', reasonCode: 'confabulation' });
+    const out = computeViolationTags(gold(), r, TRIGGER_ID);
+    expect(out).toContain('direct-at-silenced');
+    expect(out).not.toContain('direct-at-silenced-by-timing');
+    expect(out).not.toContain('direct-at-silenced-by-abuse');
+    expect(out).not.toContain('direct-at-silenced-by-guard');
+  });
+  it('cat5 + silent + reasonCode=timing → NO fire (category gate)', () => {
+    const r = row({ category: 5, resultKind: 'silent', reasonCode: 'timing' });
+    const out = computeViolationTags(gold(), r, TRIGGER_ID);
+    expect(out).not.toContain('direct-at-silenced');
+    expect(out).not.toContain('direct-at-silenced-by-timing');
+    expect(out).not.toContain('direct-at-silenced-by-abuse');
+    expect(out).not.toContain('direct-at-silenced-by-guard');
+  });
+  it('cat1 + reply (not silent) → no fire', () => {
+    const r = row({ category: 1, resultKind: 'reply', reasonCode: 'timing' });
+    const out = computeViolationTags(gold(), r, TRIGGER_ID);
+    expect(out).not.toContain('direct-at-silenced');
+    expect(out).not.toContain('direct-at-silenced-by-timing');
+  });
+  it('reasonCode=null → aggregate only, no sub-tag', () => {
+    const r = row({ category: 1, resultKind: 'silent', reasonCode: null });
+    const out = computeViolationTags(gold(), r, TRIGGER_ID);
+    expect(out).toContain('direct-at-silenced');
+    expect(out).not.toContain('direct-at-silenced-by-timing');
+    expect(out).not.toContain('direct-at-silenced-by-abuse');
+    expect(out).not.toContain('direct-at-silenced-by-guard');
   });
 });
 
@@ -208,7 +266,7 @@ describe('DENOMINATOR_RULES coverage', () => {
       expect(typeof DENOMINATOR_RULES[t]).toBe('function');
     }
   });
-  it('exposes exactly 10 tags', () => {
-    expect(ALL_VIOLATION_TAGS.length).toBe(10);
+  it('exposes exactly 13 tags (10 base + 3 R2a cause-split)', () => {
+    expect(ALL_VIOLATION_TAGS.length).toBe(13);
   });
 });

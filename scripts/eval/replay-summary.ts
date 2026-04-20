@@ -120,6 +120,7 @@ export function aggregateSummary(args: {
         targetMsgId: r.targetMsgId,
         matchedFactIds: r.matchedFactIds,
         replyText: r.replyText,
+        reasonCode: r.reasonCode ?? null,
       };
       if (!rule(gold, projected)) continue;
       denom++;

@@ -1539,7 +1539,7 @@ export class ChatModule implements IChatModule {
   async generateReply(
     groupId: string,
     triggerMessage: GroupMessage,
-    _recentMessages: GroupMessage[]
+    recentMessages: GroupMessage[]
   ): Promise<ChatResult> {
     this.knownGroups.add(groupId);
     const metaBuilder = new ReplyMetaBuilder();
@@ -1575,8 +1575,21 @@ export class ChatModule implements IChatModule {
       return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'timing' };
     }
 
-    // Group reply rate limit
-    if (!this._checkGroupLimit(groupId)) {
+    // R2a: direct override — @bot / reply-to-bot bypasses every timing gate
+    // in this function (rate limit, debounce, in-flight lock). Rationale: PLAN
+    // Scope #4 "direct override skips timing gate". Signal shape mirrors
+    // router.ts:634/636 (raw CQ match + recent-messages bot presence) so direct
+    // detection is consistent across the router splice and chat-level guards.
+    // atMentionIgnoreUntil (per-user @-spam curse+ignore, line 1606+) is
+    // legitimate abuse protection, NOT a timing gate — it is not bypassed.
+    const isDirectForGateBypass =
+      (!!this.botUserId && triggerMessage.rawContent.includes(`[CQ:at,qq=${this.botUserId}]`))
+      || (!!this.botUserId
+        && triggerMessage.rawContent.includes('[CQ:reply,')
+        && recentMessages.some(m => m.userId === this.botUserId));
+
+    // Group reply rate limit (skipped for direct @/reply-to-bot per R2a)
+    if (!isDirectForGateBypass && !this._checkGroupLimit(groupId)) {
       this.logger.warn({ groupId }, 'Group chat reply rate limit reached — silent');
       return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'timing' };
     }
@@ -1625,14 +1638,21 @@ export class ChatModule implements IChatModule {
       return { kind: 'reply', text: phrase, meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
     }
 
+    // Debounce timing gate (R2a: skipped for direct @/reply-to-bot).
+    // debounceMap is still updated on direct paths — downstream proactive gates
+    // read the signal, so invariance of last-trigger tracking is preserved;
+    // only the silent-return is conditioned on direct.
     const lastTrigger = this.debounceMap.get(groupId);
     this.debounceMap.set(groupId, now);
-    if (lastTrigger !== undefined && now - lastTrigger < this.debounceMs) {
+    if (!isDirectForGateBypass
+      && lastTrigger !== undefined
+      && now - lastTrigger < this.debounceMs) {
       return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'timing' };
     }
 
-    // In-flight lock
-    if (this.inFlightGroups.has(groupId)) {
+    // In-flight lock (R2a: skipped for direct @/reply-to-bot — a direct address
+    // should not silently lose to an in-flight organic-chat reply).
+    if (!isDirectForGateBypass && this.inFlightGroups.has(groupId)) {
       this.logger.debug({ groupId }, 'Reply in-flight — dropping duplicate trigger');
       return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'timing' };
     }
@@ -2615,7 +2635,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       // (qa-report, coreference, outsider-tone, insult-echo). On any failure,
       // regenerate via hardened request and continue the loop. Cap at 2 iters
       // so p95 latency stays bounded even when multiple guards fail together.
-      const recentHumanContents = _recentMessages
+      const recentHumanContents = recentMessages
         .filter(m => m.userId !== this.botUserId)
         .slice(-4)
         .map(m => m.content);
