@@ -55,6 +55,7 @@ import { isStickerTokenOutput, makeStickerTokenChoices, resolveStickerTokenOutpu
 import { DirectCooldown, isRepeatedLowInfoDirectOverreply, pickNeutralAck } from '../core/direct-cooldown.js';
 import { SelfEchoGuard, isSelfAmplifiedAnnoyance } from './guards/self-echo-guard.js';
 import { isBotNotAddresseeReplied } from './guards/scope-addressee-guard.js';
+import { runSendGuardChain, buildSendGuards, type SendGuardCtx } from '../utils/send-guard-chain.js';
 
 // Path A stub: { term, meaning } pairs extracted from user message.
 // Path A dev replaces null meanings with corpus results when merged.
@@ -1682,7 +1683,16 @@ export class ChatModule implements IChatModule {
         { groupId, userId: triggerMessage.userId, count: atSpamCount, ignoreForMs: this.atMentionCurseIgnoreMs },
         '@-spam curse+ignore fired',
       );
-      return { kind: 'reply', text: phrase, meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
+      {
+        const guardCtx: SendGuardCtx = { groupId, triggerMessage, isDirect: isDirectForGateBypass, resultKind: 'reply' };
+        const guardResult = runSendGuardChain(buildSendGuards(), phrase, guardCtx);
+        if (!guardResult.passed) {
+          this.logger.info({ groupId, reason: guardResult.reason, original: phrase }, 'send_guard_blocked');
+          metaBuilder.setGuardPath('post-process');
+          return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'sticker-leak-stripped' };
+        }
+        return { kind: 'reply', text: guardResult.text, meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
+      }
     }
 
     // Debounce timing gate (R2a: skipped for direct @/reply-to-bot).
@@ -1710,7 +1720,16 @@ export class ChatModule implements IChatModule {
       this.botSpeechTracking.set(groupId, { lastSpokeAt: now, msgsSinceSpoke: 0, engagementReceived: false });
       this._bumpConsecutive(groupId);
       const atOnlyText = await this._generateDeflection('at_only', triggerMessage);
-      return { kind: 'fallback', text: atOnlyText, meta: metaBuilder.buildBase('fallback'), reasonCode: 'pure-at' };
+      {
+        const guardCtx: SendGuardCtx = { groupId, triggerMessage, isDirect: isDirectForGateBypass, resultKind: 'fallback' };
+        const guardResult = runSendGuardChain(buildSendGuards(), atOnlyText, guardCtx);
+        if (!guardResult.passed) {
+          this.logger.info({ groupId, reason: guardResult.reason, original: atOnlyText }, 'send_guard_blocked');
+          metaBuilder.setGuardPath('post-process');
+          return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'sticker-leak-stripped' };
+        }
+        return { kind: 'fallback', text: guardResult.text, meta: metaBuilder.buildBase('fallback'), reasonCode: 'pure-at' };
+      }
     }
 
     // ── R2.5 SF1 + SF3 pre-LLM guards ─────────────────────────────────────
@@ -1764,7 +1783,16 @@ export class ChatModule implements IChatModule {
           this.lastProactiveReply.set(groupId, now);
           this.botSpeechTracking.set(groupId, { lastSpokeAt: now, msgsSinceSpoke: 0, engagementReceived: false });
           this._bumpConsecutive(groupId);
-          return { kind: 'fallback', text: ack, meta: metaBuilder.buildBase('fallback'), reasonCode: 'dampener-ack' };
+          {
+            const guardCtx: SendGuardCtx = { groupId, triggerMessage, isDirect: isDirectForGateBypass, resultKind: 'fallback' };
+            const guardResult = runSendGuardChain(buildSendGuards(), ack, guardCtx);
+            if (!guardResult.passed) {
+              this.logger.info({ groupId, reason: guardResult.reason, original: ack }, 'send_guard_blocked');
+              metaBuilder.setGuardPath('post-process');
+              return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'sticker-leak-stripped' };
+            }
+            return { kind: 'fallback', text: guardResult.text, meta: metaBuilder.buildBase('fallback'), reasonCode: 'dampener-ack' };
+          }
         }
       }
 
@@ -2070,7 +2098,16 @@ export class ChatModule implements IChatModule {
         if (now - lastReplyMs >= 2 * 60 * 1000) {
           this.lastProactiveReply.set(groupId, now);
           this._bumpConsecutive(groupId);
-          return { kind: 'reply', text: relayDetection.content, meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
+          {
+            const guardCtx: SendGuardCtx = { groupId, triggerMessage, isDirect, resultKind: 'reply' };
+            const guardResult = runSendGuardChain(buildSendGuards(), relayDetection.content, guardCtx);
+            if (!guardResult.passed) {
+              this.logger.info({ groupId, reason: guardResult.reason, original: relayDetection.content }, 'send_guard_blocked');
+              metaBuilder.setGuardPath('post-process');
+              return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'sticker-leak-stripped' };
+            }
+            return { kind: 'reply', text: guardResult.text, meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
+          }
         }
       }
       // Relay detected but bot sits out — no LLM call
@@ -2158,18 +2195,73 @@ export class ChatModule implements IChatModule {
       this._bumpConsecutive(groupId);
       if (isAdversarial) {
         const isCurse = this._teaseIncrement(groupId, triggerMessage.userId, now);
-        if (isCurse) return { kind: 'reply', text: await this._generateDeflection('curse', triggerMessage), meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
-        if (isHarass) return { kind: 'reply', text: await this._generateDeflection('curse', triggerMessage), meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
-        if (isProbe) return { kind: 'reply', text: await this._generateDeflection('identity', triggerMessage), meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
+        if (isCurse) {
+          const curseText = await this._generateDeflection('curse', triggerMessage);
+          const guardCtx: SendGuardCtx = { groupId, triggerMessage, isDirect, resultKind: 'reply' };
+          const guardResult = runSendGuardChain(buildSendGuards(), curseText, guardCtx);
+          if (!guardResult.passed) {
+            this.logger.info({ groupId, reason: guardResult.reason, original: curseText }, 'send_guard_blocked');
+            metaBuilder.setGuardPath('post-process');
+            return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'sticker-leak-stripped' };
+          }
+          return { kind: 'reply', text: guardResult.text, meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
+        }
+        if (isHarass) {
+          const harassText = await this._generateDeflection('curse', triggerMessage);
+          const guardCtx: SendGuardCtx = { groupId, triggerMessage, isDirect, resultKind: 'reply' };
+          const guardResult = runSendGuardChain(buildSendGuards(), harassText, guardCtx);
+          if (!guardResult.passed) {
+            this.logger.info({ groupId, reason: guardResult.reason, original: harassText }, 'send_guard_blocked');
+            metaBuilder.setGuardPath('post-process');
+            return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'sticker-leak-stripped' };
+          }
+          return { kind: 'reply', text: guardResult.text, meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
+        }
+        if (isProbe) {
+          const probeText = await this._generateDeflection('identity', triggerMessage);
+          const guardCtx: SendGuardCtx = { groupId, triggerMessage, isDirect, resultKind: 'reply' };
+          const guardResult = runSendGuardChain(buildSendGuards(), probeText, guardCtx);
+          if (!guardResult.passed) {
+            this.logger.info({ groupId, reason: guardResult.reason, original: probeText }, 'send_guard_blocked');
+            metaBuilder.setGuardPath('post-process');
+            return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'sticker-leak-stripped' };
+          }
+          return { kind: 'reply', text: guardResult.text, meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
+        }
         if (isTask) {
           const isRecite = /(背|接龙|续写|恩师|接下[一]?句|继续[背念说])/i.test(triggerMessage.content);
-          return { kind: 'reply', text: await this._generateDeflection(isRecite ? 'recite' : 'task', triggerMessage), meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
+          const taskText = await this._generateDeflection(isRecite ? 'recite' : 'task', triggerMessage);
+          const guardCtx: SendGuardCtx = { groupId, triggerMessage, isDirect, resultKind: 'reply' };
+          const guardResult = runSendGuardChain(buildSendGuards(), taskText, guardCtx);
+          if (!guardResult.passed) {
+            this.logger.info({ groupId, reason: guardResult.reason, original: taskText }, 'send_guard_blocked');
+            metaBuilder.setGuardPath('post-process');
+            return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'sticker-leak-stripped' };
+          }
+          return { kind: 'reply', text: guardResult.text, meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
         }
-        return { kind: 'reply', text: await this._generateDeflection('memory', triggerMessage), meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
+        const memoryText = await this._generateDeflection('memory', triggerMessage);
+        const guardCtx: SendGuardCtx = { groupId, triggerMessage, isDirect, resultKind: 'reply' };
+        const guardResult = runSendGuardChain(buildSendGuards(), memoryText, guardCtx);
+        if (!guardResult.passed) {
+          this.logger.info({ groupId, reason: guardResult.reason, original: memoryText }, 'send_guard_blocked');
+          metaBuilder.setGuardPath('post-process');
+          return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'sticker-leak-stripped' };
+        }
+        return { kind: 'reply', text: guardResult.text, meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
       }
       // Non-adversarial react: low comprehension → confused deflection
       const confusedText = await this._generateDeflection('confused', triggerMessage);
-      return { kind: 'fallback', text: confusedText, meta: metaBuilder.buildBase('fallback'), reasonCode: 'low-comprehension-direct' };
+      {
+        const guardCtx: SendGuardCtx = { groupId, triggerMessage, isDirect, resultKind: 'fallback' };
+        const guardResult = runSendGuardChain(buildSendGuards(), confusedText, guardCtx);
+        if (!guardResult.passed) {
+          this.logger.info({ groupId, reason: guardResult.reason, original: confusedText }, 'send_guard_blocked');
+          metaBuilder.setGuardPath('post-process');
+          return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'sticker-leak-stripped' };
+        }
+        return { kind: 'fallback', text: guardResult.text, meta: metaBuilder.buildBase('fallback'), reasonCode: 'low-comprehension-direct' };
+      }
     }
 
     // ── Mood update ───────────────────────────────────────────────────────
@@ -2846,7 +2938,16 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
             }
             // Skip near-dup for this regen output only (narrow)
             metaBuilder.setEvasive(this._isEvasiveReply(scopeRegenText));
-            return { kind: 'reply', text: scopeRegenText, meta: metaBuilder.buildReply('normal'), reasonCode: 'engaged' };
+            {
+              const guardCtx: SendGuardCtx = { groupId, triggerMessage, isDirect, resultKind: 'reply' };
+              const guardResult = runSendGuardChain(buildSendGuards(), scopeRegenText, guardCtx);
+              if (!guardResult.passed) {
+                this.logger.info({ groupId, reason: guardResult.reason, original: scopeRegenText }, 'send_guard_blocked');
+                metaBuilder.setGuardPath('post-process');
+                return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'sticker-leak-stripped' };
+              }
+              return { kind: 'reply', text: guardResult.text, meta: metaBuilder.buildReply('normal'), reasonCode: 'engaged' };
+            }
           } catch {
             return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'scope' };
           }
@@ -2904,7 +3005,14 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
         metaBuilder.setGuardPath('post-process');
         if (isDirectTrigger) {
           const reason = classifyAtFallbackReason(triggerMessage.content);
-          return { kind: 'fallback', text: pickAtFallback(triggerMessage.content), meta: metaBuilder.buildBase('fallback'), reasonCode: reason };
+          const atFallbackText = pickAtFallback(triggerMessage.content);
+          const guardCtx: SendGuardCtx = { groupId, triggerMessage, isDirect, resultKind: 'fallback' };
+          const guardResult = runSendGuardChain(buildSendGuards(), atFallbackText, guardCtx);
+          if (!guardResult.passed) {
+            this.logger.info({ groupId, reason: guardResult.reason, original: atFallbackText }, 'send_guard_blocked');
+            return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'sticker-leak-stripped' };
+          }
+          return { kind: 'fallback', text: guardResult.text, meta: metaBuilder.buildBase('fallback'), reasonCode: reason };
         }
         return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'guard' };
       }
@@ -3038,7 +3146,16 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       });
       const isEvasive = this._isEvasiveReply(processed);
       metaBuilder.setEvasive(isEvasive);
-      return { kind: 'reply', text: processed, meta: metaBuilder.buildReply(isDirect ? 'direct' : 'normal'), reasonCode: 'engaged' };
+      {
+        const guardCtx: SendGuardCtx = { groupId, triggerMessage, isDirect, resultKind: 'reply' };
+        const guardResult = runSendGuardChain(buildSendGuards(), processed, guardCtx);
+        if (!guardResult.passed) {
+          this.logger.info({ groupId, reason: guardResult.reason, original: processed }, 'send_guard_blocked');
+          metaBuilder.setGuardPath('post-process');
+          return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'sticker-leak-stripped' };
+        }
+        return { kind: 'reply', text: guardResult.text, meta: metaBuilder.buildReply(isDirect ? 'direct' : 'normal'), reasonCode: 'engaged' };
+      }
     } catch (err) {
       if (err instanceof ClaudeApiError || err instanceof ClaudeParseError) {
         this.logger.error({ err, groupId }, 'Claude API error in chat module — silent');

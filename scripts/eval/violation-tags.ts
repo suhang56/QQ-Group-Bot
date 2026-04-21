@@ -31,7 +31,10 @@ export type ViolationTag =
   | 'repeated-low-info-direct-overreply'
   | 'self-amplified-annoyance'
   | 'group-address-in-small-scene'
-  | 'bot-not-addressee-replied';
+  | 'bot-not-addressee-replied'
+  // PR1 — sticker-token-leak: guard silently suppresses bot output that
+  // contained raw `<sticker:N>` / `sticker:N` protocol tokens.
+  | 'sticker-token-leak';
 
 export const ALL_VIOLATION_TAGS: readonly ViolationTag[] = [
   'gold-silent-but-replied',
@@ -51,6 +54,7 @@ export const ALL_VIOLATION_TAGS: readonly ViolationTag[] = [
   'self-amplified-annoyance',
   'group-address-in-small-scene',
   'bot-not-addressee-replied',
+  'sticker-token-leak',
 ] as const;
 
 export interface ProjectedRow {
@@ -70,6 +74,8 @@ export interface ProjectedRow {
   scopeGuardFired: boolean;
   /** R2.5: SF3 bot-not-addressee silent path fired. */
   botNotAddresseeFired: boolean;
+  /** PR1: sticker-leak guard stripped bot output → silent. */
+  stickerLeakFired: boolean;
 }
 
 function isOutputted(k: ReplayResultKind): boolean {
@@ -155,6 +161,9 @@ export function computeViolationTags(
   if (row.resultKind === 'silent' && row.botNotAddresseeFired) {
     tags.push('bot-not-addressee-replied');
   }
+  if (row.resultKind === 'silent' && row.stickerLeakFired) {
+    tags.push('sticker-token-leak');
+  }
 
   return tags;
 }
@@ -183,4 +192,6 @@ export const DENOMINATOR_RULES: Record<ViolationTag, (gold: GoldLabel, row: Proj
   'group-address-in-small-scene':       (_g, r) => r.category === 1,
   // SF2 runs post-LLM on any reply-or-silent outcome — denominator widens.
   'self-amplified-annoyance':           (_g, r) => r.resultKind === 'reply' || r.resultKind === 'silent',
+  // PR1: sticker-leak guard is a final-send filter — any outcome qualifies.
+  'sticker-token-leak':                 () => true,
 };

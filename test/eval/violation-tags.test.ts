@@ -270,8 +270,8 @@ describe('DENOMINATOR_RULES coverage', () => {
       expect(typeof DENOMINATOR_RULES[t]).toBe('function');
     }
   });
-  it('exposes exactly 17 tags (10 base + 3 R2a cause-split + 4 R2.5 guards)', () => {
-    expect(ALL_VIOLATION_TAGS.length).toBe(17);
+  it('exposes exactly 18 tags (10 base + 3 R2a cause-split + 4 R2.5 guards + 1 PR1 sticker-leak)', () => {
+    expect(ALL_VIOLATION_TAGS.length).toBe(18);
   });
 });
 
