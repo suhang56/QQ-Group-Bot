@@ -19,6 +19,7 @@ import type { IClaudeClient } from '../../src/ai/claude.js';
 import type { ChatResult } from '../../src/utils/chat-result.js';
 import type { GroupMessage } from '../../src/adapter/napcat.js';
 import { hasHarassmentTemplate } from '../../src/utils/output-hard-gate.js';
+import { hasSelfPersonaFabrication } from '../../src/utils/persona-fabrication-guard.js';
 import type { GoldLabel } from './gold/types.js';
 import type {
   ReplayerArgs,
@@ -269,6 +270,11 @@ export async function runReplayRow(args: RunReplayRowArgs): Promise<ReplayRow> {
     harassmentEscalationFired:
       (result.kind === 'reply' || result.kind === 'fallback')
         ? hasHarassmentTemplate(result.text)
+        : false,
+    personaFabricationFired: reasonCode === 'persona-fabricated',
+    personaFabricatedInOutput:
+      (result.kind === 'reply' || result.kind === 'fallback')
+        ? hasSelfPersonaFabrication(result.text)
         : false,
   };
 

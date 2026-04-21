@@ -56,6 +56,7 @@ import { DirectCooldown, isRepeatedLowInfoDirectOverreply, pickNeutralAck } from
 import { SelfEchoGuard, isSelfAmplifiedAnnoyance } from './guards/self-echo-guard.js';
 import { isBotNotAddresseeReplied } from './guards/scope-addressee-guard.js';
 import { runSendGuardChain, buildSendGuards, type SendGuardCtx } from '../utils/send-guard-chain.js';
+import { IDENTITY_DEFLECTIONS } from '../utils/identity-deflections.js';
 
 // Path A stub: { term, meaning } pairs extracted from user message.
 // Path A dev replaces null meanings with corpus results when merged.
@@ -304,7 +305,7 @@ function _reservoirSample<T>(arr: T[], k: number): T[] {
 // Patterns: 你是...bot/ai/机器人, bot吧, 真人吗, 这不是机器人, are you a/an bot/ai/human.
 // Deliberately excludes third-person observational mentions: "这AI为啥..."/"机器人真快"/"AI 真聪明".
 export const IDENTITY_PROBE =
-  /(你\s*是\s*(不是\s*)?(一个?\s*)?(bot|ai|机器人|真人)|你\s*是\s*人\s*吗|是\s*(不是\s*)?(bot|ai|机器人)\s*吧|(bot|ai)\s*吧|真人吗|这\s*不\s*是\s*(bot|ai|机器人)|are\s+you\s+(an?\s+)?(bot|ai|human))/i;
+  /(你\s*是\s*(不是\s*)?(一个?\s*)?(bot|ai|机器人|真人)|你\s*是\s*人\s*吗|是\s*(不是\s*)?(bot|ai|机器人)\s*吧|(bot|ai)\s*吧|真人吗|这\s*不\s*是\s*(bot|ai|机器人)|are\s+you\s+(an?\s+)?(bot|ai|human)|你(?:多大|几岁|多少岁)|你年龄|你(?:是)?男(?:的|生|性)?(?:还是)?女|你是男是女|你男的女的|你是不是[男女]|你多高|你多重|你身高|你体重|你住(?:在)?哪|你真名|你本名|你叫啥)/i;
 
 // Layered chat routing: sensitive triggers that MUST go to Sonnet.
 // Bias: high recall > high precision — a false positive costs a Sonnet call
@@ -326,7 +327,7 @@ export const CHAT_META_TECH_RE =
 export const CHAT_POLITICAL_RE =
   /习\s*近平|毛(?![茸毯线])泽东|共产党|安拉|反动|法轮|文革|台独|藏独|六四|tiananmen/i;
 
-export const IDENTITY_DEFLECTIONS = ['啊？', '什么', '？？', '?', '啧'];
+export { IDENTITY_DEFLECTIONS };
 
 // Matches creative-work / labor exploitation attempts only — NOT conversational
 // asks and NOT peer-chat mentions of verbs. Every bare action verb must be
@@ -410,7 +411,7 @@ export const DEFLECT_SITUATIONS: Record<DeflectCategory, string> = {
 };
 
 export const DEFLECT_FALLBACKS: Record<DeflectCategory, string[]> = {
-  identity: IDENTITY_DEFLECTIONS,
+  identity: [...IDENTITY_DEFLECTIONS],
   task: TASK_DEFLECTIONS,
   memory: MEMORY_INJECT_DEFLECTIONS,
   recite: TASK_DEFLECTIONS,
@@ -1689,7 +1690,7 @@ export class ChatModule implements IChatModule {
         if (!guardResult.passed) {
           this.logger.info({ groupId, reason: guardResult.reason, original: phrase }, 'send_guard_blocked');
           metaBuilder.setGuardPath('post-process');
-          return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: guardResult.reason as 'sticker-leak-stripped' | 'hard-gate-blocked' };
+          return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: guardResult.reason as 'sticker-leak-stripped' | 'hard-gate-blocked' | 'persona-fabricated' };
         }
         return { kind: 'reply', text: guardResult.text, meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
       }
@@ -1726,7 +1727,7 @@ export class ChatModule implements IChatModule {
         if (!guardResult.passed) {
           this.logger.info({ groupId, reason: guardResult.reason, original: atOnlyText }, 'send_guard_blocked');
           metaBuilder.setGuardPath('post-process');
-          return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: guardResult.reason as 'sticker-leak-stripped' | 'hard-gate-blocked' };
+          return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: guardResult.reason as 'sticker-leak-stripped' | 'hard-gate-blocked' | 'persona-fabricated' };
         }
         return { kind: 'fallback', text: guardResult.text, meta: metaBuilder.buildBase('fallback'), reasonCode: 'pure-at' };
       }
@@ -1789,7 +1790,7 @@ export class ChatModule implements IChatModule {
             if (!guardResult.passed) {
               this.logger.info({ groupId, reason: guardResult.reason, original: ack }, 'send_guard_blocked');
               metaBuilder.setGuardPath('post-process');
-              return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: guardResult.reason as 'sticker-leak-stripped' | 'hard-gate-blocked' };
+              return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: guardResult.reason as 'sticker-leak-stripped' | 'hard-gate-blocked' | 'persona-fabricated' };
             }
             return { kind: 'fallback', text: guardResult.text, meta: metaBuilder.buildBase('fallback'), reasonCode: 'dampener-ack' };
           }
@@ -2104,7 +2105,7 @@ export class ChatModule implements IChatModule {
             if (!guardResult.passed) {
               this.logger.info({ groupId, reason: guardResult.reason, original: relayDetection.content }, 'send_guard_blocked');
               metaBuilder.setGuardPath('post-process');
-              return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: guardResult.reason as 'sticker-leak-stripped' | 'hard-gate-blocked' };
+              return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: guardResult.reason as 'sticker-leak-stripped' | 'hard-gate-blocked' | 'persona-fabricated' };
             }
             return { kind: 'reply', text: guardResult.text, meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
           }
@@ -2202,7 +2203,7 @@ export class ChatModule implements IChatModule {
           if (!guardResult.passed) {
             this.logger.info({ groupId, reason: guardResult.reason, original: curseText }, 'send_guard_blocked');
             metaBuilder.setGuardPath('post-process');
-            return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: guardResult.reason as 'sticker-leak-stripped' | 'hard-gate-blocked' };
+            return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: guardResult.reason as 'sticker-leak-stripped' | 'hard-gate-blocked' | 'persona-fabricated' };
           }
           return { kind: 'reply', text: guardResult.text, meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
         }
@@ -2213,7 +2214,7 @@ export class ChatModule implements IChatModule {
           if (!guardResult.passed) {
             this.logger.info({ groupId, reason: guardResult.reason, original: harassText }, 'send_guard_blocked');
             metaBuilder.setGuardPath('post-process');
-            return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: guardResult.reason as 'sticker-leak-stripped' | 'hard-gate-blocked' };
+            return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: guardResult.reason as 'sticker-leak-stripped' | 'hard-gate-blocked' | 'persona-fabricated' };
           }
           return { kind: 'reply', text: guardResult.text, meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
         }
@@ -2224,7 +2225,7 @@ export class ChatModule implements IChatModule {
           if (!guardResult.passed) {
             this.logger.info({ groupId, reason: guardResult.reason, original: probeText }, 'send_guard_blocked');
             metaBuilder.setGuardPath('post-process');
-            return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: guardResult.reason as 'sticker-leak-stripped' | 'hard-gate-blocked' };
+            return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: guardResult.reason as 'sticker-leak-stripped' | 'hard-gate-blocked' | 'persona-fabricated' };
           }
           return { kind: 'reply', text: guardResult.text, meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
         }
@@ -2236,7 +2237,7 @@ export class ChatModule implements IChatModule {
           if (!guardResult.passed) {
             this.logger.info({ groupId, reason: guardResult.reason, original: taskText }, 'send_guard_blocked');
             metaBuilder.setGuardPath('post-process');
-            return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: guardResult.reason as 'sticker-leak-stripped' | 'hard-gate-blocked' };
+            return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: guardResult.reason as 'sticker-leak-stripped' | 'hard-gate-blocked' | 'persona-fabricated' };
           }
           return { kind: 'reply', text: guardResult.text, meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
         }
@@ -2246,7 +2247,7 @@ export class ChatModule implements IChatModule {
         if (!guardResult.passed) {
           this.logger.info({ groupId, reason: guardResult.reason, original: memoryText }, 'send_guard_blocked');
           metaBuilder.setGuardPath('post-process');
-          return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: guardResult.reason as 'sticker-leak-stripped' | 'hard-gate-blocked' };
+          return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: guardResult.reason as 'sticker-leak-stripped' | 'hard-gate-blocked' | 'persona-fabricated' };
         }
         return { kind: 'reply', text: guardResult.text, meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
       }
@@ -2258,7 +2259,7 @@ export class ChatModule implements IChatModule {
         if (!guardResult.passed) {
           this.logger.info({ groupId, reason: guardResult.reason, original: confusedText }, 'send_guard_blocked');
           metaBuilder.setGuardPath('post-process');
-          return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: guardResult.reason as 'sticker-leak-stripped' | 'hard-gate-blocked' };
+          return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: guardResult.reason as 'sticker-leak-stripped' | 'hard-gate-blocked' | 'persona-fabricated' };
         }
         return { kind: 'fallback', text: guardResult.text, meta: metaBuilder.buildBase('fallback'), reasonCode: 'low-comprehension-direct' };
       }
@@ -2944,7 +2945,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
               if (!guardResult.passed) {
                 this.logger.info({ groupId, reason: guardResult.reason, original: scopeRegenText }, 'send_guard_blocked');
                 metaBuilder.setGuardPath('post-process');
-                return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: guardResult.reason as 'sticker-leak-stripped' | 'hard-gate-blocked' };
+                return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: guardResult.reason as 'sticker-leak-stripped' | 'hard-gate-blocked' | 'persona-fabricated' };
               }
               return { kind: 'reply', text: guardResult.text, meta: metaBuilder.buildReply('normal'), reasonCode: 'engaged' };
             }
@@ -3010,7 +3011,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
           const guardResult = runSendGuardChain(buildSendGuards(), atFallbackText, guardCtx);
           if (!guardResult.passed) {
             this.logger.info({ groupId, reason: guardResult.reason, original: atFallbackText }, 'send_guard_blocked');
-            return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: guardResult.reason as 'sticker-leak-stripped' | 'hard-gate-blocked' };
+            return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: guardResult.reason as 'sticker-leak-stripped' | 'hard-gate-blocked' | 'persona-fabricated' };
           }
           return { kind: 'fallback', text: guardResult.text, meta: metaBuilder.buildBase('fallback'), reasonCode: reason };
         }
@@ -3152,7 +3153,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
         if (!guardResult.passed) {
           this.logger.info({ groupId, reason: guardResult.reason, original: processed }, 'send_guard_blocked');
           metaBuilder.setGuardPath('post-process');
-          return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: guardResult.reason as 'sticker-leak-stripped' | 'hard-gate-blocked' };
+          return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: guardResult.reason as 'sticker-leak-stripped' | 'hard-gate-blocked' | 'persona-fabricated' };
         }
         return { kind: 'reply', text: guardResult.text, meta: metaBuilder.buildReply(isDirect ? 'direct' : 'normal'), reasonCode: 'engaged' };
       }
