@@ -470,6 +470,7 @@ const jargonMiner = new JargonMiner({
   learnedFacts: db.learnedFacts,
   claude,
   activeGroups: ACTIVE_GROUPS,
+  botUserId,
 });
 
 // Daily stale-candidate prune at 03:00 Asia/Shanghai.
@@ -499,6 +500,7 @@ const phraseMiner = memesDisabled ? null : new PhraseMiner({
   claude,
   phraseCandidates: db.phraseCandidates,
   activeGroups: ACTIVE_GROUPS,
+  botUserId,
 });
 const memeClusterer = memesDisabled ? null : new MemeClusterer({
   db: db.rawDb,
@@ -506,6 +508,7 @@ const memeClusterer = memesDisabled ? null : new MemeClusterer({
   phraseCandidates: db.phraseCandidates,
   claude,
   embeddingService: embedder,
+  botUserId,
 });
 
 const harvest = new OpportunisticHarvest({

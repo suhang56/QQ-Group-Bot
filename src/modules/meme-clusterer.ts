@@ -41,6 +41,8 @@ export interface MemeClustererOptions {
   /** Cosine threshold for embedding-based clustering (v2, currently unused). */
   clusterThreshold?: number;
   maxOriginInferPerCycle?: number;
+  /** Bot's own QQ id — rows whose jargon_candidates.contexts are >=50% bot-authored are skipped. */
+  botUserId?: string;
 }
 
 export class MemeClusterer {
@@ -52,6 +54,7 @@ export class MemeClusterer {
   private readonly logger: Logger;
   private readonly now: () => number;
   private readonly maxOriginInfer: number;
+  private readonly botUserId: string | undefined;
 
   constructor(opts: MemeClustererOptions) {
     this.db = opts.db;
@@ -62,6 +65,7 @@ export class MemeClusterer {
     this.logger = opts.logger ?? createLogger('meme-clusterer');
     this.now = opts.now ?? (() => Date.now());
     this.maxOriginInfer = opts.maxOriginInferPerCycle ?? MAX_ORIGIN_INFER_PER_CYCLE;
+    this.botUserId = opts.botUserId;
   }
 
   /**
@@ -145,6 +149,31 @@ export class MemeClusterer {
       if (!row.meaning) continue;
       let contexts: string[] = [];
       try { contexts = JSON.parse(row.contexts); } catch { /* empty */ }
+
+      // Skip rows dominated by bot-authored contexts (>=50%). jargon_candidates
+      // has no scalar bot-source column — jargon-miner writes contexts as
+      // {user_id,content} objects (jargon-miner.ts:462), so we row-level filter
+      // on that JSON. String-only legacy rows (no user_id field) pass through.
+      // Threshold: half bot-authored is enough signal the row came from
+      // bot-output feedback loop rather than genuine group usage.
+      if (this.botUserId) {
+        const rawContexts: unknown[] = contexts as unknown as unknown[];
+        if (rawContexts.length > 0) {
+          const botCount = rawContexts.filter(c =>
+            c !== null && typeof c === 'object'
+              && 'user_id' in (c as object)
+              && (c as { user_id: unknown }).user_id === this.botUserId
+          ).length;
+          if (botCount * 2 >= rawContexts.length) {
+            this.logger.debug(
+              { groupId, content: row.content, botCount, totalContexts: rawContexts.length },
+              'meme-clusterer skipped bot-dominated candidate',
+            );
+            continue;
+          }
+        }
+      }
+
       results.push({
         content: row.content,
         meaning: row.meaning,

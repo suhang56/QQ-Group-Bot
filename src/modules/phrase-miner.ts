@@ -32,6 +32,8 @@ export interface PhraseMinerOptions {
   windowMessages?: number;
   /** Injected for testing */
   now?: () => number;
+  /** Bot's own QQ id — messages with msg.userId matching this are skipped before n-gram extraction. */
+  botUserId?: string;
 }
 
 export class PhraseMiner {
@@ -42,6 +44,7 @@ export class PhraseMiner {
   private readonly logger: Logger;
   private readonly windowMessages: number;
   private readonly now: () => number;
+  private readonly botUserId: string | undefined;
 
   constructor(opts: PhraseMinerOptions) {
     this.messages = opts.messages;
@@ -51,6 +54,7 @@ export class PhraseMiner {
     this.logger = opts.logger ?? createLogger('phrase-miner');
     this.windowMessages = opts.windowMessages ?? DEFAULT_WINDOW;
     this.now = opts.now ?? (() => Date.now());
+    this.botUserId = opts.botUserId;
   }
 
   /**
@@ -92,6 +96,9 @@ export class PhraseMiner {
     const nowSec = Math.floor(this.now() / 1000);
 
     for (const msg of msgs) {
+      // Skip bot's own output so phrase miner doesn't learn from itself.
+      // Truthy guard: empty botUserId is a no-op (avoids ''===''  on legacy null userId).
+      if (this.botUserId && msg.userId === this.botUserId) continue;
       const cleaned = msg.content.replace(CQ_CODE_RE, ' ');
       const tokens = cleaned.split(TOKEN_SPLIT_RE).filter(Boolean);
 
