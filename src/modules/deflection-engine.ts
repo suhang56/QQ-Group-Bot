@@ -154,6 +154,7 @@ export class DeflectionEngine implements IDeflectionEngine {
     if (!text) return null;
     if (text.length > 30) return null;
     if (/[<>]/.test(text)) return null;
+    if (/sticker:\d+/.test(text)) return null;
     if (/[:：——]/.test(text)) return null;
     if (/作为ai|作为机器|我是ai|我是一个|无法|帮您|好的，|当然，/i.test(text)) return null;
     // UR-A #15: over-denial rejection

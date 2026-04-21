@@ -129,6 +129,7 @@ export function aggregateSummary(args: {
         selfEchoFired: rc === 'self-echo' || gp === 'self-echo-regen',
         scopeGuardFired: rc === 'scope' && gp === 'addressee-regen',
         botNotAddresseeFired: rc === 'scope' && gp !== 'addressee-regen',
+        stickerLeakFired: rc === 'sticker-leak-stripped',
       };
       if (!rule(gold, projected)) continue;
       denom++;

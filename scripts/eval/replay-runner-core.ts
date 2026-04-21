@@ -263,6 +263,7 @@ export async function runReplayRow(args: RunReplayRowArgs): Promise<ReplayRow> {
     selfEchoFired: reasonCode === 'self-echo' || guardPath === 'self-echo-regen',
     scopeGuardFired: reasonCode === 'scope' && guardPath === 'addressee-regen',
     botNotAddresseeFired: reasonCode === 'scope' && guardPath !== 'addressee-regen',
+    stickerLeakFired: reasonCode === 'sticker-leak-stripped',
   };
 
   const violationTags = computeViolationTags(args.gold, projected, args.triggerMessage.messageId);
