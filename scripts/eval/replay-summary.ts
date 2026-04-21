@@ -16,6 +16,7 @@ import {
   type ProjectedRow,
 } from './violation-tags.js';
 import { hasHarassmentTemplate } from '../../src/utils/output-hard-gate.js';
+import { hasSelfPersonaFabrication } from '../../src/utils/persona-fabrication-guard.js';
 import {
   type ComplianceMetric,
   type PerCategoryBreakdown,
@@ -136,6 +137,11 @@ export function aggregateSummary(args: {
           (r.resultKind === 'reply' || r.resultKind === 'fallback') &&
           r.replyText != null &&
           hasHarassmentTemplate(r.replyText),
+        personaFabricationFired: rc === 'persona-fabricated',
+        personaFabricatedInOutput:
+          (r.resultKind === 'reply' || r.resultKind === 'fallback') &&
+          r.replyText != null &&
+          hasSelfPersonaFabrication(r.replyText),
       };
       if (!rule(gold, projected)) continue;
       denom++;

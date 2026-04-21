@@ -24,10 +24,12 @@ const ctx: SendGuardCtx = {
   resultKind: 'reply',
 };
 
-describe('buildSendGuards — PR2 chain composition', () => {
-  it('returns [stickerLeakGuard, harassmentHardGate] in order', () => {
+describe('buildSendGuards — PR2 chain composition (sticker + harassment order preserved)', () => {
+  it('starts with [stickerLeakGuard, harassmentHardGate] in order', () => {
     const guards = buildSendGuards();
-    expect(guards.length).toBe(2);
+    // PR4 appends a third guard; PR2 invariant is only that the first two
+    // slots are stickerLeakGuard then harassmentHardGate.
+    expect(guards.length).toBeGreaterThanOrEqual(2);
     expect(guards[0]).toBe(stickerLeakGuard);
     expect(guards[1]).toBe(harassmentHardGate);
   });
