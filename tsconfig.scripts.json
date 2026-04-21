@@ -23,6 +23,7 @@
     "scripts/eval/replay-runner.ts",
     "scripts/eval/build-synthetic-replay-db.ts",
     "scripts/eval/gold/**/*",
+    "scripts/maintenance/purge-bot-output-phrases.ts",
     "src/**/*"
   ],
   "exclude": ["node_modules", "dist", "test"]

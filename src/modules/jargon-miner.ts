@@ -122,6 +122,8 @@ export interface JargonMinerOptions {
   now?: () => number;
   /** Injected for testing — overrides GeminiGroundingProvider */
   groundingProvider?: { search(query: string): Promise<import('./web-lookup.js').SearchResult[]> };
+  /** Bot's own QQ id — messages with msg.userId matching this are skipped before candidate upsert. */
+  botUserId?: string;
 }
 
 interface JargonCandidate {
@@ -201,6 +203,7 @@ export class JargonMiner {
   private readonly windowMessages: number;
   private readonly now: () => number;
   private readonly groundingProvider: { search(query: string): Promise<import('./web-lookup.js').SearchResult[]> } | undefined;
+  private readonly botUserId: string | undefined;
   private readonly _inFlight = new Map<string, Set<string>>();
 
   constructor(opts: JargonMinerOptions) {
@@ -213,6 +216,7 @@ export class JargonMiner {
     this.windowMessages = opts.windowMessages ?? DEFAULT_WINDOW;
     this.now = opts.now ?? (() => Date.now());
     this.groundingProvider = opts.groundingProvider;
+    this.botUserId = opts.botUserId;
     if (JARGON_MODEL.includes('claude')) {
       this.logger.warn({ model: JARGON_MODEL }, 'JARGON_MODEL is a Claude model — MAX_INFER_PER_CYCLE=8 may incur cost');
     }
@@ -260,6 +264,9 @@ export class JargonMiner {
     const nowSec = Math.floor(this.now() / 1000);
 
     for (const msg of msgs) {
+      // Skip bot's own output so jargon miner doesn't catalog its own phrases.
+      // Truthy guard: empty botUserId is a no-op (avoids ''===''  on legacy null userId).
+      if (this.botUserId && msg.userId === this.botUserId) continue;
       // Strip CQ codes from content before tokenizing
       const cleaned = msg.content.replace(CQ_CODE_RE, ' ');
       const tokens = cleaned.split(TOKEN_SPLIT_RE).filter(Boolean);
