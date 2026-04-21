@@ -18,6 +18,7 @@ import { Database } from '../../src/storage/db.js';
 import type { IClaudeClient } from '../../src/ai/claude.js';
 import type { ChatResult } from '../../src/utils/chat-result.js';
 import type { GroupMessage } from '../../src/adapter/napcat.js';
+import { hasHarassmentTemplate } from '../../src/utils/output-hard-gate.js';
 import type { GoldLabel } from './gold/types.js';
 import type {
   ReplayerArgs,
@@ -264,6 +265,11 @@ export async function runReplayRow(args: RunReplayRowArgs): Promise<ReplayRow> {
     scopeGuardFired: reasonCode === 'scope' && guardPath === 'addressee-regen',
     botNotAddresseeFired: reasonCode === 'scope' && guardPath !== 'addressee-regen',
     stickerLeakFired: reasonCode === 'sticker-leak-stripped',
+    hardGateFired: reasonCode === 'hard-gate-blocked',
+    harassmentEscalationFired:
+      (result.kind === 'reply' || result.kind === 'fallback')
+        ? hasHarassmentTemplate(result.text)
+        : false,
   };
 
   const violationTags = computeViolationTags(args.gold, projected, args.triggerMessage.messageId);

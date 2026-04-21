@@ -15,6 +15,7 @@ import {
   DENOMINATOR_RULES,
   type ProjectedRow,
 } from './violation-tags.js';
+import { hasHarassmentTemplate } from '../../src/utils/output-hard-gate.js';
 import {
   type ComplianceMetric,
   type PerCategoryBreakdown,
@@ -130,6 +131,11 @@ export function aggregateSummary(args: {
         scopeGuardFired: rc === 'scope' && gp === 'addressee-regen',
         botNotAddresseeFired: rc === 'scope' && gp !== 'addressee-regen',
         stickerLeakFired: rc === 'sticker-leak-stripped',
+        hardGateFired: rc === 'hard-gate-blocked',
+        harassmentEscalationFired:
+          (r.resultKind === 'reply' || r.resultKind === 'fallback') &&
+          r.replyText != null &&
+          hasHarassmentTemplate(r.replyText),
       };
       if (!rule(gold, projected)) continue;
       denom++;

@@ -9,6 +9,7 @@
 
 import type { GroupMessage } from '../adapter/napcat.js';
 import { stripStickerTokens } from './sticker-token-output-guard.js';
+import { harassmentHardGate } from './output-hard-gate.js';
 
 export interface SendGuardCtx {
   groupId: string;
@@ -53,5 +54,5 @@ export const stickerLeakGuard: SendGuard = (text, ctx) => {
 };
 
 export function buildSendGuards(): SendGuard[] {
-  return [stickerLeakGuard];
+  return [stickerLeakGuard, harassmentHardGate];
 }

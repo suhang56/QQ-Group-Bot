@@ -20,6 +20,8 @@ const baseRow = (overrides: Partial<ProjectedRow> = {}): ProjectedRow => ({
   scopeGuardFired: false,
   botNotAddresseeFired: false,
   stickerLeakFired: true,
+  hardGateFired: false,
+  harassmentEscalationFired: false,
   ...overrides,
 });
 

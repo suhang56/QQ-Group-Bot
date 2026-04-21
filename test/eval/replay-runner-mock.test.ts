@@ -68,7 +68,8 @@ describe('replay-runner integration — mock mode', () => {
     // R2.5 added 4 guard-cause tags (repeated-low-info-direct-overreply,
     // self-amplified-annoyance, group-address-in-small-scene,
     // bot-not-addressee-replied). PR1 added 1 more: sticker-token-leak.
-    expect(Object.keys(summary.violationCounts).length).toBe(18);
+    // PR2 added 2: hard-gate-blocked + harassment-escalation.
+    expect(Object.keys(summary.violationCounts).length).toBe(20);
 
     // Zero side effect: synthetic fixture sha256 must be unchanged.
     assertNoProdContamination(FIXTURE_DB, before);
