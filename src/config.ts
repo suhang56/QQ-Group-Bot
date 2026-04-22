@@ -166,13 +166,19 @@ export const MEMES_V1_DISABLED = (): boolean => process.env['MEMES_V1_DISABLED']
  * Default 0.78 balances substring matching with semantic synonym detection. */
 export const MEME_CLUSTER_THRESHOLD = parseFloatOr(process.env['MEME_CLUSTER_THRESHOLD'], 0.78, 'MEME_CLUSTER_THRESHOLD');
 
+// R2.5.1 Item 4 — engagement-threshold raise. Default true raises chatMinScore
+// 0.45 → 0.65 for low-info non-direct scenes (no @/reply/fact/lore/fandom).
+// Set env to the literal string 'false' to restore 0.45 for rollback.
+const R2_5_1_HIGHER_ENGAGE_THRESHOLD =
+  process.env['R2_5_1_HIGHER_ENGAGE_THRESHOLD'] !== 'false';
+
 export const lurkerDefaults = {
   lurkerReplyChance: 0.12,
   lurkerCooldownMs: 120_000,
   burstWindowMs: 10_000,
   burstMinMessages: 5,
   chatSilenceBonusSec: 420,
-  chatMinScore: 0.45,
+  chatMinScore: R2_5_1_HIGHER_ENGAGE_THRESHOLD ? 0.65 : 0.45,
   chatBurstWindowMs: 10_000,
   chatBurstCount: 5,
 } as const;

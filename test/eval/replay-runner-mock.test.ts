@@ -70,7 +70,8 @@ describe('replay-runner integration — mock mode', () => {
     // bot-not-addressee-replied). PR1 added 1 more: sticker-token-leak.
     // PR2 added 2: hard-gate-blocked + harassment-escalation.
     // PR4 added 2: persona-fabrication-blocked + persona-fabricated-in-output.
-    expect(Object.keys(summary.violationCounts).length).toBe(22);
+    // R2.5.1 added 2: self-centered-scope-claim + annoyed-template-consecutive.
+    expect(Object.keys(summary.violationCounts).length).toBe(24);
 
     // Zero side effect: synthetic fixture sha256 must be unchanged.
     assertNoProdContamination(FIXTURE_DB, before);

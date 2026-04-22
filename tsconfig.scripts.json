@@ -24,6 +24,7 @@
     "scripts/eval/build-synthetic-replay-db.ts",
     "scripts/eval/gold/**/*",
     "scripts/maintenance/purge-bot-output-phrases.ts",
+    "scripts/maintenance/purge-social-phrase-facts.ts",
     "src/**/*"
   ],
   "exclude": ["node_modules", "dist", "test"]

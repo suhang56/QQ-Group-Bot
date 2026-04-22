@@ -1511,8 +1511,8 @@ describe('ChatModule — soft score gate + Claude-driven silence', () => {
     expect('text' in result && result.text).toBe('好啊');
   });
 
-  it('chatMinScore default is 0.45 (middle ground after 0.25 too eager / 0.7 too quiet)', () => {
-    expect(lurkerDefaults.chatMinScore).toBe(0.45);
+  it('chatMinScore default is 0.65 (R2.5.1 Item 4 — higher engage threshold; rollback via R2_5_1_HIGHER_ENGAGE_THRESHOLD=false → 0.45)', () => {
+    expect(lurkerDefaults.chatMinScore).toBe(0.65);
   });
 
   it('system prompt contains participation opt-out instruction', async () => {
@@ -3786,8 +3786,11 @@ describe('ChatModule — UR-A regen loop cap (Phase C)', () => {
     };
     const chat = makePassthroughChat(claude, db);
     await chat.generateReply('g1', makeMsg({ content: '群里在聊啥' }), []);
-    // Original call + at most 2 regen calls = at most 3 total
+    // Original call + at most 2 UR-A regen calls = 3. R2.5.1 adds a post-loop
+    // scope-claim-regen when the stubbed output matches PLURAL_YOU_PATTERNS
+    // (`你们都X啊`), bringing the cap to 4. Intent of this test is the UR-A
+    // loop's 2-iter cap, not a global regen ceiling.
     const total = (claude.complete as ReturnType<typeof vi.fn>).mock.calls.length;
-    expect(total).toBeLessThanOrEqual(3);
+    expect(total).toBeLessThanOrEqual(4);
   });
 });

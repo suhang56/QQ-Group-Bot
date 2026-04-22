@@ -270,8 +270,8 @@ describe('DENOMINATOR_RULES coverage', () => {
       expect(typeof DENOMINATOR_RULES[t]).toBe('function');
     }
   });
-  it('exposes exactly 22 tags (10 base + 3 R2a cause-split + 4 R2.5 guards + 1 PR1 sticker-leak + 2 PR2 harassment + 2 PR4 persona)', () => {
-    expect(ALL_VIOLATION_TAGS.length).toBe(22);
+  it('exposes exactly 24 tags (10 base + 3 R2a cause-split + 4 R2.5 guards + 1 PR1 sticker-leak + 2 PR2 harassment + 2 PR4 persona + 2 R2.5.1 scope-claim)', () => {
+    expect(ALL_VIOLATION_TAGS.length).toBe(24);
   });
 });
 

@@ -263,7 +263,12 @@ export async function runReplayRow(args: RunReplayRowArgs): Promise<ReplayRow> {
     reasonCode,
     dampenerFired: reasonCode === 'dampener' || reasonCode === 'dampener-ack',
     selfEchoFired: reasonCode === 'self-echo' || guardPath === 'self-echo-regen',
-    scopeGuardFired: reasonCode === 'scope' && guardPath === 'addressee-regen',
+    // R2.5.1: Group A plural-you guard uses the new reasonCode literal — fold
+    // it into scopeGuardFired so the legacy group-address-in-small-scene
+    // violation tag continues to track the plural-you suppression path.
+    scopeGuardFired:
+      (reasonCode === 'scope' && guardPath === 'addressee-regen')
+      || reasonCode === 'scope-claim-plural-you',
     botNotAddresseeFired: reasonCode === 'scope' && guardPath !== 'addressee-regen',
     stickerLeakFired: reasonCode === 'sticker-leak-stripped',
     hardGateFired: reasonCode === 'hard-gate-blocked',
@@ -276,6 +281,8 @@ export async function runReplayRow(args: RunReplayRowArgs): Promise<ReplayRow> {
       (result.kind === 'reply' || result.kind === 'fallback')
         ? hasSelfPersonaFabrication(result.text)
         : false,
+    selfCenteredScopeFired: reasonCode === 'scope-claim-self-centered',
+    templateFamilyFired: reasonCode === 'template-family-cooldown',
   };
 
   const violationTags = computeViolationTags(args.gold, projected, args.triggerMessage.messageId);
