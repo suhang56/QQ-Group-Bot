@@ -129,7 +129,8 @@ export function aggregateSummary(args: {
         reasonCode: rc,
         dampenerFired: rc === 'dampener' || rc === 'dampener-ack',
         selfEchoFired: rc === 'self-echo' || gp === 'self-echo-regen',
-        scopeGuardFired: rc === 'scope' && gp === 'addressee-regen',
+        scopeGuardFired:
+          (rc === 'scope' && gp === 'addressee-regen') || rc === 'scope-claim-plural-you',
         botNotAddresseeFired: rc === 'scope' && gp !== 'addressee-regen',
         stickerLeakFired: rc === 'sticker-leak-stripped',
         hardGateFired: rc === 'hard-gate-blocked',
@@ -142,6 +143,8 @@ export function aggregateSummary(args: {
           (r.resultKind === 'reply' || r.resultKind === 'fallback') &&
           r.replyText != null &&
           hasSelfPersonaFabrication(r.replyText),
+        selfCenteredScopeFired: rc === 'scope-claim-self-centered',
+        templateFamilyFired: rc === 'template-family-cooldown',
       };
       if (!rule(gold, projected)) continue;
       denom++;

@@ -1,4 +1,5 @@
 import { createLogger } from './logger.js';
+import { hasPluralYouScopeClaim } from './scope-claim-guard.js';
 
 const logger = createLogger('sentinel');
 
@@ -693,6 +694,11 @@ export function hasSpectatorJudgmentTemplate(rawText: string): boolean {
   return SPECTATOR_PATTERNS.some(p => p.test(compact));
 }
 
+// R2.5.1: body delegates to scope-claim-guard's plural-you predicate. The
+// new Group A (PLURAL_YOU_PATTERNS) is a superset of legacy SPECTATOR_PATTERNS
+// (adds hostile 你们别烦|闹|吵 + 你们都X啊), so all existing caller tests stay
+// green. Signature preserved for back-compat — chat.ts:53/2930/2936 + R2.5
+// guards/*.ts + existing callers are not modified.
 export function isAddresseeScopeViolation(rawText: string, distinctNonBotSpeakers: number): boolean {
-  return hasSpectatorJudgmentTemplate(rawText) && distinctNonBotSpeakers < 3;
+  return hasPluralYouScopeClaim(rawText) && distinctNonBotSpeakers < 3;
 }

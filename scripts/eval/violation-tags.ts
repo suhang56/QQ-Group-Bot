@@ -46,7 +46,12 @@ export type ViolationTag =
   | 'persona-fabrication-blocked'
   // PR4 — persona-fabricated-in-output: bot's sent replyText contains a
   // self-attributed hard-attr claim (gate bypassed). Target = 0.
-  | 'persona-fabricated-in-output';
+  | 'persona-fabricated-in-output'
+  // R2.5.1 — Group B self-centered scope-claim suppressed (`又来了` without
+  // addressee). Final outcome silent.
+  | 'self-centered-scope-claim'
+  // R2.5.1 — ANNOYED_TEMPLATE_FAMILY consecutive cooldown fired silent.
+  | 'annoyed-template-consecutive';
 
 export const ALL_VIOLATION_TAGS: readonly ViolationTag[] = [
   'gold-silent-but-replied',
@@ -71,6 +76,8 @@ export const ALL_VIOLATION_TAGS: readonly ViolationTag[] = [
   'harassment-escalation',
   'persona-fabrication-blocked',
   'persona-fabricated-in-output',
+  'self-centered-scope-claim',
+  'annoyed-template-consecutive',
 ] as const;
 
 export interface ProjectedRow {
@@ -100,6 +107,10 @@ export interface ProjectedRow {
   personaFabricationFired: boolean;
   /** PR4: bot's sent replyText self-claims a hard attribute (target=0). */
   personaFabricatedInOutput: boolean;
+  /** R2.5.1 Group B: self-centered scope-claim guard fired → silent. */
+  selfCenteredScopeFired: boolean;
+  /** R2.5.1 Item 3: ANNOYED_TEMPLATE_FAMILY cooldown fired → silent. */
+  templateFamilyFired: boolean;
 }
 
 function isOutputted(k: ReplayResultKind): boolean {
@@ -204,6 +215,14 @@ export function computeViolationTags(
   if (outputted && row.personaFabricatedInOutput) {
     tags.push('persona-fabricated-in-output');
   }
+  // R2.5.1 — Group B self-centered scope-claim silence success.
+  if (row.resultKind === 'silent' && row.selfCenteredScopeFired) {
+    tags.push('self-centered-scope-claim');
+  }
+  // R2.5.1 — ANNOYED_TEMPLATE_FAMILY cooldown silence success.
+  if (row.resultKind === 'silent' && row.templateFamilyFired) {
+    tags.push('annoyed-template-consecutive');
+  }
 
   return tags;
 }
@@ -242,4 +261,8 @@ export const DENOMINATOR_RULES: Record<ViolationTag, (gold: GoldLabel, row: Proj
   'persona-fabrication-blocked':        () => true,
   // PR4: escalation only meaningful when bot actually produced an output.
   'persona-fabricated-in-output':       (_g, r) => isOutputted(r.resultKind),
+  // R2.5.1: Group B / template-family guards are final-send filters — any
+  // outcome qualifies for the denominator (mirrors sticker-token-leak).
+  'self-centered-scope-claim':          () => true,
+  'annoyed-template-consecutive':       () => true,
 };

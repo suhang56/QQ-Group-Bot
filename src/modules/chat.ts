@@ -50,7 +50,13 @@ import { buildFactualContextSignal } from './factual-context-signal.js';
 import { type BaseResultMeta, type ReplyMeta, type StickerMeta, type ChatResult } from '../utils/chat-result.js';
 import { pickAtFallback, classifyAtFallbackReason } from './fallback-pool.js';
 import { GroupmateVoice, type VoiceBlock } from './groupmate-voice.js';
-import { isAddresseeScopeViolation } from '../utils/sentinel.js';
+// R2.5.1: `isAddresseeScopeViolation` (sentinel.ts:702) is back-compat re-export
+// for existing callers (test/addressee-scope-guard.test.ts + test/guards/
+// scope-addressee-guard.test.ts). chat.ts itself no longer calls it — Group A
+// plural-you path now uses hasPluralYouScopeClaim directly with the distinct
+// reasonCode 'scope-claim-plural-you' so violation-tags can discriminate.
+import { hasSelfCenteredScopeClaim, hasPluralYouScopeClaim, prevBotTurnAddressed } from '../utils/scope-claim-guard.js';
+import { isAnnoyedTemplateConsecutive } from './guards/template-family-cooldown.js';
 import { isStickerTokenOutput, makeStickerTokenChoices, resolveStickerTokenOutput, type StickerTokenChoice } from '../utils/sticker-tokens.js';
 import { DirectCooldown, isRepeatedLowInfoDirectOverreply, pickNeutralAck } from '../core/direct-cooldown.js';
 import { SelfEchoGuard, isSelfAmplifiedAnnoyance } from './guards/self-echo-guard.js';
@@ -2918,39 +2924,67 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
         }
       }
 
-      // ── Addressee-scope guard ─────────────────────────────────────────────
+      // ── R2.5.1 scope-claim guards (Group B → Group A) ────────────────────
       // Runs AFTER regen loop (model may emit "你们 事 真多" with spaces that
       // only normalize in postProcess). Must run before near-dup/entity guards.
+      // Each block is independent (non-short-circuit): pass → update
+      // `processed`, continue; fail (regen still matches) → early-return silent.
+      //
+      // Group B — self-centered scope-claim (`又来了` / `又开始了` ...). Trigger
+      // is speakerCount-agnostic; suppress only when bot not currently
+      // addressed AND bot's most-recent own turn was not addressed either.
+      {
+        const isAtMention = engagementSignals.isMention;
+        const isReplyToBot = engagementSignals.isReplyToBot;
+        if (hasSelfCenteredScopeClaim(processed)
+            && !isAtMention
+            && !isReplyToBot
+            && !prevBotTurnAddressed(
+              immediateChron as ReadonlyArray<{ userId: string; rawContent?: string; content: string; messageId?: string; timestamp?: number }>,
+              this.botUserId,
+            )) {
+          this.logger.info({ groupId, processed, tag: 'self-centered-scope-claim' }, 'scope-claim guard B: regen once');
+          metaBuilder.setGuardPath('scope-claim-regen');
+          try {
+            const regenResponse = await chatRequest(true);
+            const regenText = applyPersonaFilters(sanitize(regenResponse.text), mfaceKeys);
+            if (!regenText || hasSelfCenteredScopeClaim(regenText)) {
+              this.logger.info({ groupId }, 'scope-claim guard B: regen fail → silent');
+              return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'scope-claim-self-centered' };
+            }
+            processed = regenText;
+          } catch {
+            return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'scope-claim-self-centered' };
+          }
+        }
+      }
+
+      // Group A — plural-you scope-claim (legacy SPECTATOR_PATTERNS superset).
+      // Trigger mirrors R2.5 addressee-scope: distinct-non-bot speakers < 3 AND
+      // not a direct trigger. Legacy reasonCode 'scope' preserved via SF3-style
+      // integration — new reasonCode literal 'scope-claim-plural-you' keeps the
+      // violation-tags pipeline able to discriminate Group A fires from pre-R2.5
+      // 'scope' paths (sentinel's isAddresseeScopeViolation back-compat keeps
+      // legacy callers in other files untouched).
       {
         const dSpeakers = distinctNonBotSpeakersImmediate(
           immediateChron as ReadonlyArray<{ userId: string; rawContent?: string; content: string; timestamp?: number }>,
           triggerMessage,
           this.botUserId,
         );
-        if (isAddresseeScopeViolation(processed, dSpeakers)) {
-          this.logger.info({ groupId, processed, dSpeakers }, 'addressee-scope guard: regen once');
-          metaBuilder.setGuardPath('addressee-regen');
+        if (hasPluralYouScopeClaim(processed) && dSpeakers < 3 && !isDirect) {
+          this.logger.info({ groupId, processed, dSpeakers, tag: 'group-address-in-small-scene' }, 'scope-claim guard A: regen once');
+          metaBuilder.setGuardPath('scope-claim-regen');
           try {
-            const scopeRegenResponse = await chatRequest(true);
-            const scopeRegenText = applyPersonaFilters(sanitize(scopeRegenResponse.text), mfaceKeys);
-            if (!scopeRegenText || isAddresseeScopeViolation(scopeRegenText, dSpeakers)) {
-              this.logger.info({ groupId, dSpeakers }, 'addressee-scope guard: regen fail → silent');
-              return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'scope' };
+            const regenResponse = await chatRequest(true);
+            const regenText = applyPersonaFilters(sanitize(regenResponse.text), mfaceKeys);
+            if (!regenText || hasPluralYouScopeClaim(regenText)) {
+              this.logger.info({ groupId, dSpeakers }, 'scope-claim guard A: regen fail → silent');
+              return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'scope-claim-plural-you' };
             }
-            // Skip near-dup for this regen output only (narrow)
-            metaBuilder.setEvasive(this._isEvasiveReply(scopeRegenText));
-            {
-              const guardCtx: SendGuardCtx = { groupId, triggerMessage, isDirect, resultKind: 'reply' };
-              const guardResult = runSendGuardChain(buildSendGuards(), scopeRegenText, guardCtx);
-              if (!guardResult.passed) {
-                this.logger.info({ groupId, reason: guardResult.reason, original: scopeRegenText }, 'send_guard_blocked');
-                metaBuilder.setGuardPath('post-process');
-                return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: guardResult.reason as 'sticker-leak-stripped' | 'hard-gate-blocked' | 'persona-fabricated' };
-              }
-              return { kind: 'reply', text: guardResult.text, meta: metaBuilder.buildReply('normal'), reasonCode: 'engaged' };
-            }
+            processed = regenText;
           } catch {
-            return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'scope' };
+            return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'scope-claim-plural-you' };
           }
         }
       }
@@ -2987,6 +3021,32 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
             processed = echoRegenText;
           } catch {
             return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'self-echo' };
+          }
+        }
+      }
+
+      // ── R2.5.1 Item 3: ANNOYED_TEMPLATE_FAMILY consecutive cooldown ──────
+      // Narrower than SF2 — specific "annoyed template" tokens (烦死了/想屁吃呢/
+      // 爱谁记谁记/又来了/你复读机/...). Fires when candidate AND ≥2 of last-3 bot
+      // outputs contain a family token. Non-short-circuit w.r.t. Group B/A:
+      // evaluated independently on current `processed`, including when Group B
+      // passed via regen-update.
+      {
+        const nowSecTF = Math.floor(Date.now() / 1000);
+        const botHistTF = this.selfEchoGuard.getRecent(groupId, nowSecTF);
+        if (isAnnoyedTemplateConsecutive(processed, botHistTF)) {
+          this.logger.info({ groupId, processed, tag: 'annoyed-template-consecutive' }, 'template-family guard: regen once');
+          metaBuilder.setGuardPath('template-family-regen');
+          try {
+            const regenResponse = await chatRequest(true);
+            const regenText = applyPersonaFilters(sanitize(regenResponse.text), mfaceKeys);
+            if (!regenText || isAnnoyedTemplateConsecutive(regenText, botHistTF)) {
+              this.logger.info({ groupId }, 'template-family guard: regen fail → silent');
+              return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'template-family-cooldown' };
+            }
+            processed = regenText;
+          } catch {
+            return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'template-family-cooldown' };
           }
         }
       }
