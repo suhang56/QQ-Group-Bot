@@ -238,8 +238,8 @@ describe('hasHarassmentTemplate (replay telemetry helper)', () => {
 });
 
 describe('BLOCKED_TEMPLATES + ALLOWLIST shape', () => {
-  it('BLOCKED_TEMPLATES has 8 entries', () => {
-    expect(BLOCKED_TEMPLATES.length).toBe(8);
+  it('BLOCKED_TEMPLATES has 14 entries', () => {
+    expect(BLOCKED_TEMPLATES.length).toBe(14);
   });
 
   it('ALLOWLIST has exactly 炒你妈 and 滚蛋', () => {
@@ -263,5 +263,134 @@ describe('BLOCKED_TEMPLATES + ALLOWLIST shape', () => {
     for (const re of BLOCKED_TEMPLATES) {
       expect(re.source).not.toBe('你他妈');
     }
+  });
+});
+
+describe('BLOCKED_TEMPLATES — PR2 hotfix (nmd / 尼玛 / insult family)', () => {
+  describe('must-fire: new terms', () => {
+    it('blocks bare nmd', () => {
+      const r = harassmentHardGate('nmd', ctx);
+      expect(r.passed).toBe(false);
+      if (!r.passed) expect(r.reason).toBe('hard-gate-blocked');
+    });
+
+    it('blocks nmd in mid-sentence', () => {
+      const r = harassmentHardGate('你今天nmd了吗', ctx);
+      expect(r.passed).toBe(false);
+    });
+
+    it('blocks nmd with suffix 啊', () => {
+      const r = harassmentHardGate('nmd啊', ctx);
+      expect(r.passed).toBe(false);
+    });
+
+    it('blocks CQ-prefixed nmd (stripCqReply applied first)', () => {
+      const r = harassmentHardGate('[CQ:reply,id=1]nmd', ctx);
+      expect(r.passed).toBe(false);
+    });
+
+    it('blocks bare 尼玛', () => {
+      const r = harassmentHardGate('尼玛', ctx);
+      expect(r.passed).toBe(false);
+    });
+
+    it('blocks 尼玛 as substring (去尼玛的)', () => {
+      const r = harassmentHardGate('去尼玛的', ctx);
+      expect(r.passed).toBe(false);
+    });
+
+    it('blocks 你有病吧', () => {
+      const r = harassmentHardGate('你有病吧', ctx);
+      expect(r.passed).toBe(false);
+    });
+
+    it('blocks 有病啊你', () => {
+      const r = harassmentHardGate('有病啊你', ctx);
+      expect(r.passed).toBe(false);
+    });
+
+    it('blocks 神经病吧', () => {
+      const r = harassmentHardGate('神经病吧', ctx);
+      expect(r.passed).toBe(false);
+    });
+
+    it('blocks 干你妈', () => {
+      const r = harassmentHardGate('干你妈', ctx);
+      expect(r.passed).toBe(false);
+    });
+
+    it('blocks 干你妈 as substring (干你妈的活)', () => {
+      const r = harassmentHardGate('干你妈的活', ctx);
+      expect(r.passed).toBe(false);
+    });
+
+    it('blocks 你妈的', () => {
+      const r = harassmentHardGate('你妈的', ctx);
+      expect(r.passed).toBe(false);
+    });
+
+    it('blocks 你妈逼', () => {
+      const r = harassmentHardGate('你妈逼', ctx);
+      expect(r.passed).toBe(false);
+    });
+
+    it('blocks 妈的逼', () => {
+      const r = harassmentHardGate('妈的逼', ctx);
+      expect(r.passed).toBe(false);
+    });
+  });
+
+  describe('must-NOT-fire: PR2 hotfix negative matrix', () => {
+    it('bare nm passes (prefix of nmd)', () => {
+      const r = harassmentHardGate('nm', ctx);
+      expect(r.passed).toBe(true);
+    });
+
+    it('uppercase NMD passes (regex is case-sensitive, 0 lore hits)', () => {
+      const r = harassmentHardGate('NMD', ctx);
+      expect(r.passed).toBe(true);
+    });
+
+    it('bare 尼 passes (single char)', () => {
+      const r = harassmentHardGate('尼', ctx);
+      expect(r.passed).toBe(true);
+    });
+
+    it('bare 妈 passes (single char)', () => {
+      const r = harassmentHardGate('妈', ctx);
+      expect(r.passed).toBe(true);
+    });
+
+    it('bare 神经病 passes (requires 吧 suffix to block)', () => {
+      const r = harassmentHardGate('神经病', ctx);
+      expect(r.passed).toBe(true);
+    });
+
+    it('bare 有病 passes (not full 你有病吧 / 有病啊你)', () => {
+      const r = harassmentHardGate('有病', ctx);
+      expect(r.passed).toBe(true);
+    });
+
+    it('笑死 passes (only 去死 blocked, not bare 死)', () => {
+      const r = harassmentHardGate('笑死', ctx);
+      expect(r.passed).toBe(true);
+    });
+
+    it('哭死 passes (bare 死 unblocked)', () => {
+      const r = harassmentHardGate('哭死', ctx);
+      expect(r.passed).toBe(true);
+    });
+  });
+
+  describe('shape: new pattern presence in source', () => {
+    it('sources include nmd, 尼玛, 干你妈, 妈的逼, 你妈(?:的|逼), 你有病吧|有病啊你|神经病吧', () => {
+      const srcConcat = BLOCKED_TEMPLATES.map((r) => r.source).join('||');
+      expect(srcConcat).toMatch(/nmd/);
+      expect(srcConcat).toMatch(/尼玛/);
+      expect(srcConcat).toMatch(/干你妈/);
+      expect(srcConcat).toMatch(/妈的逼/);
+      expect(srcConcat).toMatch(/你妈\(\?:的\|逼\)/);
+      expect(srcConcat).toMatch(/你有病吧\|有病啊你\|神经病吧/);
+    });
   });
 });

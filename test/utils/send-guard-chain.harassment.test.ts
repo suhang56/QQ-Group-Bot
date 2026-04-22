@@ -80,4 +80,29 @@ describe('send-guard-chain + harassmentHardGate ordering', () => {
     const r = runSendGuardChain(buildSendGuards(), '', ctx);
     expect(r.passed).toBe(true);
   });
+
+  it('PR2 hotfix: curse-deflection emits nmd → chain blocks with hard-gate-blocked', () => {
+    // Simulates the chat.ts:2209 curse-deflection path — curseText is
+    // generated (pre-hotfix pool contained 'nmd'; post-hotfix it should not,
+    // but the gate remains the authoritative guardrail). Verifies that even
+    // if any upstream path emits 'nmd', the send-guard chain silences it.
+    const r = runSendGuardChain(buildSendGuards(), 'nmd', ctx);
+    expect(r.passed).toBe(false);
+    if (!r.passed) {
+      expect(r.reason).toBe('hard-gate-blocked');
+      expect(r.replacement).toBe('neutral-ack');
+    }
+  });
+
+  it('PR2 hotfix: 尼玛 full-chain blocks with hard-gate-blocked', () => {
+    const r = runSendGuardChain(buildSendGuards(), '尼玛', ctx);
+    expect(r.passed).toBe(false);
+    if (!r.passed) expect(r.reason).toBe('hard-gate-blocked');
+  });
+
+  it('PR2 hotfix: 你妈的 full-chain blocks with hard-gate-blocked', () => {
+    const r = runSendGuardChain(buildSendGuards(), '你妈的', ctx);
+    expect(r.passed).toBe(false);
+    if (!r.passed) expect(r.reason).toBe('hard-gate-blocked');
+  });
 });
