@@ -21,12 +21,18 @@ const logger = createLogger('output-hard-gate');
 export const BLOCKED_TEMPLATES: readonly RegExp[] = [
   /怡你妈/,
   /操你妈|草你妈|炒你妈/,
+  /干你妈/,
+  /你妈(?:的|逼)/,
+  /妈的逼/,
   /去死|去你妈的死/,
   /滚(?:蛋|开)/,
   /再@我(?:你)?试试/,
   /闭嘴|给我闭嘴/,
   /傻逼/,
   /脑子有问题/,
+  /你有病吧|有病啊你|神经病吧/,
+  /nmd/,
+  /尼玛/,
 ];
 
 export const ALLOWLIST: readonly string[] = ['炒你妈', '滚蛋'];
