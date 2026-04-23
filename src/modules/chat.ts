@@ -44,6 +44,7 @@ import { OnDemandLookup } from './on-demand-lookup.js';
 import { extractCandidateTerms } from '../utils/extract-candidate-terms.js';
 import { WebLookup, shouldLookupTerm, DEFAULT_COMMON_WORDS } from './web-lookup.js';
 import { isDirectQuestion, isGroundedOpinionQuestion } from '../utils/is-direct-question.js';
+import { hasTopicFollowUpPhrase, FOLLOWUP_FUNCTION_WORDS } from '../utils/topic-followup-phrase.js';
 import { extractTermFromTopic, isValidStructuredTerm } from './fact-topic-prefixes.js';
 import { isEmotivePhrase } from '../utils/is-emotive-phrase.js';
 import { isVulgarDismissal } from '../utils/is-vulgar-dismissal.js';
@@ -257,6 +258,7 @@ export interface ScoreFactors {
   continuity: number;
   clarification: number;
   topicStick: number;
+  followUpPhrase: number;
   metaIdentityProbe: number;
   adminBoost: number;
   stickerRequest: number;
@@ -3206,11 +3208,24 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
         },
         engagePathAffinityRecorded,
       );
-      this.engagedTopic.set(groupId, {
-        tokens: extractTokens(triggerMessage.content),
-        until: Date.now() + 90_000,
-        msgCount: 0,
-      });
+      {
+        const existing = this.engagedTopic.get(groupId);
+        const raw = extractTokens(triggerMessage.content);
+        const filtered: string[] = [];
+        for (const t of raw) {
+          if (!FOLLOWUP_FUNCTION_WORDS.has(t)) filtered.push(t);
+        }
+        const merged: string[] = existing ? [...existing.tokens] : [];
+        for (const t of filtered) {
+          if (!merged.includes(t)) merged.push(t);
+        }
+        const capped = merged.length > 30 ? merged.slice(merged.length - 30) : merged;
+        this.engagedTopic.set(groupId, {
+          tokens: new Set(capped),
+          until: Date.now() + 90_000,
+          msgCount: 0,
+        });
+      }
       const isEvasive = this._isEvasiveReply(processed);
       metaBuilder.setEvasive(isEvasive);
       {
@@ -3257,6 +3272,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       continuity: 0,
       clarification: 0,
       topicStick: 0,
+      followUpPhrase: 0,
       metaIdentityProbe: 0,
       adminBoost: 0,
       stickerRequest: 0,
@@ -3404,6 +3420,12 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     const engaged = this.engagedTopic.get(groupId);
     if (engaged) {
       if (nowMs < engaged.until) {
+        // followUpPhrase: independent of overlap — fires when topic is valid
+        // AND the message is a naked follow-up particle (还有吗 / 那X呢 / 6月...live).
+        // Value 0.4, additive with topicStick when both fire. See PR6 R3.1 Round 1.
+        if (hasTopicFollowUpPhrase(msg.content)) {
+          factors.followUpPhrase = 0.4;
+        }
         const msgTokens = extractTokens(msg.content);
         let overlap = 0;
         for (const t of msgTokens) if (engaged.tokens.has(t)) overlap++;
