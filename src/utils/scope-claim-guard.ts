@@ -18,6 +18,9 @@
  * Input is bot OUTGOING text — user input never routes here.
  */
 
+import { extractTokens } from './text-tokenize.js';
+import { FOLLOWUP_FUNCTION_WORDS } from './topic-followup-phrase.js';
+
 const _stripCQ = (s: string): string => s.replace(/\[CQ:[^\]]+\]/g, '').trim();
 const _compact = (s: string): string => _stripCQ(s).replace(/\s+/g, '');
 
@@ -132,5 +135,89 @@ export function prevBotTurnAddressed(
       if (botMessageIds.has(match[1]!)) return true;
     }
   }
+  return false;
+}
+
+// ── botIsInCurrentThread (R2.5.1-annex C) ──────────────────────────────────
+// 4th condition for Group B fire block. Returns true when the bot is a real
+// participant in the current thread, so the self-centered scope-claim guard
+// should NOT fire (because bot is plausibly addressed even without an explicit
+// @ or reply-to-bot CQ on THIS turn).
+//
+// Three OR'd sub-conditions (any → return true):
+//   (a) Within the last 3 non-bot user turns, some turn @bot or reply-to-bot.
+//   (b) engagedTopic for the group is still valid (nowMs < until) AND the
+//       trigger's tokens (after FOLLOWUP_FUNCTION_WORDS filter) overlap the
+//       topic's token set by ≥ 1 entry.
+//   (c) Walking the trigger's [CQ:reply,id=N] chain up to 3 hops lands on a
+//       message authored by botUserId. (Hop 1 = the trigger's first reply
+//       target; trigger itself is hop 0.)
+//
+// Cold-start safe: empty history → all sub-conditions false → return false.
+// engagedTopicEntry=undefined → (b) skipped. No reply-id → (c) skipped.
+export function botIsInCurrentThread(
+  triggerMsg: { readonly content: string; readonly rawContent?: string },
+  recentHistory: ReadonlyArray<HistoryMessage>,
+  engagedTopicEntry: { readonly tokens: ReadonlySet<string>; readonly until: number; readonly msgCount: number } | undefined,
+  botUserId: string,
+  nowMs: number,
+): boolean {
+  if (!botUserId) return false;
+  const history = recentHistory ?? [];
+
+  // Build botMessageIds across ALL of recentHistory (not bounded by botIdx).
+  const botMessageIds = new Set<string>();
+  for (const m of history) {
+    if (m.userId === botUserId && m.messageId) botMessageIds.add(m.messageId);
+  }
+
+  const atBotRe = new RegExp(`\\[CQ:at,qq=${botUserId}(?:[,\\]])`);
+  const replyIdRe = /\[CQ:reply,[^\]]*\bid=(-?\d+)/g;
+
+  // (a) Recent direct-address window — last 3 non-bot user turns.
+  {
+    const window: HistoryMessage[] = [];
+    for (let i = history.length - 1; i >= 0 && window.length < 3; i--) {
+      const m = history[i]!;
+      if (m.userId === botUserId) continue;
+      window.push(m);
+    }
+    for (const m of window) {
+      const txt = m.rawContent ?? m.content ?? '';
+      if (atBotRe.test(txt)) return true;
+      replyIdRe.lastIndex = 0;
+      let match: RegExpExecArray | null;
+      while ((match = replyIdRe.exec(txt)) !== null) {
+        if (botMessageIds.has(match[1]!)) return true;
+      }
+    }
+  }
+
+  // (b) Engaged-topic content overlap (filtered by FOLLOWUP_FUNCTION_WORDS).
+  if (engagedTopicEntry !== undefined && nowMs < engagedTopicEntry.until) {
+    const raw = extractTokens(triggerMsg.content);
+    for (const t of raw) {
+      if (FOLLOWUP_FUNCTION_WORDS.has(t)) continue;
+      if (engagedTopicEntry.tokens.has(t)) return true;
+    }
+  }
+
+  // (c) Reply-chain walk, max 3 hops; hop 1 = first reply target.
+  {
+    const byId = new Map<string, HistoryMessage>();
+    for (const m of history) {
+      if (m.messageId !== undefined) byId.set(m.messageId, m);
+    }
+    let cur = triggerMsg.rawContent ?? triggerMsg.content ?? '';
+    for (let hop = 1; hop <= 3; hop++) {
+      const m = /\[CQ:reply,[^\]]*\bid=(-?\d+)/.exec(cur);
+      if (!m) break;
+      const target = byId.get(m[1]!);
+      if (!target) break;
+      if (target.userId === botUserId) return true;
+      cur = target.rawContent ?? target.content ?? '';
+    }
+  }
+
   return false;
 }
