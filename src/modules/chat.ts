@@ -57,7 +57,7 @@ import { GroupmateVoice, type VoiceBlock } from './groupmate-voice.js';
 // scope-addressee-guard.test.ts). chat.ts itself no longer calls it — Group A
 // plural-you path now uses hasPluralYouScopeClaim directly with the distinct
 // reasonCode 'scope-claim-plural-you' so violation-tags can discriminate.
-import { hasSelfCenteredScopeClaim, hasPluralYouScopeClaim, prevBotTurnAddressed } from '../utils/scope-claim-guard.js';
+import { hasSelfCenteredScopeClaim, hasPluralYouScopeClaim, prevBotTurnAddressed, botIsInCurrentThread } from '../utils/scope-claim-guard.js';
 import { isAnnoyedTemplateConsecutive } from './guards/template-family-cooldown.js';
 import { isStickerTokenOutput, makeStickerTokenChoices, resolveStickerTokenOutput, type StickerTokenChoice } from '../utils/sticker-tokens.js';
 import { DirectCooldown, isRepeatedLowInfoDirectOverreply, pickNeutralAck } from '../core/direct-cooldown.js';
@@ -1038,6 +1038,12 @@ export class ChatModule implements IChatModule {
   }>();
   // per-group: active topic engagement state (set when bot replies, consumed in scoring)
   private readonly engagedTopic = new Map<string, { tokens: Set<string>; until: number; msgCount: number }>();
+  // R2.5.1-annex (C): read-only accessor used by Group B fire block to feed
+  // the botIsInCurrentThread predicate. Returns the entry as-is (caller does
+  // not mutate; tokens Set is shared by reference, predicate only reads).
+  private _getEngagedTopicEntry(groupId: string): { tokens: Set<string>; until: number; msgCount: number } | undefined {
+    return this.engagedTopic.get(groupId);
+  }
   // per-group: admin userId → { nickname, samples[] } (populated from live messages)
   private readonly adminSamples = new Map<string, Map<string, { nickname: string; samples: string[] }>>();
   // per-group: admin style block cache { text, expiresAt }
@@ -2950,6 +2956,13 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
             && !prevBotTurnAddressed(
               immediateChron as ReadonlyArray<{ userId: string; rawContent?: string; content: string; messageId?: string; timestamp?: number }>,
               this.botUserId,
+            )
+            && !botIsInCurrentThread(
+              triggerMessage,
+              immediateChron as ReadonlyArray<{ userId: string; rawContent?: string; content: string; messageId?: string; timestamp?: number }>,
+              this._getEngagedTopicEntry(groupId),
+              this.botUserId,
+              Date.now(),
             )) {
           this.logger.info({ groupId, processed, tag: 'self-centered-scope-claim' }, 'scope-claim guard B: regen once');
           metaBuilder.setGuardPath('scope-claim-regen');
