@@ -11,6 +11,9 @@
  * replacement:'neutral-ack' }. PR2 maps to `silent` kind via the 14 chat.ts
  * reasonCode sites; `neutral-ack` replacement field is reserved for PR2.1
  * mapper refactor that will wire pickNeutralAck() through.
+ *
+ * 2026-04-24: cao-family collapsed to phonetic IME family regex (操草炒吵淦艹肏);
+ * sb-family expanded to 煞笔 + \bSB\b. See feedback_chinese_profanity_phonetic_family.md.
  */
 
 import type { SendGuard } from './send-guard-chain.js';
@@ -20,7 +23,7 @@ const logger = createLogger('output-hard-gate');
 
 export const BLOCKED_TEMPLATES: readonly RegExp[] = [
   /怡你妈/,
-  /操你妈|草你妈|炒你妈/,
+  /(?:操|草|炒|吵|淦|艹|肏)(?:你|尼|拟)?(?:妈|马)/,
   /干你妈/,
   /你妈(?:的|逼)/,
   /妈的逼/,
@@ -28,7 +31,7 @@ export const BLOCKED_TEMPLATES: readonly RegExp[] = [
   /滚(?:蛋|开)/,
   /再@我(?:你)?试试/,
   /闭嘴|给我闭嘴/,
-  /傻逼/,
+  /傻逼|煞笔|\b[Ss][Bb]\b/,
   /脑子有问题/,
   /你有病吧|有病啊你|神经病吧/,
   /nmd/,
