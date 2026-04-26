@@ -394,3 +394,82 @@ describe('BLOCKED_TEMPLATES — PR2 hotfix (nmd / 尼玛 / insult family)', () =
     });
   });
 });
+
+describe('BLOCKED_TEMPLATES — PR3 cao-family + sb-family extension', () => {
+  describe('cao-family must-fire (10 rows)', () => {
+    it.each([
+      ['操你妈'],
+      ['草你妈'],
+      ['你炒你妈'],
+      ['吵你妈'],
+      ['淦你妈'],
+      ['艹你妈'],
+      ['肏你妈'],
+      ['操尼妈'],
+      ['草拟妈'],
+      ['淦马'],
+    ])('blocks %s (cao-family)', (text) => {
+      const r = harassmentHardGate(text, ctx);
+      expect(r.passed).toBe(false);
+      if (!r.passed) expect(r.reason).toBe('hard-gate-blocked');
+    });
+  });
+
+  describe('sb-family must-fire (6 rows)', () => {
+    it.each([
+      ['傻逼'],
+      ['煞笔'],
+      ['sb'],
+      ['SB'],
+      ['这sb真烦'],
+      ['sb啊'],
+    ])('blocks %s (sb-family)', (text) => {
+      const r = harassmentHardGate(text, ctx);
+      expect(r.passed).toBe(false);
+      if (!r.passed) expect(r.reason).toBe('hard-gate-blocked');
+    });
+  });
+
+  describe('cao-family must-NOT-fire (5 rows)', () => {
+    it.each([
+      ['操作'],
+      ['炒菜'],
+      ['草'],
+      ['淦'],
+      ['他妈的'],
+    ])('passes %s (no profanity suffix or wrong family)', (text) => {
+      const r = harassmentHardGate(text, ctx);
+      expect(r.passed).toBe(true);
+    });
+  });
+
+  describe('sb-family must-NOT-fire (3 rows)', () => {
+    it.each([
+      ['usb'],
+      ['gosb'],
+      ['sbear'],
+    ])('passes %s (\\b boundary blocks substring)', (text) => {
+      const r = harassmentHardGate(text, ctx);
+      expect(r.passed).toBe(true);
+    });
+  });
+
+  describe('shape: cao-family + sb-family pattern presence', () => {
+    it('cao-family regex contains all 7 phonetic chars', () => {
+      const srcConcat = BLOCKED_TEMPLATES.map((r) => r.source).join('||');
+      for (const ch of ['操', '草', '炒', '吵', '淦', '艹', '肏']) {
+        expect(srcConcat).toContain(ch);
+      }
+    });
+
+    it('sb-family regex contains 煞笔 + \\b[Ss][Bb]\\b', () => {
+      const srcConcat = BLOCKED_TEMPLATES.map((r) => r.source).join('||');
+      expect(srcConcat).toContain('煞笔');
+      expect(srcConcat).toMatch(/\\b\[Ss\]\[Bb\]\\b/);
+    });
+
+    it('BLOCKED_TEMPLATES still has 14 entries', () => {
+      expect(BLOCKED_TEMPLATES.length).toBe(14);
+    });
+  });
+});
