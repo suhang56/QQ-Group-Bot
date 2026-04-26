@@ -65,6 +65,7 @@ import { SelfEchoGuard, isSelfAmplifiedAnnoyance } from './guards/self-echo-guar
 import { isBotNotAddresseeReplied } from './guards/scope-addressee-guard.js';
 import { runSendGuardChain, buildSendGuards, type SendGuardCtx } from '../utils/send-guard-chain.js';
 import { IDENTITY_DEFLECTIONS } from '../utils/identity-deflections.js';
+import { isAntiMetaDirect } from '../utils/anti-meta-direct.js';
 
 // Path A stub: { term, meaning } pairs extracted from user message.
 // Path A dev replaces null meanings with corpus results when merged.
@@ -1714,6 +1715,14 @@ export class ChatModule implements IChatModule {
         }
         return { kind: 'reply', text: guardResult.text, meta: metaBuilder.buildReply('direct'), reasonCode: 'engaged' };
       }
+    }
+
+    // Anti-meta-direct input guard: pure silent on prompt-injection / persona-rewrite
+    // attempts. Runs after @-spam ignore (legit abuse protection) but BEFORE
+    // debounce / in-flight / engagement signals — direct-@ injection should also
+    // be silenced. No LLM call, no deflection pool, no regen on hit.
+    if (isAntiMetaDirect(triggerMessage.content)) {
+      return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'injection-refused' };
     }
 
     // Debounce timing gate (R2a: skipped for direct @/reply-to-bot).
