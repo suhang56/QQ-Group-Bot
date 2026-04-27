@@ -376,7 +376,7 @@ export const SEXUAL_HARASSMENT =
   /jjcn|jj[插操干cn]|鸡[巴鸡]|雷普|レイプ|\brape\b|约炮|你是gg还是mm/i;
 
 export const SEXUAL_HARASSMENT_DEFLECTIONS = [
-  '?', '滚', '无聊', '神经病', '你有病吧', '恶心', '别碰我', '闭嘴',
+  '?', '滚', '无聊', '你有病吧', '恶心', '别碰我', '闭嘴',
 ];
 
 // Matches memory-injection / persona-override exploit attempts.
@@ -391,7 +391,7 @@ export const MEMORY_INJECT_DEFLECTIONS = [
 ];
 
 export const CURSE_DEFLECTIONS = [
-  '傻逼', '神经病', '你有病吧', '滚', '煞笔', '有毛病',
+  '傻逼', '你有病吧', '滚', '煞笔', '有毛病',
   '没完了是吧', '烦死了 闭嘴', '一天天的', '真他妈烦', '别闹了', '笑死 真的烦',
 ];
 
