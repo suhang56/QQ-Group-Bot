@@ -33,7 +33,7 @@ export const BLOCKED_TEMPLATES: readonly RegExp[] = [
   /闭嘴|给我闭嘴/,
   /傻逼|煞笔|\b[Ss][Bb]\b/,
   /脑子有问题/,
-  /你有病吧|有病啊你|神经病吧/,
+  /你有病吧|有病啊你|神经病(?!院)/,
   /nmd/,
   /尼玛/,
 ];

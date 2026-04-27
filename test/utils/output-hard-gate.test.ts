@@ -7,6 +7,10 @@ import {
   BLOCKED_TEMPLATES,
   ALLOWLIST,
 } from '../../src/utils/output-hard-gate.js';
+import {
+  CURSE_DEFLECTIONS,
+  SEXUAL_HARASSMENT_DEFLECTIONS,
+} from '../../src/modules/chat.js';
 import type { SendGuardCtx } from '../../src/utils/send-guard-chain.js';
 
 const ctx: SendGuardCtx = {
@@ -361,9 +365,10 @@ describe('BLOCKED_TEMPLATES — PR2 hotfix (nmd / 尼玛 / insult family)', () =
       expect(r.passed).toBe(true);
     });
 
-    it('bare 神经病 passes (requires 吧 suffix to block)', () => {
+    it('bare 神经病 blocks (R6 hotfix — negative lookahead allows only 神经病院)', () => {
       const r = harassmentHardGate('神经病', ctx);
-      expect(r.passed).toBe(true);
+      expect(r.passed).toBe(false);
+      if (!r.passed) expect(r.reason).toBe('hard-gate-blocked');
     });
 
     it('bare 有病 passes (not full 你有病吧 / 有病啊你)', () => {
@@ -383,14 +388,14 @@ describe('BLOCKED_TEMPLATES — PR2 hotfix (nmd / 尼玛 / insult family)', () =
   });
 
   describe('shape: new pattern presence in source', () => {
-    it('sources include nmd, 尼玛, 干你妈, 妈的逼, 你妈(?:的|逼), 你有病吧|有病啊你|神经病吧', () => {
+    it('sources include nmd, 尼玛, 干你妈, 妈的逼, 你妈(?:的|逼), 你有病吧|有病啊你|神经病(?!院)', () => {
       const srcConcat = BLOCKED_TEMPLATES.map((r) => r.source).join('||');
       expect(srcConcat).toMatch(/nmd/);
       expect(srcConcat).toMatch(/尼玛/);
       expect(srcConcat).toMatch(/干你妈/);
       expect(srcConcat).toMatch(/妈的逼/);
       expect(srcConcat).toMatch(/你妈\(\?:的\|逼\)/);
-      expect(srcConcat).toMatch(/你有病吧\|有病啊你\|神经病吧/);
+      expect(srcConcat).toMatch(/你有病吧\|有病啊你\|神经病\(\?!院\)/);
     });
   });
 });
@@ -471,5 +476,60 @@ describe('BLOCKED_TEMPLATES — PR3 cao-family + sb-family extension', () => {
     it('BLOCKED_TEMPLATES still has 14 entries', () => {
       expect(BLOCKED_TEMPLATES.length).toBe(14);
     });
+  });
+});
+
+describe('BLOCKED_TEMPLATES — R6 hotfix (bare 神经病 + 神经病院 carve-out)', () => {
+  describe('must-fire: 神经病 family', () => {
+    it.each([
+      ['神经病'],
+      ['你神经病吧'],
+      ['神经病吧'],
+      ['神经病的医生'],
+      ['不要神经病'],
+    ])('blocks %s', (text) => {
+      const r = harassmentHardGate(text, ctx);
+      expect(r.passed).toBe(false);
+      if (!r.passed) expect(r.reason).toBe('hard-gate-blocked');
+    });
+  });
+
+  describe('must-NOT-fire: 神经病院 carve-out', () => {
+    it.each([
+      ['神经病院'],
+      ['神经病院的医生'],
+      ['去神经病院'],
+    ])('passes %s (院 lookahead exclusion)', (text) => {
+      const r = harassmentHardGate(text, ctx);
+      expect(r.passed).toBe(true);
+    });
+  });
+
+  describe('preserved: 你有病吧 / 有病啊你 still fire', () => {
+    it.each([
+      ['你有病吧'],
+      ['有病啊你'],
+    ])('blocks %s (preserved clause)', (text) => {
+      const r = harassmentHardGate(text, ctx);
+      expect(r.passed).toBe(false);
+    });
+  });
+});
+
+describe('Deflection pools — R6 hotfix (神经病 removed)', () => {
+  it('SEXUAL_HARASSMENT_DEFLECTIONS does NOT contain 神经病', () => {
+    expect(SEXUAL_HARASSMENT_DEFLECTIONS).not.toContain('神经病');
+  });
+
+  it('CURSE_DEFLECTIONS does NOT contain 神经病', () => {
+    expect(CURSE_DEFLECTIONS).not.toContain('神经病');
+  });
+
+  it('SEXUAL_HARASSMENT_DEFLECTIONS retains 7 elements', () => {
+    expect(SEXUAL_HARASSMENT_DEFLECTIONS.length).toBe(7);
+  });
+
+  it('CURSE_DEFLECTIONS retains 11 elements', () => {
+    expect(CURSE_DEFLECTIONS.length).toBe(11);
   });
 });
