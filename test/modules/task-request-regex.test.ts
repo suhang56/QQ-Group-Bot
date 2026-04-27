@@ -91,3 +91,52 @@ describe('PR #118 — bare-verb first-person exclusion', () => {
     expect(TASK_REQUEST.test(input)).toBe(expected);
   });
 });
+
+describe('PR third-person — third-person prefix exclusion', () => {
+  it.each([
+    // --- NEGATIVE: third-person prefix must NOT match (new coverage) ---
+    ['他写一个',                false, '他 + bare 写'],
+    ['她生成一个',              false, '她 + 生成'],
+    ['他生成一段',              false, '他 + 生成 (live evidence family)'],
+    ['它画一张',                false, '它 + 画'],
+    ['他们让我',                false, '他们 — no verb match anyway, regression guard'],
+    ['他要写',                  false, '他 + modal 要 + 写'],
+    ['他们生成代码',            false, '他们 + 生成'],
+    ['让他写',                  false, 'third-person target via 让, not direct bot-directive'],
+    ['他写代码',                false, 'bare 他 + 写 no modal'],
+    ['他想写个东西',            false, '他 + modal 想 + 写'],
+    ['帮他写',                  false, 'conservative: NO [帮给替让教] carve-out for third-person; "帮他" rare, FP cost on narration is higher'],
+    ['帮他们写代码',            false, '帮他们 third-person plural — same conservative bias'],
+
+    // --- POSITIVE: must still match (regression guards for prefix clauses + bare-verb-without-pronoun) ---
+    ['帮我写代码',              true,  '帮我 prefix unchanged'],
+    ['给我生成一个图',          true,  '给我 prefix unchanged'],
+    ['写一个故事',              true,  'bare 写, no preceding pronoun'],
+    ['让你生成一段',            true,  '让你 prefix unchanged'],
+    ['让我画个',                true,  '让我 prefix unchanged'],
+    ['你写个脚本',              true,  '你 second-person — must still match'],
+    ['先生成一个',              true,  '先 = adverb, not pronoun (out of scope: adverb-context FP — see scope boundary)'],
+
+    // --- REGRESSION: PR #117/#118 first-person exclusions still hold ---
+    ['我要写',                  false, 'PR #117 modal 要'],
+    ['我得生成',                false, 'PR #117 modal 得'],
+    ['我想画一张',              false, 'PR #117 modal 想'],
+    ['我打算翻译',              false, 'PR #117 modal 打算'],
+    ['我搞个',                  false, 'PR #118 bare 我+搞'],
+
+    // --- SCOPE BOUNDARY (documented limitations — must remain `true`, not blockers) ---
+    // Row 4412 full incident sentence: STILL matches via 先生成一个 adverb-context
+    // clause. Adverb-context FP is out of scope this PR; PR #128 send-side
+    // hard-gate is the deployed safety net for this exact case. Future R9
+    // (replyer-lite / input classifier) will address adverb-context narration.
+    ['所以我一般让他写的时候会先生成一个很神秘的propmt然后再给他讲讲code的风格', true, 'SCOPE BOUNDARY: row 4412 still matches via 先生成 adverb-context — out of scope this PR; PR #128 send-side guard is the safety net'],
+
+    // 他想帮你生成个: position-anchored LB before 生成 sees `帮你` (not `他想`).
+    // Same class as PR #118 row 87 (`我帮你搞个`) which is also documented as
+    // out of scope (test file line 87). Widening LB to span 帮你 would
+    // reintroduce FP risk on stray negation patterns. Out of scope.
+    ['他想帮你生成个',          true,  'SCOPE BOUNDARY: same class as PR #118 row 87 — position-anchored LB cannot see 他想 through intervening 帮你'],
+  ])('%s → match=%s (%s)', (input, expected) => {
+    expect(TASK_REQUEST.test(input)).toBe(expected);
+  });
+});
