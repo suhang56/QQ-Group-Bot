@@ -515,6 +515,7 @@ export interface ChatDecisionEventRow {
   decision_path: string | null;
   guard_path: string | null;
   prompt_variant: string | null;
+  utterance_act: string | null;
   sent_bot_reply_id: number | null;
   reply_text: string | null;
   used_fact_ids: string | null;
@@ -3327,10 +3328,12 @@ class ChatDecisionEventRepository implements IChatDecisionEventRepository {
       INSERT INTO chat_decision_events
         (group_id, trigger_msg_id, target_msg_id, trigger_user_id,
          result_kind, reason_code, decision_path, guard_path, prompt_variant,
+         utterance_act,
          sent_bot_reply_id, reply_text, used_fact_ids, used_voice_count, captured_at_sec)
       VALUES
         (@group_id, @trigger_msg_id, @target_msg_id, @trigger_user_id,
          @result_kind, @reason_code, @decision_path, @guard_path, @prompt_variant,
+         @utterance_act,
          @sent_bot_reply_id, @reply_text, @used_fact_ids, @used_voice_count, @captured_at_sec)
     `);
     this._getById = db.prepare(`SELECT * FROM chat_decision_events WHERE id = ?`);
@@ -4165,6 +4168,7 @@ export class Database {
       decision_path        TEXT,
       guard_path           TEXT,
       prompt_variant       TEXT,
+      utterance_act        TEXT,
       sent_bot_reply_id    INTEGER,
       reply_text           TEXT,
       used_fact_ids        TEXT,
@@ -4174,6 +4178,10 @@ export class Database {
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_cde_group_kind ON chat_decision_events(group_id, result_kind, captured_at_sec DESC)`);
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_cde_guard ON chat_decision_events(guard_path, captured_at_sec DESC)`);
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_cde_group_ts ON chat_decision_events(group_id, captured_at_sec DESC)`);
+    // R4-lite: add utterance_act column to chat_decision_events for existing DBs.
+    // Wrapped in try/catch — SQLite throws "duplicate column name" on existing DBs
+    // that already have the column; that's the correct idempotency signal.
+    try { this._db.exec(`ALTER TABLE chat_decision_events ADD COLUMN utterance_act TEXT`); } catch { /* already exists */ }
 
     this._db.exec(`CREATE TABLE IF NOT EXISTS chat_decision_effects (
       id                         INTEGER PRIMARY KEY AUTOINCREMENT,

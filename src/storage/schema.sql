@@ -672,6 +672,7 @@ CREATE TABLE IF NOT EXISTS chat_decision_events (
   decision_path        TEXT,
   guard_path           TEXT,
   prompt_variant       TEXT,
+  utterance_act        TEXT,
   sent_bot_reply_id    INTEGER,
   reply_text           TEXT,
   used_fact_ids        TEXT,

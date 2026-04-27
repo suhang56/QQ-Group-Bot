@@ -35,6 +35,8 @@ import { DeferQueue, type DeferredItem } from '../utils/defer-queue.js';
 import { evaluatePreGenerate } from '../modules/engagement-decision.js';
 import { classifyPath } from './classify-path.js';
 import { detectRelay } from '../modules/relay-detector.js';
+import { classifyUtteranceAct } from '../utils/strategy-preview.js';
+import type { StrategyPreviewContext } from '../utils/utterance-act.js';
 
 const MAX_SPLIT_LINES = 3;
 const MOD_DM_HOURLY_CAP = 20;
@@ -776,6 +778,26 @@ export class Router implements IRouter {
             const nowSec = Math.floor(Date.now() / 1000);
             const hasKnownFactTerm = this._hasKnownFactTermPreview(msg.groupId, msg.content);
             const recentNegativeScore = this._computeRecentNegativeScore(msg.groupId);
+            const recent5Lite = recentMsgs.slice(-5).map(m => ({ content: m.content, userId: m.userId }));
+            const relayDetectionForAct = detectRelay(
+              this.db.messages.getRecent(msg.groupId, 10),
+              this.botUserId ?? '',
+            );
+            const utteranceCtx: StrategyPreviewContext = {
+              msg: {
+                content: msg.content,
+                rawContent: msg.rawContent,
+                isAtMention: !!this.botUserId
+                  && msg.rawContent.includes(`[CQ:at,qq=${this.botUserId}]`),
+                isDirect: false, // Router pre-generate path is non-direct only (direct path skips this gate)
+                shouldReply: true,
+              },
+              recent5Msgs: recent5Lite,
+              hasKnownFactTerm,
+              hasRealFactHit: undefined, // Router has not run fact retrieval yet
+              relayHit: !!relayDetectionForAct,
+            };
+            const utteranceAct = classifyUtteranceAct(utteranceCtx);
             const outcome = evaluatePreGenerate({
               groupId: msg.groupId,
               msg: { messageId: msg.messageId, userId: msg.userId, content: msg.content, timestamp: msg.timestamp },
@@ -800,7 +822,7 @@ export class Router implements IRouter {
                   untilSec: outcome.deadlineSec,
                   targetMsgId: msg.messageId,
                   reasonCode: outcome.reasonCode as 'rate-limit' | 'burst-settle' | 'cooldown',
-                  meta: { decisionPath: 'defer' },
+                  meta: { decisionPath: 'defer', utteranceAct },
                 };
                 this.chatDecisionTracker.captureDecision(deferResult, {
                   groupId: msg.groupId,
@@ -820,7 +842,7 @@ export class Router implements IRouter {
               if (this.chatDecisionTracker) {
                 const silentResult: ChatResult = {
                   kind: 'silent', reasonCode: outcome.reasonCode as 'timing' | 'guard' | 'scope' | 'confabulation' | 'bot-triggered' | 'downrated',
-                  meta: { decisionPath: 'silent' },
+                  meta: { decisionPath: 'silent', utteranceAct },
                 };
                 this.chatDecisionTracker.captureDecision(silentResult, {
                   groupId: msg.groupId,
