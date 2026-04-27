@@ -139,6 +139,8 @@ export interface GroupConfig {
    * requester's group AND each source group must have this flag true before
    * a user's affinity from that source group counts in the aggregate. */
   linkAcrossGroups: boolean;
+  /** R5: opt-in per-group prompt-assembler v2 layering. Default false. */
+  chatPromptLayeringV2: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -952,6 +954,7 @@ interface GroupConfigRow {
   air_reading_enabled: number;
   addressee_graph_enabled: number;
   link_across_groups: number;
+  chat_prompt_layering_v2: number;
   created_at: string; updated_at: string;
 }
 
@@ -1059,6 +1062,7 @@ function configFromRow(row: GroupConfigRow): GroupConfig {
     airReadingEnabled: (row.air_reading_enabled ?? 0) !== 0,
     addresseeGraphEnabled: (row.addressee_graph_enabled ?? 0) !== 0,
     linkAcrossGroups: (row.link_across_groups ?? 0) !== 0,
+    chatPromptLayeringV2: (row.chat_prompt_layering_v2 ?? 0) !== 0,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -1464,8 +1468,9 @@ class GroupConfigRepository implements IGroupConfigRepository {
         chat_interest_categories, chat_interest_min_hits,
         air_reading_enabled, addressee_graph_enabled,
         link_across_groups,
+        chat_prompt_layering_v2,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(group_id) DO UPDATE SET
         enabled_modules = excluded.enabled_modules,
         auto_mod = excluded.auto_mod,
@@ -1504,6 +1509,7 @@ class GroupConfigRepository implements IGroupConfigRepository {
         air_reading_enabled = excluded.air_reading_enabled,
         addressee_graph_enabled = excluded.addressee_graph_enabled,
         link_across_groups = excluded.link_across_groups,
+        chat_prompt_layering_v2 = excluded.chat_prompt_layering_v2,
         updated_at = excluded.updated_at
     `).run(
       config.groupId,
@@ -1544,6 +1550,7 @@ class GroupConfigRepository implements IGroupConfigRepository {
       (config.airReadingEnabled ?? false) ? 1 : 0,
       (config.addresseeGraphEnabled ?? false) ? 1 : 0,
       (config.linkAcrossGroups ?? false) ? 1 : 0,
+      (config.chatPromptLayeringV2 ?? false) ? 1 : 0,
       config.createdAt,
       config.updatedAt,
     );
@@ -3780,6 +3787,9 @@ export class Database {
 
     // M9.3 cross-group recognition opt-in flag. Default OFF — privacy-first.
     try { this._db.exec(`ALTER TABLE group_config ADD COLUMN link_across_groups INTEGER NOT NULL DEFAULT 0`); } catch { /* already exists */ }
+
+    // R5: per-group prompt-assembler v2 opt-in flag.
+    try { this._db.exec(`ALTER TABLE group_config ADD COLUMN chat_prompt_layering_v2 INTEGER NOT NULL DEFAULT 0`); } catch { /* already exists */ }
 
     // M9.3 cross-group audit table. CREATE IF NOT EXISTS is idempotent on re-run.
     this._db.exec(`
