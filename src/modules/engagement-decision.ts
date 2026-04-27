@@ -263,6 +263,12 @@ export interface PreGenerateContext {
   hasKnownFactTerm: boolean;
   /** Average score of last N scored effects for this group; 0 if no data. Null treated as 0. */
   recentNegativeScore: number | null;
+  /**
+   * R2c — epoch seconds of last sendable bot reply for this group; null if none
+   * since process start. Drives Rule 2 (rate-limit defer): non-direct messages
+   * within 30s of the last reply are deferred 60s.
+   */
+  lastBotReplyAtSec: number | null;
 }
 
 export type PreGenerateOutcome =
@@ -272,7 +278,7 @@ export type PreGenerateOutcome =
 
 /**
  * Rules-based pre-generate gate. Runs BEFORE chatModule.generateReply.
- * Evaluation order: direct override (highest priority) → cooldown → burst-settle → default proceed.
+ * Evaluation order: direct override (highest) → cooldown → rate-limit → burst-settle → default proceed.
  */
 export function evaluatePreGenerate(ctx: PreGenerateContext): PreGenerateOutcome {
   // Rule 0 — Direct override: always proceed for @-mentions, replies-to-bot, or known-fact messages
@@ -287,7 +293,16 @@ export function evaluatePreGenerate(ctx: PreGenerateContext): PreGenerateOutcome
     return { action: 'silent', reasonCode: 'cooldown' };
   }
 
-  // Rule 2 — Burst-settle: high message rate → defer until burst ends
+  // Rule 2 — R2c rate-limit: minimum 30s gap between bot replies for non-direct
+  // peer chat. Direct triggers and known-fact terms already proceeded at Rule 0.
+  // Defers 60s; the deferred message is rechecked when the window expires or
+  // a new message lands in the group.
+  if (ctx.lastBotReplyAtSec !== null
+      && ctx.nowSec - ctx.lastBotReplyAtSec < 30) {
+    return { action: 'defer', reasonCode: 'rate-limit', deadlineSec: ctx.nowSec + 60 };
+  }
+
+  // Rule 3 — Burst-settle: high message rate → defer until burst ends
   // Timestamps in recentMsgs are epoch seconds
   const burstThresholdSec = ctx.nowSec - 8;
   const msgsInBurst = ctx.recentMsgs.filter(m => m.timestamp >= burstThresholdSec).length;

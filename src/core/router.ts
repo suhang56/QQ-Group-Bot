@@ -155,6 +155,10 @@ export class Router implements IRouter {
   private readonly atReplyTimestamps = new Map<string, number[]>();
   // last sticker result per group for /sticker_ban (replaces chatModule.getLastStickerKey)
   private readonly lastStickerKeyByGroup = new Map<string, string>();
+  // R2c — epoch seconds of last sendable bot reply per group. Updated in
+  // _sendReply epilogue. Read by evaluatePreGenerate Rule 2 (rate-limit defer).
+  // In-memory only; resets on process restart.
+  private readonly lastBotReplyAtSec = new Map<string, number>();
   // in-flight lock for @-mention queue processing (separate from ChatModule's lock)
   private readonly atInFlight = new Set<string>();
   // pending harvest timers per group: prevents overlap
@@ -780,6 +784,7 @@ export class Router implements IRouter {
               isDirect: false,
               hasKnownFactTerm,
               recentNegativeScore,
+              lastBotReplyAtSec: this.lastBotReplyAtSec.get(msg.groupId) ?? null,
             });
             if (outcome.action === 'defer') {
               this.deferQueue.enqueue({
@@ -946,6 +951,10 @@ export class Router implements IRouter {
         }
       }
     }
+    // R2c — record last sendable reply timestamp for rate-limit gate. Loop ran
+    // (lines.length > 0 guard above), so at least one send was attempted; even
+    // partial-send failures count as "bot spoke this turn" for rate-limit purposes.
+    this.lastBotReplyAtSec.set(groupId, Math.floor(Date.now() / 1000));
     if (logCtx) {
       if (logCtx.triggerUserId && this.chatModule) {
         this.chatModule.markReplyToUser(groupId, logCtx.triggerUserId);
@@ -1024,6 +1033,7 @@ export class Router implements IRouter {
             isDirect: true,
             hasKnownFactTerm: false,
             recentNegativeScore: 0,
+            lastBotReplyAtSec: this.lastBotReplyAtSec.get(groupId) ?? null,
           });
           if (outcome.action !== 'proceed') {
             this.logger.warn({ groupId, outcome }, 'P5: unexpected non-proceed for direct @-mention');
@@ -1170,6 +1180,7 @@ export class Router implements IRouter {
         isDirect: false,
         hasKnownFactTerm,
         recentNegativeScore,
+        lastBotReplyAtSec: this.lastBotReplyAtSec.get(groupId) ?? null,
       });
       if (recheck.action === 'proceed') {
         try {
@@ -1279,6 +1290,7 @@ export class Router implements IRouter {
           isDirect: false,
           hasKnownFactTerm,
           recentNegativeScore,
+          lastBotReplyAtSec: this.lastBotReplyAtSec.get(groupId) ?? null,
         });
         if (recheck.action === 'proceed') {
           this.deferQueue.clear(groupId);
