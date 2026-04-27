@@ -68,6 +68,8 @@ import { isBotNotAddresseeReplied } from './guards/scope-addressee-guard.js';
 import { runSendGuardChain, buildSendGuards, type SendGuardCtx } from '../utils/send-guard-chain.js';
 import { IDENTITY_DEFLECTIONS } from '../utils/identity-deflections.js';
 import { isAntiMetaDirect } from '../utils/anti-meta-direct.js';
+import { isLayeringV2Enabled } from '../config/prompt-layering.js';
+import { assemblePromptV2 } from './prompt-assembler.js';
 
 // Path A stub: { term, meaning } pairs extracted from user message.
 // Path A dev replaces null meanings with corpus results when merged.
@@ -864,6 +866,7 @@ class ReplyMetaBuilder {
   setGuardPath(g: BaseResultMeta['guardPath']): this { this.guardPath = g; return this; }
   setPromptVariant(v: BaseResultMeta['promptVariant']): this { this.promptVariant = v; return this; }
   setUtteranceAct(a: UtteranceAct): this { this.utteranceAct = a; return this; }
+  peekUtteranceAct(): UtteranceAct | undefined { return this.utteranceAct; }
   setEvasive(e: boolean): this { this.evasive = e; return this; }
   setFactIds(injected: number[], matched: number[]): this {
     this.injectedFactIds = injected;
@@ -2860,6 +2863,41 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     const hardenedFactPriorityRule = hasRealFactHit
       ? '\n\n硬性规则（覆盖其他所有装傻/反问倾向）：如果下面的 facts / on-demand / web-lookup / live 块里有 X 的答案 → 用它直接回答；不能装不知道、不能反问、不能说"考我啊/评价啥啊"。'
       : '';
+
+    // R5: prompt-assembler v2. Flag=false is the production path (zero-change
+    // regression contract). Flag=true builds an alternate systemPrompt via the
+    // assembler; we still feed it into the existing chatRequest shape so cache
+    // semantics and downstream guards stay byte-identical.
+    const groupConfigForFlag = this.db.groupConfig.get(groupId);
+    let v2SystemPrompt: string | null = null;
+    if (isLayeringV2Enabled(groupConfigForFlag)) {
+      const utteranceAct = metaBuilder.peekUtteranceAct() ?? 'direct_chat';
+      const assembled = assemblePromptV2({
+        act: utteranceAct,
+        identityBlocks: { persona: systemPrompt, rulesShort: '' },
+        stableData: {
+          lore: '', rulesFull: '', jargon: '', diary: '',
+        },
+        volatileData: {
+          facts: factsBlock || '',
+          recentHistory: groupContextWrapped || '',
+          replyContext: replyContextBlock || '',
+          targetBlock: '',
+          habits: expressionLateBlock || '',
+        },
+        strategyBlock: variantBlock || '',
+        finalInstruction: STATIC_CHAT_DIRECTIVES,
+        tokenBudget: 200_000,
+        isBotTriggered: triggerMessage.userId === this.botUserId,
+        hasRealFactHit,
+      });
+      v2SystemPrompt = assembled.systemPrompt;
+      this.logger.debug(
+        { groupId, utteranceAct, telemetry: assembled.telemetry, breakpoints: assembled.cacheBreakpoints.length },
+        'R5 assembler telemetry',
+      );
+    }
+
     const chatRequest = (hardened = false) => this.claude.complete({
       model: hardened ? RUNTIME_CHAT_MODEL : pickedModel,
       maxTokens: 2048,
@@ -2870,7 +2908,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
             ...(onDemandFactBlock ? [{ text: onDemandFactBlock, cache: false }] : []),
           ]
         : [
-            { text: systemPrompt, cache: true },
+            { text: v2SystemPrompt ?? systemPrompt, cache: true },
             { text: STATIC_CHAT_DIRECTIVES, cache: true },
             { text: variantBlock, cache: true },
             ...(groupContextBlock ? [{ text: groupContextBlock, cache: true as const }] : []),
