@@ -80,6 +80,7 @@ export class ChatDecisionTracker {
         decision_path:     meta.decisionPath ?? null,
         guard_path:        meta.guardPath ?? null,
         prompt_variant:    meta.promptVariant ?? null,
+        utterance_act:     meta.utteranceAct ?? null,
         sent_bot_reply_id: ctx.sentBotReplyId,
         reply_text:        replyText,
         used_fact_ids:     usedFactIds,

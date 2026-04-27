@@ -37,6 +37,8 @@ import type { IFatigueSource } from './fatigue.js';
 import { FATIGUE_THRESHOLD } from './fatigue.js';
 import type { IPreChatJudge, PreChatContextMessage, PreChatVerdict } from './pre-chat-judge.js';
 import { detectRelay } from './relay-detector.js';
+import { classifyUtteranceAct } from '../utils/strategy-preview.js';
+import type { UtteranceAct, StrategyPreviewContext } from '../utils/utterance-act.js';
 import { detectInteractionType, type InteractionContext, type InteractionType } from './affinity.js';
 import { sanitizeForPrompt, sanitizeNickname, hasJailbreakPattern } from '../utils/prompt-sanitize.js';
 import { createMentionSpamTracker, type MentionSpamTracker } from '../utils/mention-spam.js';
@@ -852,6 +854,7 @@ const MAX_OUTGOING_IDS = 50;
 class ReplyMetaBuilder {
   private guardPath: BaseResultMeta['guardPath'] | undefined;
   private promptVariant: BaseResultMeta['promptVariant'] | undefined;
+  private utteranceAct: UtteranceAct | undefined;
   private evasive = false;
   private injectedFactIds: number[] = [];
   private matchedFactIds: number[] = [];
@@ -860,6 +863,7 @@ class ReplyMetaBuilder {
 
   setGuardPath(g: BaseResultMeta['guardPath']): this { this.guardPath = g; return this; }
   setPromptVariant(v: BaseResultMeta['promptVariant']): this { this.promptVariant = v; return this; }
+  setUtteranceAct(a: UtteranceAct): this { this.utteranceAct = a; return this; }
   setEvasive(e: boolean): this { this.evasive = e; return this; }
   setFactIds(injected: number[], matched: number[]): this {
     this.injectedFactIds = injected;
@@ -870,18 +874,19 @@ class ReplyMetaBuilder {
   setVoiceCount(n: number): this { this.usedVoiceCount = n; return this; }
 
   buildBase(decisionPath: BaseResultMeta['decisionPath']): BaseResultMeta {
-    return { decisionPath, guardPath: this.guardPath, promptVariant: this.promptVariant };
+    return { decisionPath, guardPath: this.guardPath, promptVariant: this.promptVariant, utteranceAct: this.utteranceAct };
   }
   buildReply(decisionPath: BaseResultMeta['decisionPath']): ReplyMeta {
     return {
       decisionPath, guardPath: this.guardPath, promptVariant: this.promptVariant,
+      utteranceAct: this.utteranceAct,
       evasive: this.evasive, injectedFactIds: this.injectedFactIds,
       matchedFactIds: this.matchedFactIds, usedVoiceCount: this.usedVoiceCount,
       usedFactHint: this.usedFactHint,
     };
   }
   buildSticker(key: string, score?: number): StickerMeta {
-    return { decisionPath: 'sticker', guardPath: this.guardPath, promptVariant: this.promptVariant, key, score };
+    return { decisionPath: 'sticker', guardPath: this.guardPath, promptVariant: this.promptVariant, utteranceAct: this.utteranceAct, key, score };
   }
 }
 
@@ -2655,6 +2660,29 @@ export class ChatModule implements IChatModule {
     // "trigger hit a fact" signal because pinned-newest + recency fallback
     // always populate it. Only retrieval hits (BM25/vector/Path A) count.
     const factsBlockHasRealHit = matchedFactRetrievalIds.length > 0 && !factsBlockPinnedOnly;
+
+    // R4-lite: classify utterance act now that fact-retrieval signals are known.
+    // Pure sync helper; observability only — no behavior change.
+    {
+      const recent5Lite = recentMessages.slice(-5).map(m => ({ content: m.content, userId: m.userId }));
+      const recentForRelayAct = this.db.messages.getRecent(groupId, 10);
+      const relayDetectionForAct = detectRelay(recentForRelayAct, this.botUserId);
+      const utteranceCtx: StrategyPreviewContext = {
+        msg: {
+          content: triggerMessage.content,
+          rawContent: triggerMessage.rawContent,
+          isAtMention: !!this.botUserId
+            && triggerMessage.rawContent.includes(`[CQ:at,qq=${this.botUserId}]`),
+          isDirect: isDirectForGateBypass,
+          shouldReply: true,
+        },
+        recent5Msgs: recent5Lite,
+        hasKnownFactTerm: matchedFactRetrievalIds.length > 0 || factsBlockHasRealHit,
+        hasRealFactHit: factsBlockHasRealHit,
+        relayHit: !!relayDetectionForAct,
+      };
+      metaBuilder.setUtteranceAct(classifyUtteranceAct(utteranceCtx));
+    }
 
     // Path C: WebSearch — for terms Path A returned 'unknown', try CSE lookup.
     // Runs after Path A's onDemandLookup loop (above). Collects unknown terms from

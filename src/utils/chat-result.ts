@@ -1,3 +1,5 @@
+import type { UtteranceAct } from './utterance-act.js';
+
 export interface BaseResultMeta {
   decisionPath: 'normal' | 'direct' | 'fallback' | 'sticker' | 'silent' | 'defer';
   guardPath?:
@@ -13,6 +15,8 @@ export interface BaseResultMeta {
     | 'scope-claim-regen'
     | 'template-family-regen';
   promptVariant?: 'banter' | 'default' | 'careful' | 'char';
+  /** R4-lite: observability label of what the bot intended to do this turn. */
+  utteranceAct?: UtteranceAct;
 }
 
 export interface ReplyMeta extends BaseResultMeta {
