@@ -16,6 +16,7 @@ function makeCtx(overrides: Partial<PreGenerateContext> = {}): PreGenerateContex
     isDirect: false,
     hasKnownFactTerm: false,
     recentNegativeScore: 0,
+    lastBotReplyAtSec: null,
     ...overrides,
   };
 }
@@ -136,5 +137,78 @@ describe('evaluatePreGenerate', () => {
   it('recentNegativeScore = null treated as 0 (no data) → proceed', () => {
     const result = evaluatePreGenerate(makeCtx({ recentNegativeScore: null }));
     expect(result.action).toBe('proceed');
+  });
+});
+
+describe('evaluatePreGenerate — R2c rate-limit (Rule 2)', () => {
+  // T = NOW_SEC (1_000_000) — moments are described as offsets from T
+  const T = NOW_SEC;
+
+  it('T1: lastBot=T, now=T+5, !direct → defer rate-limit', () => {
+    const r = evaluatePreGenerate(makeCtx({ lastBotReplyAtSec: T, nowSec: T + 5 }));
+    expect(r.action).toBe('defer');
+    expect((r as { action: 'defer'; reasonCode: string }).reasonCode).toBe('rate-limit');
+    expect((r as { action: 'defer'; deadlineSec: number }).deadlineSec).toBe(T + 5 + 60);
+  });
+
+  it('T2: lastBot=T, now=T+5, isDirect=true → proceed (Rule 0 wins)', () => {
+    const r = evaluatePreGenerate(makeCtx({ lastBotReplyAtSec: T, nowSec: T + 5, isDirect: true }));
+    expect(r.action).toBe('proceed');
+  });
+
+  it('T3: lastBot=T, now=T+5, hasKnownFactTerm=true → proceed (Rule 0 wins)', () => {
+    const r = evaluatePreGenerate(makeCtx({ lastBotReplyAtSec: T, nowSec: T + 5, hasKnownFactTerm: true }));
+    expect(r.action).toBe('proceed');
+  });
+
+  it('T4: lastBot=T, now=T+29 → defer rate-limit (boundary: 29 < 30)', () => {
+    const r = evaluatePreGenerate(makeCtx({ lastBotReplyAtSec: T, nowSec: T + 29 }));
+    expect(r.action).toBe('defer');
+    expect((r as { action: 'defer'; reasonCode: string }).reasonCode).toBe('rate-limit');
+  });
+
+  it('T5: lastBot=T, now=T+30 → proceed (boundary: 30 NOT < 30)', () => {
+    const r = evaluatePreGenerate(makeCtx({ lastBotReplyAtSec: T, nowSec: T + 30 }));
+    expect(r.action).toBe('proceed');
+  });
+
+  it('T6: lastBot=T, now=T+35 → proceed (window expired)', () => {
+    const r = evaluatePreGenerate(makeCtx({ lastBotReplyAtSec: T, nowSec: T + 35 }));
+    expect(r.action).toBe('proceed');
+  });
+
+  it('T7: lastBot=null, now=T+999 → proceed (no prior reply)', () => {
+    const r = evaluatePreGenerate(makeCtx({ lastBotReplyAtSec: null, nowSec: T + 999 }));
+    expect(r.action).toBe('proceed');
+  });
+
+  it('T8: lastBot=T, now=T+5, burst≥5 → defer rate-limit (R2 fires before R3)', () => {
+    const r = evaluatePreGenerate(makeCtx({
+      lastBotReplyAtSec: T,
+      nowSec: T + 5,
+      recentMsgs: burstMsgs(5, T + 5),
+    }));
+    expect(r.action).toBe('defer');
+    expect((r as { action: 'defer'; reasonCode: string }).reasonCode).toBe('rate-limit');
+  });
+
+  it('T9: lastBot=T, now=T+35, burst≥5 → defer burst-settle (R2 skipped, R3 fires)', () => {
+    const r = evaluatePreGenerate(makeCtx({
+      lastBotReplyAtSec: T,
+      nowSec: T + 35,
+      recentMsgs: burstMsgs(5, T + 35),
+    }));
+    expect(r.action).toBe('defer');
+    expect((r as { action: 'defer'; reasonCode: string }).reasonCode).toBe('burst-settle');
+  });
+
+  it('T10: cooldown=-0.5, lastBot=T, now=T+5 → silent cooldown (R1 fires before R2)', () => {
+    const r = evaluatePreGenerate(makeCtx({
+      lastBotReplyAtSec: T,
+      nowSec: T + 5,
+      recentNegativeScore: -0.5,
+    }));
+    expect(r.action).toBe('silent');
+    expect((r as { action: 'silent'; reasonCode: string }).reasonCode).toBe('cooldown');
   });
 });
