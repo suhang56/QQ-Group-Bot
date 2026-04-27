@@ -787,9 +787,12 @@ export class Router implements IRouter {
               lastBotReplyAtSec: this.lastBotReplyAtSec.get(msg.groupId) ?? null,
             });
             if (outcome.action === 'defer') {
+              const queuedInternalRow = this.db.messages.findBySourceId(msg.messageId);
               this.deferQueue.enqueue({
                 groupId: msg.groupId, msg, recentMsgs,
                 queuedAtSec: nowSec, deadlineSec: outcome.deadlineSec, recheckCount: 0,
+                queuedMessageId: msg.messageId,
+                queuedInternalId: queuedInternalRow?.id ?? null,
               });
               if (this.chatDecisionTracker) {
                 const deferResult: ChatResult = {
@@ -833,7 +836,7 @@ export class Router implements IRouter {
             }
             // outcome.action === 'proceed': trigger recheck for any pending defers, then fall through
             if (this.deferQueue.size(msg.groupId) > 0) {
-              void this._recheckDeferredItems(msg.groupId).catch(
+              void this._recheckDeferredItems(msg.groupId, msg).catch(
                 err => this.logger.warn({ err, groupId: msg.groupId }, 'deferQueue recheck failed'),
               );
             }
@@ -978,6 +981,8 @@ export class Router implements IRouter {
   /** Enqueue an @-mention for serial processing, enforcing queue cap and burst skip. */
   private async _enqueueAtMention(msg: GroupMessage, config: GroupConfig): Promise<void> {
     const { groupId } = msg;
+    // R2b B1: at-mention / reply-to-bot direct arrival cancels older non-direct defers.
+    this._cancelDefersByDirect(groupId, msg);
     const sourceMsgId = Number(msg.messageId);
     if (!sourceMsgId) return; // no valid msg id to quote
 
@@ -1235,12 +1240,62 @@ export class Router implements IRouter {
           this.logger.warn({ err, groupId }, 'deferred recheck: generateReply failed');
         }
         break; // process one deferred item at a time to avoid pile-on
+      } else if (recheck.action === 'defer') {
+        // R2b B2: re-enqueue with thread-continuous target & incremented count
+        const pickedTarget = this._pickBestTarget(item, freshMsgs);
+        const pickedInternalRow = this.db.messages.findBySourceId(pickedTarget.messageId);
+        const updatedItem: DeferredItem = {
+          ...item,
+          msg: pickedTarget,
+          queuedAtSec: pickedTarget.timestamp,
+          queuedInternalId: pickedInternalRow?.id ?? null,
+          queuedMessageId: pickedTarget.messageId,
+          recheckCount: item.recheckCount + 1,
+          deadlineSec: recheck.deadlineSec,
+        };
+        if (updatedItem.recheckCount >= 3) {
+          // Cap reached — silent timing drop, no further enqueue
+          if (this.chatDecisionTracker) {
+            const silentResult: ChatResult = {
+              kind: 'silent',
+              reasonCode: 'timing',
+              meta: { decisionPath: 'silent' },
+            };
+            this.chatDecisionTracker.captureDecision(silentResult, {
+              groupId,
+              triggerMsgId: item.msg.messageId ?? null,
+              targetMsgId: null,
+              triggerUserId: item.msg.userId ?? null,
+              sentBotReplyId: null,
+              nowSec,
+            });
+          }
+          this.logger.debug(
+            { groupId, recheckCount: updatedItem.recheckCount, originalMsgId: item.msg.messageId },
+            'R2b B2: recheck cap reached → silent timing',
+          );
+        } else {
+          this.deferQueue?.enqueue(updatedItem);
+          this.logger.debug(
+            {
+              groupId,
+              recheckCount: updatedItem.recheckCount,
+              pickedMsgId: pickedTarget.messageId,
+              originalMsgId: item.msg.messageId,
+              reasonCode: recheck.reasonCode,
+            },
+            'R2b B2: deferred item re-enqueued with picked target',
+          );
+        }
       } else {
-        // Stale or still-deferred on recheck → silent drop
+        // recheck.action === 'silent' — currently only 'cooldown' from evaluatePreGenerate
+        // (see src/modules/engagement-decision.ts:283-294). The cast covers any future
+        // additions to the PreGenerateOutcome silent reasonCode set, mapped to the
+        // ChatResult silent union.
         if (this.chatDecisionTracker) {
           const silentResult: ChatResult = {
             kind: 'silent',
-            reasonCode: 'timing',
+            reasonCode: 'timing', // evaluatePreGenerate's 'cooldown' is timing-family; map for ChatResult union compatibility
             meta: { decisionPath: 'silent' },
           };
           this.chatDecisionTracker.captureDecision(silentResult, {
@@ -1256,9 +1311,161 @@ export class Router implements IRouter {
     }
   }
 
-  // P5: on new-message arrival, recheck all queued items for this group
-  private async _recheckDeferredItems(groupId: string): Promise<void> {
+  /**
+   * R2b B1: when a direct (at-bot or reply-to-bot) message arrives, cancel any
+   * pending non-direct defers that are "older or equal" to this message — the
+   * direct signal supersedes them. Each cancelled item logs a silent
+   * 'cancelled-by-direct' decision via chatDecisionTracker.
+   *
+   * "Newer" rules (any one is enough):
+   *   - newMsg.timestamp > item.queuedAtSec
+   *   - newMsg.timestamp === item.queuedAtSec AND
+   *       (item.queuedInternalId === null) OR
+   *       (newInternalId > item.queuedInternalId)
+   * Same-second + null queuedInternalId is conservative cancel (item not yet
+   * persisted at enqueue → can't tie-break, assume cancellable).
+   */
+  private _cancelDefersByDirect(groupId: string, newMsg: GroupMessage): void {
     if (!this.deferQueue) return;
+    const isDirect = newMsg.rawContent?.includes('[CQ:at,')
+                  || newMsg.rawContent?.includes('[CQ:reply,');
+    if (!isDirect) return;
+
+    const all = this.deferQueue.getAll(groupId);
+    if (all.length === 0) return;
+
+    const newInternalRow = this.db.messages.findBySourceId(newMsg.messageId);
+    const newInternalId = newInternalRow?.id ?? null;
+
+    const keep: DeferredItem[] = [];
+    const cancelled: DeferredItem[] = [];
+    for (const item of all) {
+      const newer =
+        newMsg.timestamp > item.queuedAtSec
+        || (newMsg.timestamp === item.queuedAtSec && item.queuedInternalId === null)
+        || (newMsg.timestamp === item.queuedAtSec
+            && item.queuedInternalId !== null
+            && newInternalId !== null
+            && newInternalId > item.queuedInternalId);
+      if (newer) cancelled.push(item);
+      else keep.push(item);
+    }
+
+    if (cancelled.length === 0) return;
+
+    // Rebuild queue: clear + re-enqueue keeps. (DeferQueue has no `remove(item)`
+    // public API; clear+enqueue-loop is the supported surface.)
+    this.deferQueue.clear(groupId);
+    for (const item of keep) this.deferQueue.enqueue(item);
+
+    if (this.chatDecisionTracker) {
+      const nowSec = Math.floor(Date.now() / 1000);
+      for (const item of cancelled) {
+        const result: ChatResult = {
+          kind: 'silent',
+          reasonCode: 'cancelled-by-direct',
+          meta: { decisionPath: 'silent' },
+        };
+        this.chatDecisionTracker.captureDecision(result, {
+          groupId,
+          triggerMsgId: item.msg.messageId ?? null,
+          targetMsgId: item.msg.messageId ?? null,
+          triggerUserId: item.msg.userId ?? null,
+          sentBotReplyId: null,
+          nowSec,
+        });
+      }
+    }
+
+    this.logger.debug(
+      { groupId, cancelled: cancelled.length, kept: keep.length, newMsgId: newMsg.messageId },
+      'R2b B1: defers cancelled by direct arrival',
+    );
+  }
+
+  /**
+   * R2b: pick the most thread-continuous fresh message as the new target for a
+   * deferred item. Scoring (additive, higher wins; ties broken by recency):
+   *   +4: rawContent has [CQ:reply,id=X] where X matches the original trigger
+   *   +3: same trigger type as original (both direct or both organic)
+   *   +2: extractTokens overlap >= 2 with item.msg.content
+   *   +1: same sender userId, OR rawContent shares an [CQ:at,qq=X] target with original
+   * Returns item.msg if no candidates exist.
+   */
+  private _pickBestTarget(deferredItem: DeferredItem, freshMsgs: GroupMessage[]): GroupMessage {
+    const candidates = freshMsgs.filter(m =>
+      m.timestamp >= deferredItem.queuedAtSec
+      && m.userId !== this.botUserId
+      && m.messageId !== deferredItem.msg.messageId
+    );
+    if (candidates.length === 0) return deferredItem.msg;
+
+    const triggerTokens = extractTokens(deferredItem.msg.content);
+    const triggerRaw = deferredItem.msg.rawContent ?? '';
+    const triggerIsDirect = triggerRaw.includes('[CQ:at,') || triggerRaw.includes('[CQ:reply,');
+    const triggerAtTargets = new Set<string>();
+    {
+      const re = /\[CQ:at,qq=([^,\]]+)\]/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(triggerRaw)) !== null) triggerAtTargets.add(m[1]!);
+    }
+    const triggerMsgIdStr = deferredItem.msg.messageId;
+
+    type Scored = { msg: GroupMessage; score: number };
+    const scored: Scored[] = candidates.map(cand => {
+      let score = 0;
+      const candRaw = cand.rawContent ?? '';
+
+      // +4: same reply chain
+      const replyMatch = /\[CQ:reply,id=([^,\]]+)\]/.exec(candRaw);
+      if (replyMatch && replyMatch[1] === triggerMsgIdStr) score += 4;
+
+      // +3: same trigger type
+      const candIsDirect = candRaw.includes('[CQ:at,') || candRaw.includes('[CQ:reply,');
+      if (candIsDirect === triggerIsDirect) score += 3;
+
+      // +2: token overlap >= 2
+      const candTokens = extractTokens(cand.content);
+      let overlap = 0;
+      for (const t of triggerTokens) {
+        if (candTokens.has(t)) {
+          overlap++;
+          if (overlap >= 2) break;
+        }
+      }
+      if (overlap >= 2) score += 2;
+
+      // +1: same sender OR same @target
+      if (cand.userId === deferredItem.msg.userId) {
+        score += 1;
+      } else {
+        const candAtRe = /\[CQ:at,qq=([^,\]]+)\]/g;
+        let m: RegExpExecArray | null;
+        let shared = false;
+        while ((m = candAtRe.exec(candRaw)) !== null) {
+          if (triggerAtTargets.has(m[1]!)) { shared = true; break; }
+        }
+        if (shared) score += 1;
+      }
+
+      return { msg: cand, score };
+    });
+
+    scored.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return b.msg.timestamp - a.msg.timestamp;
+    });
+    return scored[0]!.msg;
+  }
+
+  // P5: on new-message arrival, recheck all queued items for this group.
+  // R2b: when newMsg is direct, sweep cancellable defers first (B1).
+  private async _recheckDeferredItems(groupId: string, newMsg?: GroupMessage): Promise<void> {
+    if (!this.deferQueue) return;
+
+    // R2b B1: direct cancel sweep (only when newMsg is direct)
+    if (newMsg) this._cancelDefersByDirect(groupId, newMsg);
+
     const nowSec = Math.floor(Date.now() / 1000);
     // First drop truly stale items
     const stale = this.deferQueue.removeStale(nowSec);

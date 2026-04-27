@@ -425,3 +425,25 @@ describe('scoreUnscored — signal detection', () => {
     expect(db.chatDecisionEffects.getRecentByGroup('g1', 10)).toHaveLength(0);
   });
 });
+
+describe('captureDecision — kind=silent reasonCode=cancelled-by-direct (R2b)', () => {
+  let db: Database;
+  let tracker: ChatDecisionTracker;
+  beforeEach(() => { db = makeDb(); tracker = makeTracker(db); });
+
+  it('persists cancelled-by-direct silent decision with decisionPath=silent', () => {
+    const result: ChatResult = {
+      kind: 'silent',
+      reasonCode: 'cancelled-by-direct',
+      meta: { decisionPath: 'silent' },
+    };
+    tracker.captureDecision(result, BASE_CTX);
+
+    const rows = db.chatDecisionEffects.getUnscored(BASE_CTX.nowSec + 1, 10);
+    expect(rows).toHaveLength(1);
+    const evt = db.chatDecisionEvents.getById(rows[0]!.decision_event_id)!;
+    expect(evt.result_kind).toBe('silent');
+    expect(evt.reason_code).toBe('cancelled-by-direct');
+    expect(evt.decision_path).toBe('silent');
+  });
+});

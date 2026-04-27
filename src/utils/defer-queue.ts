@@ -7,6 +7,9 @@ export interface DeferredItem {
   queuedAtSec: number;
   deadlineSec: number;
   recheckCount: number;
+  // R2b additions
+  queuedMessageId: string;        // raw msg.messageId at enqueue time (informational)
+  queuedInternalId: number | null; // db.messages.findBySourceId(msg.messageId)?.id ?? null
 }
 
 export const DEFER_QUEUE_MAX = 20;
