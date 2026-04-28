@@ -332,10 +332,10 @@ describe('JargonMiner', () => {
       const claude = makeClaude([
         // pre-filter response
         '{"results":[true]}',
-        // with-context inference
-        '{"meaning": "群里的一首歌"}',
+        // with-context inference (confidence field required by quality gate)
+        '{"meaning": "群里的一首歌", "confidence": 0.8}',
         // without-context inference
-        '{"meaning": "一种天文现象"}',
+        '{"meaning": "一种天文现象", "confidence": 0.7}',
       ]);
       const { miner } = makeMiner({ db, claude });
 
@@ -378,9 +378,9 @@ describe('JargonMiner', () => {
       `).run(ctxs, nowSec, nowSec);
 
       const claude = makeClaude([
-        '{"results":[true]}',                        // pre-filter
-        '{"meaning": "凑友希那，BanG Dream角色"}',  // with context
-        '{"meaning": "不知道这是什么缩写"}',         // without context
+        '{"results":[true]}',                                          // pre-filter
+        '{"meaning": "凑友希那，BanG Dream角色", "confidence": 0.85}', // with context
+        '{"meaning": "不知道这是什么缩写", "confidence": 0.6}',        // without context
       ]);
       const { miner } = makeMiner({ db, claude });
 
@@ -406,8 +406,8 @@ describe('JargonMiner', () => {
 
       const claude = makeClaude([
         '{"results":[true]}',
-        '{"meaning": "手机，移动通讯设备"}',
-        '{"meaning": "手机是一种移动通讯设备"}',
+        '{"meaning": "手机，移动通讯设备", "confidence": 0.9}',
+        '{"meaning": "手机是一种移动通讯设备", "confidence": 0.9}',
       ]);
       const { miner } = makeMiner({ db, claude });
 
@@ -816,8 +816,8 @@ describe('JargonMiner', () => {
 
       const claude = makeClaude([
         '{"results":[true]}',
-        '{"meaning": "更新的含义"}',
-        '{"meaning": "不同的意思"}',
+        '{"meaning": "更新的含义", "confidence": 0.8}',
+        '{"meaning": "不同的意思", "confidence": 0.6}',
       ]);
       const { miner } = makeMiner({ db, claude });
 
