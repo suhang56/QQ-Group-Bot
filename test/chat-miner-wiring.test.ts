@@ -85,7 +85,8 @@ describe('ChatModule — M6.2a miner wiring', () => {
       const { systemText } = captureCall(claude);
       expect(systemText).toContain('你之前的回复风格参考');
       expect(systemText).toContain('当有人说「test」时，你回过「yep」');
-      expect(expressionSource.formatForPrompt).toHaveBeenCalledWith('g1');
+      // Phase 2: callsite forwards trigger message content for trigger-aware scoring.
+      expect(expressionSource.formatForPrompt).toHaveBeenCalledWith('g1', 3, 'hello');
     });
 
     it('omits expression section entirely when helper returns empty string (no dead header)', async () => {

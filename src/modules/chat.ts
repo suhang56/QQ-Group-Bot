@@ -107,7 +107,7 @@ const ACK_SIMPLE_RE = /^(好|好的|嗯|嗯嗯|收到|ok|okay|明白|懂了)$/i;
 // without importing their full classes (avoids pulling claude/db-exec wiring
 // into unit tests and keeps circular-dep risk low).
 export interface IExpressionPromptSource {
-  formatForPrompt(groupId: string, limit?: number): string;
+  formatForPrompt(groupId: string, limit?: number, triggerContent?: string): string;
   formatFewShotBlock(groupId: string, n?: number, matchContent?: string): string;
 }
 export interface IStylePromptSource {
@@ -2802,7 +2802,7 @@ export class ChatModule implements IChatModule {
     // R3: expression habit blocks evicted from identity cache; injected here
     // so they can be gated on hasRealFactHit.
     const expressionLateBlock = (!hasRealFactHit && this.expressionSource)
-      ? this.expressionSource.formatForPrompt(groupId)
+      ? this.expressionSource.formatForPrompt(groupId, 3, triggerMessage.content)
       : '';
     const fewShotLateBlock = (!hasRealFactHit && this.expressionSource)
       ? this.expressionSource.formatFewShotBlock(groupId, 3, triggerMessage.content)
