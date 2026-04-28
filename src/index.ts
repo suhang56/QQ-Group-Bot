@@ -547,6 +547,7 @@ const aliasMiner = new AliasMiner({
   learnedFacts: db.learnedFacts,
   claude,
   activeGroups: ACTIVE_GROUPS,
+  botUserId,
   enabled: process.env['ALIAS_MINER_ENABLED'] !== '0',
 });
 

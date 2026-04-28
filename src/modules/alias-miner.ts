@@ -7,7 +7,7 @@ import { ALIAS_MODEL } from '../config.js';
 import { sanitizeNickname, sanitizeForPrompt, hasJailbreakPattern } from '../utils/prompt-sanitize.js';
 
 const MIN_NEW_MESSAGES = 50;
-const ALIAS_TOPIC_PREFIX = '群友别名 ';
+const ALIAS_TOPIC_PREFIX = '群友别名:';
 // Feature A — semantic dedup threshold (independent from harvest's for future tuning).
 const SEMANTIC_DEDUP_THRESHOLD = 0.88;
 // Default confidence when the LLM doesn't emit one. Alias mappings carry
@@ -32,6 +32,10 @@ export interface AliasMinerOptions {
   intervalMs?: number;
   windowMessages?: number;
   enabled?: boolean;
+  /** When set, messages where m.userId === botUserId are excluded from the LLM
+   *  alias-evidence window, preventing bot self-output from being mined as
+   *  group-member alias mappings. */
+  botUserId?: string;
   /** Injected for testing */
   now?: () => number;
 }
@@ -45,6 +49,7 @@ export class AliasMiner {
   private readonly intervalMs: number;
   private readonly windowMessages: number;
   private readonly enabled: boolean;
+  private readonly botUserId: string | undefined;
   private readonly now: () => number;
 
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -60,6 +65,7 @@ export class AliasMiner {
     this.intervalMs = opts.intervalMs ?? 2 * 60 * 60_000;
     this.windowMessages = opts.windowMessages ?? 500;
     this.enabled = opts.enabled ?? true;
+    this.botUserId = opts.botUserId && opts.botUserId.length > 0 ? opts.botUserId : undefined;
     this.now = opts.now ?? (() => Date.now());
   }
 
@@ -93,7 +99,10 @@ export class AliasMiner {
   }
 
   async _runGroup(groupId: string): Promise<void> {
-    const recent = this.messages.getRecent(groupId, this.windowMessages);
+    const rawRecent = this.messages.getRecent(groupId, this.windowMessages);
+    const recent = this.botUserId
+      ? rawRecent.filter(m => m.userId !== this.botUserId)
+      : rawRecent;
 
     const lastTs = this.lastRunTs.get(groupId) ?? 0;
     const newMsgs = recent.filter(m => m.timestamp * 1000 > lastTs);
@@ -226,7 +235,7 @@ ${messagesList}
         ? Math.min(1, Math.max(0, entry.confidence))
         : DEFAULT_ALIAS_CONFIDENCE;
 
-      this.learnedFacts.insert({
+      const { supersededCount } = this.learnedFacts.insertOrSupersede({
         groupId,
         topic: `${ALIAS_TOPIC_PREFIX}${alias}`,
         fact: factText,
@@ -241,6 +250,9 @@ ${messagesList}
         confidence,
         status: 'pending',
       });
+      if (supersededCount > 0) {
+        this.logger.debug({ groupId, alias, supersededCount }, 'alias-miner superseded prior alias row');
+      }
 
       existing.push({
         id: 0, groupId,

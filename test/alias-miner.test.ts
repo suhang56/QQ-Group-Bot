@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { AliasMiner } from '../src/modules/alias-miner.js';
+import { extractTermFromTopic, trustTierFromTopic } from '../src/modules/fact-topic-prefixes.js';
 import type { IClaudeClient } from '../src/ai/claude.js';
 import type { IMessageRepository, ILearnedFactsRepository, LearnedFact } from '../src/storage/db.js';
 import type { Logger } from 'pino';
@@ -18,21 +19,32 @@ function makeMsgRepo(msgs: ReturnType<typeof makeMsg>[]): IMessageRepository {
   } as unknown as IMessageRepository;
 }
 
-function makeFactRepo(existing: LearnedFact[] = []): ILearnedFactsRepository & { inserted: Parameters<ILearnedFactsRepository['insert']>[0][] } {
-  const inserted: Parameters<ILearnedFactsRepository['insert']>[0][] = [];
+function makeFactRepo(existing: LearnedFact[] = []): ILearnedFactsRepository & {
+  inserted: Parameters<ILearnedFactsRepository['insertOrSupersede']>[0][];
+  legacyInserts: Parameters<ILearnedFactsRepository['insert']>[0][];
+} {
+  const inserted: Parameters<ILearnedFactsRepository['insertOrSupersede']>[0][] = [];
+  const legacyInserts: Parameters<ILearnedFactsRepository['insert']>[0][] = [];
   return {
     inserted,
+    legacyInserts,
     listActive: vi.fn().mockReturnValue(existing),
     listActiveWithEmbeddings: vi.fn().mockReturnValue([]),
     findSimilarActive: vi.fn().mockResolvedValue(null),
     listPending: vi.fn().mockReturnValue([]),
     countPending: vi.fn().mockReturnValue(0),
-    insert: vi.fn().mockImplementation((row) => { inserted.push(row); return inserted.length; }),
-    insertOrSupersede: vi.fn().mockReturnValue({ newId: 1, supersededCount: 0 }),
+    insert: vi.fn().mockImplementation((row) => { legacyInserts.push(row); return legacyInserts.length; }),
+    insertOrSupersede: vi.fn().mockImplementation((row) => {
+      inserted.push(row);
+      return { newId: inserted.length, supersededCount: 0 };
+    }),
     markStatus: vi.fn(),
     clearGroup: vi.fn(),
     countActive: vi.fn().mockReturnValue(0),
-  } as unknown as ILearnedFactsRepository & { inserted: Parameters<ILearnedFactsRepository['insert']>[0][] };
+  } as unknown as ILearnedFactsRepository & {
+    inserted: Parameters<ILearnedFactsRepository['insertOrSupersede']>[0][];
+    legacyInserts: Parameters<ILearnedFactsRepository['insert']>[0][];
+  };
 }
 
 function makeClaudeWith(response: string): IClaudeClient {
@@ -68,7 +80,7 @@ describe('AliasMiner', () => {
 
     expect(factRepo.inserted).toHaveLength(1);
     const row = factRepo.inserted[0]!;
-    expect(row.topic).toBe('群友别名 拉神');
+    expect(row.topic).toBe('群友别名:拉神');
     expect(row.fact).toContain('拉神');
     expect(row.fact).toContain('User5');
     expect(row.fact).toContain('u5');
@@ -100,7 +112,7 @@ describe('AliasMiner', () => {
     const msgs = makeRecentMsgs(60);
     const msgRepo = makeMsgRepo(msgs);
     const existingFact: LearnedFact = {
-      id: 1, groupId: GROUP, topic: '群友别名 常山', fact: '常山 = User3 (QQ u3)。已记录',
+      id: 1, groupId: GROUP, topic: '群友别名:常山', fact: '常山 = User3 (QQ u3)。已记录',
       sourceUserId: null, sourceUserNickname: '[alias-miner]', sourceMsgId: null,
       botReplyId: null, confidence: 0.85, status: 'active', createdAt: 0, updatedAt: 0,
     };
@@ -118,7 +130,7 @@ describe('AliasMiner', () => {
     await miner._run();
 
     expect(factRepo.inserted).toHaveLength(1);
-    expect(factRepo.inserted[0]!.topic).toBe('群友别名 新外号');
+    expect(factRepo.inserted[0]!.topic).toBe('群友别名:新外号');
   });
 
   it('skips run when fewer than 50 new messages since last run', async () => {
@@ -230,10 +242,108 @@ describe('AliasMiner', () => {
     const mapRows = db.learnedFacts.listAliasFactsForMap(GROUP);
     expect(mapRows).toHaveLength(1);
     expect(mapRows[0]!.status).toBe('pending');
-    expect(mapRows[0]!.topic).toBe('群友别名 拉神');
+    expect(mapRows[0]!.topic).toBe('群友别名:拉神');
 
     // Regression: listActiveAliasFacts must still exclude the pending miner row.
     const activeRows = db.learnedFacts.listActiveAliasFacts(GROUP);
     expect(activeRows).toHaveLength(0);
+  });
+
+  it('T1 botUserId filter: bot self-messages excluded from prompt', async () => {
+    const userMsgs = makeRecentMsgs(55, 'u');
+    const botMsgs = Array.from({ length: 5 }, (_, i) =>
+      makeMsg('BOT_001', 'BotName', `bot reply ${i}`, 1700000100 + i),
+    );
+    const all = [...userMsgs, ...botMsgs];
+    const msgRepo = makeMsgRepo(all);
+    const factRepo = makeFactRepo();
+    const claude = makeClaudeWith(JSON.stringify([]));
+
+    const miner = new AliasMiner({
+      messages: msgRepo, learnedFacts: factRepo, claude,
+      activeGroups: [GROUP], logger: silentLogger, botUserId: 'BOT_001',
+    });
+    await miner._runGroup(GROUP);
+
+    expect(claude.complete).toHaveBeenCalledOnce();
+    const promptArg = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const promptText = promptArg.messages[0].content as string;
+    expect(promptText).not.toContain('userId=BOT_001');
+    for (let i = 0; i < 55; i += 1) {
+      expect(promptText).toContain(`userId=u${i}`);
+    }
+  });
+
+  it('T2 colon prefix written to topic (not space)', async () => {
+    const msgs = makeRecentMsgs(60);
+    const msgRepo = makeMsgRepo(msgs);
+    const factRepo = makeFactRepo();
+    const claude = makeClaudeWith(JSON.stringify([
+      { alias: '观夜', realUserNickname: 'User5', realUserId: 'u5', evidence: 'X' },
+    ]));
+
+    const miner = new AliasMiner({
+      messages: msgRepo, learnedFacts: factRepo, claude,
+      activeGroups: [GROUP], logger: silentLogger,
+    });
+    await miner._runGroup(GROUP);
+
+    expect(factRepo.inserted).toHaveLength(1);
+    expect(factRepo.inserted[0]!.topic).toBe('群友别名:观夜');
+    expect(factRepo.inserted[0]!.topic).not.toContain('群友别名 ');
+  });
+
+  it('T3 insertOrSupersede called, insert never called', async () => {
+    const msgs = makeRecentMsgs(60);
+    const msgRepo = makeMsgRepo(msgs);
+    const factRepo = makeFactRepo();
+    const claude = makeClaudeWith(JSON.stringify([
+      { alias: '拉神', realUserNickname: 'User5', realUserId: 'u5', evidence: 'X' },
+    ]));
+
+    const miner = new AliasMiner({
+      messages: msgRepo, learnedFacts: factRepo, claude,
+      activeGroups: [GROUP], logger: silentLogger,
+    });
+    await miner._runGroup(GROUP);
+
+    expect(factRepo.insertOrSupersede).toHaveBeenCalledTimes(1);
+    expect(factRepo.insert).not.toHaveBeenCalled();
+    expect(factRepo.legacyInserts).toHaveLength(0);
+  });
+
+  it('T4 extractTermFromTopic("群友别名:观夜") === "观夜"', () => {
+    expect(extractTermFromTopic('群友别名:观夜')).toBe('观夜');
+    expect(extractTermFromTopic('群友别名:拉神')).toBe('拉神');
+  });
+
+  it('T5 trustTierFromTopic("群友别名:观夜") returns tier 4', () => {
+    expect(trustTierFromTopic('群友别名:观夜')).toBe(4);
+    expect(trustTierFromTopic('群友别名:观夜')).toBeLessThan(10);
+  });
+
+  it('T6 botUserId undefined: all messages included in prompt', async () => {
+    const userMsgs = makeRecentMsgs(55, 'u');
+    const botShaped = Array.from({ length: 5 }, (_, i) =>
+      makeMsg('BOT_001', 'BotName', `looks-like-bot ${i}`, 1700000100 + i),
+    );
+    const all = [...userMsgs, ...botShaped];
+    const msgRepo = makeMsgRepo(all);
+    const factRepo = makeFactRepo();
+    const claude = makeClaudeWith(JSON.stringify([]));
+
+    const miner = new AliasMiner({
+      messages: msgRepo, learnedFacts: factRepo, claude,
+      activeGroups: [GROUP], logger: silentLogger,
+    });
+    await miner._runGroup(GROUP);
+
+    expect(claude.complete).toHaveBeenCalledOnce();
+    const promptArg = (claude.complete as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const promptText = promptArg.messages[0].content as string;
+    expect(promptText).toContain('userId=BOT_001');
+    for (let i = 0; i < 55; i += 1) {
+      expect(promptText).toContain(`userId=u${i}`);
+    }
   });
 });

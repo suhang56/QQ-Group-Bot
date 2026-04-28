@@ -45,12 +45,12 @@ function totalCount(db: DatabaseSync): number {
 
 /** Seed the 6-row prod-shaped fixture from DESIGNER-SPEC §2. */
 function seedProdFixture(db: DatabaseSync) {
-  seed(db, 531,  TARGET_GROUP, '群友别名 qmyc', 'qmyc = 西瓜🍉 (QQ 2331924739)', 'active');
-  seed(db, 637,  TARGET_GROUP, '群友别名 qmyc', 'qmyc = 青木阳菜 (QQ 2331924739)', 'active');
+  seed(db, 531,  TARGET_GROUP, '群友别名:qmyc', 'qmyc = 西瓜🍉 (QQ 2331924739)', 'active');
+  seed(db, 637,  TARGET_GROUP, '群友别名:qmyc', 'qmyc = 青木阳菜 (QQ 2331924739)', 'active');
   seed(db, 2081, TARGET_GROUP, 'nga:声优',     '青木阳菜 (qmyc) 是…',           'active');
-  seed(db, 4573, TARGET_GROUP, '群友别名 ygfn', 'ygfn = 羊宫妃那',              'active');
-  seed(db, 700,  TARGET_GROUP, '群友别名 qmyc', 'qmyc = 某人 (QQ 999)',         'pending');
-  seed(db, 800,  TARGET_GROUP, '群友别名 qmyc', 'qmyc = 旧数据',                'rejected');
+  seed(db, 4573, TARGET_GROUP, '群友别名:ygfn', 'ygfn = 羊宫妃那',              'active');
+  seed(db, 700,  TARGET_GROUP, '群友别名:qmyc', 'qmyc = 某人 (QQ 999)',         'pending');
+  seed(db, 800,  TARGET_GROUP, '群友别名:qmyc', 'qmyc = 旧数据',                'rejected');
 }
 
 describe('purge-qmyc-alias-conflict — runPurge', () => {
@@ -126,8 +126,8 @@ describe('purge-qmyc-alias-conflict — runPurge', () => {
   it('N4: id 531/637 in a different group_id → untouched (group_id filter)', () => {
     const db = makeDb();
     // Same ids, but wrong group. Use fresh DB so PK does not collide with prod fixture.
-    seed(db, 531, '000000000', '群友别名 qmyc', 'qmyc = 西瓜🍉 (QQ 2331924739)', 'active');
-    seed(db, 637, '000000000', '群友别名 qmyc', 'qmyc = 青木阳菜 (QQ 2331924739)', 'active');
+    seed(db, 531, '000000000', '群友别名:qmyc', 'qmyc = 西瓜🍉 (QQ 2331924739)', 'active');
+    seed(db, 637, '000000000', '群友别名:qmyc', 'qmyc = 青木阳菜 (QQ 2331924739)', 'active');
 
     const result = runPurge({ db, apply: true, verbose: false, log: () => {} });
 
@@ -140,8 +140,8 @@ describe('purge-qmyc-alias-conflict — runPurge', () => {
 
   it('superseded status → untouched (status filter excludes superseded)', () => {
     const db = makeDb();
-    seed(db, 531, TARGET_GROUP, '群友别名 qmyc', 'qmyc = 西瓜🍉 (QQ 2331924739)', 'superseded');
-    seed(db, 637, TARGET_GROUP, '群友别名 qmyc', 'qmyc = 青木阳菜 (QQ 2331924739)', 'superseded');
+    seed(db, 531, TARGET_GROUP, '群友别名:qmyc', 'qmyc = 西瓜🍉 (QQ 2331924739)', 'superseded');
+    seed(db, 637, TARGET_GROUP, '群友别名:qmyc', 'qmyc = 青木阳菜 (QQ 2331924739)', 'superseded');
 
     const result = runPurge({ db, apply: true, verbose: false, log: () => {} });
 
@@ -155,8 +155,8 @@ describe('purge-qmyc-alias-conflict — runPurge', () => {
     const db = makeDb();
     // Hypothetical drift: fact text edited to no longer contain `qmyc`. The
     // id-set still matches but the fact LIKE rail prevents the UPDATE.
-    seed(db, 531, TARGET_GROUP, '群友别名 qmyc', '已被人手动改过内容', 'active');
-    seed(db, 637, TARGET_GROUP, '群友别名 qmyc', 'qmyc = 青木阳菜 (QQ 2331924739)', 'active');
+    seed(db, 531, TARGET_GROUP, '群友别名:qmyc', '已被人手动改过内容', 'active');
+    seed(db, 637, TARGET_GROUP, '群友别名:qmyc', 'qmyc = 青木阳菜 (QQ 2331924739)', 'active');
 
     const result = runPurge({ db, apply: true, verbose: false, log: () => {} });
 
@@ -202,8 +202,8 @@ describe('purge-qmyc-alias-conflict — runPurge', () => {
     const lines: string[] = [];
     runPurge({ db, apply: false, verbose: true, log: (l) => lines.push(l) });
     const joined = lines.join('\n');
-    expect(joined).toMatch(/\[id=531\].*topic=群友别名 qmyc/);
-    expect(joined).toMatch(/\[id=637\].*topic=群友别名 qmyc/);
+    expect(joined).toMatch(/\[id=531\].*topic=群友别名:qmyc/);
+    expect(joined).toMatch(/\[id=637\].*topic=群友别名:qmyc/);
     db.close();
   });
 

@@ -22,8 +22,8 @@ function makeMsgRepo(msgs: ReturnType<typeof makeMsgs>): IMessageRepository {
 function makeFactRepo(opts: {
   existing?: LearnedFact[];
   findSimilar?: ReturnType<typeof vi.fn>;
-} = {}): ILearnedFactsRepository & { inserted: Parameters<ILearnedFactsRepository['insert']>[0][]; findSimilarActive: ReturnType<typeof vi.fn> } {
-  const inserted: Parameters<ILearnedFactsRepository['insert']>[0][] = [];
+} = {}): ILearnedFactsRepository & { inserted: Parameters<ILearnedFactsRepository['insertOrSupersede']>[0][]; findSimilarActive: ReturnType<typeof vi.fn> } {
+  const inserted: Parameters<ILearnedFactsRepository['insertOrSupersede']>[0][] = [];
   const findSimilarActive = opts.findSimilar ?? vi.fn().mockResolvedValue(null);
   return {
     inserted,
@@ -32,12 +32,15 @@ function makeFactRepo(opts: {
     findSimilarActive,
     listPending: vi.fn().mockReturnValue([]),
     countPending: vi.fn().mockReturnValue(0),
-    insert: vi.fn().mockImplementation((row) => { inserted.push(row); return inserted.length; }),
-    insertOrSupersede: vi.fn().mockReturnValue({ newId: 1, supersededCount: 0 }),
+    insert: vi.fn().mockImplementation(() => 0),
+    insertOrSupersede: vi.fn().mockImplementation((row) => {
+      inserted.push(row);
+      return { newId: inserted.length, supersededCount: 0 };
+    }),
     markStatus: vi.fn(),
     clearGroup: vi.fn(),
     countActive: vi.fn().mockReturnValue(0),
-  } as unknown as ILearnedFactsRepository & { inserted: Parameters<ILearnedFactsRepository['insert']>[0][]; findSimilarActive: ReturnType<typeof vi.fn> };
+  } as unknown as ILearnedFactsRepository & { inserted: Parameters<ILearnedFactsRepository['insertOrSupersede']>[0][]; findSimilarActive: ReturnType<typeof vi.fn> };
 }
 
 function makeClaude(payload: unknown): IClaudeClient {
@@ -107,7 +110,7 @@ describe('AliasMiner — semantic dedup + pending queue', () => {
   it('prefix-based dupe check still skips before semantic dedup runs', async () => {
     const msgs = makeMsgs(60);
     const existingFact: LearnedFact = {
-      id: 1, groupId: 'g1', topic: '群友别名 拉神',
+      id: 1, groupId: 'g1', topic: '群友别名:拉神',
       fact: '拉神 = U5 (QQ u5)。其它evidence内容',
       sourceUserId: null, sourceUserNickname: '[alias-miner]', sourceMsgId: null,
       botReplyId: null, confidence: 0.8, status: 'active', createdAt: 0, updatedAt: 0,

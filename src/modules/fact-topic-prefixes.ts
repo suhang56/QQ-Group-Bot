@@ -14,6 +14,7 @@ export const LEARNED_FACT_TOPIC_PREFIXES: readonly string[] = [
   'passive',
   'online-research',
   'ondemand-lookup',
+  '群友别名',
 ];
 
 // Reject sentence-fragment Han terms — grammatical particles + interrogative suffixes.
@@ -88,6 +89,7 @@ export function trustTierFromTopic(topic: string | null): number {
   if (topic.startsWith('passive:')) return 3;
   if (topic.startsWith('online-research:')) return 3;
   if (topic.startsWith('群内黑话:')) return 4;
+  if (topic.startsWith('群友别名:')) return 4;
   if (topic.startsWith('ondemand-lookup:')) return 5;
   return 10;
 }
