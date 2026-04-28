@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { TASK_REQUEST } from '../../src/modules/chat.js';
+import { TASK_REQUEST, DEFLECT_SITUATIONS } from '../../src/modules/chat.js';
 
 describe('TASK_REQUEST — first-person false-positive exclusion', () => {
   it.each([
@@ -138,5 +138,84 @@ describe('PR third-person — third-person prefix exclusion', () => {
     ['他想帮你生成个',          true,  'SCOPE BOUNDARY: same class as PR #118 row 87 — position-anchored LB cannot see 他想 through intervening 帮你'],
   ])('%s → match=%s (%s)', (input, expected) => {
     expect(TASK_REQUEST.test(input)).toBe(expected);
+  });
+});
+
+describe('Cleanup — Item 2 verb-led sub-clause LB + Item 3 我们 plural', () => {
+  it.each([
+    // --- Item 2 — third-person verb-led NEGATIVE (NEW) ---
+    ['他推荐一下',         false, '他 + 推荐 verb-led (NEW LB)'],
+    ['她推荐个',           false, '她 + 推荐 verb-led (NEW LB)'],
+    ['他念一段',           false, '他 + 念一段 verb-led (NEW LB)'],
+    ['她念段',             false, '她 + 念段 verb-led (念一?段 with optional 一)'],
+    ['他背一段',           false, '他 + 背一段 verb-led (NEW LB)'],
+    ['它背一段',           false, '它 + 背一段 verb-led (NEW LB)'],
+    ['他教编程',           false, '他 + 教.{0,5}编程 verb-led (NEW LB)'],
+    ['她教教我写',         false, '她 + 教教.{0,5}写 verb-led (NEW LB)'],
+    ['他继续背',           false, '他 + 继续[背念说] verb-led (NEW LB)'],
+    ['她继续念',           false, '她 + 继续[背念说] verb-led (NEW LB)'],
+
+    // --- Item 2 — first-person 我 verb-led NEGATIVE (NEW) ---
+    ['我推荐一下',         false, '我 + 推荐 verb-led (NEW LB)'],
+    ['我念一段',           false, '我 + 念一段 verb-led (NEW LB)'],
+    ['我背一段',           false, '我 + 背一段 verb-led (NEW LB)'],
+    ['我教编程',           false, '我 + 教编程 verb-led (NEW LB)'],
+    ['我继续背',           false, '我 + 继续背 verb-led (NEW LB)'],
+
+    // --- Item 3 — 我们 1st-plural NEGATIVE (NEW) ---
+    ['我们要写代码',       false, '我们 + 要 + 写 (Item 3)'],
+    ['我们生成一个',       false, '我们 + 生成 (Item 3)'],
+    ['我们打算翻译',       false, '我们 + 打算 + 翻译 (Item 3)'],
+    ['我们得画一张',       false, '我们 + 得 + 画 (Item 3)'],
+    ['我们想编一个',       false, '我们 + 想 + 编 (Item 3)'],
+    ['我们需要总结一下',   false, '我们 + 需要 + 总结 (Item 3)'],
+    ['我们应该算一下',     false, '我们 + 应该 + 算 (Item 3)'],
+    ['我们写一下',         false, '我们 + 写一下 bare-verb modal optional (Item 3)'],
+    ['我们推荐个',         false, '我们 + 推荐 (Items 2+3 cross)'],
+    ['我们继续念',         false, '我们 + 继续念 (Items 2+3 cross)'],
+
+    // --- POSITIVE: bare verb-led must STILL match (no pronoun) ---
+    ['推荐一下',           true,  '推荐 — bare verb-led, no pronoun'],
+    ['念一段',             true,  '念一段 — bare verb-led, no pronoun'],
+    ['念段',               true,  '念段 — 念一?段 with optional 一'],
+    ['背一段',             true,  '背一段 — bare verb-led, no pronoun'],
+    ['继续背',             true,  '继续[背念说] — bare verb-led, no pronoun'],
+    ['教教我怎么写',       true,  '教教 — bare, 教 in carve-out class for 教我'],
+    ['教编程',             true,  '教.{0,5}编程 — bare verb-led, no pronoun'],
+
+    // --- POSITIVE: noun-led / abstract — MUST keep matching (LB SKIPPED per spec) ---
+    ['transformer怎么用的', true, 'noun-led transformer.{0,10}怎么 — LB skipped'],
+    ['代码怎么写',          true, 'noun-led 代码怎么 — LB skipped'],
+    ['接龙',                true, 'abstract 接龙 — LB skipped'],
+
+    // --- REGRESSIONS: PR #117/#118 must still hold ---
+    ['我得写个monitor系统了', false, '#117 modal 得 regression'],
+    ['我要写一段代码',        false, '#117 modal 要 regression'],
+    ['我搞个自动重连吧',      false, '#118 bare 我+搞 regression'],
+    ['我写个代码',            false, '#118 bare 我+写 regression'],
+
+    // --- REGRESSIONS: prefix clauses untouched ---
+    ['你写个脚本',         true, 'no first-person, plain 2nd-person imperative'],
+    ['帮我写个脚本',       true, '帮我 prefixed clause unchanged'],
+    ['给我写个代码',       true, '给我 prefixed clause unchanged'],
+    ['让我画个',           true, '让我 prefixed clause unchanged'],
+  ])('%s → match=%s (%s)', (input, expected) => {
+    expect(TASK_REQUEST.test(input)).toBe(expected);
+  });
+});
+
+describe('Cleanup — Item 1 DEFLECT_SITUATIONS.curse no blocked terms', () => {
+  it('does not contain hard-gate-blocked example terms', () => {
+    const text = DEFLECT_SITUATIONS.curse;
+    expect(text).not.toContain('傻逼');
+    expect(text).not.toContain('神经病');
+    expect(text).not.toContain('你有病吧');
+  });
+
+  it('contains at least 3 non-blocked example terms', () => {
+    const text = DEFLECT_SITUATIONS.curse;
+    const candidates = ['烦死了', '滚', '真烦', '别闹了', '懒得'];
+    const present = candidates.filter(c => text.includes(c));
+    expect(present.length).toBeGreaterThanOrEqual(3);
   });
 });
