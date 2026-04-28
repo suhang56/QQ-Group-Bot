@@ -68,6 +68,57 @@ describe('hasSelfCenteredScopeClaim — Group B self-centered', () => {
   it('does NOT fire: non-string', () =>
     // @ts-expect-error intentional bad input
     expect(hasSelfCenteredScopeClaim(null)).toBe(false));
+
+  // ── PIVOT — tail-plural-you variants (04-23/04-24 archived) ──
+  describe('tail-plural-you Group B variants', () => {
+    // Archived live samples — must FIRE (the bug fix)
+    it('fires: 又来了你们 (04-24 18:46/22:21 archived)', () =>
+      expect(hasSelfCenteredScopeClaim('又来了你们')).toBe(true));
+    it('fires: 又来这套是吧你们 (04-23 18:57/19:01 archived)', () =>
+      expect(hasSelfCenteredScopeClaim('又来这套是吧你们')).toBe(true));
+    it('fires: 又怎么了你们 (04-23 19:55 archived)', () =>
+      expect(hasSelfCenteredScopeClaim('又怎么了你们')).toBe(true));
+
+    // New tail variants of existing triggers
+    it('fires: 又开始了你们', () =>
+      expect(hasSelfCenteredScopeClaim('又开始了你们')).toBe(true));
+    it('fires: 又来搞我你们', () =>
+      expect(hasSelfCenteredScopeClaim('又来搞我你们')).toBe(true));
+    it('fires: 又来了大家', () =>
+      expect(hasSelfCenteredScopeClaim('又来了大家')).toBe(true));
+    it('fires: 又来了你俩', () =>
+      expect(hasSelfCenteredScopeClaim('又来了你俩')).toBe(true));
+    it('fires: 又来了你们啊! (addressee + particle + punct)', () =>
+      expect(hasSelfCenteredScopeClaim('又来了你们啊!')).toBe(true));
+
+    // 是吧 modal slot (universal for all triggers)
+    it('fires: 又来这套是吧 (modal alone, no addressee)', () =>
+      expect(hasSelfCenteredScopeClaim('又来这套是吧')).toBe(true));
+    it('fires: 又来了是吧 (universal modal slot)', () =>
+      expect(hasSelfCenteredScopeClaim('又来了是吧')).toBe(true));
+    it('fires: 又怎么了是吧你们 (modal + addressee chain)', () =>
+      expect(hasSelfCenteredScopeClaim('又怎么了是吧你们')).toBe(true));
+
+    // Bare new triggers
+    it('fires: 又来这套 (bare new trigger)', () =>
+      expect(hasSelfCenteredScopeClaim('又来这套')).toBe(true));
+    it('fires: 又怎么了 (bare new trigger)', () =>
+      expect(hasSelfCenteredScopeClaim('又怎么了')).toBe(true));
+
+    // Must-NOT-fire — long sentences / wrong prefix / wrong tail
+    it('does NOT fire: 又来了你们好吗? (long sentence — 好吗 not in particle set)', () =>
+      expect(hasSelfCenteredScopeClaim('又来了你们好吗?')).toBe(false));
+    it('does NOT fire: 又来了你们这群人 (tail continuation)', () =>
+      expect(hasSelfCenteredScopeClaim('又来了你们这群人')).toBe(false));
+    it('does NOT fire: 你们又来了 (Group A territory — 你们 prefix not Group B)', () =>
+      expect(hasSelfCenteredScopeClaim('你们又来了')).toBe(false));
+    it('does NOT fire: 又来了你们都 (`都` not in particle set)', () =>
+      expect(hasSelfCenteredScopeClaim('又来了你们都')).toBe(false));
+    it('does NOT fire: 又来这套吗 (`吗` not modal nor particle)', () =>
+      expect(hasSelfCenteredScopeClaim('又来这套吗')).toBe(false));
+    it('does NOT fire: 又怎么了啊太烦了 (multi-clause)', () =>
+      expect(hasSelfCenteredScopeClaim('又怎么了啊太烦了')).toBe(false));
+  });
 });
 
 describe('Group A ∩ Group B = ∅ (independence invariant)', () => {
