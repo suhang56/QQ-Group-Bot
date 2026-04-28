@@ -38,6 +38,7 @@ import { runFactEmbeddingBackfill, BACKFILL_INTERVAL_MS } from './modules/fact-e
 import { runMemeEmbeddingBackfill, MEME_BACKFILL_INTERVAL_MS } from './modules/meme-embedding-backfill.js';
 import { VisionService } from './modules/vision.js';
 import { StickerCaptureService } from './modules/sticker-capture.js';
+import { StickerUsageCaptureService, LaterReactionWorker } from './modules/sticker-usage-capture.js';
 import { WelcomeModule } from './modules/welcome.js';
 import { IdCardGuard } from './modules/id-guard.js';
 import { SequenceGuard } from './modules/sequence-guard.js';
@@ -354,6 +355,13 @@ router.setLoreUpdater(loreUpdater);
 const stickerCapture = new StickerCaptureService(db.localStickers, adapter, { claude, embedder });
 router.setStickerCapture(stickerCapture);
 stickerCapture.startBackfillLoop(ACTIVE_GROUPS);
+
+// S1: sticker_usage_samples — Q2 capture infrastructure. Capture-only; no read path.
+const stickerUsageCapture = new StickerUsageCaptureService(
+  db.stickerUsageSamples, db.messages, { claude, embedder },
+);
+router.setStickerUsageCapture(stickerUsageCapture);
+router.setLaterReactionWorker(new LaterReactionWorker(db.stickerUsageSamples, db.messages));
 
 const welcome = new WelcomeModule({ welcomeLog: db.welcomeLog, claude, adapter, botUserId });
 const poke = new PokeModule({ adapter, botUserId });
