@@ -720,3 +720,26 @@ CREATE INDEX IF NOT EXISTS idx_cde_effects_decision
 CREATE INDEX IF NOT EXISTS idx_cde_effects_unscored
   ON chat_decision_effects(scored_at_sec, decision_event_id)
   WHERE scored_at_sec IS NULL;
+
+-- S1: sticker usage samples — captures human sticker sends with surrounding
+-- conversation slice for future Q2 (usage-context retrieval). Capture only;
+-- no read-path consumer in this sprint. created_at is unix seconds.
+CREATE TABLE IF NOT EXISTS sticker_usage_samples (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id          TEXT    NOT NULL,
+  sticker_key       TEXT    NOT NULL,
+  sender_user_id    TEXT    NOT NULL,
+  prev_msgs         TEXT    NOT NULL DEFAULT '[]',
+  trigger_text      TEXT    NOT NULL DEFAULT '',
+  reply_to_target   TEXT,
+  act_label         TEXT,
+  context_embedding BLOB,
+  later_reactions   TEXT    NOT NULL DEFAULT '[]',
+  created_at        INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sus_group_key
+  ON sticker_usage_samples(group_id, sticker_key, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sus_group_act
+  ON sticker_usage_samples(group_id, act_label, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sus_null_embedding
+  ON sticker_usage_samples(id) WHERE context_embedding IS NULL;

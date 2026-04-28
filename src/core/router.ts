@@ -8,6 +8,7 @@ import type { ModeratorModule } from '../modules/moderator.js';
 import type { NameImagesModule } from '../modules/name-images.js';
 import type { LoreUpdater } from '../modules/lore-updater.js';
 import type { StickerCaptureService } from '../modules/sticker-capture.js';
+import type { StickerUsageCaptureService, LaterReactionWorker } from '../modules/sticker-usage-capture.js';
 import type { SelfLearningModule } from '../modules/self-learning.js';
 import type { IdCardGuard } from '../modules/id-guard.js';
 import type { SequenceGuard } from '../modules/sequence-guard.js';
@@ -134,6 +135,8 @@ export class Router implements IRouter {
   private nameImagesModule: NameImagesModule | null = null;
   private loreUpdater: LoreUpdater | null = null;
   private stickerCapture: StickerCaptureService | null = null;
+  private stickerUsageCapture: StickerUsageCaptureService | null = null;
+  private laterReactionWorker: LaterReactionWorker | null = null;
   private selfLearning: SelfLearningModule | null = null;
   private idGuard: IdCardGuard | null = null;
   private sequenceGuard: SequenceGuard | null = null;
@@ -237,6 +240,14 @@ export class Router implements IRouter {
 
   setStickerCapture(svc: StickerCaptureService): void {
     this.stickerCapture = svc;
+  }
+
+  setStickerUsageCapture(svc: StickerUsageCaptureService): void {
+    this.stickerUsageCapture = svc;
+  }
+
+  setLaterReactionWorker(w: LaterReactionWorker): void {
+    this.laterReactionWorker = w;
   }
 
   setSelfLearning(sl: SelfLearningModule): void {
@@ -479,6 +490,24 @@ export class Router implements IRouter {
         this.stickerCapture.captureFromMessage(
           msg.groupId, msg.rawContent, contextSample, msg.userId, this.botUserId ?? '',
         ).catch(err => this.logger.warn({ err, groupId: msg.groupId }, 'sticker capture failed'));
+
+        // S1: usage-context capture (separate from meta capture above). Sync INSERT,
+        // async fire-and-forget for label + embedding. Skips bot-source.
+        if (this.stickerUsageCapture && msg.userId !== (this.botUserId ?? '')) {
+          try {
+            this.stickerUsageCapture.captureUsageFromMessage(msg, this.botUserId ?? '');
+          } catch (err) {
+            this.logger.warn({ err, groupId: msg.groupId }, 'sticker usage capture failed');
+          }
+        }
+      }
+      // S1: later-reactions scan — runs every msg, idempotent, no-op when no rows in window.
+      if (this.laterReactionWorker) {
+        try {
+          this.laterReactionWorker.scan(msg.groupId, Math.floor(Date.now() / 1000));
+        } catch (err) {
+          this.logger.warn({ err, groupId: msg.groupId }, 'later-reaction scan failed');
+        }
       }
 
       // Tick sticker legend refresh counter (rebuilds sticker section every N messages)

@@ -348,6 +348,44 @@ export interface ILiveStickerRepository {
   getTopByGroup(groupId: string, limit: number): LiveSticker[];
 }
 
+// ---- S1: sticker_usage_samples (Q2 usage-context capture) ----
+
+export interface StickerUsageSampleInsert {
+  groupId: string;
+  stickerKey: string;
+  senderUserId: string;
+  prevMsgs: Array<{ userId: string; content: string; timestamp: number }>;
+  triggerText: string;
+  replyToTarget: string | null;
+  /** Unix seconds. Project convention. */
+  createdAt: number;
+}
+
+export type LaterReactionType = 'echo' | 'rebuttal' | 'meme-react' | 'silence';
+
+export interface LaterReaction {
+  type: LaterReactionType;
+  count: number;
+  sampleMsg: string | null;
+}
+
+export interface StickerUsageSample extends StickerUsageSampleInsert {
+  id: number;
+  actLabel: string | null;
+  contextEmbedding: number[] | null;
+  laterReactions: LaterReaction[];
+}
+
+export interface IStickerUsageSampleRepository {
+  insert(row: StickerUsageSampleInsert): number;
+  setEmbedding(id: number, vec: number[]): void;
+  setActLabel(id: number, label: string): void;
+  /** sinceSec: lower bound on created_at (inclusive). SECONDS — matches schema. */
+  findRecentForUpdate(groupId: string, sinceSec: number): StickerUsageSample[];
+  updateLaterReactions(id: number, reactions: LaterReaction[]): void;
+  count(groupId: string): number;
+}
+
 export interface IImageDescriptionRepository {
   get(fileKey: string): string | null;
   set(fileKey: string, description: string, now: number): void;
@@ -2439,6 +2477,96 @@ class LocalStickerRepository implements ILocalStickerRepository {
   }
 }
 
+// S1: sticker_usage_samples — capture-only repository. Read path lands in S2.
+class StickerUsageSampleRepository implements IStickerUsageSampleRepository {
+  constructor(private readonly db: DatabaseSync) {}
+
+  insert(row: StickerUsageSampleInsert): number {
+    const result = this.db.prepare(
+      `INSERT INTO sticker_usage_samples
+         (group_id, sticker_key, sender_user_id, prev_msgs, trigger_text, reply_to_target, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      row.groupId,
+      row.stickerKey,
+      row.senderUserId,
+      JSON.stringify(row.prevMsgs),
+      row.triggerText,
+      row.replyToTarget,
+      row.createdAt,
+    );
+    return Number(result.lastInsertRowid);
+  }
+
+  setEmbedding(id: number, vec: number[]): void {
+    const buf = new Uint8Array(new Float32Array(vec).buffer);
+    this.db.prepare(
+      `UPDATE sticker_usage_samples SET context_embedding = ? WHERE id = ?`,
+    ).run(buf, id);
+  }
+
+  setActLabel(id: number, label: string): void {
+    this.db.prepare(
+      `UPDATE sticker_usage_samples SET act_label = ? WHERE id = ?`,
+    ).run(label, id);
+  }
+
+  findRecentForUpdate(groupId: string, sinceSec: number): StickerUsageSample[] {
+    const rows = this.db.prepare(
+      `SELECT * FROM sticker_usage_samples
+       WHERE group_id = ? AND created_at >= ?
+       ORDER BY created_at ASC`,
+    ).all(groupId, sinceSec) as unknown as Array<{
+      id: number; group_id: string; sticker_key: string; sender_user_id: string;
+      prev_msgs: string; trigger_text: string; reply_to_target: string | null;
+      act_label: string | null; context_embedding: ArrayBuffer | Uint8Array | null;
+      later_reactions: string; created_at: number;
+    }>;
+    return rows.map(r => {
+      let prevMsgs: Array<{ userId: string; content: string; timestamp: number }> = [];
+      try { prevMsgs = JSON.parse(r.prev_msgs); } catch { prevMsgs = []; }
+      let laterReactions: LaterReaction[] = [];
+      try { laterReactions = JSON.parse(r.later_reactions); } catch { laterReactions = []; }
+      let contextEmbedding: number[] | null = null;
+      if (r.context_embedding) {
+        const ab = r.context_embedding instanceof Uint8Array
+          ? r.context_embedding.buffer.slice(
+              r.context_embedding.byteOffset,
+              r.context_embedding.byteOffset + r.context_embedding.byteLength,
+            )
+          : r.context_embedding;
+        contextEmbedding = Array.from(new Float32Array(ab));
+      }
+      return {
+        id: r.id,
+        groupId: r.group_id,
+        stickerKey: r.sticker_key,
+        senderUserId: r.sender_user_id,
+        prevMsgs,
+        triggerText: r.trigger_text,
+        replyToTarget: r.reply_to_target,
+        actLabel: r.act_label,
+        contextEmbedding,
+        laterReactions,
+        createdAt: r.created_at,
+      };
+    });
+  }
+
+  updateLaterReactions(id: number, reactions: LaterReaction[]): void {
+    this.db.prepare(
+      `UPDATE sticker_usage_samples SET later_reactions = ? WHERE id = ?`,
+    ).run(JSON.stringify(reactions), id);
+  }
+
+  count(groupId: string): number {
+    const r = this.db.prepare(
+      `SELECT COUNT(*) AS cnt FROM sticker_usage_samples WHERE group_id = ?`,
+    ).get(groupId) as { cnt: number } | undefined;
+    return r?.cnt ?? 0;
+  }
+}
+
 interface PendingModerationRow {
   id: number; group_id: string; msg_id: string; user_id: string;
   user_nickname: string | null; content: string; severity: number;
@@ -3428,6 +3556,7 @@ export class Database {
   readonly forwardCache: IForwardCacheRepository;
   readonly botReplies: IBotReplyRepository;
   readonly localStickers: ILocalStickerRepository;
+  readonly stickerUsageSamples: IStickerUsageSampleRepository;
   readonly learnedFacts: ILearnedFactsRepository;
   readonly pendingModeration: IPendingModerationRepository;
   readonly welcomeLog: IWelcomeLogRepository;
@@ -3471,6 +3600,7 @@ export class Database {
     this.forwardCache = new ForwardCacheRepository(this._db);
     this.botReplies = new BotReplyRepository(this._db);
     this.localStickers = new LocalStickerRepository(this._db);
+    this.stickerUsageSamples = new StickerUsageSampleRepository(this._db);
     this.learnedFacts = new LearnedFactsRepository(this._db);
     this.pendingModeration = new PendingModerationRepository(this._db);
     this.welcomeLog = new WelcomeLogRepository(this._db);
@@ -3567,6 +3697,27 @@ export class Database {
       )
     `);
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_live_stickers_group_count ON live_stickers(group_id, count DESC)`);
+
+    // S1: sticker_usage_samples — repeated for upgrade-in-place on legacy DBs
+    // that predate the schema. See feedback_sqlite_schema_migration.md.
+    this._db.exec(`
+      CREATE TABLE IF NOT EXISTS sticker_usage_samples (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id          TEXT    NOT NULL,
+        sticker_key       TEXT    NOT NULL,
+        sender_user_id    TEXT    NOT NULL,
+        prev_msgs         TEXT    NOT NULL DEFAULT '[]',
+        trigger_text      TEXT    NOT NULL DEFAULT '',
+        reply_to_target   TEXT,
+        act_label         TEXT,
+        context_embedding BLOB,
+        later_reactions   TEXT    NOT NULL DEFAULT '[]',
+        created_at        INTEGER NOT NULL
+      )
+    `);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_sus_group_key ON sticker_usage_samples(group_id, sticker_key, created_at DESC)`);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_sus_group_act ON sticker_usage_samples(group_id, act_label, created_at DESC)`);
+    this._db.exec(`CREATE INDEX IF NOT EXISTS idx_sus_null_embedding ON sticker_usage_samples(id) WHERE context_embedding IS NULL`);
 
     // Add role column to users table for existing DBs
     try { this._db.exec(`ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'member'`); } catch { /* already exists */ }
