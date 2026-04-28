@@ -1655,6 +1655,40 @@ export class ChatModule implements IChatModule {
       && triggerMessage.rawContent.includes(`[CQ:at,qq=${this.botUserId}]`)
       && !triggerMessage.content.trim();
 
+    // R4-lite hoist: classify utterance act EARLY so every guard-exit path
+    // below records a non-null act. Conservative defaults at this point:
+    //   - hasKnownFactTerm: false (router's _hasKnownFactTermPreview is not
+    //     in scope here; out-of-scope to extract per planner spec)
+    //   - hasRealFactHit: undefined (fact retrieval has not run yet —
+    //     classifyUtteranceAct tolerates undefined per v8 contract)
+    //   - msg.isDirect: false (isDirectForGateBypass is computed below at
+    //     L1670; conservative default keeps direct_chat classification
+    //     accurate when L2694 reclassifies on success paths)
+    // L2694 below remains as the authoritative reclassify with full context;
+    // setUtteranceAct is idempotent overwrite, no side effects.
+    {
+      const recent5LiteHoist = recentMessages.slice(-5).map(m => ({ content: m.content, userId: m.userId }));
+      const relayDetectionForActHoist = detectRelay(
+        this.db.messages.getRecent(groupId, 10),
+        this.botUserId ?? '',
+      );
+      const utteranceCtxHoist: StrategyPreviewContext = {
+        msg: {
+          content: triggerMessage.content,
+          rawContent: triggerMessage.rawContent,
+          isAtMention: !!this.botUserId
+            && triggerMessage.rawContent.includes(`[CQ:at,qq=${this.botUserId}]`),
+          isDirect: false,
+          shouldReply: true,
+        },
+        recent5Msgs: recent5LiteHoist,
+        hasKnownFactTerm: false,
+        hasRealFactHit: undefined,
+        relayHit: !!relayDetectionForActHoist,
+      };
+      metaBuilder.setUtteranceAct(classifyUtteranceAct(utteranceCtxHoist));
+    }
+
     // Empty content after CQ stripping (and not a pure @-mention)
     if (!triggerMessage.content.trim() && !isPureAtMention) {
       return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'timing' };
