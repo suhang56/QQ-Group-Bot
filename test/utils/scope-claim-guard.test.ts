@@ -69,7 +69,7 @@ describe('hasSelfCenteredScopeClaim — Group B self-centered', () => {
     // @ts-expect-error intentional bad input
     expect(hasSelfCenteredScopeClaim(null)).toBe(false));
 
-  // ── R2.5.1-annex (C) PIVOT — tail-plural-you variants (04-23/04-24 archived) ──
+  // ── PIVOT — tail-plural-you variants (04-23/04-24 archived) ──
   describe('tail-plural-you Group B variants', () => {
     // Archived live samples — must FIRE (the bug fix)
     it('fires: 又来了你们 (04-24 18:46/22:21 archived)', () =>
@@ -88,25 +88,33 @@ describe('hasSelfCenteredScopeClaim — Group B self-centered', () => {
       expect(hasSelfCenteredScopeClaim('又来了大家')).toBe(true));
     it('fires: 又来了你俩', () =>
       expect(hasSelfCenteredScopeClaim('又来了你俩')).toBe(true));
-    it('fires: 又来了你们啊!  (addressee + particle + punct)', () =>
+    it('fires: 又来了你们啊! (addressee + particle + punct)', () =>
       expect(hasSelfCenteredScopeClaim('又来了你们啊!')).toBe(true));
-    it('fires: 又来这套了 (no addressee)', () =>
-      expect(hasSelfCenteredScopeClaim('又来这套了')).toBe(true));
-    it('fires: 又来这套了你们 (variant + addressee)', () =>
-      expect(hasSelfCenteredScopeClaim('又来这套了你们')).toBe(true));
+
+    // 是吧 modal slot (universal for all triggers)
+    it('fires: 又来这套是吧 (modal alone, no addressee)', () =>
+      expect(hasSelfCenteredScopeClaim('又来这套是吧')).toBe(true));
+    it('fires: 又来了是吧 (universal modal slot)', () =>
+      expect(hasSelfCenteredScopeClaim('又来了是吧')).toBe(true));
+    it('fires: 又怎么了是吧你们 (modal + addressee chain)', () =>
+      expect(hasSelfCenteredScopeClaim('又怎么了是吧你们')).toBe(true));
+
+    // Bare new triggers
+    it('fires: 又来这套 (bare new trigger)', () =>
+      expect(hasSelfCenteredScopeClaim('又来这套')).toBe(true));
     it('fires: 又怎么了 (bare new trigger)', () =>
       expect(hasSelfCenteredScopeClaim('又怎么了')).toBe(true));
 
     // Must-NOT-fire — long sentences / wrong prefix / wrong tail
     it('does NOT fire: 又来了你们好吗? (long sentence — 好吗 not in particle set)', () =>
       expect(hasSelfCenteredScopeClaim('又来了你们好吗?')).toBe(false));
+    it('does NOT fire: 又来了你们这群人 (tail continuation)', () =>
+      expect(hasSelfCenteredScopeClaim('又来了你们这群人')).toBe(false));
     it('does NOT fire: 你们又来了 (Group A territory — 你们 prefix not Group B)', () =>
       expect(hasSelfCenteredScopeClaim('你们又来了')).toBe(false));
-    it('does NOT fire: 又开始了你们这群人 (extra content after addressee)', () =>
-      expect(hasSelfCenteredScopeClaim('又开始了你们这群人')).toBe(false));
     it('does NOT fire: 又来了你们都 (`都` not in particle set)', () =>
       expect(hasSelfCenteredScopeClaim('又来了你们都')).toBe(false));
-    it('does NOT fire: 又来这套吗 (`吗` not in trigger; need 是吧/了)', () =>
+    it('does NOT fire: 又来这套吗 (`吗` not modal nor particle)', () =>
       expect(hasSelfCenteredScopeClaim('又来这套吗')).toBe(false));
     it('does NOT fire: 又怎么了啊太烦了 (multi-clause)', () =>
       expect(hasSelfCenteredScopeClaim('又怎么了啊太烦了')).toBe(false));
