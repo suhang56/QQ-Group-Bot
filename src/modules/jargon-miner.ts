@@ -308,6 +308,7 @@ export class JargonMiner {
     const rows = this.db.prepare(`
       SELECT * FROM jargon_candidates
       WHERE group_id = ?
+        AND rejected = 0
         AND count IN (${placeholders})
         AND count > last_inference_count
       ORDER BY count DESC
@@ -367,7 +368,7 @@ export class JargonMiner {
   async promoteToFacts(groupId: string): Promise<void> {
     const rows = this.db.prepare(`
       SELECT * FROM jargon_candidates
-      WHERE group_id = ? AND is_jargon = 1
+      WHERE group_id = ? AND is_jargon = 1 AND rejected = 0
     `).all(groupId) as unknown as JargonCandidateRow[];
 
     if (rows.length === 0) return;

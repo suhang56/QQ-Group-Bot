@@ -181,7 +181,8 @@ export class MemeGraphRepository implements IMemeGraphRepo {
 
   findByCanonical(groupId: string, canonical: string): MemeGraphEntry | null {
     const row = this.db.prepare(
-      'SELECT * FROM meme_graph WHERE group_id = ? AND canonical = ?'
+      `SELECT * FROM meme_graph WHERE group_id = ? AND canonical = ?
+       AND status IN ('active','manual_edit')`
     ).get(groupId, canonical) as unknown;
     if (!row) return null;
     return memeGraphFromRow(row as Parameters<typeof memeGraphFromRow>[0]);
@@ -189,7 +190,7 @@ export class MemeGraphRepository implements IMemeGraphRepo {
 
   findByVariant(groupId: string, term: string): MemeGraphEntry[] {
     const rows = this.db.prepare(
-      `SELECT * FROM meme_graph WHERE group_id = ? AND (
+      `SELECT * FROM meme_graph WHERE group_id = ? AND status NOT IN ('demoted') AND (
         canonical LIKE ? OR variants LIKE ?
       )`
     ).all(groupId, `%${term}%`, `%${term}%`) as unknown[];
@@ -341,7 +342,7 @@ export class PhraseCandidatesRepository implements IPhraseCandidatesRepo {
     const placeholders = thresholds.map(() => '?').join(',');
     const rows = this.db.prepare(`
       SELECT * FROM phrase_candidates
-      WHERE group_id = ? AND count IN (${placeholders})
+      WHERE group_id = ? AND rejected = 0 AND count IN (${placeholders})
         AND count > last_inference_count
       ORDER BY count DESC
       LIMIT ?
@@ -363,7 +364,7 @@ export class PhraseCandidatesRepository implements IPhraseCandidatesRepo {
   listUnpromoted(groupId: string): PhraseCandidateRow[] {
     const rows = this.db.prepare(
       `SELECT * FROM phrase_candidates
-       WHERE group_id = ? AND is_jargon = 1 AND promoted = 0
+       WHERE group_id = ? AND is_jargon = 1 AND promoted = 0 AND rejected = 0
        ORDER BY count DESC`
     ).all(groupId) as unknown[];
 
