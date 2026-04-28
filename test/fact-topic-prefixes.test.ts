@@ -109,9 +109,9 @@ describe('compareFactsByTrust determinism (case 17)', () => {
 });
 
 describe('topicStringsForTerm (case 18)', () => {
-  it("returns a 9-element array for valid 'ygfn'", () => {
+  it("returns one entry per LEARNED_FACT_TOPIC_PREFIXES for valid 'ygfn'", () => {
     const list = topicStringsForTerm('ygfn');
-    expect(list).toHaveLength(9);
+    expect(list).toHaveLength(LEARNED_FACT_TOPIC_PREFIXES.length);
     expect(list).toEqual(expect.arrayContaining(LEARNED_FACT_TOPIC_PREFIXES.map(p => `${p}:ygfn`)));
   });
 
@@ -145,7 +145,7 @@ describe('findActiveByTopicTerm dynamic-placeholder sanity (case 19)', () => {
     });
   }
 
-  it('returns all 9 rows for a term with every prefix populated, plus no decoys', () => {
+  it('returns one row per prefix for a term with every prefix populated, plus no decoys', () => {
     for (const p of LEARNED_FACT_TOPIC_PREFIXES) {
       insertFact('g1', `${p}:ygfn`, `fact under ${p}`);
     }
@@ -154,7 +154,7 @@ describe('findActiveByTopicTerm dynamic-placeholder sanity (case 19)', () => {
     insertFact('g1', 'unknown-prefix:ygfn', 'unknown prefix');
 
     const result = db.learnedFacts.findActiveByTopicTerm('g1', 'ygfn');
-    expect(result).toHaveLength(9);
+    expect(result).toHaveLength(LEARNED_FACT_TOPIC_PREFIXES.length);
     const topics = new Set(result.map(r => r.topic));
     for (const p of LEARNED_FACT_TOPIC_PREFIXES) {
       expect(topics).toContain(`${p}:ygfn`);

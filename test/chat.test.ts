@@ -3536,7 +3536,7 @@ describe('ChatModule — alias-miner fast-path (M6.2c Option 1b)', () => {
     // Critical Option 1b invariant: miner-written rows are status='pending'
     // and must still surface in the alias-map cache.
     db.learnedFacts.insert({
-      groupId: GROUP, topic: '群友别名 小明', fact: '小明 = hyw (QQ 10086)',
+      groupId: GROUP, topic: '群友别名:小明', fact: '小明 = hyw (QQ 10086)',
       sourceUserId: null, sourceUserNickname: '[alias-miner]',
       sourceMsgId: null, botReplyId: null,
       confidence: 0.8, status: 'pending',
@@ -3556,7 +3556,7 @@ describe('ChatModule — alias-miner fast-path (M6.2c Option 1b)', () => {
 
   it('active alias fact also reaches alias-map', () => {
     db.learnedFacts.insert({
-      groupId: GROUP, topic: '群友别名 小绿', fact: '小绿 = hyw (QQ 10089)',
+      groupId: GROUP, topic: '群友别名:小绿', fact: '小绿 = hyw (QQ 10089)',
       sourceUserId: null, sourceUserNickname: '[admin]',
       sourceMsgId: null, botReplyId: null,
       confidence: 0.9, status: 'active',
@@ -3580,7 +3580,7 @@ describe('ChatModule — alias-miner fast-path (M6.2c Option 1b)', () => {
     expect(priv.loreChunkAliasMap.get(GROUP)!.has('小红')).toBe(false);
 
     db.learnedFacts.insert({
-      groupId: GROUP, topic: '群友别名 小红', fact: '小红 = hyw (QQ 10087)',
+      groupId: GROUP, topic: '群友别名:小红', fact: '小红 = hyw (QQ 10087)',
       sourceUserId: null, sourceUserNickname: '[alias-miner]',
       sourceMsgId: null, botReplyId: null,
       confidence: 0.8, status: 'pending',
@@ -3593,7 +3593,7 @@ describe('ChatModule — alias-miner fast-path (M6.2c Option 1b)', () => {
 
   it('rejected alias fact does NOT reach alias-map (status filter excludes)', () => {
     const id = db.learnedFacts.insert({
-      groupId: GROUP, topic: '群友别名 小黑', fact: '小黑 = hyw (QQ 10099)',
+      groupId: GROUP, topic: '群友别名:小黑', fact: '小黑 = hyw (QQ 10099)',
       sourceUserId: null, sourceUserNickname: '[alias-miner]',
       sourceMsgId: null, botReplyId: null,
       confidence: 0.8, status: 'pending',

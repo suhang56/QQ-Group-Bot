@@ -178,18 +178,18 @@ describe('purge-legacy-classifier-junk — runPurge', () => {
 
   // ───────────────────────── Must-NOT-FIRE (untouched) ─────────────────────
 
-  it('T2 B3 overlap: [harvest:X] + topic 群友别名 小明 → untouched (16-row overlap case)', () => {
+  it('T2 B3 overlap: [harvest:X] + topic 群友别名:小明 → untouched (16-row overlap case)', () => {
     const db = makeDb();
-    const id = seed(db, { topic: '群友别名 小明', nickname: '[harvest:nsy]' });
+    const id = seed(db, { topic: '群友别名:小明', nickname: '[harvest:nsy]' });
     const r = runPurge({ db, target: 'all', apply: true, verbose: false, log: () => {}, now: () => 1e12 });
     expect(r.target2.found).toBe(0);
     expect(statusOf(db, id)).toBe('active');
     db.close();
   });
 
-  it('T2 alias-miner: [alias-miner] + 群友别名 X → untouched', () => {
+  it('T2 alias-miner: [alias-miner] + 群友别名:X → untouched', () => {
     const db = makeDb();
-    const id = seed(db, { topic: '群友别名 X', nickname: '[alias-miner]' });
+    const id = seed(db, { topic: '群友别名:X', nickname: '[alias-miner]' });
     const r = runPurge({ db, target: 'all', apply: true, verbose: false, log: () => {}, now: () => 1e12 });
     expect(r.target2.found).toBe(0);
     expect(statusOf(db, id)).toBe('active');
