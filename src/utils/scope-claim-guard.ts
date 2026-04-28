@@ -51,9 +51,17 @@ export function hasPluralYouScopeClaim(rawText: string): boolean {
 // ── Group B — SELF_CENTERED_SCOPE_CLAIM_PATTERNS ────────────────────────────
 // Full-line anchor. Embedded occurrences NOT matched — e.g. "又开始了在讨论音乐"
 // has 又开始了 as prefix but is followed by content → NOT a scope-claim.
-// Tail: optional sentence-end particle + optional punct.
+//
+// Tail addressee: optional plural-you (`你们/大家/你俩/诸位/你几个`) BEFORE the
+// particle/punct tail. Covers archived 04-23/04-24 live samples where bot ate
+// generic 你们 rhetoric and emitted "又来了你们" / "又来这套是吧你们" /
+// "又怎么了你们". These are semantically self-centered ("bot feels targeted")
+// but shape-wise distinct from Group A (which owns 你们-PREFIX patterns).
+//
+// Independence invariant: PLURAL_YOU_PATTERNS owns 你们-prefix; this group owns
+// 你们-tail. The two never co-fire on any single compact string.
 export const SELF_CENTERED_SCOPE_CLAIM_PATTERNS: readonly RegExp[] = [
-  /^(?:又来了|又开始了|又来搞我|又在搞我|还来|又一次|有完没完)[啊了呢吧哦嗷哈]*[。.!?~～！？]*$/,
+  /^(?:又来了|又开始了|又来搞我|又在搞我|还来|又一次|有完没完|又来这套(?:是吧|了)?|又怎么了)(?:你们|大家|你俩|诸位|你几个)?[啊了呢吧哦嗷哈]*[。.!?~～！？]*$/,
 ];
 
 /**
