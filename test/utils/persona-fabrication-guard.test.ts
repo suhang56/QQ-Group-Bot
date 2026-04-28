@@ -4,7 +4,6 @@ import {
   personaFabricationGuard,
   hasSelfPersonaFabrication,
   pickPersonaDeflection,
-  BLOCKED_SELF_ATTR_PATTERNS,
 } from '../../src/utils/persona-fabrication-guard.js';
 import { IDENTITY_DEFLECTIONS } from '../../src/utils/identity-deflections.js';
 import type { SendGuardCtx } from '../../src/utils/send-guard-chain.js';
@@ -24,9 +23,118 @@ const ctx: SendGuardCtx = {
   resultKind: 'reply',
 };
 
-describe('personaFabricationGuard — must-fire (self-attributed hard attrs)', () => {
-  it('fires on 我22岁', () => {
-    const r = personaFabricationGuard('我22岁', ctx);
+// Matrix rows: [text, expectedBlock(true=block / false=pass), label]
+type Row = [string, boolean, string];
+
+const CANON_PASS_ROWS: Row[] = [
+  ['我是女生', false, 'P1 gender canon (女生)'],
+  ['我是女的', false, 'P2 gender canon (女的)'],
+  ['我是女性', false, 'P3 gender canon (女性)'],
+  ['我女的', false, 'P4 我女的'],
+  ['我22岁', false, 'P5 age canon'],
+  ['我是22岁', false, 'P6 age canon (是)'],
+  ['我22 岁', false, 'P7 age canon (spaced)'],
+  ['我喜欢Roselia', false, 'P8 likes open'],
+  ['我不喜欢那个', false, 'P9 dislikes open'],
+  ['我住西雅图', false, 'P10 residence canon (CN)'],
+  ['我住在西雅图', false, 'P11 residence canon (住在)'],
+  ['我住 Seattle', false, 'P12 residence canon (EN)'],
+  ['自己是女的', false, 'A1 自己 anchor + canon 女'],
+  ['我住seattle', false, 'A2 lowercase Seattle'],
+  ['我住SEATTLE', false, 'A3 uppercase SEATTLE'],
+];
+
+const STANDALONE_PASS_ROWS: Row[] = [
+  ['女的', false, 'S1 standalone canon gender'],
+  ['女22岁', false, 'S2 standalone canon gender + age'],
+  ['女的22岁', false, 'S3 standalone canon gender + age'],
+];
+
+const CONTRADICT_BLOCK_ROWS: Row[] = [
+  ['我是男生', true, 'B1 gender contradicts (男生)'],
+  ['我是男的', true, 'B2 gender contradicts (男的)'],
+  ['我是男性', true, 'B3 gender contradicts (男性)'],
+  ['自己是男生', true, 'B4 自己 anchor + 男'],
+  ['我18岁', true, 'B5 age (18)'],
+  ['我30岁', true, 'B6 age (30)'],
+  ['我18 岁', true, 'B7 age (spaced)'],
+  ['我身高175', true, 'B8 height no canon'],
+  ['我身高 170 cm', true, 'B9 height no canon (unit)'],
+  ['我体重50kg', true, 'B10 weight no canon'],
+  ['我住北京', true, 'B11 residence (北京)'],
+  ['我住上海', true, 'B12 residence (上海)'],
+  ['我住New York', true, 'A4 New York not in canon'],
+  ['我体重55', true, 'A6 weight bare digit'],
+  ['我23岁', true, 'A11 age (23)'],
+];
+
+const STANDALONE_BLOCK_ROWS: Row[] = [
+  ['男的', true, 'BS1 standalone 男'],
+  ['男22岁', true, 'BS2 standalone 男'],
+  ['女的18岁', true, 'BS3 standalone age 18'],
+  ['女18岁', true, 'A12 standalone age 18'],
+];
+
+const EDGE_PASS_ROWS: Row[] = [
+  ['她22岁', false, 'E1 third-person (她)'],
+  ['他是男的', false, 'E2 third-person (他)'],
+  ['她说她22岁了', false, 'E3 embedded long'],
+  ['我女朋友今天生日', false, 'E4 compound 女朋友'],
+  ['', false, 'E5 empty'],
+  ['我住在这附近很久了', false, 'E6 这-prefixed'],
+  ['我女老师', false, 'A13 compound 女老师'],
+  ['我女同事', false, 'A14 compound 女同事'],
+  ['去女生厕所', false, 'A15 compound 女生厕所'],
+  ['进男生宿舍', false, 'A16 compound 男生宿舍'],
+  ['自己猜', false, 'A17 tsundere'],
+  ['不告诉你', false, 'A18 tsundere'],
+  ['我不知道', false, 'A19 honest gap'],
+  ['我忘了', false, 'A20 honest gap'],
+  ['我住在这附近', false, 'A21 vague'],
+  ['我22号去看演出', false, 'A22 22号 ≠ 22岁'],
+  ['   ', false, 'A23 whitespace'],
+  ['拉普兰德身高170', false, 'A27 3rd-person named'],
+];
+
+const CQ_ROWS: Row[] = [
+  ['[CQ:reply,id=1] 我22岁', false, 'CQ + canon-match age'],
+  ['[CQ:reply,id=1] 我30岁', true, 'CQ + contradicting age'],
+  ['[CQ:reply,id=1] 自己猜', false, 'CQ + tsundere'],
+];
+
+describe('hasSelfPersonaFabrication — canon-consistent → PASS', () => {
+  it.each([...CANON_PASS_ROWS, ...STANDALONE_PASS_ROWS])(
+    '[%# %s] %s',
+    (text, expected, _label) => {
+      expect(hasSelfPersonaFabrication(text)).toBe(expected);
+    },
+  );
+});
+
+describe('hasSelfPersonaFabrication — contradicts canon → BLOCK', () => {
+  it.each([...CONTRADICT_BLOCK_ROWS, ...STANDALONE_BLOCK_ROWS])(
+    '[%# %s] %s',
+    (text, expected, _label) => {
+      expect(hasSelfPersonaFabrication(text)).toBe(expected);
+    },
+  );
+});
+
+describe('hasSelfPersonaFabrication — third-person / compound / tsundere → PASS', () => {
+  it.each(EDGE_PASS_ROWS)('[%# %s] %s', (text, expected, _label) => {
+    expect(hasSelfPersonaFabrication(text)).toBe(expected);
+  });
+});
+
+describe('hasSelfPersonaFabrication — CQ:reply preprocess', () => {
+  it.each(CQ_ROWS)('[%# %s] %s', (text, expected, _label) => {
+    expect(hasSelfPersonaFabrication(text)).toBe(expected);
+  });
+});
+
+describe('personaFabricationGuard — SendGuard shape', () => {
+  it('contradicting age → passed:false, reason, replacement', () => {
+    const r = personaFabricationGuard('我30岁', ctx);
     expect(r.passed).toBe(false);
     if (!r.passed) {
       expect(r.reason).toBe('persona-fabricated');
@@ -34,161 +142,15 @@ describe('personaFabricationGuard — must-fire (self-attributed hard attrs)', (
     }
   });
 
-  it('fires on 我 22 岁 (spaced)', () => {
-    const r = personaFabricationGuard('我 22 岁', ctx);
-    expect(r.passed).toBe(false);
-  });
-
-  it('fires on 我是女的', () => {
-    const r = personaFabricationGuard('我是女的', ctx);
-    expect(r.passed).toBe(false);
-  });
-
-  it('fires on 我是男生', () => {
-    const r = personaFabricationGuard('我是男生', ctx);
-    expect(r.passed).toBe(false);
-  });
-
-  it('fires on 我女的', () => {
-    const r = personaFabricationGuard('我女的', ctx);
-    expect(r.passed).toBe(false);
-  });
-
-  it('fires on 我身高170', () => {
-    const r = personaFabricationGuard('我身高170', ctx);
-    expect(r.passed).toBe(false);
-  });
-
-  it('fires on 我体重55', () => {
-    const r = personaFabricationGuard('我体重55', ctx);
-    expect(r.passed).toBe(false);
-  });
-
-  it('fires on 我住北京朝阳区 (specific address)', () => {
-    const r = personaFabricationGuard('我住北京朝阳区', ctx);
-    expect(r.passed).toBe(false);
-  });
-
-  it('fires on 我自己是女的 (自己 anchor)', () => {
-    const r = personaFabricationGuard('我自己是女的', ctx);
-    expect(r.passed).toBe(false);
-  });
-
-  it('fires on standalone 女的22岁 (no 我, len ≤ 15)', () => {
-    const r = personaFabricationGuard('女的22岁', ctx);
-    expect(r.passed).toBe(false);
-  });
-
-  it('fires on standalone 男的 (len ≤ 15)', () => {
-    const r = personaFabricationGuard('男的', ctx);
-    expect(r.passed).toBe(false);
-  });
-
-  it('fires post-CQ-strip (我22岁 with CQ prefix)', () => {
-    const r = personaFabricationGuard('[CQ:reply,id=1] 我22岁', ctx);
-    expect(r.passed).toBe(false);
-  });
-});
-
-describe('personaFabricationGuard — must-NOT-fire (third-person / tsundere / honest / compound)', () => {
-  it('does NOT fire on 她22岁 (3rd-person)', () => {
-    const r = personaFabricationGuard('她22岁', ctx);
+  it('canon-consistent gender → passed:true, text preserved', () => {
+    const r = personaFabricationGuard('我是女生', ctx);
     expect(r.passed).toBe(true);
+    if (r.passed) expect(r.text).toBe('我是女生');
   });
 
-  it('does NOT fire on 他是男的 (3rd-person)', () => {
-    const r = personaFabricationGuard('他是男的', ctx);
-    expect(r.passed).toBe(true);
-  });
-
-  it('does NOT fire on 拉普兰德身高170 (3rd-person named)', () => {
-    const r = personaFabricationGuard('拉普兰德身高170', ctx);
-    expect(r.passed).toBe(true);
-  });
-
-  it('does NOT fire on 去女生厕所 (compound word)', () => {
-    const r = personaFabricationGuard('去女生厕所', ctx);
-    expect(r.passed).toBe(true);
-  });
-
-  it('does NOT fire on 进男生宿舍 (compound)', () => {
-    const r = personaFabricationGuard('进男生宿舍', ctx);
-    expect(r.passed).toBe(true);
-  });
-
-  it('does NOT fire on 我女朋友 (compound 女朋友)', () => {
-    const r = personaFabricationGuard('我女朋友今天生日', ctx);
-    expect(r.passed).toBe(true);
-  });
-
-  it('does NOT fire on 自己猜 (tsundere deflection)', () => {
-    const r = personaFabricationGuard('自己猜', ctx);
-    expect(r.passed).toBe(true);
-  });
-
-  it('does NOT fire on 不告诉你 (tsundere deflection)', () => {
-    const r = personaFabricationGuard('不告诉你', ctx);
-    expect(r.passed).toBe(true);
-  });
-
-  it('does NOT fire on 问这个干嘛 (tsundere deflection)', () => {
-    const r = personaFabricationGuard('问这个干嘛', ctx);
-    expect(r.passed).toBe(true);
-  });
-
-  it('does NOT fire on 别研究这个 (tsundere deflection)', () => {
-    const r = personaFabricationGuard('别研究这个', ctx);
-    expect(r.passed).toBe(true);
-  });
-
-  it('does NOT fire on 我不知道 (honest gap)', () => {
-    const r = personaFabricationGuard('我不知道', ctx);
-    expect(r.passed).toBe(true);
-  });
-
-  it('does NOT fire on 我忘了 (honest gap)', () => {
-    const r = personaFabricationGuard('我忘了', ctx);
-    expect(r.passed).toBe(true);
-  });
-
-  it('does NOT fire on 我住在这附近 (vague chatter, 这-prefixed address)', () => {
-    const r = personaFabricationGuard('我住在这附近', ctx);
-    expect(r.passed).toBe(true);
-  });
-
-  it('does NOT fire on 她说她22岁了 (3rd-person embedded)', () => {
-    const r = personaFabricationGuard('她说她22岁了', ctx);
-    expect(r.passed).toBe(true);
-  });
-
-  it('does NOT fire on empty / whitespace', () => {
+  it('empty → passed:true', () => {
     expect(personaFabricationGuard('', ctx).passed).toBe(true);
     expect(personaFabricationGuard('   ', ctx).passed).toBe(true);
-  });
-
-  it('does NOT fire on 我22号去看演出 (date, not age)', () => {
-    const r = personaFabricationGuard('我22号去看演出', ctx);
-    expect(r.passed).toBe(true);
-  });
-});
-
-describe('hasSelfPersonaFabrication (predicate helper)', () => {
-  it('returns true for self-attributed hard attr', () => {
-    expect(hasSelfPersonaFabrication('我22岁')).toBe(true);
-    expect(hasSelfPersonaFabrication('我是女的')).toBe(true);
-    expect(hasSelfPersonaFabrication('女的22岁')).toBe(true);
-  });
-
-  it('returns false for empty / 3rd-person / tsundere / compound', () => {
-    expect(hasSelfPersonaFabrication('')).toBe(false);
-    expect(hasSelfPersonaFabrication('她22岁')).toBe(false);
-    expect(hasSelfPersonaFabrication('自己猜')).toBe(false);
-    expect(hasSelfPersonaFabrication('去男生宿舍')).toBe(false);
-  });
-
-  it('strips CQ before match', () => {
-    expect(hasSelfPersonaFabrication('[CQ:reply,id=1] 我22岁')).toBe(true);
-    expect(hasSelfPersonaFabrication('[CQ:reply,id=1] 自己猜')).toBe(false);
   });
 });
 
@@ -197,19 +159,6 @@ describe('pickPersonaDeflection', () => {
     for (let i = 0; i < 50; i++) {
       const pick = pickPersonaDeflection();
       expect(IDENTITY_DEFLECTIONS).toContain(pick);
-    }
-  });
-});
-
-describe('BLOCKED_SELF_ATTR_PATTERNS shape', () => {
-  it('has 5 patterns (gender / age / metric / address / 自己-gender)', () => {
-    expect(BLOCKED_SELF_ATTR_PATTERNS.length).toBe(5);
-  });
-
-  it('no pattern fires on 3rd-person 她/他', () => {
-    for (const re of BLOCKED_SELF_ATTR_PATTERNS) {
-      expect(re.test('她22岁')).toBe(false);
-      expect(re.test('他是男的')).toBe(false);
     }
   });
 });
