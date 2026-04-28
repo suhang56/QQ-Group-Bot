@@ -141,7 +141,7 @@ export class MemeClusterer {
     // 1. Jargon candidates (is_jargon=1, promoted=0)
     const jargonRows = this.db.prepare(`
       SELECT * FROM jargon_candidates
-      WHERE group_id = ? AND is_jargon = 1 AND promoted = 0
+      WHERE group_id = ? AND is_jargon = 1 AND promoted = 0 AND rejected = 0
       ORDER BY count DESC
     `).all(groupId) as unknown as JargonCandidateRow[];
 

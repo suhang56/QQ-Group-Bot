@@ -42,7 +42,7 @@ export function loadGroupJargon(
   try {
     rows = rawDb.prepare(
       `SELECT content, meaning, count FROM jargon_candidates
-       WHERE group_id = ? AND is_jargon = 1 AND meaning IS NOT NULL
+       WHERE group_id = ? AND is_jargon = 1 AND meaning IS NOT NULL AND rejected = 0
        ORDER BY count DESC LIMIT ?`
     ).all(groupId, limit) as unknown as JargonRow[];
   } catch (err) {

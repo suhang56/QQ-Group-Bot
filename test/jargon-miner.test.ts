@@ -22,6 +22,7 @@ function makeDb(): DatabaseSync {
       is_jargon             INTEGER NOT NULL DEFAULT 0,
       created_at            INTEGER NOT NULL,
       updated_at            INTEGER NOT NULL,
+      rejected              INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (group_id, content)
     );
     CREATE INDEX IF NOT EXISTS idx_jargon_group_count ON jargon_candidates(group_id, count DESC);

@@ -366,6 +366,7 @@ CREATE TABLE IF NOT EXISTS jargon_candidates (
   promoted              INTEGER NOT NULL DEFAULT 0,
   created_at            INTEGER NOT NULL,
   updated_at            INTEGER NOT NULL,
+  rejected              INTEGER NOT NULL DEFAULT 0,    -- R6: bot-self purge flag
   PRIMARY KEY (group_id, content)
 );
 CREATE INDEX IF NOT EXISTS idx_jargon_group_count ON jargon_candidates(group_id, count DESC);
@@ -386,6 +387,7 @@ CREATE TABLE IF NOT EXISTS phrase_candidates (
   promoted              INTEGER NOT NULL DEFAULT 0,
   created_at            INTEGER NOT NULL,
   updated_at            INTEGER NOT NULL,
+  rejected              INTEGER NOT NULL DEFAULT 0,    -- R6: bot-self purge flag (Phase 1 infra; audit deferred to Phase 2)
   PRIMARY KEY (group_id, content, gram_len)
 );
 CREATE INDEX IF NOT EXISTS idx_phrase_group_count ON phrase_candidates(group_id, count DESC);

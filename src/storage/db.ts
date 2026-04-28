@@ -3932,6 +3932,12 @@ export class Database {
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_phrase_group_count ON phrase_candidates(group_id, count DESC)`);
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_phrase_unpromoted ON phrase_candidates(group_id, is_jargon, promoted) WHERE is_jargon = 1 AND promoted = 0`);
 
+    // R6: rejected column for bot-self corpus filter.
+    // Phase 1 jargon: full audit + read-path filter.
+    // Phase 1 phrase: column + read-path filter only; audit deferred to Phase 2.
+    try { this._db.exec(`ALTER TABLE jargon_candidates ADD COLUMN rejected INTEGER NOT NULL DEFAULT 0`); } catch { /* already exists */ }
+    try { this._db.exec(`ALTER TABLE phrase_candidates ADD COLUMN rejected INTEGER NOT NULL DEFAULT 0`); } catch { /* already exists */ }
+
     // meme_graph — clustered meme entries after inference + variant aggregation (memes-v1)
     this._db.exec(`
       CREATE TABLE IF NOT EXISTS meme_graph (

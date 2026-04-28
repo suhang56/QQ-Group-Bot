@@ -124,6 +124,7 @@ describe('jargon-provider', () => {
         is_jargon INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
+        rejected INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (group_id, content)
       )
     `);
