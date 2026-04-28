@@ -1,16 +1,17 @@
 /**
- * PR4: Persona fabrication guard — deterministic blacklist for bot self-claiming
- * hard attributes (gender / age / height / weight / address).
+ * R6: Persona fabrication guard — canon-aware self-attribution gate.
  *
- * Appended to buildSendGuards() after harassmentHardGate. Pure-regex, no LLM,
- * no regen. Input is bot outgoing text (post CQ:reply strip); third-person
- * statements (她22岁 / 他是男的) are R3 fact-retrieval territory and are NOT
- * blocked here — the gate requires a self-attribution anchor (我 / 自己) OR a
- * standalone short reply (len ≤ 15) of bare-attribute shape.
+ * Bot's BANGDREAM_PERSONA canon (chat.ts:499-505): gender=女, age=22,
+ * residence=西雅图/Seattle. Statements that match canon PASS; statements
+ * that contradict canon BLOCK. Fields with no canon (height/weight)
+ * continue to block any specific digit. Likes are an open list and are
+ * never checked.
+ *
+ * Third-person (她22岁 / 他是男的) is R3 fact-retrieval territory — gate
+ * requires 我/自己 anchor or a standalone short reply (len ≤ 15) of bare
+ * gender (+ optional age) shape.
  *
  * Gate fire → { passed:false, reason:'persona-fabricated', replacement:'deflection' }.
- * Send-site mapping mirrors PR2 harassment — deferred `deflection` render maps
- * to `silent` kind with reasonCode 'persona-fabricated' for now.
  */
 
 import type { SendGuard } from './send-guard-chain.js';
@@ -21,37 +22,86 @@ import { createLogger } from './logger.js';
 const logger = createLogger('persona-fabrication-guard');
 
 /**
- * Patterns require a self-attribution anchor (我 or 自己) so third-person
- * statements like "她22岁" / "他是男的" fall through to R3 fact-retrieval.
- * Compound-word lookaheads on 男/女生 exclude 女朋友 / 男生厕所 / 宿舍 / 生组
- * etc. Address pattern requires ≥2 CJK and negative-lookahead on 这/那 so
- * "我住在这附近很久了" is NOT a fabrication claim.
+ * Canon source: src/modules/chat.ts:499-505 (BANGDREAM_PERSONA).
+ * - gender / age / residence canon are checked
+ * - height / weight have no canon → any specific digit blocks
+ * - likes are open per user directive → never checked here
+ * residence list is lowercase-normalized; comparison is case-insensitive
+ * bidirectional substring (西雅图市 ⊇ 西雅图 → match; SEATTLE → seattle → match).
  */
-export const BLOCKED_SELF_ATTR_PATTERNS: readonly RegExp[] = [
-  /我\s*(?:是\s*)?[女男](?:的|生|性)(?!朋友|厕所|宿舍|生组|生气|生)/,
-  /我\s*\d{1,3}\s*岁/,
-  /我\s*(?:身高|体重)\s*\d/,
-  /我\s*住\s*(?:在\s*)?(?!这|那|在)[\u4e00-\u9fa5]{2,6}(?:市|区|县|省|里|附近)?/,
-  /自己\s*(?:是\s*)?[女男](?:的|生|性)/,
-];
+const PERSONA_CANON = {
+  gender: '女',
+  age: 22,
+  residence: ['西雅图', 'seattle'] as const,
+} as const;
 
-/**
- * Standalone-short-reply: full-reply shape like "女的22岁" / "男的" where the
- * whole bot utterance is a bare attribute claim without the 我 / 自己 anchor.
- * Must be evaluated only when the full stripped reply is ≤ 15 chars — this
- * keeps the gate narrow and avoids matching embedded third-person mentions
- * ("她说她22岁了") or descriptive asides inside longer replies.
- */
+// Gender: 我/自己 + 是? + [男女] + (的|生|性), with compound-word lookahead so
+// 女朋友 / 男生厕所 / 宿舍 / 生组 / 生气 etc don't fire.
+const GENDER_RE =
+  /(?:我|自己)\s*(?:是\s*)?([男女])(?:的|生|性)(?!朋友|厕所|宿舍|生组|生气|生)/u;
+
+// Age: 我 + (是)? + \d{1,3} + 岁  — requires 岁 unit so 我22号去看演出 is safe.
+const AGE_RE = /我\s*(?:是\s*)?(\d{1,3})\s*岁/u;
+
+// Height / weight — no canon, anchored 我 + 身高|体重 + digit always blocks.
+const METRIC_RE = /我\s*(?:身高|体重)\s*\d/u;
+
+// Residence: 我 + (住|在) + (在)? + (NOT 这|那|在) + 2-15 char place.
+const RESIDENCE_RE =
+  /我\s*(?:住|在)\s*(?:在\s*)?(?!这|那|在)([一-龥a-zA-Z][一-龥a-zA-Z\s]{1,14})/u;
+
+// Standalone short reply (whole-utterance, len ≤ 15): bare [男女] + opt
+// (的|生|性) + opt digits + 岁 + opt punct. Falls through if canon-matching.
 const STANDALONE_SHORT_RE =
-  /^\s*[女男](?:的|生|性)(?:\s*\d{1,3}\s*岁?)?\s*[。.!?~～]*\s*$/u;
+  /^\s*([男女])(?:的|生|性)?\s*(?:(\d{1,3})\s*岁?)?\s*[。.!?~～]*\s*$/u;
+
+function residenceMatchesCanon(place: string): boolean {
+  const p = place.trim().toLowerCase();
+  if (p === '') return false;
+  for (const c of PERSONA_CANON.residence) {
+    if (p.includes(c) || c.includes(p)) return true;
+  }
+  return false;
+}
 
 export function hasSelfPersonaFabrication(text: string): boolean {
   const s = stripCqReply(text);
   if (s === '') return false;
-  for (const re of BLOCKED_SELF_ATTR_PATTERNS) {
-    if (re.test(s)) return true;
+
+  // 1. Gender (anchored 我/自己) — block if captured ≠ canon.
+  const gm = s.match(GENDER_RE);
+  if (gm && gm[1] !== PERSONA_CANON.gender) return true;
+
+  // 2. Age (我 anchored) — block if parsed ≠ canon.
+  const am = s.match(AGE_RE);
+  if (am) {
+    const age = parseInt(am[1]!, 10);
+    if (age !== PERSONA_CANON.age) return true;
   }
-  if (s.length <= 15 && STANDALONE_SHORT_RE.test(s)) return true;
+
+  // 3. Height / weight — always block any digit.
+  if (METRIC_RE.test(s)) return true;
+
+  // 4. Residence (anchored 我 + 住|在) — block if captured place not in canon.
+  const rm = s.match(RESIDENCE_RE);
+  if (rm) {
+    if (!residenceMatchesCanon(rm[1]!)) return true;
+  }
+
+  // 5. Standalone short reply — bare [男女](+ opt age) — block if non-canon.
+  if (s.length <= 15) {
+    const sm = s.match(STANDALONE_SHORT_RE);
+    if (sm) {
+      const gender = sm[1]!;
+      const ageStr = sm[2];
+      if (gender !== PERSONA_CANON.gender) return true;
+      if (ageStr !== undefined) {
+        const age = parseInt(ageStr, 10);
+        if (age !== PERSONA_CANON.age) return true;
+      }
+    }
+  }
+
   return false;
 }
 

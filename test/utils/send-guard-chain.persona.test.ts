@@ -55,7 +55,7 @@ describe('send-guard-chain + personaFabricationGuard ordering (short-circuit)', 
   });
 
   it('sticker pass + harassment pass + persona fail → persona-fabricated, replacement:deflection', () => {
-    const r = runSendGuardChain(buildSendGuards(), '我22岁', ctx);
+    const r = runSendGuardChain(buildSendGuards(), '我30岁', ctx);
     expect(r.passed).toBe(false);
     if (!r.passed) {
       expect(r.reason).toBe('persona-fabricated');
