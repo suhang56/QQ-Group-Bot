@@ -120,12 +120,15 @@ function extractText(message: OneBotFrame['message']): string {
 type PendingResolve = (value: OneBotActionResponse) => void;
 type PendingReject = (reason: unknown) => void;
 
+const DEDUP_TTL_MS = 60_000;
+
 export class NapCatAdapter extends EventEmitter implements INapCatAdapter {
   private ws: WebSocket | null = null;
   private reconnectAttempts = 0;
   private readonly maxReconnects = 3;
   private readonly reconnectDelays = [2000, 5000, 10000];
   private pendingActions = new Map<string, { resolve: PendingResolve; reject: PendingReject; actionName: string; timer: ReturnType<typeof setTimeout> }>();
+  private readonly seenMessageIds = new Map<string, number>(); // messageId → expireTimeMs
   private echoCounter = 0;
   private disconnecting = false;
   private readonly logger = createLogger('adapter');
@@ -364,6 +367,33 @@ export class NapCatAdapter extends EventEmitter implements INapCatAdapter {
     }
 
     const evt = frame as OneBotFrame;
+
+    if (evt.post_type === 'message') {
+      const mid = evt.message_id != null ? String(evt.message_id) : '';
+      if (mid) {
+        const now = Date.now();
+        // Lazy sweep — purge expired entries before insert
+        for (const [k, exp] of this.seenMessageIds) {
+          if (exp <= now) this.seenMessageIds.delete(k);
+        }
+        const existingExp = this.seenMessageIds.get(mid);
+        if (existingExp != null && existingExp > now) {
+          const firstSeenMs = existingExp - DEDUP_TTL_MS;
+          this.logger.debug(
+            {
+              messageId: mid,
+              mapSize: this.seenMessageIds.size,
+              firstSeenMs,
+              ageMs: now - firstSeenMs,
+              message_type: evt.message_type,
+            },
+            '[dedup] duplicate frame dropped',
+          );
+          return;
+        }
+        this.seenMessageIds.set(mid, now + DEDUP_TTL_MS);
+      }
+    }
 
     if (evt.post_type === 'message' && evt.message_type === 'group') {
       const rawContent = typeof evt.message === 'string'
