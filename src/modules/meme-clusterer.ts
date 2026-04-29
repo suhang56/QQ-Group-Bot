@@ -7,6 +7,7 @@ import { createLogger } from '../utils/logger.js';
 import { extractJson } from '../utils/json-extract.js';
 import { JARGON_MODEL } from '../config.js';
 import { sanitizeForPrompt, hasJailbreakPattern } from '../utils/prompt-sanitize.js';
+import { HEDGE_RE } from '../utils/hedge-pattern.js';
 
 // ---- Constants ----
 
@@ -345,6 +346,13 @@ ${contextBlock}
       if (hasJailbreakPattern(parsed.origin_event)
         || (typeof parsed.origin_user === 'string' && hasJailbreakPattern(parsed.origin_user))) {
         this.logger.warn({ entryId, module: 'meme-clusterer' }, 'jailbreak pattern in meme origin — skipping update');
+        return;
+      }
+      if (HEDGE_RE.test(parsed.origin_event)) {
+        this.logger.warn(
+          { entryId, origin_event_truncated: parsed.origin_event.substring(0, 60) },
+          'meme origin rejected — hedge phrase',
+        );
         return;
       }
       this.memeGraph.update(entryId, {

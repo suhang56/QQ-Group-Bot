@@ -1412,10 +1412,26 @@ export class Router implements IRouter {
     if (this.chatDecisionTracker) {
       const nowSec = Math.floor(Date.now() / 1000);
       for (const item of cancelled) {
+        const itemRaw = item.msg.rawContent ?? '';
+        const itemIsDirect = itemRaw.includes('[CQ:at,') || itemRaw.includes('[CQ:reply,');
+        const utteranceCtx: StrategyPreviewContext = {
+          msg: {
+            content: item.msg.content,
+            rawContent: item.msg.rawContent,
+            isDirect: itemIsDirect,
+            isAtMention: itemRaw.includes('[CQ:at,'),
+            shouldReply: true,
+          },
+          recent5Msgs: item.recentMsgs.slice(-5).map(m => ({ content: m.content, userId: m.userId })),
+          hasKnownFactTerm: false,
+          hasRealFactHit: undefined,
+          relayHit: false,
+        };
+        const utteranceAct = classifyUtteranceAct(utteranceCtx);
         const result: ChatResult = {
           kind: 'silent',
           reasonCode: 'cancelled-by-direct',
-          meta: { decisionPath: 'silent' },
+          meta: { decisionPath: 'silent', utteranceAct },
         };
         this.chatDecisionTracker.captureDecision(result, {
           groupId,
