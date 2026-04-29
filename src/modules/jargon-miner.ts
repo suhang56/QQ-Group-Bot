@@ -10,6 +10,8 @@ import { validateFactForActive } from './fact-validator.js';
 import { GeminiGroundingProvider } from './web-lookup.js';
 import { shouldAcceptFactCandidate } from './fact-candidate-validator.js';
 import { isValidStructuredTerm } from './fact-topic-prefixes.js';
+import { HEDGE_RE } from '../utils/hedge-pattern.js';
+export { HEDGE_RE };
 
 // ---- Constants ----
 
@@ -43,12 +45,6 @@ const IMAGE_PAYLOAD_RE = /\[图片:\{[0-9A-Fa-f\-]{30,40}\}\.[a-zA-Z]{2,5}\]/gu;
 // Strip bare bracketed UUID segments {XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}.
 // Requires full 8-4-4-4-12 hex format — does not match {123} URL params or {hello}.
 const UUID_BRACES_RE = /\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}/gu;
-// Hedge phrase gate for jargon-miner LLM output. Single source of truth — applied
-// at exactly one point (_inferSingle, post-jailbreak gate). Calibrated against
-// real DB rows on 2026-04-28; see 02-designer-spec.md §A.
-export const HEDGE_RE =
-  /无法(判断|确定|准确判断|准确确定)|(?<![或担的])不确定(?![或担的性])|没有(特殊|特定|引申|独立|群聊黑话)(含义|意义|意思)|不具有.{0,10}黑话.{0,5}含义|需要(更多|更详细的?)?(上下文|对话|语境|背景|信息)|缺乏(更多|足够的?)?(上下文|对话背景|背景信息)|UUID|GUID|全局唯一标识符|图片文件名|技术性?.{0,5}标识|仅仅是图片附件|文件名的(一部分|组成部分)|可能(只|仅)?是(某个|一个|某位)?(人的|群成员的)?(名字|代号|昵称|人名)|没有(迹象表明|进一步(信息|上下文|资料))|(有限|仅有限)(信息|上下文|资料)/u;
-
 /**
  * ~200 common Chinese words that should never be jargon candidates.
  * These are everyday vocabulary that would create noise.
