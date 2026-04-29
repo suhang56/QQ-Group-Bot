@@ -188,11 +188,12 @@ describe('NapCatAdapter', () => {
     const roles: Array<GroupMessage['role']> = [];
     adapter.on('message.group', (msg) => roles.push(msg.role));
 
+    let messageId = 1;
     for (const role of ['owner', 'admin', 'member', 'unknown_role']) {
       serverSocket!.send(JSON.stringify({
         post_type: 'message',
         message_type: 'group',
-        message_id: 1,
+        message_id: messageId++,
         group_id: 1,
         user_id: 1,
         sender: { nickname: 'X', role },
