@@ -13,6 +13,8 @@ export const LEARNED_FACT_TOPIC_PREFIXES: readonly string[] = [
   '群内黑话',
   'passive',
   'online-research',
+  'moegirl',
+  'nga',
   'ondemand-lookup',
   '群友别名',
 ];
@@ -88,6 +90,8 @@ export function trustTierFromTopic(topic: string | null): number {
   if (topic.startsWith('opus-rest-classified:fandom:')) return 2;
   if (topic.startsWith('passive:')) return 3;
   if (topic.startsWith('online-research:')) return 3;
+  if (topic.startsWith('moegirl:')) return 3;
+  if (topic.startsWith('nga:')) return 3;
   if (topic.startsWith('群内黑话:')) return 4;
   if (topic.startsWith('群友别名:')) return 4;
   if (topic.startsWith('ondemand-lookup:')) return 5;

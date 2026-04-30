@@ -18,6 +18,8 @@ describe('trustTierFromTopic (case 8 — exhaustive)', () => {
     expect(trustTierFromTopic('opus-rest-classified:fandom:ygfn')).toBe(2);
     expect(trustTierFromTopic('passive:ygfn')).toBe(3);
     expect(trustTierFromTopic('online-research:ygfn')).toBe(3);
+    expect(trustTierFromTopic('moegirl:Roselia')).toBe(3);
+    expect(trustTierFromTopic('nga:声优')).toBe(3);
     expect(trustTierFromTopic('群内黑话:ygfn')).toBe(4);
     expect(trustTierFromTopic('ondemand-lookup:ygfn')).toBe(5);
   });
@@ -48,6 +50,51 @@ describe('extractTermFromTopic (case 9)', () => {
   });
   it('rejects too-short suffix', () => {
     expect(extractTermFromTopic('user-taught:X')).toBeNull();
+  });
+  it('extracts moegirl ASCII term', () => {
+    expect(extractTermFromTopic('moegirl:Roselia')).toBe('Roselia');
+  });
+  it('extracts nga Han 2-char term', () => {
+    expect(extractTermFromTopic('nga:声优')).toBe('声优');
+  });
+  it('extracts moegirl Han 3-char term', () => {
+    expect(extractTermFromTopic('moegirl:高松灯')).toBe('高松灯');
+  });
+  it('extracts nga Han 4-char term', () => {
+    expect(extractTermFromTopic('nga:翻唱歌曲')).toBe('翻唱歌曲');
+  });
+  it('rejects moegirl paren term (fails isValidStructuredTerm)', () => {
+    expect(extractTermFromTopic('moegirl:Afterglow(BanG Dream!)')).toBeNull();
+  });
+});
+
+describe('moegirl + nga prefix edge cases', () => {
+  it('moegirl:高松灯 — pure-Han 3-char term passes', () => {
+    expect(extractTermFromTopic('moegirl:高松灯')).toBe('高松灯');
+  });
+  it('nga:翻唱歌曲 — pure-Han 4-char term passes', () => {
+    expect(extractTermFromTopic('nga:翻唱歌曲')).toBe('翻唱歌曲');
+  });
+  it('moegirl:Afterglow(BanG Dream!) — mixed/paren term rejects', () => {
+    expect(extractTermFromTopic('moegirl:Afterglow(BanG Dream!)')).toBeNull();
+  });
+  it('moegirl:Roselia — ASCII-leading band name passes', () => {
+    expect(extractTermFromTopic('moegirl:Roselia')).toBe('Roselia');
+  });
+  it('nga:声优 — tier 3', () => {
+    expect(trustTierFromTopic('nga:声优')).toBe(3);
+  });
+  it('moegirl:Roselia — tier 3', () => {
+    expect(trustTierFromTopic('moegirl:Roselia')).toBe(3);
+  });
+  it('dirty suffix on moegirl falls to tier 10', () => {
+    expect(trustTierFromTopic('moegirl:ygfn是谁啊')).toBe(10);
+  });
+  it('topicStringsForTerm Roselia includes moegirl and nga entries', () => {
+    const list = topicStringsForTerm('Roselia');
+    expect(list).toContain('moegirl:Roselia');
+    expect(list).toContain('nga:Roselia');
+    expect(list).toHaveLength(LEARNED_FACT_TOPIC_PREFIXES.length);
   });
 });
 
