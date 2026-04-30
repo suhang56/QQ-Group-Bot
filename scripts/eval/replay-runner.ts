@@ -38,6 +38,93 @@ import { GeminiClient } from '../../src/ai/providers/gemini-llm.js';
 import { RealClaudeClientForReplay } from '../../src/ai/real-claude-client-for-replay.js';
 import { loadRealLlmConfig, type RealLlmConfig } from './real-llm-config.js';
 
+// ---------------------------------------------------------------------------
+// Halt-state for process-level handlers (uncaughtException / unhandledRejection
+// / SIGTERM / SIGHUP / SIGINT). Module-level. Safe because replay-runner.ts is
+// a CLI entry — each invocation is its own Node process. Library use is not a
+// supported surface; tests must call runReplay() sequentially within a single
+// process and rely on the de-dup sentinel below.
+// ---------------------------------------------------------------------------
+const CHECKPOINT_EVERY = 50;
+
+interface HaltState {
+  outputPath: string;
+  summaryPath: string;
+  rows: ReplayRow[];
+  goldByKey: Map<string, GoldLabel>;
+  llmMode: 'mock' | 'real' | 'recorded';
+  goldPath: string;
+  benchmarkPath: string;
+  llmStats: ReturnType<RealClaudeClientForReplay['getStats']> | null;
+}
+
+let _haltState: HaltState | null = null;
+
+function _flushHalt(reason: string, err?: unknown): void {
+  const msg = err instanceof Error ? (err.stack ?? err.message) : String(err ?? '');
+  process.stderr.write(`[replay-runner] FATAL ${reason}: ${msg}\n`);
+  if (!_haltState) return;
+  const { summaryPath, rows, goldByKey, llmMode, goldPath, benchmarkPath, llmStats } = _haltState;
+  const summary = aggregateSummary({
+    rows, goldByKey, llmMode, goldPath, benchmarkPath, llmStats, halted: true,
+  });
+  const haltedSummary = Object.assign({}, summary, {
+    halted: true,
+    haltReason: 'unhandled-error' as const,
+    error: msg,
+  });
+  try {
+    fs.writeFileSync(summaryPath + '.tmp', JSON.stringify(haltedSummary, null, 2));
+    fs.renameSync(summaryPath + '.tmp', summaryPath);
+    process.stderr.write(`[replay-runner] halt summary written: ${summaryPath}\n`);
+  } catch {
+    process.stderr.write(`[replay-runner] could not write halt summary\n`);
+  }
+}
+
+function _signalFlush(sig: NodeJS.Signals): void {
+  process.stderr.write(`[replay-runner] received ${sig} — flushing halt summary\n`);
+  if (_haltState) {
+    const { summaryPath, rows, goldByKey, llmMode, goldPath, benchmarkPath, llmStats } = _haltState;
+    const summary = aggregateSummary({
+      rows, goldByKey, llmMode, goldPath, benchmarkPath, llmStats, halted: true,
+    });
+    const haltedSummary = Object.assign({}, summary, {
+      halted: true,
+      haltReason: 'signal' as const,
+      signal: sig,
+    });
+    try {
+      fs.writeFileSync(summaryPath + '.tmp', JSON.stringify(haltedSummary, null, 2));
+      fs.renameSync(summaryPath + '.tmp', summaryPath);
+    } catch { /* best-effort */ }
+  }
+  const sigNum = sig === 'SIGTERM' ? 15 : sig === 'SIGHUP' ? 1 : sig === 'SIGINT' ? 2 : 0;
+  process.exit(128 + sigNum);
+}
+
+if ((process as unknown as { __replayRunnerHaltHandlersInstalled?: boolean })
+      .__replayRunnerHaltHandlersInstalled !== true) {
+  process.on('unhandledRejection', (reason) => {
+    _flushHalt('unhandledRejection', reason);
+    process.exitCode = 1;
+  });
+  process.on('uncaughtException', (err) => {
+    _flushHalt('uncaughtException', err);
+    process.exit(1);
+  });
+  process.on('SIGTERM', () => _signalFlush('SIGTERM'));
+  process.on('SIGHUP', () => _signalFlush('SIGHUP'));
+  process.on('SIGINT', () => _signalFlush('SIGINT'));
+  (process as unknown as { __replayRunnerHaltHandlersInstalled?: boolean })
+    .__replayRunnerHaltHandlersInstalled = true;
+}
+
+async function appendRowFsynced(fd: fs.promises.FileHandle, row: ReplayRow): Promise<void> {
+  await fd.write(JSON.stringify(row) + '\n');
+  await fd.datasync();
+}
+
 interface MinimalSampleRecord {
   sampleId: string;
   [k: string]: unknown;
@@ -206,13 +293,21 @@ export async function runReplay(args: ReturnType<typeof parseArgs>): Promise<Run
       mockClaude: llmClient,
     });
 
-    let writeStream: fs.WriteStream;
+    let fd: fs.promises.FileHandle;
     try {
-      writeStream = fs.createWriteStream(outputPath, { encoding: 'utf8' });
+      fd = await fs.promises.open(outputPath, 'a');
     } catch (err) {
       process.stderr.write(`Cannot open output file: ${String(err)}\n`);
       return { exitCode: 3, rowsWritten: 0, outputPath, summaryPath };
     }
+
+    // Keep the event loop alive while the run is in progress. Without this,
+    // an `unref()`'d setTimeout in dependency code (e.g. RealClaudeClientForReplay
+    // backoff sleep, withTimeout in replay-runner-core) can become the sole
+    // pending op — Node then exits cleanly with code 0 even though the run
+    // had not finished. fs.promises.FileHandle does NOT keep the loop alive
+    // the way fs.createWriteStream does. Ref'd interval cleared in finally.
+    const keepAlive = setInterval(() => { /* heartbeat */ }, 60_000);
 
     const rows: ReplayRow[] = [];
     let processed = 0;
@@ -220,6 +315,20 @@ export async function runReplay(args: ReturnType<typeof parseArgs>): Promise<Run
     let halted = false;
     const t0 = Date.now();
     const cap = args.limit === null ? gold.length : Math.min(gold.length, args.limit);
+
+    // Wire halt state now that rows + goldByKey are in scope and the output
+    // file is open. The handler always sees the latest snapshot because rows
+    // is mutated in-place and llmStats is re-snapshotted only at flush time.
+    _haltState = {
+      outputPath,
+      summaryPath,
+      rows,
+      goldByKey,
+      llmMode: args.llmMode,
+      goldPath: args.goldPath,
+      benchmarkPath: args.benchmarkPath,
+      llmStats: realClient?.getStats() ?? null,
+    };
 
     try {
       for (const g of gold) {
@@ -251,9 +360,14 @@ export async function runReplay(args: ReturnType<typeof parseArgs>): Promise<Run
           realClient,
         });
         rows.push(row);
-        writeStream.write(JSON.stringify(row) + '\n');
+        await appendRowFsynced(fd, row);
         processed++;
         if (row.resultKind === 'error') errors++;
+        // Refresh halt-state llmStats snapshot so a mid-run flush carries the
+        // latest token/cost numbers.
+        if (_haltState) {
+          _haltState.llmStats = realClient?.getStats() ?? null;
+        }
         if (processed % 20 === 0) {
           const sdCount = rows.filter(
             r => (r.goldDecision === 'silent' || r.goldDecision === 'defer') && r.resultKind !== 'error',
@@ -268,11 +382,37 @@ export async function runReplay(args: ReturnType<typeof parseArgs>): Promise<Run
             `processed ${processed}/${cap} (err=${errors}) compliance=${compliance.toFixed(4)}\n`,
           );
         }
+        if (processed % CHECKPOINT_EVERY === 0) {
+          const mem = process.memoryUsage();
+          const heapMb = (mem.heapUsed / 1024 / 1024).toFixed(1);
+          const rssMb  = (mem.rss       / 1024 / 1024).toFixed(1);
+          process.stderr.write(
+            `[checkpoint] rows=${processed} heap=${heapMb}MB rss=${rssMb}MB\n`,
+          );
+          const cpSummary = aggregateSummary({
+            rows,
+            goldByKey,
+            llmMode: args.llmMode,
+            goldPath: args.goldPath,
+            benchmarkPath: args.benchmarkPath,
+            llmStats: realClient?.getStats() ?? null,
+            halted: false,
+          });
+          try {
+            fs.writeFileSync(summaryPath + '.tmp', JSON.stringify(cpSummary, null, 2));
+            fs.renameSync(summaryPath + '.tmp', summaryPath);
+          } catch {
+            process.stderr.write(`[checkpoint] could not write checkpoint summary\n`);
+          }
+        }
       }
     } finally {
-      await new Promise<void>(resolve => {
-        writeStream.end(() => resolve());
-      });
+      // Order is significant: clear halt-state BEFORE closing fd so a Windows
+      // sharing-violation on close cannot leave a stale pointer to a closed
+      // file handle for a subsequent late event.
+      _haltState = null;
+      clearInterval(keepAlive);
+      try { await fd.close(); } catch { /* ignore */ }
       try { chat.destroy(); } catch { /* idempotent */ }
       try { (db as unknown as { rawDb?: { close?: () => void } }).rawDb?.close?.(); } catch { /* ignore */ }
     }
@@ -300,9 +440,13 @@ export async function runReplay(args: ReturnType<typeof parseArgs>): Promise<Run
       llmStats: realClient?.getStats() ?? null,
       halted,
     });
+    const finalSummary = halted
+      ? Object.assign({}, summary, { halted: true, haltReason: 'cost-cap' as const })
+      : summary;
 
     try {
-      fs.writeFileSync(summaryPath, JSON.stringify(summary, null, 2));
+      fs.writeFileSync(summaryPath + '.tmp', JSON.stringify(finalSummary, null, 2));
+      fs.renameSync(summaryPath + '.tmp', summaryPath);
     } catch (err) {
       process.stderr.write(`Cannot write summary.json: ${String(err)}\n`);
       return { exitCode: 3, rowsWritten: processed, outputPath, summaryPath };
