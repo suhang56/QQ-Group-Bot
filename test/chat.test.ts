@@ -3066,7 +3066,7 @@ describe('BANGDREAM_PERSONA — "我是谁" meta-question handling', () => {
   it('persona contains "我是谁" section with dismissal responses', () => {
     expect(BANGDREAM_PERSONA).toContain('被问"我是谁');
     expect(BANGDREAM_PERSONA).toContain('大哲学家是吧');
-    expect(BANGDREAM_PERSONA).toContain('问户口本啊');
+    expect(BANGDREAM_PERSONA).toContain('问户口本呢');
   });
 
   it('persona explicitly forbids redirecting question to other group members (non-sequitur)', () => {
