@@ -308,7 +308,7 @@ describe('OnDemandLookup.lookupTerm', () => {
       logger: makeLogger(),
     });
     const result = await lookup.lookupTerm('g1', 'xtt', 'u1');
-    expect(result).toEqual({ type: 'found', meaning: 'xtt=小团体' });
+    expect(result).toEqual({ type: 'found', meaning: 'xtt=小团体', factId: 4387 });
     expect(messagesRepo.searchFts).not.toHaveBeenCalled();
     expect(llm.complete).not.toHaveBeenCalled();
   });
@@ -350,7 +350,7 @@ describe('OnDemandLookup.lookupTerm', () => {
       logger: makeLogger(),
     });
     const result = await lookup.lookupTerm('g1', 'ygfn', 'u1');
-    expect(result).toEqual({ type: 'found', meaning: 'ygfn是羊宫妃那' });
+    expect(result).toEqual({ type: 'found', meaning: 'ygfn是羊宫妃那', factId: 9001 });
     expect(messagesRepo.searchFts).not.toHaveBeenCalled();
     expect(llm.complete).not.toHaveBeenCalled();
   });
@@ -384,7 +384,7 @@ describe('OnDemandLookup.lookupTerm', () => {
       logger: makeLogger(),
     });
     const result = await lookup.lookupTerm('g1', 'ygfn', 'u1');
-    expect(result).toEqual({ type: 'found', meaning: 'ygfn 是羊宫妃那啊' });
+    expect(result).toEqual({ type: 'found', meaning: 'ygfn 是羊宫妃那啊', factId: 4573 });
     expect(llm.complete).not.toHaveBeenCalled();
   });
 
@@ -416,7 +416,7 @@ describe('OnDemandLookup.lookupTerm', () => {
       logger: makeLogger(),
     });
     const result = await lookup.lookupTerm('g1', 'ykn', 'u1');
-    expect(result).toEqual({ type: 'found', meaning: 'ykn就是凑友希那，BanG Dream里的角色，Afterglow的主唱' });
+    expect(result).toEqual({ type: 'found', meaning: 'ykn就是凑友希那，BanG Dream里的角色，Afterglow的主唱', factId: 102 });
     expect(llm.complete).not.toHaveBeenCalled();
   });
 
@@ -447,7 +447,7 @@ describe('OnDemandLookup.lookupTerm', () => {
       logger: makeLogger(),
     });
     const result = await lookup.lookupTerm('g1', 'xtt', 'u1');
-    expect(result).toEqual({ type: 'found', meaning: 'xtt=小团体' });
+    expect(result).toEqual({ type: 'found', meaning: 'xtt=小团体', factId: 202 });
     expect(llm.complete).not.toHaveBeenCalled();
   });
 
@@ -501,7 +501,7 @@ describe('OnDemandLookup.lookupTerm', () => {
       logger: makeLogger(),
     });
     const result = await lookup.lookupTerm('g1', 'ygfn', 'u1');
-    expect(result).toEqual({ type: 'found', meaning: 'ygfn 是羊宫妃那啊' });
+    expect(result).toEqual({ type: 'found', meaning: 'ygfn 是羊宫妃那啊', factId: 4573 });
     expect(llm.complete).not.toHaveBeenCalled();
   });
 
@@ -525,7 +525,7 @@ describe('OnDemandLookup.lookupTerm', () => {
       logger: makeLogger(),
     });
     const result = await lookup.lookupTerm('g1', 'xtt', 'u1');
-    expect(result).toEqual({ type: 'found', meaning: '小团体' });
+    expect(result).toEqual({ type: 'found', meaning: '小团体', factId: 4387 });
     expect(factsRepo.findActiveByTopicTerm).toHaveBeenCalledWith('g1', 'xtt');
     expect(factsRepo.listActive).not.toHaveBeenCalled();
   });
@@ -571,7 +571,7 @@ describe('OnDemandLookup.lookupTerm', () => {
 
     expect(await lookup.lookupTerm('g1', 'aaa', 'u1')).toEqual({ type: 'unknown' });
     expect(await lookup.lookupTerm('g1', 'bbb', 'u1')).toEqual({ type: 'unknown' });
-    expect(await lookup.lookupTerm('g1', 'xtt', 'u1')).toEqual({ type: 'found', meaning: 'xtt=小团体' });
+    expect(await lookup.lookupTerm('g1', 'xtt', 'u1')).toEqual({ type: 'found', meaning: 'xtt=小团体', factId: 4387 });
     expect(messagesRepo.searchFts).toHaveBeenCalledTimes(2);
   });
 });

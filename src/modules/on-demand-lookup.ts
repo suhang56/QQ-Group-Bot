@@ -37,10 +37,14 @@ interface LlmResult {
 
 // Discriminated union returned to callers.
 // null = rate-limited or unrecoverable error (caller treats as unknown).
+// factId is set ONLY on the shortcut path (existing learned_facts row hit) so
+// callers can union the id into matchedFactRetrievalIds. The LLM-cache `found`
+// branch leaves factId undefined: insertOrSupersede returns no id and the row
+// will surface in the next BM25 retrieval anyway.
 export type TermLookupOutcome =
-  | { type: 'found'; meaning: string }   // ≥3 FTS hits + LLM confidence ≥7, cached to learnedFacts
-  | { type: 'weak'; guess: string }       // 1-2 FTS hits, LLM ran, NOT cached — ask-confirm
-  | { type: 'unknown' };                  // 0 FTS hits or LLM returned no answer — bot asks openly
+  | { type: 'found'; meaning: string; factId?: number }   // ≥3 FTS hits + LLM confidence ≥7, cached to learnedFacts
+  | { type: 'weak'; guess: string }                       // 1-2 FTS hits, LLM ran, NOT cached — ask-confirm
+  | { type: 'unknown' };                                  // 0 FTS hits or LLM returned no answer — bot asks openly
 
 export { LEARN_MODEL };
 
@@ -105,7 +109,7 @@ export class OnDemandLookup {
         if (match) {
           const meaning = match.personaForm ?? match.fact ?? '';
           this.logger.info({ groupId, term, factId: match.id }, 'ondemand-lookup: learned_facts shortcut hit');
-          return { type: 'found', meaning };
+          return { type: 'found', meaning, factId: match.id };
         }
       } catch (err) {
         this.logger.warn({ err, term }, 'ondemand-lookup: learned_facts shortcut failed -- falling through');
