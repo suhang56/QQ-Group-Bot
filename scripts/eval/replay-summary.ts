@@ -80,8 +80,20 @@ export function aggregateSummary(args: {
   llmMode: 'mock' | 'real' | 'recorded';
   goldPath: string;
   benchmarkPath: string;
+  // r6.4 — when present, used as the authoritative source for cost totals
+  // (single accumulator inside RealClaudeClientForReplay). Falls back to
+  // summing per-row llmCostUsd when absent.
+  llmStats?: {
+    totalInputTokens: number;
+    totalOutputTokens: number;
+    totalCostUsd: number;
+    errorCount: number;
+  } | null;
+  halted?: boolean;
 }): ReplaySummary {
   const { rows, goldByKey, llmMode, goldPath, benchmarkPath } = args;
+  const llmStats = args.llmStats ?? null;
+  const halted = args.halted ?? false;
   const totalRows = rows.length;
   const errorRows = rows.filter(r => r.resultKind === 'error').length;
 
@@ -215,6 +227,25 @@ export function aggregateSummary(args: {
     });
   }
 
+  // r6.4 — cost summary section. Prefer the client accumulator (single source
+  // of truth, includes regen calls); fall back to per-row sum if not provided.
+  let totalLlmInputTokens = 0;
+  let totalLlmOutputTokens = 0;
+  let totalLlmCostUsd = 0;
+  let llmErrorCount = 0;
+  if (llmStats) {
+    totalLlmInputTokens = llmStats.totalInputTokens;
+    totalLlmOutputTokens = llmStats.totalOutputTokens;
+    totalLlmCostUsd = llmStats.totalCostUsd;
+    llmErrorCount = llmStats.errorCount;
+  } else {
+    for (const r of rows) {
+      totalLlmInputTokens += r.llmInputTokens ?? 0;
+      totalLlmOutputTokens += r.llmOutputTokens ?? 0;
+      totalLlmCostUsd += r.llmCostUsd ?? 0;
+    }
+  }
+
   return {
     generatedAt: Math.floor(Date.now() / 1000),
     runnerVersion: RUNNER_VERSION,
@@ -232,5 +263,11 @@ export function aggregateSummary(args: {
     reasonCodeDist,
     actConfusion,
     perCategory,
+    realLlm: llmMode === 'real',
+    totalLlmInputTokens,
+    totalLlmOutputTokens,
+    totalLlmCostUsd,
+    llmErrorCount,
+    halted,
   };
 }

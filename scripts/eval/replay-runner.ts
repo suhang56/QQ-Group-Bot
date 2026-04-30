@@ -1,19 +1,26 @@
 #!/usr/bin/env tsx
 /**
- * R6.3 — Replay runner CLI entrypoint.
+ * R6.4 — Replay runner CLI entrypoint.
  *
- * Joins gold × benchmark by sampleId, instantiates ChatModule with a mock
- * Claude client and a tmp-copy of the prod DB, calls generateReply, captures
- * ChatResult, writes replay-output.jsonl + summary.json. Zero src/ edits.
+ * Joins gold × benchmark by sampleId, instantiates ChatModule with either a
+ * mock or a real Gemini-backed Claude client and a tmp-copy of the prod DB,
+ * calls generateReply, captures ChatResult, writes replay-output.jsonl +
+ * summary.json. Zero src/ writes (DB tmp-copied; bot never touches prod).
+ *
+ * Real-mode wiring per DESIGN.md §D — see also `scripts/eval/real-llm-config.ts`.
  *
  * Lifecycle per DEV-READY §3.3.
  *
  * Exit codes:
- *   0 — success
- *   1 — invalid args / missing input file
- *   2 — --llm-mode=real|recorded (not implemented) OR zero rows processed
+ *   0 — success (including cost-cap halt with partial output)
+ *   1 — invalid args / missing input file / GEMINI_API_KEY missing in real mode
+ *   2 — --llm-mode=recorded (not implemented) OR zero rows processed
  *   3 — output write error OR zero-side-effect tripwire fired
  */
+
+// dotenv loads .env at module-import time. Idempotent — safe even though
+// `real-llm-config.ts` also imports it.
+import 'dotenv/config';
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -26,6 +33,10 @@ import { readSamples } from './gold/reader.js';
 import { constructChatModule, runReplayRow, aggregateSummary } from './replay-runner-core.js';
 import type { SampledRow, ReplayRow } from './replay-types.js';
 import type { GoldLabel } from './gold/types.js';
+import type { IClaudeClient } from '../../src/ai/claude.js';
+import { GeminiClient } from '../../src/ai/providers/gemini-llm.js';
+import { RealClaudeClientForReplay } from '../../src/ai/real-claude-client-for-replay.js';
+import { loadRealLlmConfig, type RealLlmConfig } from './real-llm-config.js';
 
 interface MinimalSampleRecord {
   sampleId: string;
@@ -103,8 +114,8 @@ export interface RunResult {
  * Takes already-parsed ReplayerArgs. Writes files, returns exit-code shape.
  */
 export async function runReplay(args: ReturnType<typeof parseArgs>): Promise<RunResult> {
-  if (args.llmMode !== 'mock') {
-    process.stderr.write(`--llm-mode=${args.llmMode} not implemented in R6.3; use mock.\n`);
+  if (args.llmMode === 'recorded') {
+    process.stderr.write(`--llm-mode=recorded not implemented; use mock or real.\n`);
     return { exitCode: 2, rowsWritten: 0, outputPath: '', summaryPath: '' };
   }
 
@@ -163,11 +174,36 @@ export async function runReplay(args: ReturnType<typeof parseArgs>): Promise<Run
     for (const g of gold) goldByKey.set(g.sampleId, g);
     process.stderr.write(`gold=${gold.length} benchmark=${benchmarkMap.size}\n`);
 
-    const mockClaude = new MockClaudeClient();
+    let llmClient: IClaudeClient;
+    let realClient: RealClaudeClientForReplay | null = null;
+    let realCfg: RealLlmConfig | null = null;
+    let mockClaude: MockClaudeClient | null = null;
+    if (args.llmMode === 'mock') {
+      mockClaude = new MockClaudeClient();
+      llmClient = mockClaude;
+    } else {
+      // 'real' — 'recorded' was already rejected above with exit 2.
+      const cfgOverrides: { maxCostUsd?: number; rateLimitRps?: number; retryMax?: number } = {};
+      if (args.maxCostUsd != null) cfgOverrides.maxCostUsd = args.maxCostUsd;
+      if (args.rateLimitRps != null) cfgOverrides.rateLimitRps = args.rateLimitRps;
+      if (args.retryMax != null) cfgOverrides.retryMax = args.retryMax;
+      realCfg = loadRealLlmConfig(cfgOverrides);
+      const inner = new GeminiClient({
+        apiKey: realCfg.apiKey,
+        timeoutMs: realCfg.perCallTimeoutMs,
+      });
+      realClient = new RealClaudeClientForReplay(inner, realCfg);
+      llmClient = realClient;
+      process.stderr.write(
+        `[real-llm] cost cap=$${realCfg.maxCostUsd.toFixed(4)} ` +
+        `perCallTimeout=${realCfg.perCallTimeoutMs}ms ` +
+        `rps=${realCfg.rateLimitRps} retryMax=${realCfg.retryMax}\n`,
+      );
+    }
     const { chat, db } = constructChatModule({
       tmpDbPath: tmpDb,
       botQQ: args.botQQ,
-      mockClaude,
+      mockClaude: llmClient,
     });
 
     let writeStream: fs.WriteStream;
@@ -181,12 +217,23 @@ export async function runReplay(args: ReturnType<typeof parseArgs>): Promise<Run
     const rows: ReplayRow[] = [];
     let processed = 0;
     let errors = 0;
+    let halted = false;
     const t0 = Date.now();
     const cap = args.limit === null ? gold.length : Math.min(gold.length, args.limit);
 
     try {
       for (const g of gold) {
         if (processed >= cap) break;
+        // r6.4 — primary halt point for cost cap. Defense-in-depth: complete()
+        // also throws CostCapError, but ChatModule's catch only swallows
+        // ClaudeApiError; CostCapError would propagate up through generateReply
+        // → runReplayRow.catch and yield a kind:'error' row. Pre-checking here
+        // keeps partial output clean (no error rows just from cap-hit).
+        if (realClient && realCfg && realClient.getStats().totalCostUsd >= realCfg.maxCostUsd) {
+          process.stderr.write(`[real-llm] cost cap reached — halting run\n`);
+          halted = true;
+          break;
+        }
         const bench = benchmarkMap.get(g.sampleId);
         if (!bench) {
           process.stderr.write(`[skip] no benchmark row for gold sampleId=${g.sampleId}\n`);
@@ -201,6 +248,7 @@ export async function runReplay(args: ReturnType<typeof parseArgs>): Promise<Run
           gold: g,
           category: bench.category,
           perSampleTimeoutMs: args.perSampleTimeoutMs,
+          realClient,
         });
         rows.push(row);
         writeStream.write(JSON.stringify(row) + '\n');
@@ -233,12 +281,24 @@ export async function runReplay(args: ReturnType<typeof parseArgs>): Promise<Run
       process.stderr.write(`zero rows processed — check sampleId join or --limit\n`);
     }
 
+    if (realClient) {
+      const stats = realClient.getStats();
+      process.stderr.write(
+        `[real-llm] totalInputTokens=${stats.totalInputTokens} ` +
+        `totalOutputTokens=${stats.totalOutputTokens} ` +
+        `totalCostUsd=$${stats.totalCostUsd.toFixed(4)} ` +
+        `llmErrors=${stats.errorCount} halted=${halted}\n`,
+      );
+    }
+
     const summary = aggregateSummary({
       rows,
       goldByKey,
       llmMode: args.llmMode,
       goldPath: args.goldPath,
       benchmarkPath: args.benchmarkPath,
+      llmStats: realClient?.getStats() ?? null,
+      halted,
     });
 
     try {
@@ -249,15 +309,21 @@ export async function runReplay(args: ReturnType<typeof parseArgs>): Promise<Run
     }
 
     const elapsedMs = Date.now() - t0;
+    const llmCallSummary = mockClaude
+      ? `mockClaudeCalls=${mockClaude.callCount}`
+      : `realCalls=(see [real-llm] line)`;
     process.stderr.write(
       `DONE rows=${processed} errors=${errors} elapsed=${(elapsedMs / 1000).toFixed(2)}s ` +
       `compliance=${summary.silenceDeferCompliance.rate} ` +
-      `mockClaudeCalls=${mockClaude.callCount}\n`,
+      `${llmCallSummary}\n`,
     );
     process.stderr.write(`output=${outputPath}\nsummary=${summaryPath}\n`);
 
     return {
-      exitCode: processed === 0 && args.limit !== 0 ? 2 : 0,
+      // r6.4 — intentional halt (cost cap) is success-with-partial, exit 0.
+      // Zero rows is only an error if the cause is sampleId-join failure or
+      // --limit not at fault, not when halt fired before the first row.
+      exitCode: processed === 0 && args.limit !== 0 && !halted ? 2 : 0,
       rowsWritten: processed,
       outputPath,
       summaryPath,

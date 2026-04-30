@@ -20,6 +20,7 @@ import type { ChatResult } from '../../src/utils/chat-result.js';
 import type { GroupMessage } from '../../src/adapter/napcat.js';
 import { hasHarassmentTemplate } from '../../src/utils/output-hard-gate.js';
 import { hasSelfPersonaFabrication } from '../../src/utils/persona-fabrication-guard.js';
+import type { RealClaudeClientForReplay } from '../../src/ai/real-claude-client-for-replay.js';
 import type { GoldLabel } from './gold/types.js';
 import type {
   ReplayerArgs,
@@ -82,6 +83,10 @@ interface BuildReplayRowArgs {
   durationMs: number;
   violationTags: ViolationTag[];
   utteranceAct: UtteranceAct;
+  // r6.4 — token+cost attribution for the sample. null in mock mode or when no
+  // real client was passed. Captures the diff across all complete() calls a
+  // single generateReply made (addressee-regen, self-echo-regen, etc.).
+  llmUsage?: { inputTokens: number; outputTokens: number; costUsd: number } | null;
 }
 
 /**
@@ -93,7 +98,7 @@ interface BuildReplayRowArgs {
 export function buildReplayRow(args: BuildReplayRowArgs): ReplayRow {
   const {
     sampleId, category, gold, triggerMessageId, result,
-    durationMs, violationTags, utteranceAct,
+    durationMs, violationTags, utteranceAct, llmUsage,
   } = args;
 
   const base = {
@@ -104,6 +109,12 @@ export function buildReplayRow(args: BuildReplayRowArgs): ReplayRow {
     factNeeded: gold.factNeeded,
     allowBanter: gold.allowBanter,
     allowSticker: gold.allowSticker,
+  };
+
+  const usage = {
+    llmInputTokens: llmUsage?.inputTokens ?? null,
+    llmOutputTokens: llmUsage?.outputTokens ?? null,
+    llmCostUsd: llmUsage?.costUsd ?? null,
   };
 
   if (result.kind === 'error') {
@@ -122,6 +133,7 @@ export function buildReplayRow(args: BuildReplayRowArgs): ReplayRow {
       violationTags: [...violationTags],
       errorMessage: result.errorMessage,
       durationMs,
+      ...usage,
     };
   }
 
@@ -141,6 +153,7 @@ export function buildReplayRow(args: BuildReplayRowArgs): ReplayRow {
       violationTags: [...violationTags],
       errorMessage: null,
       durationMs,
+      ...usage,
     };
   }
 
@@ -160,6 +173,7 @@ export function buildReplayRow(args: BuildReplayRowArgs): ReplayRow {
       violationTags: [...violationTags],
       errorMessage: null,
       durationMs,
+      ...usage,
     };
   }
 
@@ -179,6 +193,7 @@ export function buildReplayRow(args: BuildReplayRowArgs): ReplayRow {
       violationTags: [...violationTags],
       errorMessage: null,
       durationMs,
+      ...usage,
     };
   }
 
@@ -198,6 +213,7 @@ export function buildReplayRow(args: BuildReplayRowArgs): ReplayRow {
     violationTags: [...violationTags],
     errorMessage: null,
     durationMs,
+    ...usage,
   };
 }
 
@@ -209,6 +225,10 @@ interface RunReplayRowArgs {
   gold: GoldLabel;
   category: number;
   perSampleTimeoutMs: number;
+  // r6.4 — optional. When provided, runReplayRow snapshots getStats() before
+  // and after generateReply and attributes the diff to the row's llmUsage —
+  // captures all complete() calls within the sample (regen storms included).
+  realClient?: RealClaudeClientForReplay | null;
 }
 
 /**
@@ -217,6 +237,7 @@ interface RunReplayRowArgs {
  */
 export async function runReplayRow(args: RunReplayRowArgs): Promise<ReplayRow> {
   const start = Date.now();
+  const statsBefore = args.realClient?.getStats() ?? null;
   let result: ChatResult | { kind: 'error'; errorMessage: string };
   try {
     result = await withTimeout(
@@ -227,6 +248,14 @@ export async function runReplayRow(args: RunReplayRowArgs): Promise<ReplayRow> {
     result = { kind: 'error', errorMessage: err instanceof Error ? err.message : String(err) };
   }
   const durationMs = Date.now() - start;
+  const statsAfter = args.realClient?.getStats() ?? null;
+  const llmUsage = (statsBefore && statsAfter)
+    ? {
+      inputTokens: statsAfter.totalInputTokens - statsBefore.totalInputTokens,
+      outputTokens: statsAfter.totalOutputTokens - statsBefore.totalOutputTokens,
+      costUsd: statsAfter.totalCostUsd - statsBefore.totalCostUsd,
+    }
+    : null;
 
   const utteranceAct: UtteranceAct =
     result.kind === 'error' ? 'none' : classifyUtterance(result);
@@ -296,5 +325,6 @@ export async function runReplayRow(args: RunReplayRowArgs): Promise<ReplayRow> {
     durationMs,
     violationTags,
     utteranceAct,
+    llmUsage,
   });
 }

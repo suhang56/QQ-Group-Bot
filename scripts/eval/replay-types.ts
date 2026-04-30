@@ -57,6 +57,12 @@ export interface ReplayRow {
   violationTags: string[];
   errorMessage: string | null;
   durationMs: number;
+
+  // r6.4 — llm token usage (null in mock mode, on error rows where complete()
+  // was never reached, or when the runner ran without a real client)
+  llmInputTokens: number | null;
+  llmOutputTokens: number | null;
+  llmCostUsd: number | null;
 }
 
 export interface ComplianceMetric {
@@ -96,6 +102,17 @@ export interface ReplaySummary {
   reasonCodeDist: Record<string, number>;
   actConfusion: Record<GoldAct, Record<UtteranceAct, number>>;
   perCategory: PerCategoryBreakdown[];
+
+  // r6.4 — real-llm cost summary section. `realLlm: false` for mock/recorded
+  // runs; downstream snapshot diffs can suppress drift on real-mode reruns
+  // (Gemini is non-deterministic; expect 5-10% violation-rate drift between
+  // back-to-back invocations).
+  realLlm: boolean;
+  totalLlmInputTokens: number;
+  totalLlmOutputTokens: number;
+  totalLlmCostUsd: number;
+  llmErrorCount: number;
+  halted: boolean;
 }
 
 export interface ReplayerArgs {
@@ -108,6 +125,11 @@ export interface ReplayerArgs {
   botQQ: string;
   groupIdForReplay: string;
   perSampleTimeoutMs: number;
+
+  // r6.4 — real-llm overrides (null = use env / config default)
+  maxCostUsd: number | null;
+  rateLimitRps: number | null;
+  retryMax: number | null;
 }
 
 export interface IReplayCounters {
@@ -117,4 +139,4 @@ export interface IReplayCounters {
   silentDeferDenomSoFar: number;
 }
 
-export const RUNNER_VERSION = 'r6.3.0';
+export const RUNNER_VERSION = 'r6.4.0';

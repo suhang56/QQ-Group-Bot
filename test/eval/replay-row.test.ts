@@ -49,7 +49,7 @@ describe('buildReplayRow — serialization invariants', () => {
     expect(s).not.toContain('undefined');
   });
 
-  it('all 20 fields are present as keys in the object', () => {
+  it('all 23 fields are present as keys in the object', () => {
     const keys = Object.keys(row).sort();
     const expected = [
       'sampleId', 'category',
@@ -58,6 +58,8 @@ describe('buildReplayRow — serialization invariants', () => {
       'usedFactHint', 'matchedFactIds', 'injectedFactIds',
       'replyText', 'promptVariant',
       'violationTags', 'errorMessage', 'durationMs',
+      // r6.4 — llm token+cost attribution (null in mock mode)
+      'llmInputTokens', 'llmOutputTokens', 'llmCostUsd',
     ].sort();
     expect(keys).toEqual(expected);
   });

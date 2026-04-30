@@ -24,6 +24,9 @@ function makeArgs(outputDir: string, overrides: Partial<ReplayerArgs> = {}): Rep
     botQQ: '1705075399',
     groupIdForReplay: '958751334',
     perSampleTimeoutMs: 10_000,
+    maxCostUsd: null,
+    rateLimitRps: null,
+    retryMax: null,
     ...overrides,
   };
 }
@@ -116,9 +119,12 @@ describe('replay-runner integration — mock mode', () => {
     expect(result.rowsWritten).toBe(1);
   }, 30_000);
 
-  it('--llm-mode=real → exit 2 not implemented', async () => {
-    const outDir = tmpDir('realmode');
-    const result = await runReplay(makeArgs(outDir, { llmMode: 'real' }));
+  // r6.4 — `--llm-mode=real` is now implemented; covered by
+  // test/scripts/eval/replay-runner-real-mode.test.ts. The remaining
+  // unimplemented mode is `recorded` → exit 2.
+  it('--llm-mode=recorded → exit 2 not implemented', async () => {
+    const outDir = tmpDir('recordedmode');
+    const result = await runReplay(makeArgs(outDir, { llmMode: 'recorded' }));
     expect(result.exitCode).toBe(2);
   });
 

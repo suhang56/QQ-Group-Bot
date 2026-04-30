@@ -21,6 +21,7 @@
     "scripts/eval/replay-runner-core.ts",
     "scripts/eval/replay-summary.ts",
     "scripts/eval/replay-runner.ts",
+    "scripts/eval/real-llm-config.ts",
     "scripts/eval/build-synthetic-replay-db.ts",
     "scripts/eval/gold/**/*",
     "scripts/maintenance/purge-bot-output-phrases.ts",
