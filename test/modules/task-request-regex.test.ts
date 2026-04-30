@@ -186,7 +186,7 @@ describe('Cleanup — Item 2 verb-led sub-clause LB + Item 3 我们 plural', () 
     // --- POSITIVE: noun-led / abstract — MUST keep matching (LB SKIPPED per spec) ---
     ['transformer怎么用的', true, 'noun-led transformer.{0,10}怎么 — LB skipped'],
     ['代码怎么写',          true, 'noun-led 代码怎么 — LB skipped'],
-    ['接龙',                true, 'abstract 接龙 — LB skipped'],
+    ['接龙',                false, 'bare 接龙 — peer-chat FP, must NOT match (jielong-fp PR)'],
 
     // --- REGRESSIONS: PR #117/#118 must still hold ---
     ['我得写个monitor系统了', false, '#117 modal 得 regression'],
