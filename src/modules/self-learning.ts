@@ -17,6 +17,7 @@ import {
   extractTermFromTopic,
   compareFactsByTrust,
 } from './fact-topic-prefixes.js';
+import { extractCandidateTerms } from '../utils/extract-candidate-terms.js';
 
 /** Cosine similarity floor — facts below this are dropped unless pinned.
  * MiniLM-L6-v2 is noisier on Chinese text so we set a slightly higher
@@ -104,6 +105,29 @@ const CORRECTION_PATTERNS: ReadonlyArray<RegExp> = [
 
 /** Minimum length of a candidate correction message — anything shorter is noise. */
 const MIN_CORRECTION_LENGTH = 3;
+
+/**
+ * Candidate-term extractor for the structured-term pre-pass in
+ * formatFactsForPrompt. Reuses extractCandidateTerms (production tokenizer with
+ * CJK suffix regex + ASCII/CJK boundary split + scaffolding filter), then
+ * applies the structural-shape gate that matches what learned_facts topics
+ * store. First-5 valid structured terms in source order, NOT trust-sorted.
+ * Cap of 5 keeps overhead bounded (≤5 indexed DB reads per call).
+ */
+function extractCandidateTermsForFacts(text: string): string[] {
+  const tokens = extractCandidateTerms(text);
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const t of tokens) {
+    if (out.length >= 5) break;
+    if (seen.has(t)) continue;
+    if (isValidStructuredTerm(t)) {
+      out.push(t);
+      seen.add(t);
+    }
+  }
+  return out;
+}
 
 /**
  * Result of formatting learned facts for the system prompt. `injectedFactIds` lists
@@ -371,6 +395,25 @@ export class SelfLearningModule {
       return this._formatFactsRecency(groupId, limit, 'noTrigger');
     }
 
+    // Structured-term exact pre-pass: short Latin aliases (e.g. 'ygfn', 'hyw')
+    // and 2-4 char Han aliases (e.g. '拉神') that FTS5's default tokenizer may
+    // not score high. For each candidate structured term, run findActiveByTopicTerm
+    // and merge hits into the fused set. This guarantees `matchedFactIds` includes
+    // them even when BM25=0 and vector cosine misses. Candidate terms come from
+    // extractCandidateTerms (production tokenizer, capped at 3) in source order,
+    // NOT trust-sorted — we want fan-out, dedup happens in the fuse merge below.
+    const exactPrePassIds = new Set<number>();
+    const exactPrePassFacts: LearnedFact[] = [];
+    for (const term of extractCandidateTermsForFacts(triggerText)) {
+      const rows = this.db.learnedFacts.findActiveByTopicTerm(groupId, term);
+      for (const row of rows) {
+        if (!exactPrePassIds.has(row.id)) {
+          exactPrePassIds.add(row.id);
+          exactPrePassFacts.push(row);
+        }
+      }
+    }
+
     // BM25 and semantic are independently gated:
     //   - BM25 runs whenever we have a trigger (FTS5 prepared statement, no embedder needed).
     //   - Semantic runs only when the embedder is ready.
@@ -419,20 +462,31 @@ export class SelfLearningModule {
     // BM25 rows arrive un-filtered by hedge/confidence — apply same rail as vector.
     const filteredBm25 = this._applyHedgeAndConfidenceFilter(bm25RowsRaw);
 
-    // If the embedder is down AND BM25 produced nothing, both ranked paths are
-    // dry — recency is a better surface than empty. (When embedder is up but
-    // both paths are empty, fall through to the meme-block check below.)
-    if (triggerEmbedding === null && filteredBm25.length === 0) {
+    // If the embedder is down AND BM25 produced nothing AND the structured-term
+    // pre-pass also missed, both ranked paths are dry — recency is a better
+    // surface than empty. (When embedder is up but both paths are empty, fall
+    // through to the meme-block check below.) Pre-pass hits keep us out of
+    // recency fallback so alias-only queries surface the fact.
+    if (triggerEmbedding === null && filteredBm25.length === 0 && exactPrePassFacts.length === 0) {
       return this._formatFactsRecency(groupId, limit, 'noServiceNoBm25');
     }
 
-    const fused = rrfFuse<LearnedFact>(
+    const rrfFused = rrfFuse<LearnedFact>(
       [
         { items: filteredBm25 },
         { items: scoredVector.map(s => s.fact) },
       ],
       { k: 60, limit: limit * 2 }, // over-fetch — pinned-newest + dedupe consume slots.
     );
+    // Append pre-pass hits not already in RRF output. We append (not prepend)
+    // because RRF already ranks BM25/vector overlap; pre-pass is a safety net
+    // for tokenizer gaps and shouldn't outrank legitimate scored hits.
+    const rrfFusedIds = new Set<number>(rrfFused.map(r => r.item.id));
+    const prePassOnly = exactPrePassFacts.filter(f => !rrfFusedIds.has(f.id));
+    const fused = [
+      ...rrfFused,
+      ...prePassOnly.map(f => ({ item: f, score: 0, contributions: [] })),
+    ];
 
     // Pinned-newest: listActiveWithEmbeddings returns created_at DESC, so
     // filteredEmbedded is already newest-first. Take first K.
