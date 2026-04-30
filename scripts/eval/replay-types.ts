@@ -112,7 +112,14 @@ export interface ReplaySummary {
   totalLlmOutputTokens: number;
   totalLlmCostUsd: number;
   llmErrorCount: number;
+
+  // halt taxonomy: undefined haltReason → ran to completion;
+  // 'cost-cap' → real-llm budget hit; 'unhandled-error' → process-level
+  // rejection/exception; 'signal' → SIGTERM/SIGHUP/SIGINT.
   halted: boolean;
+  haltReason?: 'cost-cap' | 'unhandled-error' | 'signal';
+  error?: string;     // present when haltReason === 'unhandled-error'
+  signal?: string;    // present when haltReason === 'signal'
 }
 
 export interface ReplayerArgs {
