@@ -24,6 +24,9 @@ export function usage(): never {
       '         --group-id <gid>        groupId to use for replay (where benchmark was sampled)',
       '         [--limit <N>]           stop after N samples (default: all)',
       '         [--timeout-ms <ms>]     per-sample generateReply timeout (default 10000)',
+      '         [--max-cost-usd <f>]    real-mode cost cap in USD (default $5.00 or REPLAY_MAX_COST_USD env)',
+      '         [--rps <int>]           real-mode rate limit (default 3 or REPLAY_RATE_LIMIT_RPS env)',
+      '         [--retry-max <int>]     real-mode 429/5xx retry count (default 3 or REPLAY_RETRY_MAX env)',
       '',
     ].join('\n'),
   );
@@ -31,7 +34,18 @@ export function usage(): never {
 }
 
 export function parseArgs(argv: string[]): ParsedArgs {
-  const args = argv.slice(2);
+  // Normalize `--name=value` → `--name`, `value`. Avoids per-flag boilerplate
+  // and matches the form used by the smoke-test runbook (--llm-mode=real).
+  const args: string[] = [];
+  for (const a of argv.slice(2)) {
+    if (a.startsWith('--') && a.includes('=')) {
+      const eqIdx = a.indexOf('=');
+      args.push(a.slice(0, eqIdx));
+      args.push(a.slice(eqIdx + 1));
+    } else {
+      args.push(a);
+    }
+  }
   let goldPath = '';
   let benchmarkPath = '';
   let outputDir = '';
@@ -41,6 +55,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let groupId = '';
   let limit: number | null = null;
   let perSampleTimeoutMs = 10_000;
+  let maxCostUsd: number | null = null;
+  let rateLimitRps: number | null = null;
+  let retryMax: number | null = null;
 
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -73,6 +90,36 @@ export function parseArgs(argv: string[]): ParsedArgs {
       i++;
       continue;
     }
+    if (a === '--max-cost-usd' && next) {
+      const n = Number.parseFloat(next);
+      if (!Number.isFinite(n) || n < 0) {
+        process.stderr.write(`--max-cost-usd must be non-negative number (got ${next})\n`);
+        process.exit(1);
+      }
+      maxCostUsd = n;
+      i++;
+      continue;
+    }
+    if (a === '--rps' && next) {
+      const n = Number.parseInt(next, 10);
+      if (!Number.isFinite(n) || n < 1) {
+        process.stderr.write(`--rps must be integer >= 1 (got ${next})\n`);
+        process.exit(1);
+      }
+      rateLimitRps = n;
+      i++;
+      continue;
+    }
+    if (a === '--retry-max' && next) {
+      const n = Number.parseInt(next, 10);
+      if (!Number.isFinite(n) || n < 0) {
+        process.stderr.write(`--retry-max must be integer >= 0 (got ${next})\n`);
+        process.exit(1);
+      }
+      retryMax = n;
+      i++;
+      continue;
+    }
     if (a === '--help' || a === '-h') usage();
     process.stderr.write(`Unknown argument: ${String(a)}\n`);
     usage();
@@ -101,5 +148,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
     botQQ,
     groupIdForReplay: groupId,
     perSampleTimeoutMs,
+    maxCostUsd,
+    rateLimitRps,
+    retryMax,
   };
 }
