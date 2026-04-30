@@ -7,6 +7,7 @@ import { createLogger } from '../utils/logger.js';
 import { extractJson } from '../utils/json-extract.js';
 import { LEARN_MODEL, RESEARCH_MODEL, FACTS_RAG_DISABLED, MEMES_V1_DISABLED } from '../config.js';
 import { sanitizeNickname, sanitizeForPrompt, hasJailbreakPattern } from '../utils/prompt-sanitize.js';
+import { isPromptInjectionFactSignature } from '../utils/redline-fact-filter.js';
 import { rrfFuse } from '../utils/rrf-fusion.js';
 import { validateFactForActive } from './fact-validator.js';
 import { GeminiGroundingProvider } from './web-lookup.js';
@@ -478,7 +479,16 @@ export class SelfLearningModule {
     // Compute matched-fact IDs BEFORE dedup: any fact that came from BM25 or
     // vector match (not pinned-newest) counts. fused contains only retrieval hits.
     const matchedIdSet = new Set<number>(fused.map(r => r.item.id));
-    const deduped = SelfLearningModule._dedupByTermTrust(finalFacts);
+    const redlineFiltered = finalFacts.filter(f => !isPromptInjectionFactSignature(f.fact));
+    if (redlineFiltered.length < finalFacts.length) {
+      finalFacts
+        .filter(f => isPromptInjectionFactSignature(f.fact))
+        .forEach(f => this.logger.warn(
+          { groupId, factId: f.id, reason: 'redline-prompt-injection', path: 'hybridRAG' },
+          'redline fact filtered',
+        ));
+    }
+    const deduped = SelfLearningModule._dedupByTermTrust(redlineFiltered);
     const base = this._renderFacts(deduped);
     const matchedFactIds = base.injectedFactIds.filter(id => matchedIdSet.has(id));
     const pinnedOnly = matchedFactIds.length === 0 && base.injectedFactIds.length > 0;
@@ -513,9 +523,18 @@ export class SelfLearningModule {
     const raw = this.db.learnedFacts.listActive(groupId, overFetch);
     let droppedLowConf = 0;
     let droppedHedge = 0;
+    let droppedRedline = 0;
     const filtered = raw.filter(f => {
       if (f.confidence < SelfLearningModule.MIN_INJECT_CONFIDENCE) { droppedLowConf++; return false; }
       if (SelfLearningModule.isHedged(f.fact)) { droppedHedge++; return false; }
+      if (isPromptInjectionFactSignature(f.fact)) {
+        droppedRedline++;
+        this.logger.warn(
+          { groupId, factId: f.id, reason: 'redline-prompt-injection', path: 'recency' },
+          'redline fact filtered',
+        );
+        return false;
+      }
       return true;
     });
     // Apply same per-term trust-tier dedup as the main RAG path, then clip.
@@ -523,7 +542,7 @@ export class SelfLearningModule {
     // legacy facts for the same term alongside a user-taught override.
     const deduped = SelfLearningModule._dedupByTermTrust(filtered).slice(0, limit);
     this.logger.debug(
-      { groupId, total: raw.length, keptBeforeDedup: filtered.length, keptAfterDedup: deduped.length, droppedLowConf, droppedHedge, reason },
+      { groupId, total: raw.length, keptBeforeDedup: filtered.length, keptAfterDedup: deduped.length, droppedLowConf, droppedHedge, droppedRedline, reason },
       'facts filtered for prompt (recency)',
     );
     if (deduped.length === 0) return { text: '', injectedFactIds: [], matchedFactIds: [], pinnedOnly: false };

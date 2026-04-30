@@ -1,7 +1,8 @@
 import { sanitizeFtsQuery } from '../utils/text-tokenize.js';
 import { sanitizeForPrompt, hasJailbreakPattern } from '../utils/prompt-sanitize.js';
+import { isPromptInjectionFactSignature } from '../utils/redline-fact-filter.js';
 import { LEARN_MODEL } from '../config.js';
-import type { ILearnedFactsRepository, IMessageRepository } from '../storage/db.js';
+import type { ILearnedFactsRepository, IMessageRepository, LearnedFact } from '../storage/db.js';
 import type { Logger } from 'pino';
 import { validateFactForActive } from './fact-validator.js';
 import { GeminiGroundingProvider } from './web-lookup.js';
@@ -86,10 +87,21 @@ export class OnDemandLookup {
     if (normalizedTerm.length >= 2) {
       try {
         const matches = this.db.learnedFacts.findActiveByTopicTerm(groupId, normalizedTerm);
+        const isRedline = (m: LearnedFact): boolean =>
+          isPromptInjectionFactSignature(m.fact)
+          || (m.personaForm != null && isPromptInjectionFactSignature(m.personaForm));
+        const safeMatches = matches.filter(m => !isRedline(m));
+        if (safeMatches.length < matches.length) {
+          matches
+            .filter(m => isRedline(m))
+            .forEach(m => this.logger.warn(
+              { groupId, factId: m.id, reason: 'redline-prompt-injection', path: 'onDemandShortcut' },
+              'redline fact filtered',
+            ));
+        }
+        safeMatches.sort(compareFactsByTrust);
 
-        matches.sort(compareFactsByTrust);
-
-        const match = matches[0];
+        const match = safeMatches[0];
         if (match) {
           const meaning = match.personaForm ?? match.fact ?? '';
           this.logger.info({ groupId, term, factId: match.id }, 'ondemand-lookup: learned_facts shortcut hit');
