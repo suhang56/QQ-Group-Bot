@@ -32,6 +32,7 @@ import {
   stripClosingTag,
 } from '../utils/prompt-sanitize.js';
 import { createLogger, type Logger } from '../utils/logger.js';
+import { safeSetTimeout, type SafeTimer } from '../utils/safe-set-timeout.js';
 
 const SHANGHAI_OFFSET_MS = 8 * 3600 * 1000;
 const DAY_MS = 86_400_000;
@@ -109,8 +110,8 @@ export interface DiaryDistillerOptions {
 
 export interface DiaryTimers {
   daily: NodeJS.Timeout | null;
-  weekly: NodeJS.Timeout | null;
-  monthly: NodeJS.Timeout | null;
+  weekly: SafeTimer | null;
+  monthly: SafeTimer | null;
 }
 
 export class DiaryDistiller {
@@ -123,8 +124,8 @@ export class DiaryDistiller {
   private readonly now: () => number;
 
   private dailyTimer: NodeJS.Timeout | null = null;
-  private weeklyTimer: NodeJS.Timeout | null = null;
-  private monthlyTimer: NodeJS.Timeout | null = null;
+  private weeklyTimer: SafeTimer | null = null;
+  private monthlyTimer: SafeTimer | null = null;
 
   constructor(opts: DiaryDistillerOptions) {
     this.claude = opts.claude;
@@ -147,8 +148,8 @@ export class DiaryDistiller {
 
   dispose(): void {
     if (this.dailyTimer) clearTimeout(this.dailyTimer);
-    if (this.weeklyTimer) clearTimeout(this.weeklyTimer);
-    if (this.monthlyTimer) clearTimeout(this.monthlyTimer);
+    this.weeklyTimer?.cancel();
+    this.monthlyTimer?.cancel();
     this.dailyTimer = null;
     this.weeklyTimer = null;
     this.monthlyTimer = null;
@@ -168,17 +169,17 @@ export class DiaryDistiller {
 
   private _scheduleNextWeekly(): void {
     const delayMs = msUntilNextShanghaiWeeklySlot(this.now(), WEEKLY_HOUR_SHANGHAI);
-    this.weeklyTimer = setTimeout(() => {
+    this.weeklyTimer = safeSetTimeout(delayMs, () => {
       void this._runWeeklyAndReschedule();
-    }, delayMs);
+    });
     this.weeklyTimer.unref?.();
   }
 
   private _scheduleNextMonthly(): void {
     const delayMs = msUntilNextShanghaiMonthlySlot(this.now(), MONTHLY_HOUR_SHANGHAI);
-    this.monthlyTimer = setTimeout(() => {
+    this.monthlyTimer = safeSetTimeout(delayMs, () => {
       void this._runMonthlyAndReschedule();
-    }, delayMs);
+    });
     this.monthlyTimer.unref?.();
   }
 
