@@ -99,7 +99,7 @@ describe('ChatModule — 5+ @-spam curse+ignore', () => {
   });
 
   it('ATSPAM_CURSE_POOL contains the 9 spec phrases', () => {
-    expect(ATSPAM_CURSE_POOL).toContain('烦不烦一直 @');
+    expect(ATSPAM_CURSE_POOL).toContain('一直 @ 干嘛');
     expect(ATSPAM_CURSE_POOL).toContain('滚');
     expect(ATSPAM_CURSE_POOL).toContain('闭嘴');
     expect(ATSPAM_CURSE_POOL.length).toBeGreaterThanOrEqual(9);
