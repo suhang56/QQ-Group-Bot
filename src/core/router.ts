@@ -1228,6 +1228,25 @@ export class Router implements IRouter {
       }));
       const hasKnownFactTerm = this._hasKnownFactTermPreview(groupId, item.msg.content);
       const recentNegativeScore = this._computeRecentNegativeScore(groupId);
+      const relayDetectionForAct = detectRelay(
+        this.db.messages.getRecent(groupId, 10),
+        this.botUserId ?? '',
+      );
+      const utteranceCtx: StrategyPreviewContext = {
+        msg: {
+          content: item.msg.content,
+          rawContent: item.msg.rawContent ?? item.msg.content,
+          isAtMention: !!this.botUserId
+            && (item.msg.rawContent ?? '').includes(`[CQ:at,qq=${this.botUserId}]`),
+          isDirect: false,
+          shouldReply: true,
+        },
+        recent5Msgs: freshMsgs.slice(-5).map(m => ({ content: m.content, userId: m.userId })),
+        hasKnownFactTerm,
+        hasRealFactHit: undefined,
+        relayHit: !!relayDetectionForAct,
+      };
+      const utteranceAct = classifyUtteranceAct(utteranceCtx);
       const recheck = evaluatePreGenerate({
         groupId,
         msg: { messageId: item.msg.messageId, userId: item.msg.userId, content: item.msg.content, timestamp: item.msg.timestamp },
@@ -1310,7 +1329,7 @@ export class Router implements IRouter {
             const silentResult: ChatResult = {
               kind: 'silent',
               reasonCode: 'timing',
-              meta: { decisionPath: 'silent' },
+              meta: { decisionPath: 'silent', utteranceAct },
             };
             this.chatDecisionTracker.captureDecision(silentResult, {
               groupId,
@@ -1347,7 +1366,7 @@ export class Router implements IRouter {
           const silentResult: ChatResult = {
             kind: 'silent',
             reasonCode: 'timing', // evaluatePreGenerate's 'cooldown' is timing-family; map for ChatResult union compatibility
-            meta: { decisionPath: 'silent' },
+            meta: { decisionPath: 'silent', utteranceAct },
           };
           this.chatDecisionTracker.captureDecision(silentResult, {
             groupId,
