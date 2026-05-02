@@ -78,25 +78,61 @@ export interface ITermLookupResult {
   meaning: string | null;
 }
 
-/** Last 5 valid text messages (non-bot, non-CQ-only, ts<=trigger) for addressee-scope guard. */
-function distinctNonBotSpeakersImmediate(
+/**
+ * Distinct non-bot speakers in the immediate-scope window before the trigger.
+ *
+ * `msgs` is OLDEST-first chronological (matches chat.ts `wideRaw.reverse()` →
+ * `slice(-N)` pipeline). Iteration runs newest→oldest so we can stop early
+ * on the first message that falls outside the window or before a thread-break.
+ *
+ * Filters (in order):
+ *   0. msg.timestamp > trigger.timestamp → skip (DB-race; future msg appears
+ *      late). `continue`, not `break`, in case of interleaving.
+ *   1. msg.timestamp < windowCutoff (= trigger.timestamp - windowSeconds) → break.
+ *   2. lastSeenTs - msg.timestamp > 60s → thread-break, break. lastSeenTs
+ *      advances on every visited msg (including bot/trigger skips) so a chain
+ *      of bot messages doesn't fabricate a gap.
+ *   3. msg.userId === botUserId → skip without counting.
+ *   4. msg.userId === trigger.userId → skip without counting (guard purpose
+ *      is "are there OTHER active speakers"; a solo trigger sender must yield 0).
+ *   5. CQ-only / whitespace-after-CQ-strip → skip.
+ *   6. Diversity cap: speakers.size >= 5 → break.
+ *
+ * Timestamps are SECONDS (matches `Message.timestamp` and `triggerMessage.timestamp`
+ * across the codebase, e.g. chat.ts:1660 `triggerMessage.timestamp * 1000`).
+ */
+export function distinctNonBotSpeakersImmediate(
   msgs: ReadonlyArray<{ userId: string; rawContent?: string; content: string; timestamp?: number }>,
   trigger: { userId: string; timestamp: number },
   botUserId: string,
+  windowSeconds = 90,
 ): number {
   const CQ_ONLY = /^(?:\s*\[CQ:[^\]]+\]\s*)+$/;
-  const valid: string[] = [];
-  for (const m of msgs) {
-    if ((m.timestamp ?? 0) > trigger.timestamp) continue;
+  const windowCutoff = trigger.timestamp - windowSeconds;
+  const speakers = new Set<string>();
+  let lastSeenTs: number | null = null;
+
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
+    const ts = m.timestamp ?? 0;
+
+    if (ts > trigger.timestamp) continue;
+    if (ts < windowCutoff) break;
+    if (lastSeenTs !== null && lastSeenTs - ts > 60) break;
+    lastSeenTs = ts;
+
     if (m.userId === botUserId) continue;
+    if (m.userId === trigger.userId) continue;
+
     const raw = m.rawContent ?? m.content;
     if (CQ_ONLY.test(raw)) continue;
     const text = raw.replace(/\[CQ:[^\]]+\]/g, '').trim();
     if (text.length === 0) continue;
-    valid.push(m.userId);
-    if (valid.length >= 5) break;
+
+    if (speakers.size >= 5) break;
+    speakers.add(m.userId);
   }
-  return new Set(valid).size;
+  return speakers.size;
 }
 
 const CQ_ONLY_RE = /^(?:\s*\[CQ:[^\]]+\]\s*)+$/;
