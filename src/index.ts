@@ -64,6 +64,7 @@ import { TuningGenerator } from './server/tuning-generator.js';
 import { GroupmateVoice } from './modules/groupmate-voice.js';
 import { ChatDecisionTracker } from './modules/chat-decision-tracker.js';
 import { DeferQueue, DEFER_RECHECK_INTERVAL_MS } from './utils/defer-queue.js';
+import { startRssGuard, parseRssLimit } from './utils/rss-guard.js';
 
 // ============================================================
 // PHASE 1: Infrastructure (logger, env, PID lock, database)
@@ -161,6 +162,13 @@ process.on('exit', cleanupPidFile);
 process.on('SIGTERM', () => { cleanupPidFile(); process.exit(0); });
 process.on('SIGINT', () => { cleanupPidFile(); process.exit(0); });
 process.on('SIGHUP', () => { cleanupPidFile(); process.exit(0); });
+
+const maxRssMb = parseRssLimit(process.env['BOT_MAX_RSS_MB']);
+if (maxRssMb !== null) {
+  startRssGuard({ maxRssMb, intervalMs: 30_000 }, logger);
+} else {
+  logger.warn({ raw: process.env['BOT_MAX_RSS_MB'] }, 'BOT_MAX_RSS_MB invalid or disabled — RSS guard off');
+}
 
 // 3. Open DB (step 2 of bootstrap order per architecture.md)
 const dbPath = process.env['DB_PATH'] ?? 'data/bot.db';
