@@ -9,7 +9,7 @@ import { sanitizeForPrompt, hasJailbreakPattern } from '../utils/prompt-sanitize
 import { validateFactForActive } from './fact-validator.js';
 import { GeminiGroundingProvider } from './web-lookup.js';
 import { shouldAcceptFactCandidate } from './fact-candidate-validator.js';
-import { isValidStructuredTerm } from './fact-topic-prefixes.js';
+import { isValidStructuredTerm, findHigherTrustExistingFact, trustTierFromTopic } from './fact-topic-prefixes.js';
 import { HEDGE_RE } from '../utils/hedge-pattern.js';
 export { HEDGE_RE };
 
@@ -434,6 +434,28 @@ export class JargonMiner {
         continue;
       }
       const jargonTopic = `群内黑话:${jargonTerm}`;
+      // Best-effort guard — single-process bot. Skip the write when a
+      // higher-trust active fact (e.g. user-taught:X tier 0) already exists
+      // for the same term so miner-inferred meaning cannot supersede curated
+      // truth. Same-tier collisions fall through to insertOrSupersede's
+      // exact-topic refresh path.
+      const existingFacts = this.learnedFacts.findActiveByTopicTerm(groupId, jargonTerm);
+      const higher = findHigherTrustExistingFact(existingFacts, jargonTopic);
+      if (higher !== null) {
+        this.logger.info(
+          {
+            groupId,
+            term: jargonTerm,
+            proposed: jargonTopic,
+            existing: higher.topic,
+            existingTier: trustTierFromTopic(higher.topic),
+            proposedTier: trustTierFromTopic(jargonTopic),
+          },
+          'jargon promote skipped -- higher-trust topic already active',
+        );
+        this._markPromoted(groupId, candidate.content);
+        continue;
+      }
       this.learnedFacts.insertOrSupersede({
         groupId,
         topic: jargonTopic,

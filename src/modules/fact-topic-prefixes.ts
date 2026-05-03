@@ -121,3 +121,32 @@ export function compareFactsByTrust(a: TrustComparableFact, b: TrustComparableFa
   if (confA !== confB) return confB - confA;
   return b.id - a.id;
 }
+
+/**
+ * Pure helper. Given an `existingFacts` snapshot (caller fetches via
+ * `findActiveByTopicTerm`) and a `proposedTopic`, return the first existing
+ * fact whose tier is strictly higher trust (= lower tier number) than the
+ * proposed topic AND whose extracted term equals the proposed term.
+ *
+ * Returns `null` when no such row exists. Same-tier collisions also return
+ * `null` so the caller's `insertOrSupersede` exact-topic refresh path is
+ * preserved unchanged.
+ *
+ * The same-term gate prevents a cross-term match if the caller passed in an
+ * `existingFacts` array that includes unrelated rows. Callers that already
+ * fetched via `findActiveByTopicTerm` will see only same-term rows, but the
+ * gate stays as a defense-in-depth check at the helper boundary.
+ */
+export function findHigherTrustExistingFact(
+  existingFacts: readonly TrustComparableFact[],
+  proposedTopic: string,
+): TrustComparableFact | null {
+  const proposedTier = trustTierFromTopic(proposedTopic);
+  const proposedTerm = extractTermFromTopic(proposedTopic);
+  if (proposedTerm === null) return null;
+  for (const f of existingFacts) {
+    if (extractTermFromTopic(f.topic) !== proposedTerm) continue;
+    if (trustTierFromTopic(f.topic) < proposedTier) return f;
+  }
+  return null;
+}

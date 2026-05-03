@@ -5,6 +5,7 @@ import { createLogger } from '../utils/logger.js';
 import { extractJson } from '../utils/json-extract.js';
 import { ALIAS_MODEL } from '../config.js';
 import { sanitizeNickname, sanitizeForPrompt, hasJailbreakPattern } from '../utils/prompt-sanitize.js';
+import { findHigherTrustExistingFact, trustTierFromTopic } from './fact-topic-prefixes.js';
 
 const MIN_NEW_MESSAGES = 50;
 const ALIAS_TOPIC_PREFIX = '群友别名:';
@@ -235,9 +236,31 @@ ${messagesList}
         ? Math.min(1, Math.max(0, entry.confidence))
         : DEFAULT_ALIAS_CONFIDENCE;
 
+      const aliasTopic = `${ALIAS_TOPIC_PREFIX}${alias}`;
+      // Best-effort guard — single-process bot. Skip the write when a
+      // higher-trust active fact (e.g. user-taught:alias tier 0) already
+      // exists for the same alias term so miner-inferred mapping cannot
+      // pollute the approval queue against curated truth.
+      const existingAliasFacts = this.learnedFacts.findActiveByTopicTerm(groupId, alias);
+      const higherAlias = findHigherTrustExistingFact(existingAliasFacts, aliasTopic);
+      if (higherAlias !== null) {
+        this.logger.info(
+          {
+            groupId,
+            alias,
+            proposed: aliasTopic,
+            existing: higherAlias.topic,
+            existingTier: trustTierFromTopic(higherAlias.topic),
+            proposedTier: trustTierFromTopic(aliasTopic),
+          },
+          'alias promote skipped -- higher-trust topic already active',
+        );
+        continue;
+      }
+
       const { supersededCount } = this.learnedFacts.insertOrSupersede({
         groupId,
-        topic: `${ALIAS_TOPIC_PREFIX}${alias}`,
+        topic: aliasTopic,
         fact: factText,
         sourceUserId: null,
         sourceUserNickname: '[alias-miner]',
@@ -256,7 +279,7 @@ ${messagesList}
 
       existing.push({
         id: 0, groupId,
-        topic: `${ALIAS_TOPIC_PREFIX}${alias}`,
+        topic: aliasTopic,
         fact: factText,
         canonicalForm: null, personaForm: null,
         sourceUserId: null, sourceUserNickname: '[alias-miner]',

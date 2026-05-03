@@ -27,6 +27,7 @@
     "scripts/maintenance/purge-bot-output-phrases.ts",
     "scripts/maintenance/purge-social-phrase-facts.ts",
     "scripts/maintenance/purge-legacy-classifier-junk.ts",
+    "scripts/maintenance/supersede-jargon-tier-conflict.ts",
     "src/**/*"
   ],
   "exclude": ["node_modules", "dist", "test"]
