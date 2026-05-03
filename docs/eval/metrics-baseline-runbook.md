@@ -187,3 +187,34 @@ Don't pick speculatively. Run real-LLM benchmark + look at top violations, choos
 - **Worktree-local files** (gitignored): `data/eval/gold/*.jsonl`, `data/eval/replay/*`, `data/eval/snapshots/*`. Rebuild via scripts when needed.
 - **Long sessions clean OS Temp** per `feedback_temp_dir_cleanup_after_long_sessions.md`: vitest leaks `test.db*` and replay-runner leaves `replay-*.db` in `%TEMP%`. Clean before C: < 5 GB.
 - **Cost discipline**: real-LLM runs cap at $5 by default. Don't disable cap for full 1027 unless explicitly authorized — a misconfig (rps=20, retry=10) can burn through quickly.
+
+## Metric variance discipline (added 2026-05-02)
+
+real-LLM mode 单跑 metric **noise floor ≈ 10x** — same master / same prompt / same model 跨 run hits 浮动 1→9 已观察到。**不能把单 run spike 当 regression**。
+
+升级为 regression 必须 ≥1:
+1. 同 row 连续 ≥2 runs 都 hit — 排除 LLM 随机性
+2. 同类 pattern ≥3 rows 在不同 run 中稳定出现 — 排除偶然 cluster
+3. deterministic mock replay 也复现 — 完全排除 LLM 因素
+
+低于门槛 = 暂存观察,不开 PR。
+
+**高方差(LLM 输出选择影响大)**:`sticker-when-not-allowed` / `banter-when-not-allowed` / `meta-status-misclassified` / `gold-silent-but-replied`
+**低方差(rule-based + structural)**:`direct-at-silenced-by-guard` / `hard-gate-blocked` / `self-centered-scope-claim`
+**中方差**:`direct-at-silenced` aggregate / `fact-needed-no-fact`
+
+低方差 tag 单 run 可信。高方差 tag 需要 multi-run averaging。
+
+Memory:`feedback_real_llm_metric_variance_needs_repeat_confirmation.md`。
+
+### Triaged: 2026-05-02 sticker-when-not-allowed +0.5pp
+
+post-#163 real-LLM rerun:`sticker-when-not-allowed` 5→9 行(+0.5pp vs 04-30 baseline)。Re-run 同 781 prompt set:run2 只 1 行(0.13%)。8/9 stochastic, 1/9 (`703857` 用户 trigger "发个鬼脸") 是 gold-label 错(已修 `allowSticker=true` 跨 4 个 gold file)。**No regression.**
+
+| Run | hits | rate |
+|---|---|---|
+| 04-30 baseline | 5 | 0.68% |
+| 05-02 run1 | 9 | 1.15% |
+| 05-02 run2 | **1** | **0.13%** |
+
+run-to-run overlap = 1 row → validated stochastic dominance。
