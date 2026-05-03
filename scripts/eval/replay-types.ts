@@ -115,9 +115,14 @@ export interface ReplaySummary {
 
   // halt taxonomy: undefined haltReason → ran to completion;
   // 'cost-cap' → real-llm budget hit; 'unhandled-error' → process-level
-  // rejection/exception; 'signal' → SIGTERM/SIGHUP/SIGINT.
+  // rejection/exception; 'signal' → SIGTERM/SIGHUP/SIGINT;
+  // 'retry-budget-exhausted' → consecutive-error cap reached in row loop.
   halted: boolean;
-  haltReason?: 'cost-cap' | 'unhandled-error' | 'signal';
+  haltReason?: 'cost-cap' | 'unhandled-error' | 'signal' | 'retry-budget-exhausted';
+  // Required: every final summary states completeness explicitly. true on all
+  // halt paths; false when the loop completes naturally. Checkpoint summaries
+  // (intermediate writes) do not carry this field.
+  incomplete: boolean;
   error?: string;     // present when haltReason === 'unhandled-error'
   signal?: string;    // present when haltReason === 'signal'
 }
@@ -137,6 +142,10 @@ export interface ReplayerArgs {
   maxCostUsd: number | null;
   rateLimitRps: number | null;
   retryMax: number | null;
+
+  // r7 — halt run after N consecutive resultKind='error' rows. null = disabled.
+  // Default 5 set in parseArgs. Counter resets on first non-error row.
+  maxConsecutiveErrors: number | null;
 }
 
 export interface IReplayCounters {

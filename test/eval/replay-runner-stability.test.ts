@@ -49,6 +49,7 @@ function makeArgs(outputDir: string, overrides: Partial<ReplayerArgs> = {}): Rep
     maxCostUsd: null,
     rateLimitRps: null,
     retryMax: null,
+    maxConsecutiveErrors: null,
     ...overrides,
   };
 }

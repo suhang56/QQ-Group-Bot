@@ -27,6 +27,7 @@ export function usage(): never {
       '         [--max-cost-usd <f>]    real-mode cost cap in USD (default $5.00 or REPLAY_MAX_COST_USD env)',
       '         [--rps <int>]           real-mode rate limit (default 3 or REPLAY_RATE_LIMIT_RPS env)',
       '         [--retry-max <int>]     real-mode 429/5xx retry count (default 3 or REPLAY_RETRY_MAX env)',
+      '         [--max-consecutive-errors <int>]  halt after N consecutive error rows (default 5, 0=disabled)',
       '',
     ].join('\n'),
   );
@@ -58,6 +59,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   let maxCostUsd: number | null = null;
   let rateLimitRps: number | null = null;
   let retryMax: number | null = null;
+  let maxConsecutiveErrors: number | null = 5;
 
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -120,6 +122,16 @@ export function parseArgs(argv: string[]): ParsedArgs {
       i++;
       continue;
     }
+    if (a === '--max-consecutive-errors' && next) {
+      const n = Number.parseInt(next, 10);
+      if (!Number.isFinite(n) || n < 0) {
+        process.stderr.write(`--max-consecutive-errors must be integer >= 0 (got ${next})\n`);
+        process.exit(1);
+      }
+      maxConsecutiveErrors = n === 0 ? null : n;
+      i++;
+      continue;
+    }
     if (a === '--help' || a === '-h') usage();
     process.stderr.write(`Unknown argument: ${String(a)}\n`);
     usage();
@@ -151,5 +163,6 @@ export function parseArgs(argv: string[]): ParsedArgs {
     maxCostUsd,
     rateLimitRps,
     retryMax,
+    maxConsecutiveErrors,
   };
 }

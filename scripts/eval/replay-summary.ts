@@ -269,5 +269,9 @@ export function aggregateSummary(args: {
     totalLlmCostUsd,
     llmErrorCount,
     halted,
+    // r7 — incomplete defaults to false here (the row loop has not signaled a
+    // halt at aggregation time). Halt paths in replay-runner.ts Object.assign
+    // an `incomplete: true` overlay on the returned summary before persistence.
+    incomplete: false,
   };
 }

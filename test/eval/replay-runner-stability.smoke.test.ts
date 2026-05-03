@@ -47,6 +47,7 @@ function makeArgs(outputDir: string, overrides: Partial<ReplayerArgs> = {}): Rep
     maxCostUsd: null,
     rateLimitRps: null,
     retryMax: null,
+    maxConsecutiveErrors: null,
     ...overrides,
   };
 }
@@ -206,6 +207,7 @@ describe('Test F — child_process spawn + SIGTERM mid-run produces halt summary
       expect(summary.halted).toBe(true);
       expect(summary.haltReason).toBe('signal');
       expect(summary.signal).toBe('SIGTERM');
+      expect(summary.incomplete).toBe(true);
       const outputPath = path.join(outDir, 'replay-output.jsonl');
       expect(fs.existsSync(outputPath)).toBe(true);
       const lines = fs.readFileSync(outputPath, 'utf8').trim().split('\n').filter(Boolean);
