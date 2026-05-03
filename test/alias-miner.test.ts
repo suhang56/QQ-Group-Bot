@@ -31,6 +31,7 @@ function makeFactRepo(existing: LearnedFact[] = []): ILearnedFactsRepository & {
     listActive: vi.fn().mockReturnValue(existing),
     listActiveWithEmbeddings: vi.fn().mockReturnValue([]),
     findSimilarActive: vi.fn().mockResolvedValue(null),
+    findActiveByTopicTerm: vi.fn().mockReturnValue([]),
     listPending: vi.fn().mockReturnValue([]),
     countPending: vi.fn().mockReturnValue(0),
     insert: vi.fn().mockImplementation((row) => { legacyInserts.push(row); return legacyInserts.length; }),
