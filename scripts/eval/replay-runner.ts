@@ -47,7 +47,7 @@ import { loadRealLlmConfig, type RealLlmConfig } from './real-llm-config.js';
 // ---------------------------------------------------------------------------
 const CHECKPOINT_EVERY = 50;
 
-interface HaltState {
+export interface HaltState {
   outputPath: string;
   summaryPath: string;
   rows: ReplayRow[];
@@ -60,7 +60,13 @@ interface HaltState {
 
 let _haltState: HaltState | null = null;
 
-function _flushHalt(reason: string, err?: unknown): void {
+// Test-only setter for direct unit tests of _flushHalt / _signalFlush. Not for
+// production callers — runReplay manages _haltState internally.
+export function _setHaltStateForTest(s: HaltState | null): void {
+  _haltState = s;
+}
+
+export function _flushHalt(reason: string, err?: unknown): void {
   const msg = err instanceof Error ? (err.stack ?? err.message) : String(err ?? '');
   process.stderr.write(`[replay-runner] FATAL ${reason}: ${msg}\n`);
   if (!_haltState) return;
@@ -71,6 +77,7 @@ function _flushHalt(reason: string, err?: unknown): void {
   const haltedSummary = Object.assign({}, summary, {
     halted: true,
     haltReason: 'unhandled-error' as const,
+    incomplete: true,
     error: msg,
   });
   try {
@@ -82,7 +89,7 @@ function _flushHalt(reason: string, err?: unknown): void {
   }
 }
 
-function _signalFlush(sig: NodeJS.Signals): void {
+export function _signalFlush(sig: NodeJS.Signals): void {
   process.stderr.write(`[replay-runner] received ${sig} — flushing halt summary\n`);
   if (_haltState) {
     const { summaryPath, rows, goldByKey, llmMode, goldPath, benchmarkPath, llmStats } = _haltState;
@@ -92,6 +99,7 @@ function _signalFlush(sig: NodeJS.Signals): void {
     const haltedSummary = Object.assign({}, summary, {
       halted: true,
       haltReason: 'signal' as const,
+      incomplete: true,
       signal: sig,
     });
     try {
@@ -313,6 +321,8 @@ export async function runReplay(args: ReturnType<typeof parseArgs>): Promise<Run
     let processed = 0;
     let errors = 0;
     let halted = false;
+    let consecutiveErrors = 0;
+    let haltReason: 'cost-cap' | 'retry-budget-exhausted' | undefined;
     const t0 = Date.now();
     const cap = args.limit === null ? gold.length : Math.min(gold.length, args.limit);
 
@@ -341,6 +351,7 @@ export async function runReplay(args: ReturnType<typeof parseArgs>): Promise<Run
         if (realClient && realCfg && realClient.getStats().totalCostUsd >= realCfg.maxCostUsd) {
           process.stderr.write(`[real-llm] cost cap reached — halting run\n`);
           halted = true;
+          haltReason = 'cost-cap';
           break;
         }
         const bench = benchmarkMap.get(g.sampleId);
@@ -363,6 +374,27 @@ export async function runReplay(args: ReturnType<typeof parseArgs>): Promise<Run
         await appendRowFsynced(fd, row);
         processed++;
         if (row.resultKind === 'error') errors++;
+        // r7 — consecutive-error halt. Tracks streak of error rows separately
+        // from `errors` (lifetime count). Resets on any non-error row, so a
+        // transient burst does not permanently halt a long run.
+        if (row.resultKind === 'error') {
+          consecutiveErrors++;
+          if (
+            args.maxConsecutiveErrors !== null &&
+            consecutiveErrors >= args.maxConsecutiveErrors
+          ) {
+            process.stderr.write(
+              '[real-llm] consecutive-error cap reached (' +
+                args.maxConsecutiveErrors +
+                ') -- halting run\n',
+            );
+            halted = true;
+            haltReason = 'retry-budget-exhausted';
+            break;
+          }
+        } else {
+          consecutiveErrors = 0;
+        }
         // Refresh halt-state llmStats snapshot so a mid-run flush carries the
         // latest token/cost numbers.
         if (_haltState) {
@@ -441,8 +473,8 @@ export async function runReplay(args: ReturnType<typeof parseArgs>): Promise<Run
       halted,
     });
     const finalSummary = halted
-      ? Object.assign({}, summary, { halted: true, haltReason: 'cost-cap' as const })
-      : summary;
+      ? Object.assign({}, summary, { halted: true, haltReason, incomplete: true })
+      : Object.assign({}, summary, { incomplete: false });
 
     try {
       fs.writeFileSync(summaryPath + '.tmp', JSON.stringify(finalSummary, null, 2));
