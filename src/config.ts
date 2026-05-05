@@ -266,6 +266,8 @@ export function defaultGroupConfig(groupId: string): GroupConfig {
     linkAcrossGroups: false,
     chatPromptLayeringV2: false,
     chatPromptShadowClassifierV1: false,
+    chatPlannerLiteV1: false,
+    chatPlannerLiteScope: 'direct-only',
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };

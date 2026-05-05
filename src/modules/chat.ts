@@ -73,6 +73,20 @@ import { isLayeringV2Enabled } from '../config/prompt-layering.js';
 import { isShadowClassifierEnabled } from '../config/shadow-classifier.js';
 import type { LlmShadowClassifier, ShadowClassifierResult } from './llm-shadow-classifier.js';
 import { assemblePromptV2 } from './prompt-assembler.js';
+import {
+  buildFallbackDirective,
+  validateDirective,
+  assembleDirectiveBlock,
+  extractTopTokens,
+  directiveToJson,
+  R9_PLANNER_TIMEOUT_MS,
+  type Directive,
+  type DirectiveMode,
+  type DirectiveLengthBudget,
+  type IReplyPlanner,
+  type PlannerContext,
+} from './reply-planner.js';
+import { isReplyerLiteEnabled, replyerLiteScope } from '../config/reply-planner.js';
 
 // Path A stub: { term, meaning } pairs extracted from user message.
 // Path A dev replaces null meanings with corpus results when merged.
@@ -919,6 +933,13 @@ class ReplyMetaBuilder {
   private matchedFactIds: number[] = [];
   private usedVoiceCount = 0;
   private usedFactHint = false;
+  // R9: directive metadata. All optional; populated only when the wiring
+  // path runs (flag-on AND not bot-self AND not scope-skipped).
+  private plannerSource: 'llm-planner' | 'rule-fallback' | 'no-planner-skipped' | undefined;
+  private directiveMode: DirectiveMode | undefined;
+  private directiveLengthBudget: DirectiveLengthBudget | undefined;
+  private plannerLatencyMs: number | undefined;
+  private directiveJson: string | undefined;
 
   setGuardPath(g: BaseResultMeta['guardPath']): this { this.guardPath = g; return this; }
   setPromptVariant(v: BaseResultMeta['promptVariant']): this { this.promptVariant = v; return this; }
@@ -933,6 +954,23 @@ class ReplyMetaBuilder {
     return this;
   }
   setVoiceCount(n: number): this { this.usedVoiceCount = n; return this; }
+  setDirective(
+    d: Directive,
+    src: 'llm-planner' | 'rule-fallback' | 'no-planner-skipped',
+    latencyMs: number,
+  ): this {
+    this.directiveMode = d.mode;
+    this.directiveLengthBudget = d.lengthBudget;
+    this.plannerSource = src;
+    this.plannerLatencyMs = latencyMs;
+    // Stamp source/latency into the persisted JSON copy so log+row agree.
+    this.directiveJson = JSON.stringify(directiveToJson({
+      ...d,
+      source: src === 'no-planner-skipped' ? 'rule-fallback' : src,
+      latencyMs,
+    }));
+    return this;
+  }
 
   buildBase(decisionPath: BaseResultMeta['decisionPath']): BaseResultMeta {
     return {
@@ -941,6 +979,11 @@ class ReplyMetaBuilder {
       promptVariant: this.promptVariant,
       utteranceAct: this.utteranceAct,
       utteranceActShadowPromise: this.shadowPromise,
+      plannerSource: this.plannerSource,
+      directiveMode: this.directiveMode,
+      directiveLengthBudget: this.directiveLengthBudget,
+      plannerLatencyMs: this.plannerLatencyMs,
+      directiveJson: this.directiveJson,
     };
   }
   buildReply(decisionPath: BaseResultMeta['decisionPath']): ReplyMeta {
@@ -948,6 +991,11 @@ class ReplyMetaBuilder {
       decisionPath, guardPath: this.guardPath, promptVariant: this.promptVariant,
       utteranceAct: this.utteranceAct,
       utteranceActShadowPromise: this.shadowPromise,
+      plannerSource: this.plannerSource,
+      directiveMode: this.directiveMode,
+      directiveLengthBudget: this.directiveLengthBudget,
+      plannerLatencyMs: this.plannerLatencyMs,
+      directiveJson: this.directiveJson,
       evasive: this.evasive, injectedFactIds: this.injectedFactIds,
       matchedFactIds: this.matchedFactIds, usedVoiceCount: this.usedVoiceCount,
       usedFactHint: this.usedFactHint,
@@ -960,6 +1008,11 @@ class ReplyMetaBuilder {
       promptVariant: this.promptVariant,
       utteranceAct: this.utteranceAct,
       utteranceActShadowPromise: this.shadowPromise,
+      plannerSource: this.plannerSource,
+      directiveMode: this.directiveMode,
+      directiveLengthBudget: this.directiveLengthBudget,
+      plannerLatencyMs: this.plannerLatencyMs,
+      directiveJson: this.directiveJson,
       key, score,
     };
   }
@@ -1602,6 +1655,15 @@ export class ChatModule implements IChatModule {
   private shadowClassifier: LlmShadowClassifier | null = null;
   setShadowClassifier(c: LlmShadowClassifier | null): void {
     this.shadowClassifier = c;
+  }
+
+  // R9: optional reply-planner. When null, the wiring guard short-circuits
+  // to the no-planner-skipped path even if the per-group flag is true. This
+  // preserves replay-runner / unit-test compat (no Gemini key needed) and
+  // first-boot safety before the key is provisioned.
+  private replyPlanner: IReplyPlanner | null = null;
+  setReplyPlanner(p: IReplyPlanner | null): void {
+    this.replyPlanner = p;
   }
 
   // W-A: honest-gaps wiring. Both interfaces are usually implemented by the
@@ -3080,6 +3142,154 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       );
     }
 
+    // ── R9 Planner pass (flag-gated, default OFF) ─────────────────────────
+    // Runs AFTER engagement / fact-retrieval / voice / variant / R5 prompt
+    // assembly are settled, BEFORE the chatRequest factory is constructed.
+    // Fail-open: timeout, parse-fail, validate-fail, or any error → rule
+    // fallback Directive. NEVER blocks the turn (per PLAN edge D-1 / D-7
+    // / D-10 + feedback_defer_before_expensive_op_not_after).
+    //
+    // Wiring guard: r9ShouldRunPlanner gates EVERY observable change. When
+    // false (flag OFF, bot-self trigger, scope-skipped, or replyPlanner not
+    // injected), no directive slot is prepended to system[] and no silent
+    // short-circuit fires — preserves byte-identical pre-R9 behavior on all
+    // four skip reasons (D-8 / D-9 / scope canary).
+    const r9Enabled = isReplyerLiteEnabled(groupConfigForFlag);
+    const r9Scope = replyerLiteScope(groupConfigForFlag);
+    const r9SkipForBotSelf = triggerMessage.userId === this.botUserId;
+    const r9SkipForScope = r9Scope === 'direct-only' && !isDirectTrigger;
+    const r9ShouldRunPlanner = r9Enabled
+      && !r9SkipForBotSelf
+      && !r9SkipForScope
+      && this.replyPlanner !== null;
+
+    const recentOutputTokens = extractTopTokens(recentOutputs);
+    const stickerAllowedNow = stickerTokenChoices.length > 0;
+    // matchedFactRetrievalIds is number[] in src/; Directive uses string[] for
+    // schema stability. Convert at boundary, ONCE.
+    const availableFactIdStrings = matchedFactRetrievalIds.map(id => String(id));
+    // factsByIdMap is empty for R9 Lite — assembleDirectiveBlock falls back
+    // to id-only fact lines (see DEV-READY §1A note + open Q1). A follow-up
+    // ticket adds getFactsByIds for structured term:meaning rendering.
+    const factsByIdMap: ReadonlyMap<number, { term: string; meaning: string }> = new Map();
+
+    let directive: Directive;
+    let plannerSource: 'llm-planner' | 'rule-fallback' | 'no-planner-skipped' = 'no-planner-skipped';
+    let plannerLatencyMs = 0;
+    let fellBackReason: 'timeout' | 'parse' | 'validate' | 'flag-off' | 'bot-self' | 'scope-skipped' | null = null;
+
+    if (r9ShouldRunPlanner) {
+      const t0 = Date.now();
+      const utteranceActNow = metaBuilder.peekUtteranceAct() ?? 'direct_chat';
+      const plannerCtx: PlannerContext = {
+        groupId,
+        triggerContent: triggerMessage.content,
+        triggerNickname: triggerMessage.nickname,
+        recentChrono: (immediateChron as ReadonlyArray<{ userId: string; content: string; nickname?: string }>)
+          .slice(-6)
+          .map(m => ({
+            speaker: m.userId === this.botUserId ? `[你(${m.nickname ?? ''})]` : `[${m.nickname ?? m.userId}]`,
+            content: m.content,
+          })),
+        facts: [], // empty until factsByIdMap hydration ticket lands
+        signals: {
+          isAt: isAtTrigger,
+          isReplyToBot: this._isReplyToBot(triggerMessage),
+          hasRealFactHit,
+          utteranceAct: utteranceActNow,
+          dNonBot,
+          affinityFactor: 0.5,
+          inDirectCooldown: false,
+        },
+        recentBotOutputs: recentOutputs,
+        stickerAllowed: stickerAllowedNow,
+      };
+      const validateCtx = {
+        hasDirectTrigger: isDirectTrigger,
+        availableFactIds: new Set(availableFactIdStrings),
+        stickerAllowed: stickerAllowedNow,
+        recentOutputTokens,
+      };
+
+      const controller = new AbortController();
+      const timeoutTimer = setTimeout(() => controller.abort(), R9_PLANNER_TIMEOUT_MS);
+      timeoutTimer.unref?.();
+      let planned: Directive | null = null;
+      try {
+        planned = await this.replyPlanner!.plan(plannerCtx, controller.signal);
+      } catch (err) {
+        this.logger.debug({ err: String(err), groupId }, 'r9 planner threw — fallback');
+        fellBackReason = 'timeout';
+      } finally {
+        clearTimeout(timeoutTimer);
+      }
+      plannerLatencyMs = Date.now() - t0;
+      const validated = planned !== null ? validateDirective(planned, validateCtx) : null;
+      if (validated !== null) {
+        directive = { ...validated, source: 'llm-planner', latencyMs: plannerLatencyMs };
+        plannerSource = 'llm-planner';
+      } else {
+        directive = buildFallbackDirective({
+          engagementMode: engagementDecision.strength,
+          hasDirectTrigger: isDirectTrigger,
+          hasRealFactHit,
+          availableFactIds: availableFactIdStrings,
+          recentOutputTokens,
+          stickerAllowed: stickerAllowedNow,
+        });
+        plannerSource = 'rule-fallback';
+        if (fellBackReason === null) fellBackReason = planned === null ? 'parse' : 'validate';
+      }
+    } else {
+      // Skipped: build the rule-fallback object so meta columns stay populated,
+      // but DO NOT inject a directive block (preserves byte-identical pre-R9
+      // behavior — D-8 / D-9 / scope canary).
+      directive = buildFallbackDirective({
+        engagementMode: engagementDecision.strength,
+        hasDirectTrigger: isDirectTrigger,
+        hasRealFactHit,
+        availableFactIds: availableFactIdStrings,
+        recentOutputTokens,
+        stickerAllowed: stickerAllowedNow,
+      });
+      fellBackReason =
+        !r9Enabled ? 'flag-off' :
+        r9SkipForBotSelf ? 'bot-self' :
+        r9SkipForScope ? 'scope-skipped' :
+        'flag-off';
+    }
+
+    this.logger.info({
+      groupId,
+      plannerSource,
+      plannerLatencyMs,
+      directiveMode: directive.mode,
+      lengthBudget: directive.lengthBudget,
+      requiredFactCount: directive.requiredFactIds.length,
+      forbiddenTokenCount: directive.forbiddenTokens.length,
+      hasDirectTrigger: isDirectTrigger,
+      hasRealFactHit,
+      ...(fellBackReason !== null ? { fellBackReason } : {}),
+    }, 'chat timing (planner)');
+
+    metaBuilder.setDirective(directive, plannerSource, plannerLatencyMs);
+
+    // Silent short-circuit: only fires when Planner actually ran (not on skip
+    // paths) AND directive.mode === 'silent' AND not direct. reasonCode='guard'
+    // because BaseResultMeta union doesn't widen for R9 Lite (DEV-READY §1A
+    // note); directiveMode + plannerSource columns make the planner-silent
+    // case queryable.
+    if (r9ShouldRunPlanner && directive.mode === 'silent' && !isDirectTrigger) {
+      this.logger.info({ groupId, plannerSource }, 'r9 planner: silent short-circuit');
+      return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'guard' };
+    }
+
+    // Build the directive block ONLY when Planner ran AND short-circuit didn't fire.
+    const directiveBlock = r9ShouldRunPlanner
+      ? assembleDirectiveBlock(directive, factsByIdMap)
+      : '';
+    // ── end R9 Planner pass ───────────────────────────────────────────────
+
     const chatRequest = (hardened = false) => this.claude.complete({
       model: hardened ? RUNTIME_CHAT_MODEL : pickedModel,
       maxTokens: 2048,
@@ -3090,6 +3300,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
             ...(onDemandFactBlock ? [{ text: onDemandFactBlock, cache: false }] : []),
           ]
         : [
+            ...(directiveBlock ? [{ text: directiveBlock, cache: false as const }] : []),
             { text: v2SystemPrompt ?? systemPrompt, cache: true },
             { text: STATIC_CHAT_DIRECTIVES, cache: true },
             { text: variantBlock, cache: true },
