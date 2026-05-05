@@ -18,16 +18,17 @@ const ARGS: CliArgs = {
   dbPath: ':memory:',
   goldPath: '',
   outPath: '',
-  costCeiling: 20,
+  costCeiling: 2,
   latencyP99Ceiling: 800,
 };
 
+// Sized to fit the $2/month default cost ceiling at $0.000425/call * 30:
+// 108 rows/day → ~$1.38/month projected (well under $2 ceiling).
 function makeHealthyRows(): EventRow[] {
-  // 1000 events, 90% agreement, all 8 acts represented, latency p99 ~700ms.
   const rows: EventRow[] = [];
-  // Build 100 of each act with shadow=rule (agreeing).
+  // 12 of each act with shadow=rule (96 agreeing rows; all 8 enum labels represented).
   for (const a of ACTS) {
-    for (let i = 0; i < 100; i++) {
+    for (let i = 0; i < 12; i++) {
       rows.push({
         utterance_act: a,
         utterance_act_shadow: a,
@@ -35,9 +36,8 @@ function makeHealthyRows(): EventRow[] {
       });
     }
   }
-  // Force 100 disagreement rows (rule=chime_in but shadow=direct_chat) to land overall at 87.5%.
-  // We have 800 in agreement above, plus 100 disagreement = 900 total compared, 800 agreed → 88.9%.
-  for (let i = 0; i < 100; i++) {
+  // 12 disagreement rows (rule=chime_in, shadow=direct_chat) → 96/108 = 88.9% agreement, > 85% threshold.
+  for (let i = 0; i < 12; i++) {
     rows.push({
       utterance_act: 'chime_in',
       utterance_act_shadow: 'direct_chat',
@@ -50,7 +50,7 @@ function makeHealthyRows(): EventRow[] {
 const HEALTHY_GOLD = ACTS.map(a => ({ rule_based: a, gold: a }));
 
 describe('R4.5 gate CLI buildReport', () => {
-  it('case 1: healthy fixture → all_pass true', () => {
+  it('case 1: healthy fixture → all_pass true under $2 cost ceiling', () => {
     const rows = makeHealthyRows();
     const report = buildReport(rows, HEALTHY_GOLD, ARGS);
     expect(report.gate_1_agreement.pass).toBe(true);
@@ -59,13 +59,14 @@ describe('R4.5 gate CLI buildReport', () => {
     expect(report.gate_4_latency.pass).toBe(true);
     expect(report.all_pass).toBe(true);
     expect(report.gate_4_latency.p99_ms).toBeLessThanOrEqual(800);
+    expect(report.gate_3_cost.projected_monthly_usd).toBeLessThanOrEqual(2);
   });
 
   it('case 2: failing agreement → gate_1 fails, all_pass false', () => {
-    // 1000 rows, 80% agreement (below 85% threshold).
+    // 120 rows, 80% agreement (below 85% threshold). Cost projection still fits $2 ceiling.
     const rows: EventRow[] = [];
-    for (let i = 0; i < 800; i++) rows.push({ utterance_act: 'chime_in', utterance_act_shadow: 'chime_in', utterance_act_shadow_latency_ms: 600 });
-    for (let i = 0; i < 200; i++) rows.push({ utterance_act: 'chime_in', utterance_act_shadow: 'direct_chat', utterance_act_shadow_latency_ms: 600 });
+    for (let i = 0; i < 96; i++) rows.push({ utterance_act: 'chime_in', utterance_act_shadow: 'chime_in', utterance_act_shadow_latency_ms: 600 });
+    for (let i = 0; i < 24; i++) rows.push({ utterance_act: 'chime_in', utterance_act_shadow: 'direct_chat', utterance_act_shadow_latency_ms: 600 });
     const report = buildReport(rows, HEALTHY_GOLD, ARGS);
     expect(report.gate_1_agreement.pass).toBe(false);
     expect(report.all_pass).toBe(false);

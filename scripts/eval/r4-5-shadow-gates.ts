@@ -15,7 +15,10 @@ import { dirname } from 'node:path';
 import { ALL_UTTERANCE_ACTS } from '../../src/utils/utterance-act.js';
 
 const COST_PER_CALL_USD = 0.000425;
-const DEFAULT_COST_CEILING_USD = 20.0;
+// Architect-locked default ceiling: ~25 events/day all-groups x $0.000425/call x 1.5x bursty/price-drift headroom
+// → ~$0.53/month worst-case; floor lifted to $2.00 for tripwire stability (4x signal-to-noise).
+// Operators can flex via --cost-ceiling for ad-hoc audits. See ARCHITECT.md §5.
+const DEFAULT_COST_CEILING_USD = 2.0;
 const DEFAULT_LATENCY_P99_MS = 800;
 const KL_THRESHOLD = 0.5;
 const AGREEMENT_THRESHOLD = 0.85;
