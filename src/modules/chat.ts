@@ -70,6 +70,8 @@ import { IDENTITY_DEFLECTIONS } from '../utils/identity-deflections.js';
 import { isAntiMetaDirect } from '../utils/anti-meta-direct.js';
 import { hasOnlyOtherUserAtMention, parseAtTargets } from '../utils/at-mention-parse.js';
 import { isLayeringV2Enabled } from '../config/prompt-layering.js';
+import { isShadowClassifierEnabled } from '../config/shadow-classifier.js';
+import type { LlmShadowClassifier, ShadowClassifierResult } from './llm-shadow-classifier.js';
 import { assemblePromptV2 } from './prompt-assembler.js';
 
 // Path A stub: { term, meaning } pairs extracted from user message.
@@ -911,6 +913,7 @@ class ReplyMetaBuilder {
   private guardPath: BaseResultMeta['guardPath'] | undefined;
   private promptVariant: BaseResultMeta['promptVariant'] | undefined;
   private utteranceAct: UtteranceAct | undefined;
+  private shadowPromise: Promise<ShadowClassifierResult> | undefined;
   private evasive = false;
   private injectedFactIds: number[] = [];
   private matchedFactIds: number[] = [];
@@ -921,6 +924,7 @@ class ReplyMetaBuilder {
   setPromptVariant(v: BaseResultMeta['promptVariant']): this { this.promptVariant = v; return this; }
   setUtteranceAct(a: UtteranceAct): this { this.utteranceAct = a; return this; }
   peekUtteranceAct(): UtteranceAct | undefined { return this.utteranceAct; }
+  setShadowPromise(p: Promise<ShadowClassifierResult>): this { this.shadowPromise = p; return this; }
   setEvasive(e: boolean): this { this.evasive = e; return this; }
   setFactIds(injected: number[], matched: number[]): this {
     this.injectedFactIds = injected;
@@ -931,19 +935,33 @@ class ReplyMetaBuilder {
   setVoiceCount(n: number): this { this.usedVoiceCount = n; return this; }
 
   buildBase(decisionPath: BaseResultMeta['decisionPath']): BaseResultMeta {
-    return { decisionPath, guardPath: this.guardPath, promptVariant: this.promptVariant, utteranceAct: this.utteranceAct };
+    return {
+      decisionPath,
+      guardPath: this.guardPath,
+      promptVariant: this.promptVariant,
+      utteranceAct: this.utteranceAct,
+      utteranceActShadowPromise: this.shadowPromise,
+    };
   }
   buildReply(decisionPath: BaseResultMeta['decisionPath']): ReplyMeta {
     return {
       decisionPath, guardPath: this.guardPath, promptVariant: this.promptVariant,
       utteranceAct: this.utteranceAct,
+      utteranceActShadowPromise: this.shadowPromise,
       evasive: this.evasive, injectedFactIds: this.injectedFactIds,
       matchedFactIds: this.matchedFactIds, usedVoiceCount: this.usedVoiceCount,
       usedFactHint: this.usedFactHint,
     };
   }
   buildSticker(key: string, score?: number): StickerMeta {
-    return { decisionPath: 'sticker', guardPath: this.guardPath, promptVariant: this.promptVariant, utteranceAct: this.utteranceAct, key, score };
+    return {
+      decisionPath: 'sticker',
+      guardPath: this.guardPath,
+      promptVariant: this.promptVariant,
+      utteranceAct: this.utteranceAct,
+      utteranceActShadowPromise: this.shadowPromise,
+      key, score,
+    };
   }
 }
 
@@ -1578,6 +1596,14 @@ export class ChatModule implements IChatModule {
   setWebLookup(webLookup: WebLookup | null): void {
     this.webLookup = webLookup;
   }
+
+  // R4.5: optional LLM shadow classifier. When null, chat.ts:2830 silently
+  // skips shadow even if the per-group flag is true (test/no-API-key safety).
+  private shadowClassifier: LlmShadowClassifier | null = null;
+  setShadowClassifier(c: LlmShadowClassifier | null): void {
+    this.shadowClassifier = c;
+  }
+
   // W-A: honest-gaps wiring. Both interfaces are usually implemented by the
   // same HonestGapsTracker instance, but we accept them via separate setters
   // so tests can inject a formatter-only mock without also stubbing
@@ -2828,6 +2854,19 @@ export class ChatModule implements IChatModule {
         relayHit: !!relayDetectionForAct,
       };
       metaBuilder.setUtteranceAct(classifyUtteranceAct(utteranceCtx));
+
+      // R4.5: fire-and-forget LLM shadow classifier. Promise NEVER rejects;
+      // ChatDecisionTracker awaits it post-insert and UPDATEs the row by id.
+      // Reply latency unaffected.
+      const groupConfigForShadow = this.db.groupConfig.get(groupId);
+      if (this.shadowClassifier !== null && isShadowClassifierEnabled(groupConfigForShadow)) {
+        metaBuilder.setShadowPromise(this.shadowClassifier.classify({
+          triggerContent: triggerMessage.content,
+          triggerUserId: triggerMessage.userId,
+          recent5: recent5Lite,
+          botUserId: this.botUserId,
+        }));
+      }
     }
 
     // Path C: WebSearch — for terms Path A returned 'unknown', try CSE lookup.
