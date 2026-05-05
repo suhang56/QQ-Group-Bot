@@ -18,6 +18,7 @@ import {
   compareFactsByTrust,
 } from './fact-topic-prefixes.js';
 import { extractCandidateTerms } from '../utils/extract-candidate-terms.js';
+import { expandDateTokens } from '../utils/query-date-expand.js';
 
 /** Cosine similarity floor — facts below this are dropped unless pinned.
  * MiniLM-L6-v2 is noisier on Chinese text so we set a slightly higher
@@ -430,10 +431,27 @@ export class SelfLearningModule {
     const embedded = this.db.learnedFacts.listActiveWithEmbeddings(groupId);
     const filteredEmbedded = this._applyHedgeAndConfidenceFilter(embedded);
 
+    // Date-token expansion: detect compact dates (618, 6/18) and emit canonical
+    // Chinese alternates (6月18号 / 6月18日 / 6月). Each alternate runs as its
+    // OWN BM25 call and the row sets are unioned — sanitizeFtsQuery joins
+    // phrase-literals with implicit AND, so concatenating into one query would
+    // intersect not union and fail to recover the miss. Vector embed gets the
+    // baseQuery + alternates concatenated (centroid blend, AND/OR moot).
+    const { baseQuery, alternates } = expandDateTokens(triggerText);
+    if (alternates.length > 0) {
+      this.logger.debug(
+        { groupId, baseLen: baseQuery.length, alternateCount: alternates.length },
+        'date-token expansion applied',
+      );
+    }
+    const embedQuery = alternates.length > 0
+      ? `${baseQuery} ${alternates.join(' ')}`
+      : baseQuery;
+
     let triggerEmbedding: number[] | null = null;
     if (semanticEnabled) {
       try {
-        triggerEmbedding = await svc!.embed(triggerText);
+        triggerEmbedding = await svc!.embed(embedQuery);
       } catch (err) {
         // Embed failure only disables the semantic path; BM25 still runs below.
         this.logger.warn({ err, groupId }, 'formatFactsForPrompt: trigger embed failed — BM25-only');
@@ -446,8 +464,14 @@ export class SelfLearningModule {
 
     // BM25 is a sync prepared statement; wrap in Promise.resolve so Promise.all
     // parallelism is semantically honest and the two paths read the same way.
-    const [bm25RowsRaw, scoredVector] = await Promise.all([
-      Promise.resolve(this.db.learnedFacts.searchByBM25(groupId, triggerText, BM25_TOP_K)),
+    // One BM25 call per alternate (plus baseQuery) gives us OR-of-phrases via
+    // row-set union, which the implicit-AND sanitizer can't express in a
+    // single FTS query string.
+    const bm25Queries = [baseQuery, ...alternates];
+    const [bm25Lists, scoredVector] = await Promise.all([
+      Promise.resolve(
+        bm25Queries.map(q => this.db.learnedFacts.searchByBM25(groupId, q, BM25_TOP_K)),
+      ),
       Promise.resolve(
         triggerEmbedding === null
           ? []
@@ -458,6 +482,20 @@ export class SelfLearningModule {
               .slice(0, VECTOR_TOP_K),
       ),
     ]);
+
+    // Union BM25 row sets across baseQuery + alternates; dedup by id, preserve
+    // first-seen order so baseQuery hits rank ahead of alternate-only hits.
+    const bm25SeenIds = new Set<number>();
+    const bm25RowsRaw: LearnedFact[] = [];
+    for (const list of bm25Lists) {
+      for (const row of list) {
+        if (bm25SeenIds.has(row.id)) continue;
+        bm25SeenIds.add(row.id);
+        bm25RowsRaw.push(row);
+        if (bm25RowsRaw.length >= BM25_TOP_K) break;
+      }
+      if (bm25RowsRaw.length >= BM25_TOP_K) break;
+    }
 
     // BM25 rows arrive un-filtered by hedge/confidence — apply same rail as vector.
     const filteredBm25 = this._applyHedgeAndConfidenceFilter(bm25RowsRaw);
