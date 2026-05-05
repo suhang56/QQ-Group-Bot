@@ -482,7 +482,7 @@ export function assembleDirectiveBlock(
 
 // ─── Planner system prompt (LOCKED per DESIGN §3.2) ─────────────────────
 
-const R9_PLANNER_SYSTEM_PROMPT = [
+export const R9_PLANNER_SYSTEM_PROMPT = [
   '你是一个回复计划器。你不写回复。你只输出一个 JSON 对象，告诉下游 replyer 这次该怎么接。',
   '',
   '输入会包含：',
@@ -505,6 +505,7 @@ const R9_PLANNER_SYSTEM_PROMPT = [
   '约束：',
   '- 只输出 JSON，不要任何解释、前缀、markdown fence。',
   '- 当 has_real_fact_hit=true 且 trigger 是问句 → mode=fact_answer，required_fact_ids 至少 1 个',
+  '- 当 has_real_fact_hit=false 且 trigger 是问句（含 ?/？/谁/啥/什么/吗/呢 等）且 is_at=true 或 is_reply_to_bot=true → mode=reply，length_budget=normal。群友被点名问问题时不会一字带过；要么猜一下、要么反问回去、要么说不知道但带上下文，正经接一句即使没事实命中。',
   '- 当 is_at=false 且 utterance_act==chime_in 且 d_non_bot >= 2 → 倾向 mode=silent 或 ack',
   '- 当 is_at=true → 永远不要 silent（会被下游覆盖，浪费）',
   '- forbidden_tokens 只列 recent_bot_outputs 里的高频片段；不要发明',
