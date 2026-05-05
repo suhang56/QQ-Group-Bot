@@ -121,6 +121,8 @@ CREATE TABLE IF NOT EXISTS group_config (
   link_across_groups                    INTEGER NOT NULL DEFAULT 0,
   chat_prompt_layering_v2               INTEGER NOT NULL DEFAULT 0,
   chat_prompt_shadow_classifier_v1      INTEGER NOT NULL DEFAULT 0,
+  chat_planner_lite_v1                  INTEGER NOT NULL DEFAULT 0,
+  chat_planner_lite_scope               TEXT    NOT NULL DEFAULT 'direct-only',
   created_at                            TEXT    NOT NULL DEFAULT '',
   updated_at                            TEXT    NOT NULL DEFAULT ''
 );
@@ -684,7 +686,12 @@ CREATE TABLE IF NOT EXISTS chat_decision_events (
   captured_at_sec                 INTEGER NOT NULL,
   utterance_act_shadow            TEXT,
   utterance_act_shadow_conf       REAL,
-  utterance_act_shadow_latency_ms INTEGER
+  utterance_act_shadow_latency_ms INTEGER,
+  directive_mode                  TEXT,
+  directive_length_budget         TEXT,
+  directive_json                  TEXT,
+  planner_source                  TEXT,
+  planner_latency_ms              INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_cde_group_kind

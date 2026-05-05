@@ -622,6 +622,20 @@ const llmShadowClassifier = new LlmShadowClassifier({
 });
 chat.setShadowClassifier(llmShadowClassifier);
 
+// R9: reply-planner-lite (MUCA constraint layer). Uses Gemini Flash with
+// reasoning_effort:'none' and an 800ms hard timeout — fail-open returns null
+// → chat.ts falls back to a rule-built Directive without blocking the turn.
+// Gated per-group by chat_planner_lite_v1; null instance = always-skipped.
+if (process.env['GEMINI_API_KEY'] && process.env['R9_REPLYER_LITE_DISABLE_INSTANCE'] !== '1') {
+  try {
+    const { ReplyPlanner } = await import('./modules/reply-planner.js');
+    const replyPlannerLLM = new GeminiClient();
+    chat.setReplyPlanner(new ReplyPlanner(replyPlannerLLM, createLogger('reply-planner')));
+  } catch (err) {
+    logger.warn({ err: String(err) }, 'R9 reply-planner not wired — continuing without');
+  }
+}
+
 const deferQueue = new DeferQueue();
 router.setDeferQueue(deferQueue);
 

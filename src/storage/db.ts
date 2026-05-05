@@ -143,6 +143,11 @@ export interface GroupConfig {
   chatPromptLayeringV2: boolean;
   /** R4.5: opt-in per-group LLM shadow classifier on chat.ts:2830. Default false. */
   chatPromptShadowClassifierV1: boolean;
+  /** R9: opt-in per-group reply-planner-lite (MUCA constraint layer). Default false. */
+  chatPlannerLiteV1: boolean;
+  /** R9: scope of Planner activation. 'direct-only' = only @bot / reply-to-bot
+   * triggers; 'all' = every LLM-stage turn. Default 'direct-only'. */
+  chatPlannerLiteScope: 'direct-only' | 'all';
   createdAt: string;
   updatedAt: string;
 }
@@ -569,6 +574,19 @@ export interface ChatDecisionEventRow {
   utterance_act_shadow_conf: number | null;
   /** R4.5: wall-clock ms from shadow promise creation to resolve. */
   utterance_act_shadow_latency_ms: number | null;
+  /** R9: directive.mode for analytics (flat for cheap GROUP BY); null when
+   * wiring did not run. */
+  directive_mode: string | null;
+  /** R9: directive.lengthBudget bucket for analytics. */
+  directive_length_budget: string | null;
+  /** R9: full canonical-key-ordered Directive JSON (snake_case). Verbatim
+   * shape preserved for offline replay. */
+  directive_json: string | null;
+  /** R9: source path — 'llm-planner' | 'rule-fallback' | 'no-planner-skipped'. */
+  planner_source: string | null;
+  /** R9: ms spent in Planner LLM call + parse + validate. 0 for rule-fallback
+   * / no-planner-skipped. */
+  planner_latency_ms: number | null;
 }
 
 export interface ChatDecisionEffectRow {
@@ -1008,6 +1026,11 @@ interface GroupConfigRow {
   link_across_groups: number;
   chat_prompt_layering_v2: number;
   chat_prompt_shadow_classifier_v1: number;
+  /** R9: optional in transit — column added in same release but ALTER may run
+   * after first SELECT under tooling that pre-snapshots schema; leave nullable
+   * for read-path safety. */
+  chat_planner_lite_v1?: number;
+  chat_planner_lite_scope?: string;
   created_at: string; updated_at: string;
 }
 
@@ -1117,6 +1140,8 @@ function configFromRow(row: GroupConfigRow): GroupConfig {
     linkAcrossGroups: (row.link_across_groups ?? 0) !== 0,
     chatPromptLayeringV2: (row.chat_prompt_layering_v2 ?? 0) !== 0,
     chatPromptShadowClassifierV1: (row.chat_prompt_shadow_classifier_v1 ?? 0) !== 0,
+    chatPlannerLiteV1: (row.chat_planner_lite_v1 ?? 0) !== 0,
+    chatPlannerLiteScope: row.chat_planner_lite_scope === 'all' ? 'all' : 'direct-only',
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -1524,8 +1549,10 @@ class GroupConfigRepository implements IGroupConfigRepository {
         link_across_groups,
         chat_prompt_layering_v2,
         chat_prompt_shadow_classifier_v1,
+        chat_planner_lite_v1,
+        chat_planner_lite_scope,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(group_id) DO UPDATE SET
         enabled_modules = excluded.enabled_modules,
         auto_mod = excluded.auto_mod,
@@ -1566,6 +1593,8 @@ class GroupConfigRepository implements IGroupConfigRepository {
         link_across_groups = excluded.link_across_groups,
         chat_prompt_layering_v2 = excluded.chat_prompt_layering_v2,
         chat_prompt_shadow_classifier_v1 = excluded.chat_prompt_shadow_classifier_v1,
+        chat_planner_lite_v1 = excluded.chat_planner_lite_v1,
+        chat_planner_lite_scope = excluded.chat_planner_lite_scope,
         updated_at = excluded.updated_at
     `).run(
       config.groupId,
@@ -1608,6 +1637,8 @@ class GroupConfigRepository implements IGroupConfigRepository {
       (config.linkAcrossGroups ?? false) ? 1 : 0,
       (config.chatPromptLayeringV2 ?? false) ? 1 : 0,
       (config.chatPromptShadowClassifierV1 ?? false) ? 1 : 0,
+      (config.chatPlannerLiteV1 ?? false) ? 1 : 0,
+      config.chatPlannerLiteScope ?? 'direct-only',
       config.createdAt,
       config.updatedAt,
     );
@@ -3485,13 +3516,17 @@ class ChatDecisionEventRepository implements IChatDecisionEventRepository {
          result_kind, reason_code, decision_path, guard_path, prompt_variant,
          utterance_act,
          sent_bot_reply_id, reply_text, used_fact_ids, used_voice_count, captured_at_sec,
-         utterance_act_shadow, utterance_act_shadow_conf, utterance_act_shadow_latency_ms)
+         utterance_act_shadow, utterance_act_shadow_conf, utterance_act_shadow_latency_ms,
+         directive_mode, directive_length_budget, directive_json,
+         planner_source, planner_latency_ms)
       VALUES
         (@group_id, @trigger_msg_id, @target_msg_id, @trigger_user_id,
          @result_kind, @reason_code, @decision_path, @guard_path, @prompt_variant,
          @utterance_act,
          @sent_bot_reply_id, @reply_text, @used_fact_ids, @used_voice_count, @captured_at_sec,
-         @utterance_act_shadow, @utterance_act_shadow_conf, @utterance_act_shadow_latency_ms)
+         @utterance_act_shadow, @utterance_act_shadow_conf, @utterance_act_shadow_latency_ms,
+         @directive_mode, @directive_length_budget, @directive_json,
+         @planner_source, @planner_latency_ms)
     `);
     this._getById = db.prepare(`SELECT * FROM chat_decision_events WHERE id = ?`);
     this._updateShadow = db.prepare(`
@@ -3982,6 +4017,16 @@ export class Database {
     // R4.5: per-group LLM shadow classifier opt-in flag.
     try { this._db.exec(`ALTER TABLE group_config ADD COLUMN chat_prompt_shadow_classifier_v1 INTEGER NOT NULL DEFAULT 0`); } catch { /* already exists */ }
 
+    // R9: per-group reply-planner-lite (MUCA constraint layer) opt-in flag +
+    // scope. SQLite NOT NULL DEFAULT '...' on TEXT ALTER works since 3.35;
+    // strict form first, fall back to nullable form on engines that reject it.
+    try { this._db.exec(`ALTER TABLE group_config ADD COLUMN chat_planner_lite_v1 INTEGER NOT NULL DEFAULT 0`); } catch { /* already exists */ }
+    try {
+      this._db.exec(`ALTER TABLE group_config ADD COLUMN chat_planner_lite_scope TEXT NOT NULL DEFAULT 'direct-only'`);
+    } catch {
+      try { this._db.exec(`ALTER TABLE group_config ADD COLUMN chat_planner_lite_scope TEXT DEFAULT 'direct-only'`); } catch { /* already exists */ }
+    }
+
     // M9.3 cross-group audit table. CREATE IF NOT EXISTS is idempotent on re-run.
     this._db.exec(`
       CREATE TABLE IF NOT EXISTS cross_group_audit (
@@ -4383,7 +4428,12 @@ export class Database {
       captured_at_sec                 INTEGER NOT NULL,
       utterance_act_shadow            TEXT,
       utterance_act_shadow_conf       REAL,
-      utterance_act_shadow_latency_ms INTEGER
+      utterance_act_shadow_latency_ms INTEGER,
+      directive_mode                  TEXT,
+      directive_length_budget         TEXT,
+      directive_json                  TEXT,
+      planner_source                  TEXT,
+      planner_latency_ms              INTEGER
     )`);
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_cde_group_kind ON chat_decision_events(group_id, result_kind, captured_at_sec DESC)`);
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_cde_guard ON chat_decision_events(guard_path, captured_at_sec DESC)`);
@@ -4398,6 +4448,14 @@ export class Database {
     try { this._db.exec(`ALTER TABLE chat_decision_events ADD COLUMN utterance_act_shadow TEXT`); } catch { /* already exists */ }
     try { this._db.exec(`ALTER TABLE chat_decision_events ADD COLUMN utterance_act_shadow_conf REAL`); } catch { /* already exists */ }
     try { this._db.exec(`ALTER TABLE chat_decision_events ADD COLUMN utterance_act_shadow_latency_ms INTEGER`); } catch { /* already exists */ }
+
+    // R9: directive telemetry columns on chat_decision_events. Flat top-level
+    // for cheap GROUP BY analytics + raw directive_json for replay/debug.
+    try { this._db.exec(`ALTER TABLE chat_decision_events ADD COLUMN directive_mode TEXT`); } catch { /* already exists */ }
+    try { this._db.exec(`ALTER TABLE chat_decision_events ADD COLUMN directive_length_budget TEXT`); } catch { /* already exists */ }
+    try { this._db.exec(`ALTER TABLE chat_decision_events ADD COLUMN directive_json TEXT`); } catch { /* already exists */ }
+    try { this._db.exec(`ALTER TABLE chat_decision_events ADD COLUMN planner_source TEXT`); } catch { /* already exists */ }
+    try { this._db.exec(`ALTER TABLE chat_decision_events ADD COLUMN planner_latency_ms INTEGER`); } catch { /* already exists */ }
 
     this._db.exec(`CREATE TABLE IF NOT EXISTS chat_decision_effects (
       id                         INTEGER PRIMARY KEY AUTOINCREMENT,
