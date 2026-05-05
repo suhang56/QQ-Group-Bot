@@ -121,6 +121,8 @@ CREATE TABLE IF NOT EXISTS group_config (
   link_across_groups                    INTEGER NOT NULL DEFAULT 0,
   chat_prompt_layering_v2               INTEGER NOT NULL DEFAULT 0,
   chat_prompt_shadow_classifier_v1      INTEGER NOT NULL DEFAULT 0,
+  chat_planner_lite_v1                  INTEGER NOT NULL DEFAULT 0,
+  chat_planner_lite_scope               TEXT    NOT NULL DEFAULT 'direct-only',
   created_at                            TEXT    NOT NULL DEFAULT '',
   updated_at                            TEXT    NOT NULL DEFAULT ''
 );

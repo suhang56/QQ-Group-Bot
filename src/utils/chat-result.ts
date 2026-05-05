@@ -1,5 +1,6 @@
 import type { UtteranceAct } from './utterance-act.js';
 import type { ShadowClassifierResult } from '../modules/llm-shadow-classifier.js';
+import type { DirectiveMode, DirectiveLengthBudget } from '../modules/reply-planner.js';
 
 export interface BaseResultMeta {
   decisionPath: 'normal' | 'direct' | 'fallback' | 'sticker' | 'silent' | 'defer';
@@ -26,6 +27,17 @@ export interface BaseResultMeta {
    * Routes that don't shadow leave this undefined.
    */
   utteranceActShadowPromise?: Promise<ShadowClassifierResult>;
+  /** R9: which path produced the directive — 'no-planner-skipped' when flag
+   * off / bot-self / scope-skipped. */
+  plannerSource?: 'llm-planner' | 'rule-fallback' | 'no-planner-skipped';
+  /** R9: chosen mode (telemetry; not load-bearing for runtime gates). */
+  directiveMode?: DirectiveMode;
+  /** R9: chosen length budget bucket. */
+  directiveLengthBudget?: DirectiveLengthBudget;
+  /** R9: ms spent in Planner LLM call + parse + validate. 0 for rule-fallback / no-planner. */
+  plannerLatencyMs?: number;
+  /** R9: full canonical-key-ordered Directive JSON for offline replay/analytics. */
+  directiveJson?: string;
 }
 
 export interface ReplyMeta extends BaseResultMeta {
