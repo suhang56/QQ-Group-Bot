@@ -23,8 +23,31 @@ import type { UtteranceAct } from '../utils/utterance-act.js';
 
 // ─── Constants (LOCKED per DESIGN §0 / DEV-READY §1A) ───────────────────
 export const R9_PLANNER_MODEL = 'gemini-2.5-flash';
-export const R9_PLANNER_TIMEOUT_MS = 800;
+/**
+ * LOCKED per R9.5a-DESIGN §1.1 — bumped 800ms to 1500ms after audit
+ * (data/eval/r9-5a-audit/audit-findings.md) showed Gemini Flash p50=1065ms,
+ * p95=1321ms, max=1472ms over n=112 R9-active rows. The previous 800ms cap
+ * admitted only 1/112 (0.89%) of legitimate responses — the misattributed
+ * cause of the 0.9% parse rate observed in r9-4-rebaseline-2026-05-05.md.
+ * 1500ms covers 100% with ~28ms headroom over observed max.
+ */
+export const R9_PLANNER_TIMEOUT_MS = 1500;
 export const R9_PLANNER_MAX_TOKENS = 256;
+
+/**
+ * Sentinel thrown by the inner Planner timer arm when the per-call
+ * R9_PLANNER_TIMEOUT_MS cap fires before the LLM responds. The wire site
+ * at chat.ts catches this via instanceof and stamps fellBackReason='timeout'.
+ * Per R9.5a-DESIGN §1.2 (audit found timeout was misattributed as 'parse'
+ * because the inner catch swallowed the abort and returned null, collapsing
+ * timeout and parse-fail onto the same null signal).
+ */
+export class PlannerTimeoutError extends Error {
+  constructor() {
+    super('reply-planner timeout');
+    this.name = 'PlannerTimeoutError';
+  }
+}
 
 // ─── Types ──────────────────────────────────────────────────────────────
 export type DirectiveMode =
@@ -631,7 +654,7 @@ export class ReplyPlanner implements IReplyPlanner {
     const abortPromise = new Promise<never>((_resolve, reject) => {
       localController.signal.addEventListener(
         'abort',
-        () => reject(new Error('reply-planner timeout/abort')),
+        () => reject(new PlannerTimeoutError()),
         { once: true },
       );
     });
@@ -641,6 +664,13 @@ export class ReplyPlanner implements IReplyPlanner {
       const resp = await Promise.race([completePromise, abortPromise]);
       raw = resp.text;
     } catch (err) {
+      if (err instanceof PlannerTimeoutError) {
+        this.logger.debug(
+          { durationMs: this.now() - start, groupId: ctx.groupId },
+          'reply-planner timeout (fail-open)',
+        );
+        throw err;
+      }
       this.logger.debug(
         { err: String(err), durationMs: this.now() - start, groupId: ctx.groupId },
         'reply-planner LLM call failed (fail-open)',

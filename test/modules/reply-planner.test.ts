@@ -8,6 +8,7 @@ import {
   assembleDirectiveBlock,
   directiveToJson,
   R9_PLANNER_TIMEOUT_MS,
+  PlannerTimeoutError,
   type ValidateContext,
   type FallbackSeed,
   type PlannerContext,
@@ -422,13 +423,13 @@ describe('reply-planner — directiveToJson canonical order', () => {
 });
 
 describe('ReplyPlanner.plan — fail-open behavior (D-1, D-7, D-10)', () => {
-  it('T2 D-1: timeout returns null', async () => {
+  it('T2 D-1: timeout throws PlannerTimeoutError (fellBackReason distinguisher)', async () => {
     const claude = makeClaudeStub('never');
     const planner = new ReplyPlanner(claude, createLogger('test-rp'), { timeoutMs: 30 });
     const ctx = makeBaseCtx();
     const ctrl = new AbortController();
-    const result = await planner.plan(ctx, ctrl.signal);
-    expect(result).toBeNull();
+    await expect(planner.plan(ctx, ctrl.signal))
+      .rejects.toBeInstanceOf(PlannerTimeoutError);
   });
 
   it('T3 D-1: network error returns null', async () => {
@@ -496,6 +497,80 @@ describe('ReplyPlanner.plan — fail-open behavior (D-1, D-7, D-10)', () => {
   });
 
   it('respects R9_PLANNER_TIMEOUT_MS constant default', () => {
-    expect(R9_PLANNER_TIMEOUT_MS).toBe(800);
+    expect(R9_PLANNER_TIMEOUT_MS).toBe(1500);
+  });
+});
+
+describe('reply-planner — R9.5a timeout fix + real-Gemini fixture (audit-derived)', () => {
+  it('T-AUDIT-1: real Gemini-2.5-Flash fenced output parses (audit-derived from groupId 958751334)', () => {
+    const raw = '```json\n{\n'
+              + '  "mode": "reply",\n'
+              + '  "length_budget": "short",\n'
+              + '  "required_fact_ids": [],\n'
+              + '  "forbidden_tokens": ["说啥", "你谁"],\n'
+              + '  "tone_hint": "像一个被表白了有点不知所措的群友",\n'
+              + '  "use_sticker_token": true\n'
+              + '}\n```';
+    const parsed = tolerantParseDirective(raw);
+    expect(parsed).not.toBeNull();
+    const d = validateDirective(parsed, makeValidateCtx({ stickerAllowed: true }));
+    expect(d).not.toBeNull();
+    expect(d!.mode).toBe('reply');
+    expect(d!.lengthBudget).toBe('short');
+    expect(d!.useStickerToken).toBe(true);
+  });
+
+  it('T-AUDIT-2: PlannerTimeoutError is exported and extends Error', () => {
+    const e = new PlannerTimeoutError();
+    expect(e).toBeInstanceOf(Error);
+    expect(e).toBeInstanceOf(PlannerTimeoutError);
+    expect(e.name).toBe('PlannerTimeoutError');
+    expect(e.message).toBe('reply-planner timeout');
+  });
+
+  it('T-AUDIT-3: parse-fail (LLM returns garbage) returns null, NOT PlannerTimeoutError', async () => {
+    const claude = makeClaudeStub('resolve', 'this is not json at all');
+    const planner = new ReplyPlanner(claude, createLogger('test-rp'), { timeoutMs: 5000 });
+    const ctx = makeBaseCtx();
+    const ctrl = new AbortController();
+    const result = await planner.plan(ctx, ctrl.signal);
+    expect(result).toBeNull();
+  });
+
+  it('E1: cap boundary — LLM resolves under cap returns Directive, no timeout', async () => {
+    const json = JSON.stringify({
+      mode: 'reply',
+      length_budget: 'short',
+      required_fact_ids: [],
+      forbidden_tokens: [],
+      tone_hint: '随意',
+      use_sticker_token: false,
+    });
+    const claude = makeClaudeStub('resolve', json);
+    const planner = new ReplyPlanner(claude, createLogger('test-rp'), { timeoutMs: 200 });
+    const ctx = makeBaseCtx();
+    const ctrl = new AbortController();
+    const result = await planner.plan(ctx, ctrl.signal);
+    expect(result).not.toBeNull();
+    expect(result!.mode).toBe('reply');
+  });
+
+  it('E2: cap boundary — LLM never resolves at small cap throws PlannerTimeoutError', async () => {
+    const claude = makeClaudeStub('never');
+    const planner = new ReplyPlanner(claude, createLogger('test-rp'), { timeoutMs: 20 });
+    const ctx = makeBaseCtx();
+    const ctrl = new AbortController();
+    await expect(planner.plan(ctx, ctrl.signal))
+      .rejects.toBeInstanceOf(PlannerTimeoutError);
+  });
+
+  it('E3: external AbortController fires before timer also throws PlannerTimeoutError', async () => {
+    const claude = makeClaudeStub('never');
+    const planner = new ReplyPlanner(claude, createLogger('test-rp'), { timeoutMs: 5000 });
+    const ctx = makeBaseCtx();
+    const ctrl = new AbortController();
+    setTimeout(() => ctrl.abort(), 10);
+    await expect(planner.plan(ctx, ctrl.signal))
+      .rejects.toBeInstanceOf(PlannerTimeoutError);
   });
 });

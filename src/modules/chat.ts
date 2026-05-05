@@ -80,6 +80,7 @@ import {
   extractTopTokens,
   directiveToJson,
   R9_PLANNER_TIMEOUT_MS,
+  PlannerTimeoutError,
   type Directive,
   type DirectiveMode,
   type DirectiveLengthBudget,
@@ -3218,8 +3219,12 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       try {
         planned = await this.replyPlanner!.plan(plannerCtx, controller.signal);
       } catch (err) {
-        this.logger.debug({ err: String(err), groupId }, 'r9 planner threw — fallback');
-        fellBackReason = 'timeout';
+        if (err instanceof PlannerTimeoutError) {
+          fellBackReason = 'timeout';
+        } else {
+          this.logger.debug({ err: String(err), groupId }, 'r9 planner threw — fallback');
+          fellBackReason = 'timeout';
+        }
       } finally {
         clearTimeout(timeoutTimer);
       }

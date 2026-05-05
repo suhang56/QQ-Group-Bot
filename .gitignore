@@ -22,6 +22,9 @@ data/eval/replay/*.jsonl
 data/eval/replay/*.json
 data/eval/replay/.tmp/
 
+# R9.5a Planner audit findings (curated MD committed; raw run artifacts gitignored)
+!data/eval/r9-5a-audit/audit-findings.md
+
 # SQLite WAL journals (transient, recreated by sqlite on every access)
 *.sqlite-shm
 *.sqlite-wal
