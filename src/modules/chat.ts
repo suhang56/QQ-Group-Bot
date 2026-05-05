@@ -1664,6 +1664,17 @@ export class ChatModule implements IChatModule {
         Math.floor(Date.now() / 1000),
       );
     }
+    // Annoyance carve-out: clear at-mention spam history when bot served the
+    // user (reply/sticker). Real spam = unanswered @s; engaged Q&A shouldn't
+    // accumulate. Per feedback_query_constraint_carry_over.md Layer 4. Live
+    // evidence: row 7300 (2026-05-04 00:01:21) — 5 fact-grounded queries, 4
+    // bot replies, 5th tripped curse. botUserId-self guard is defensive.
+    if (
+      (result.kind === 'reply' || result.kind === 'sticker')
+      && triggerMessage.userId !== this.botUserId
+    ) {
+      this._clearAtMentionHistory(groupId, triggerMessage.userId);
+    }
     return result;
   }
 
@@ -3835,6 +3846,20 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
       );
     }
     return arr.length;
+  }
+
+  /**
+   * Clear @-mention history for one user in one group. Called from
+   * generateReply when the bot served the user (reply/sticker) — engaged Q&A
+   * shouldn't accumulate spam count. Real spam (unanswered @s) is preserved.
+   */
+  private _clearAtMentionHistory(groupId: string, userId: string): void {
+    const key = `${groupId}:${userId}`;
+    const had = this.atMentionHistory.has(key);
+    this.atMentionHistory.delete(key);
+    if (had) {
+      this.logger.debug({ groupId, userId }, '@-mention history cleared on served reply');
+    }
   }
 
   /**
