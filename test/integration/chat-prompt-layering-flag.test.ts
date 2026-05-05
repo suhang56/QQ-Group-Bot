@@ -52,7 +52,6 @@ const stubConfig = (overrides: Partial<GroupConfig> = {}): GroupConfig => ({
   addresseeGraphEnabled: false,
   linkAcrossGroups: false,
   chatPromptLayeringV2: false,
-  chatPromptShadowClassifierV1: false,
   createdAt: '',
   updatedAt: '',
   ...overrides,

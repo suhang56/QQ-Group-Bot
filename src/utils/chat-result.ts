@@ -1,5 +1,4 @@
 import type { UtteranceAct } from './utterance-act.js';
-import type { ShadowClassifierResult } from '../modules/llm-shadow-classifier.js';
 
 export interface BaseResultMeta {
   decisionPath: 'normal' | 'direct' | 'fallback' | 'sticker' | 'silent' | 'defer';
@@ -18,14 +17,6 @@ export interface BaseResultMeta {
   promptVariant?: 'banter' | 'default' | 'careful' | 'char';
   /** R4-lite: observability label of what the bot intended to do this turn. */
   utteranceAct?: UtteranceAct;
-  /**
-   * R4.5: optional in-flight LLM shadow classifier promise. Stamped at
-   * src/modules/chat.ts:2830 when the per-group flag is on. The decision
-   * tracker awaits this post-insert and UPDATEs the just-written
-   * chat_decision_events row by id. Promise NEVER rejects (internal try/catch).
-   * Routes that don't shadow leave this undefined.
-   */
-  utteranceActShadowPromise?: Promise<ShadowClassifierResult>;
 }
 
 export interface ReplyMeta extends BaseResultMeta {

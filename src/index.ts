@@ -63,7 +63,6 @@ import { RatingPortalServer } from './server/rating-portal.js';
 import { TuningGenerator } from './server/tuning-generator.js';
 import { GroupmateVoice } from './modules/groupmate-voice.js';
 import { ChatDecisionTracker } from './modules/chat-decision-tracker.js';
-import { LlmShadowClassifier } from './modules/llm-shadow-classifier.js';
 import { DeferQueue, DEFER_RECHECK_INTERVAL_MS } from './utils/defer-queue.js';
 import { startRssGuard, parseRssLimit } from './utils/rss-guard.js';
 
@@ -613,14 +612,6 @@ const chatDecisionTracker = new ChatDecisionTracker({
   logger: createLogger('chat-decision-tracker'),
 });
 router.setChatDecisionTracker(chatDecisionTracker);
-
-// R4.5: LLM shadow classifier for utterance_act observability. Reuses the
-// existing Claude client; gated per-group by chat_prompt_shadow_classifier_v1.
-const llmShadowClassifier = new LlmShadowClassifier({
-  claude,
-  logger: createLogger('llm-shadow-classifier'),
-});
-chat.setShadowClassifier(llmShadowClassifier);
 
 const deferQueue = new DeferQueue();
 router.setDeferQueue(deferQueue);

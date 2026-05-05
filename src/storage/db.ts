@@ -141,8 +141,6 @@ export interface GroupConfig {
   linkAcrossGroups: boolean;
   /** R5: opt-in per-group prompt-assembler v2 layering. Default false. */
   chatPromptLayeringV2: boolean;
-  /** R4.5: opt-in per-group LLM shadow classifier on chat.ts:2830. Default false. */
-  chatPromptShadowClassifierV1: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -563,12 +561,6 @@ export interface ChatDecisionEventRow {
   used_fact_ids: string | null;
   used_voice_count: number | null;
   captured_at_sec: number;
-  /** R4.5: LLM shadow classifier act (nullable on timeout/parse-fail/disabled). */
-  utterance_act_shadow: string | null;
-  /** R4.5: 0.0-1.0 LLM confidence; null when act is null OR confidence missing. */
-  utterance_act_shadow_conf: number | null;
-  /** R4.5: wall-clock ms from shadow promise creation to resolve. */
-  utterance_act_shadow_latency_ms: number | null;
 }
 
 export interface ChatDecisionEffectRow {
@@ -601,12 +593,6 @@ export interface ScoredEffectUpdate {
 export interface IChatDecisionEventRepository {
   insert(row: Omit<ChatDecisionEventRow, 'id'>): number;
   getById(id: number): ChatDecisionEventRow | undefined;
-  /** R4.5: post-insert UPDATE for fire-and-forget shadow classifier result. */
-  updateShadow(id: number, shadow: {
-    utterance_act_shadow: string | null;
-    utterance_act_shadow_conf: number | null;
-    utterance_act_shadow_latency_ms: number | null;
-  }): void;
 }
 
 export interface IChatDecisionEffectRepository {
@@ -1007,7 +993,6 @@ interface GroupConfigRow {
   addressee_graph_enabled: number;
   link_across_groups: number;
   chat_prompt_layering_v2: number;
-  chat_prompt_shadow_classifier_v1: number;
   created_at: string; updated_at: string;
 }
 
@@ -1116,7 +1101,6 @@ function configFromRow(row: GroupConfigRow): GroupConfig {
     addresseeGraphEnabled: (row.addressee_graph_enabled ?? 0) !== 0,
     linkAcrossGroups: (row.link_across_groups ?? 0) !== 0,
     chatPromptLayeringV2: (row.chat_prompt_layering_v2 ?? 0) !== 0,
-    chatPromptShadowClassifierV1: (row.chat_prompt_shadow_classifier_v1 ?? 0) !== 0,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -1523,9 +1507,8 @@ class GroupConfigRepository implements IGroupConfigRepository {
         air_reading_enabled, addressee_graph_enabled,
         link_across_groups,
         chat_prompt_layering_v2,
-        chat_prompt_shadow_classifier_v1,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(group_id) DO UPDATE SET
         enabled_modules = excluded.enabled_modules,
         auto_mod = excluded.auto_mod,
@@ -1565,7 +1548,6 @@ class GroupConfigRepository implements IGroupConfigRepository {
         addressee_graph_enabled = excluded.addressee_graph_enabled,
         link_across_groups = excluded.link_across_groups,
         chat_prompt_layering_v2 = excluded.chat_prompt_layering_v2,
-        chat_prompt_shadow_classifier_v1 = excluded.chat_prompt_shadow_classifier_v1,
         updated_at = excluded.updated_at
     `).run(
       config.groupId,
@@ -1607,7 +1589,6 @@ class GroupConfigRepository implements IGroupConfigRepository {
       (config.addresseeGraphEnabled ?? false) ? 1 : 0,
       (config.linkAcrossGroups ?? false) ? 1 : 0,
       (config.chatPromptLayeringV2 ?? false) ? 1 : 0,
-      (config.chatPromptShadowClassifierV1 ?? false) ? 1 : 0,
       config.createdAt,
       config.updatedAt,
     );
@@ -3476,7 +3457,6 @@ class WebLookupCacheRepository implements IWebLookupCacheRepository {
 class ChatDecisionEventRepository implements IChatDecisionEventRepository {
   private readonly _insert: ReturnType<DatabaseSync['prepare']>;
   private readonly _getById: ReturnType<DatabaseSync['prepare']>;
-  private readonly _updateShadow: ReturnType<DatabaseSync['prepare']>;
 
   constructor(db: DatabaseSync) {
     this._insert = db.prepare(`
@@ -3484,23 +3464,14 @@ class ChatDecisionEventRepository implements IChatDecisionEventRepository {
         (group_id, trigger_msg_id, target_msg_id, trigger_user_id,
          result_kind, reason_code, decision_path, guard_path, prompt_variant,
          utterance_act,
-         sent_bot_reply_id, reply_text, used_fact_ids, used_voice_count, captured_at_sec,
-         utterance_act_shadow, utterance_act_shadow_conf, utterance_act_shadow_latency_ms)
+         sent_bot_reply_id, reply_text, used_fact_ids, used_voice_count, captured_at_sec)
       VALUES
         (@group_id, @trigger_msg_id, @target_msg_id, @trigger_user_id,
          @result_kind, @reason_code, @decision_path, @guard_path, @prompt_variant,
          @utterance_act,
-         @sent_bot_reply_id, @reply_text, @used_fact_ids, @used_voice_count, @captured_at_sec,
-         @utterance_act_shadow, @utterance_act_shadow_conf, @utterance_act_shadow_latency_ms)
+         @sent_bot_reply_id, @reply_text, @used_fact_ids, @used_voice_count, @captured_at_sec)
     `);
     this._getById = db.prepare(`SELECT * FROM chat_decision_events WHERE id = ?`);
-    this._updateShadow = db.prepare(`
-      UPDATE chat_decision_events SET
-        utterance_act_shadow            = @utterance_act_shadow,
-        utterance_act_shadow_conf       = @utterance_act_shadow_conf,
-        utterance_act_shadow_latency_ms = @utterance_act_shadow_latency_ms
-      WHERE id = @id
-    `);
   }
 
   insert(row: Omit<ChatDecisionEventRow, 'id'>): number {
@@ -3510,14 +3481,6 @@ class ChatDecisionEventRepository implements IChatDecisionEventRepository {
 
   getById(id: number): ChatDecisionEventRow | undefined {
     return this._getById.get(id) as ChatDecisionEventRow | undefined;
-  }
-
-  updateShadow(id: number, shadow: {
-    utterance_act_shadow: string | null;
-    utterance_act_shadow_conf: number | null;
-    utterance_act_shadow_latency_ms: number | null;
-  }): void {
-    this._updateShadow.run({ id, ...shadow });
   }
 }
 
@@ -3979,9 +3942,6 @@ export class Database {
     // R5: per-group prompt-assembler v2 opt-in flag.
     try { this._db.exec(`ALTER TABLE group_config ADD COLUMN chat_prompt_layering_v2 INTEGER NOT NULL DEFAULT 0`); } catch { /* already exists */ }
 
-    // R4.5: per-group LLM shadow classifier opt-in flag.
-    try { this._db.exec(`ALTER TABLE group_config ADD COLUMN chat_prompt_shadow_classifier_v1 INTEGER NOT NULL DEFAULT 0`); } catch { /* already exists */ }
-
     // M9.3 cross-group audit table. CREATE IF NOT EXISTS is idempotent on re-run.
     this._db.exec(`
       CREATE TABLE IF NOT EXISTS cross_group_audit (
@@ -4365,25 +4325,22 @@ export class Database {
     // CREATE TABLE IF NOT EXISTS in schema.sql handles fresh installs;
     // these exec calls cover existing DBs idempotently.
     this._db.exec(`CREATE TABLE IF NOT EXISTS chat_decision_events (
-      id                              INTEGER PRIMARY KEY AUTOINCREMENT,
-      group_id                        TEXT    NOT NULL,
-      trigger_msg_id                  TEXT,
-      target_msg_id                   TEXT,
-      trigger_user_id                 TEXT,
-      result_kind                     TEXT    NOT NULL,
-      reason_code                     TEXT    NOT NULL,
-      decision_path                   TEXT,
-      guard_path                      TEXT,
-      prompt_variant                  TEXT,
-      utterance_act                   TEXT,
-      sent_bot_reply_id               INTEGER,
-      reply_text                      TEXT,
-      used_fact_ids                   TEXT,
-      used_voice_count                INTEGER,
-      captured_at_sec                 INTEGER NOT NULL,
-      utterance_act_shadow            TEXT,
-      utterance_act_shadow_conf       REAL,
-      utterance_act_shadow_latency_ms INTEGER
+      id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_id             TEXT    NOT NULL,
+      trigger_msg_id       TEXT,
+      target_msg_id        TEXT,
+      trigger_user_id      TEXT,
+      result_kind          TEXT    NOT NULL,
+      reason_code          TEXT    NOT NULL,
+      decision_path        TEXT,
+      guard_path           TEXT,
+      prompt_variant       TEXT,
+      utterance_act        TEXT,
+      sent_bot_reply_id    INTEGER,
+      reply_text           TEXT,
+      used_fact_ids        TEXT,
+      used_voice_count     INTEGER,
+      captured_at_sec      INTEGER NOT NULL
     )`);
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_cde_group_kind ON chat_decision_events(group_id, result_kind, captured_at_sec DESC)`);
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_cde_guard ON chat_decision_events(guard_path, captured_at_sec DESC)`);
@@ -4392,12 +4349,6 @@ export class Database {
     // Wrapped in try/catch — SQLite throws "duplicate column name" on existing DBs
     // that already have the column; that's the correct idempotency signal.
     try { this._db.exec(`ALTER TABLE chat_decision_events ADD COLUMN utterance_act TEXT`); } catch { /* already exists */ }
-
-    // R4.5: shadow classifier columns on chat_decision_events for existing DBs.
-    // Bare-catch idempotency — SQLite throws "duplicate column name" on re-run.
-    try { this._db.exec(`ALTER TABLE chat_decision_events ADD COLUMN utterance_act_shadow TEXT`); } catch { /* already exists */ }
-    try { this._db.exec(`ALTER TABLE chat_decision_events ADD COLUMN utterance_act_shadow_conf REAL`); } catch { /* already exists */ }
-    try { this._db.exec(`ALTER TABLE chat_decision_events ADD COLUMN utterance_act_shadow_latency_ms INTEGER`); } catch { /* already exists */ }
 
     this._db.exec(`CREATE TABLE IF NOT EXISTS chat_decision_effects (
       id                         INTEGER PRIMARY KEY AUTOINCREMENT,
