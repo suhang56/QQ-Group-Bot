@@ -55,6 +55,13 @@ export interface ReplayRow {
 
   // diagnostics
   violationTags: string[];
+  /**
+   * R9 directive layer signal. `null` ONLY on error rows (no ChatResult.meta).
+   * `'no-planner-skipped'` literal: env flag OFF, bot-self trigger, or
+   * scope-skipped. `'llm-planner'`: Planner returned a validated Directive.
+   * `'rule-fallback'`: Planner ran but returned null/invalid → rule fallback.
+   */
+  plannerSource: 'llm-planner' | 'rule-fallback' | 'no-planner-skipped' | null;
   errorMessage: string | null;
   durationMs: number;
 
