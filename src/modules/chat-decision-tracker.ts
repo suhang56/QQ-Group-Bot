@@ -71,24 +71,46 @@ export class ChatDecisionTracker {
       }
 
       const eventId = this.deps.events.insert({
-        group_id:          ctx.groupId,
-        trigger_msg_id:    ctx.triggerMsgId,
-        target_msg_id:     ctx.targetMsgId,
-        trigger_user_id:   ctx.triggerUserId,
-        result_kind:       result.kind,
-        reason_code:       result.reasonCode,
-        decision_path:     meta.decisionPath ?? null,
-        guard_path:        meta.guardPath ?? null,
-        prompt_variant:    meta.promptVariant ?? null,
-        utterance_act:     meta.utteranceAct ?? null,
-        sent_bot_reply_id: ctx.sentBotReplyId,
-        reply_text:        replyText,
-        used_fact_ids:     usedFactIds,
-        used_voice_count:  usedVoiceCount,
-        captured_at_sec:   ctx.nowSec,
+        group_id:                        ctx.groupId,
+        trigger_msg_id:                  ctx.triggerMsgId,
+        target_msg_id:                   ctx.targetMsgId,
+        trigger_user_id:                 ctx.triggerUserId,
+        result_kind:                     result.kind,
+        reason_code:                     result.reasonCode,
+        decision_path:                   meta.decisionPath ?? null,
+        guard_path:                      meta.guardPath ?? null,
+        prompt_variant:                  meta.promptVariant ?? null,
+        utterance_act:                   meta.utteranceAct ?? null,
+        sent_bot_reply_id:               ctx.sentBotReplyId,
+        reply_text:                      replyText,
+        used_fact_ids:                   usedFactIds,
+        used_voice_count:                usedVoiceCount,
+        captured_at_sec:                 ctx.nowSec,
+        utterance_act_shadow:            null,
+        utterance_act_shadow_conf:       null,
+        utterance_act_shadow_latency_ms: null,
       });
 
       this.deps.effects.insertPlaceholder(eventId, ctx.groupId);
+
+      // R4.5: if a shadow promise was attached at chat.ts:2830, await it
+      // off-band and UPDATE the just-inserted row. Promise NEVER rejects (per
+      // LlmShadowClassifier contract); the .then handler still has try/catch
+      // around the DB UPDATE in case the DB is locked / closed.
+      const shadowPromise = meta.utteranceActShadowPromise;
+      if (shadowPromise !== undefined) {
+        void shadowPromise.then(shadow => {
+          try {
+            this.deps.events.updateShadow(eventId, {
+              utterance_act_shadow:            shadow.act,
+              utterance_act_shadow_conf:       shadow.conf,
+              utterance_act_shadow_latency_ms: shadow.latencyMs,
+            });
+          } catch (err) {
+            this.deps.logger.warn({ err, eventId }, 'updateShadow failed');
+          }
+        });
+      }
     } catch (err) {
       this.deps.logger.warn({ err }, 'captureDecision failed');
     }
