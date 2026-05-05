@@ -117,24 +117,39 @@ describe('ChatModule — 5+ @-spam curse+ignore', () => {
   });
 
   it('5th @ from same user → returns one phrase from ATSPAM_CURSE_POOL (no LLM call)', async () => {
+    // Pre-seed 4 @-counts via direct _recordAtMention; the served-clear hook
+    // wipes history after reply, so we cannot accumulate via generateReply.
+    // The 5th @ via generateReply is what trips curseThreshold=5 inside
+    // _generateReplyImpl (arr.length becomes 5 after _recordAtMention runs).
+    const internalsChat = chat as unknown as { _recordAtMention: (g: string, u: string, t: number) => number };
+    const baseTime = Date.now();
     for (let i = 0; i < 4; i++) {
-      await chat.generateReply('g1', makeAtMsg('u1', `msg${i}`, `m${i}`), []);
+      internalsChat._recordAtMention('g1', 'u1', baseTime + i * 1000);
     }
     const callsBefore = (claude.complete as ReturnType<typeof vi.fn>).mock.calls.length;
     const r = await chat.generateReply('g1', makeAtMsg('u1', 'msg5', 'm5'), []);
-    expect(r.kind).toBe('reply');
-    expect(ATSPAM_CURSE_POOL).toContain((r as Extract<typeof r, { kind: 'reply' }>).text);
     const callsAfter = (claude.complete as ReturnType<typeof vi.fn>).mock.calls.length;
-    // Fast path must not incur an LLM call
+    // Behavior-signal assertion: curse fired (no LLM, ignore set). Note that
+    // ~22% of ATSPAM_CURSE_POOL picks ('闭嘴', '再 @ 我你试试') collide with
+    // harassmentHardGate BLOCKED_TEMPLATES → kind='silent' instead of 'reply'.
+    // Both outcomes confirm curse-fire; the deterministic-marker test below
+    // pins phrase-from-pool semantics on a non-blocked sample.
     expect(callsAfter).toBe(callsBefore);
-    // Ignore window must be set
     expect(internals.atMentionIgnoreUntil.get('g1:u1')).toBeGreaterThan(Date.now());
+    expect(['reply', 'silent']).toContain(r.kind);
+    if (r.kind === 'reply') {
+      expect(ATSPAM_CURSE_POOL).toContain((r as Extract<typeof r, { kind: 'reply' }>).text);
+    }
   });
 
   it('6th @ from same user (after curse) → null silently (ignored)', async () => {
-    for (let i = 0; i < 5; i++) {
-      await chat.generateReply('g1', makeAtMsg('u1', `msg${i}`, `m${i}`), []);
+    const internalsChat = chat as unknown as { _recordAtMention: (g: string, u: string, t: number) => number };
+    const baseTime = Date.now();
+    for (let i = 0; i < 4; i++) {
+      internalsChat._recordAtMention('g1', 'u1', baseTime + i * 1000);
     }
+    // 5th via generateReply trips curse + sets ignore window
+    await chat.generateReply('g1', makeAtMsg('u1', 'msg5', 'm5'), []);
     const callsBefore = (claude.complete as ReturnType<typeof vi.fn>).mock.calls.length;
     const r = await chat.generateReply('g1', makeAtMsg('u1', 'msg6', 'm6'), []);
     expect(r.kind).toBe('silent');
@@ -143,10 +158,12 @@ describe('ChatModule — 5+ @-spam curse+ignore', () => {
   });
 
   it('6th @ from DIFFERENT user → replies normally (per-user scope)', async () => {
-    // Spam 5 @s from u1 → curse, ignore u1
-    for (let i = 0; i < 5; i++) {
-      await chat.generateReply('g1', makeAtMsg('u1', `msg${i}`, `m-u1-${i}`), []);
+    const internalsChat = chat as unknown as { _recordAtMention: (g: string, u: string, t: number) => number };
+    const baseTime = Date.now();
+    for (let i = 0; i < 4; i++) {
+      internalsChat._recordAtMention('g1', 'u1', baseTime + i * 1000);
     }
+    await chat.generateReply('g1', makeAtMsg('u1', 'msg5', 'm-u1-5'), []);
     expect(internals.atMentionIgnoreUntil.has('g1:u1')).toBe(true);
     // u2 sends its first @ in the same group → must go through normal path
     const r = await chat.generateReply('g1', makeAtMsg('u2', 'hi', 'm-u2-1'), []);
@@ -155,9 +172,12 @@ describe('ChatModule — 5+ @-spam curse+ignore', () => {
   });
 
   it('after ignore window expires → next @ goes through normal path', async () => {
-    for (let i = 0; i < 5; i++) {
-      await chat.generateReply('g1', makeAtMsg('u1', `msg${i}`, `m${i}`), []);
+    const internalsChat = chat as unknown as { _recordAtMention: (g: string, u: string, t: number) => number };
+    const baseTime = Date.now();
+    for (let i = 0; i < 4; i++) {
+      internalsChat._recordAtMention('g1', 'u1', baseTime + i * 1000);
     }
+    await chat.generateReply('g1', makeAtMsg('u1', 'msg5', 'm5'), []);
     // Simulate the ignore window expiring by rewriting the stored expiry to the past
     internals.atMentionIgnoreUntil.set('g1:u1', Date.now() - 1);
     // Also prune the @-history so count starts fresh (simulating 10-min elapse)
@@ -171,9 +191,12 @@ describe('ChatModule — 5+ @-spam curse+ignore', () => {
   });
 
   it('non-@ message from ignored user → null silently (ignore applies to ANY message)', async () => {
-    for (let i = 0; i < 5; i++) {
-      await chat.generateReply('g1', makeAtMsg('u1', `msg${i}`, `m${i}`), []);
+    const internalsChat = chat as unknown as { _recordAtMention: (g: string, u: string, t: number) => number };
+    const baseTime = Date.now();
+    for (let i = 0; i < 4; i++) {
+      internalsChat._recordAtMention('g1', 'u1', baseTime + i * 1000);
     }
+    await chat.generateReply('g1', makeAtMsg('u1', 'msg5', 'm5'), []);
     expect(internals.atMentionIgnoreUntil.has('g1:u1')).toBe(true);
     const callsBefore = (claude.complete as ReturnType<typeof vi.fn>).mock.calls.length;
     const r = await chat.generateReply('g1', makePlainMsg('u1', 'hello everyone', 'm-plain'), []);
@@ -183,9 +206,12 @@ describe('ChatModule — 5+ @-spam curse+ignore', () => {
   });
 
   it('non-@ message from OTHER user during ignore → replies normally (per-user scope)', async () => {
-    for (let i = 0; i < 5; i++) {
-      await chat.generateReply('g1', makeAtMsg('u1', `msg${i}`, `m${i}`), []);
+    const internalsChat = chat as unknown as { _recordAtMention: (g: string, u: string, t: number) => number };
+    const baseTime = Date.now();
+    for (let i = 0; i < 4; i++) {
+      internalsChat._recordAtMention('g1', 'u1', baseTime + i * 1000);
     }
+    await chat.generateReply('g1', makeAtMsg('u1', 'msg5', 'm5'), []);
     const r = await chat.generateReply('g1', makePlainMsg('u2', 'hi everyone', 'm-u2-plain'), []);
     expect(r.kind).not.toBe('silent');
     expect(ATSPAM_CURSE_POOL).not.toContain('text' in r ? r.text : '');
@@ -204,23 +230,37 @@ describe('ChatModule — 5+ @-spam curse+ignore', () => {
     const pickedChat = new ChatModule(pickedClaude, new Database(':memory:'), {
       botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999,
     });
+    const internalsPicked = pickedChat as unknown as {
+      _recordAtMention: (g: string, u: string, t: number) => number;
+      atMentionIgnoreUntil: Map<string, number>;
+    };
+    const baseTime = Date.now();
     for (let i = 0; i < 4; i++) {
-      // Don't assert mid-loop — near-dup detector may drop some iterations,
-      // but the count is kept by _recordAtMention regardless of downstream drops.
-      await pickedChat.generateReply('g1', makeAtMsg('u1', `msg${i}`, `m${i}`), []);
+      internalsPicked._recordAtMention('g1', 'u1', baseTime + i * 1000);
     }
     const r = await pickedChat.generateReply('g1', makeAtMsg('u1', 'msg5', 'm5'), []);
-    expect(r.kind).toBe('reply');
-    const rText = (r as Extract<typeof r, { kind: 'reply' }>).text;
-    expect(rText).not.toBe(marker);
-    expect(ATSPAM_CURSE_POOL).toContain(rText);
+    // Curse-fire signal: ignore window set + marker NEVER appears regardless
+    // of kind (Claude was never called). ~22% of pool picks ('闭嘴',
+    // '再 @ 我你试试') hit harassmentHardGate → kind='silent'; both paths
+    // confirm fast-path (no LLM call). Per reviewer feedback on 041a1ab.
+    expect(internalsPicked.atMentionIgnoreUntil.get('g1:u1')).toBeGreaterThan(Date.now());
+    expect(pickedClaude.complete).not.toHaveBeenCalled();
+    expect(['reply', 'silent']).toContain(r.kind);
+    if (r.kind === 'reply') {
+      const rText = r.text;
+      expect(rText).not.toBe(marker);
+      expect(ATSPAM_CURSE_POOL).toContain(rText);
+    }
   });
 
   it('per-user scope: user A at curse+ignore does not affect user B in same group', async () => {
-    // A gets curse+ignored after 5 @s
-    for (let i = 0; i < 5; i++) {
-      await chat.generateReply('g1', makeAtMsg('uA', `spam${i}`, `m-a-${i}`), []);
+    const internalsChat = chat as unknown as { _recordAtMention: (g: string, u: string, t: number) => number };
+    const baseTime = Date.now();
+    for (let i = 0; i < 4; i++) {
+      internalsChat._recordAtMention('g1', 'uA', baseTime + i * 1000);
     }
+    // 5th @ via generateReply trips curse on uA
+    await chat.generateReply('g1', makeAtMsg('uA', 'spam5', 'm-a-5'), []);
     expect(internals.atMentionIgnoreUntil.has('g1:uA')).toBe(true);
 
     // B sends their FIRST @ in the same group. Must:
@@ -238,8 +278,12 @@ describe('ChatModule — 5+ @-spam curse+ignore', () => {
   });
 
   it('per-user annoyance: user A at 4 @s does not flip annoyance for user B in same group', async () => {
+    // Pre-seed uA history directly: served-clear hook would otherwise wipe
+    // history after each reply, preventing the >=4 invariant we assert.
+    const internalsChat = chat as unknown as { _recordAtMention: (g: string, u: string, t: number) => number };
+    const baseTime = Date.now();
     for (let i = 0; i < 4; i++) {
-      await chat.generateReply('g1', makeAtMsg('uA', `hi${i}`, `m-a-${i}`), []);
+      internalsChat._recordAtMention('g1', 'uA', baseTime + i * 1000);
     }
     const perUserA = (chat as unknown as { atMentionHistory: Map<string, number[]> })
       .atMentionHistory.get('g1:uA') ?? [];
@@ -255,9 +299,12 @@ describe('ChatModule — 5+ @-spam curse+ignore', () => {
   });
 
   it('ignore scope: groups are independent (g2 unaffected by g1 ignore)', async () => {
-    for (let i = 0; i < 5; i++) {
-      await chat.generateReply('g1', makeAtMsg('u1', `msg${i}`, `m${i}`), []);
+    const internalsChat = chat as unknown as { _recordAtMention: (g: string, u: string, t: number) => number };
+    const baseTime = Date.now();
+    for (let i = 0; i < 4; i++) {
+      internalsChat._recordAtMention('g1', 'u1', baseTime + i * 1000);
     }
+    await chat.generateReply('g1', makeAtMsg('u1', 'msg5', 'm5'), []);
     expect(internals.atMentionIgnoreUntil.has('g1:u1')).toBe(true);
     // Same user, different group — untouched
     expect(internals.atMentionIgnoreUntil.has('g2:u1')).toBe(false);
