@@ -262,22 +262,32 @@ describe('ChatModule — @-spam served-clear hook', () => {
     expect(internals.atMentionHistory.get('g1:u1')?.length).toBe(4);
 
     // 5th @ via generateReply: _recordAtMention runs at line 1791 (count → 5),
-    // curse-check fires at line 1793, kind='reply' with curse phrase returned.
+    // curse-check fires at line 1793. Curse path returns kind='reply' with a
+    // phrase from ATSPAM_CURSE_POOL — but ~22% of pool picks ('闭嘴',
+    // '再 @ 我你试试') collide with harassmentHardGate BLOCKED_TEMPLATES, in
+    // which case post-process send-guard converts the return to kind='silent'
+    // (chat.ts hard-gate-blocked path). Both outcomes are valid curse-fire
+    // signals — assert behavior signals (ignore window + no LLM call) instead
+    // of literal-text assertion. Per reviewer feedback on 041a1ab.
     const callsBefore = (claude.complete as ReturnType<typeof vi.fn>).mock.calls.length;
     const r = await chat.generateReply('g1', makeAtMsg('u1', 'msg5', 'm5'), []);
     const callsAfter = (claude.complete as ReturnType<typeof vi.fn>).mock.calls.length;
 
-    expect(r.kind).toBe('reply');
-    expect(ATSPAM_CURSE_POOL).toContain((r as Extract<typeof r, { kind: 'reply' }>).text);
-    // No LLM call on curse fast-path
+    // Behavior-signal assertion: curse fired (no LLM, ignore set), regardless
+    // of whether send-guard let the phrase through.
     expect(callsAfter).toBe(callsBefore);
-    // Ignore window set for 10 min
     expect(internals.atMentionIgnoreUntil.get('g1:u1')).toBeGreaterThan(Date.now());
-    // Note: served-clear hook DOES fire after curse return (kind='reply'),
-    // wiping history. Per Designer §6 line 179: harmless because the user
-    // is already in atMentionIgnoreUntil for 10 min — the cleared count
-    // only affects post-ignore-expiry behavior, which is correct.
-    expect(internals.atMentionHistory.has('g1:u1')).toBe(false);
+    expect(['reply', 'silent']).toContain(r.kind);
+    // When the picked phrase passed send-guard: validate it came from the pool.
+    if (r.kind === 'reply') {
+      expect(ATSPAM_CURSE_POOL).toContain((r as Extract<typeof r, { kind: 'reply' }>).text);
+      // Served-clear hook fires for kind=reply, wiping history. Harmless: the
+      // user is now in atMentionIgnoreUntil for 10 min. Only matters
+      // post-ignore-expiry, which is the desired reset.
+      expect(internals.atMentionHistory.has('g1:u1')).toBe(false);
+    }
+    // When hard-gate blocked → kind='silent': hook does NOT fire (gated by
+    // reply|sticker), history stays. Either path validates "curse fired".
   });
 
   // ────────────────────────────────────────────────────────────────────

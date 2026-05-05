@@ -128,13 +128,18 @@ describe('ChatModule — 5+ @-spam curse+ignore', () => {
     }
     const callsBefore = (claude.complete as ReturnType<typeof vi.fn>).mock.calls.length;
     const r = await chat.generateReply('g1', makeAtMsg('u1', 'msg5', 'm5'), []);
-    expect(r.kind).toBe('reply');
-    expect(ATSPAM_CURSE_POOL).toContain((r as Extract<typeof r, { kind: 'reply' }>).text);
     const callsAfter = (claude.complete as ReturnType<typeof vi.fn>).mock.calls.length;
-    // Fast path must not incur an LLM call
+    // Behavior-signal assertion: curse fired (no LLM, ignore set). Note that
+    // ~22% of ATSPAM_CURSE_POOL picks ('闭嘴', '再 @ 我你试试') collide with
+    // harassmentHardGate BLOCKED_TEMPLATES → kind='silent' instead of 'reply'.
+    // Both outcomes confirm curse-fire; the deterministic-marker test below
+    // pins phrase-from-pool semantics on a non-blocked sample.
     expect(callsAfter).toBe(callsBefore);
-    // Ignore window must be set
     expect(internals.atMentionIgnoreUntil.get('g1:u1')).toBeGreaterThan(Date.now());
+    expect(['reply', 'silent']).toContain(r.kind);
+    if (r.kind === 'reply') {
+      expect(ATSPAM_CURSE_POOL).toContain((r as Extract<typeof r, { kind: 'reply' }>).text);
+    }
   });
 
   it('6th @ from same user (after curse) → null silently (ignored)', async () => {
@@ -225,16 +230,27 @@ describe('ChatModule — 5+ @-spam curse+ignore', () => {
     const pickedChat = new ChatModule(pickedClaude, new Database(':memory:'), {
       botUserId: BOT_ID, debounceMs: 0, chatMinScore: -999,
     });
-    const internalsPicked = pickedChat as unknown as { _recordAtMention: (g: string, u: string, t: number) => number };
+    const internalsPicked = pickedChat as unknown as {
+      _recordAtMention: (g: string, u: string, t: number) => number;
+      atMentionIgnoreUntil: Map<string, number>;
+    };
     const baseTime = Date.now();
     for (let i = 0; i < 4; i++) {
       internalsPicked._recordAtMention('g1', 'u1', baseTime + i * 1000);
     }
     const r = await pickedChat.generateReply('g1', makeAtMsg('u1', 'msg5', 'm5'), []);
-    expect(r.kind).toBe('reply');
-    const rText = (r as Extract<typeof r, { kind: 'reply' }>).text;
-    expect(rText).not.toBe(marker);
-    expect(ATSPAM_CURSE_POOL).toContain(rText);
+    // Curse-fire signal: ignore window set + marker NEVER appears regardless
+    // of kind (Claude was never called). ~22% of pool picks ('闭嘴',
+    // '再 @ 我你试试') hit harassmentHardGate → kind='silent'; both paths
+    // confirm fast-path (no LLM call). Per reviewer feedback on 041a1ab.
+    expect(internalsPicked.atMentionIgnoreUntil.get('g1:u1')).toBeGreaterThan(Date.now());
+    expect(pickedClaude.complete).not.toHaveBeenCalled();
+    expect(['reply', 'silent']).toContain(r.kind);
+    if (r.kind === 'reply') {
+      const rText = r.text;
+      expect(rText).not.toBe(marker);
+      expect(ATSPAM_CURSE_POOL).toContain(rText);
+    }
   });
 
   it('per-user scope: user A at curse+ignore does not affect user B in same group', async () => {
