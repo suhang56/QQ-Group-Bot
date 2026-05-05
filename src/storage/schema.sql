@@ -120,7 +120,6 @@ CREATE TABLE IF NOT EXISTS group_config (
   addressee_graph_enabled               INTEGER NOT NULL DEFAULT 0,
   link_across_groups                    INTEGER NOT NULL DEFAULT 0,
   chat_prompt_layering_v2               INTEGER NOT NULL DEFAULT 0,
-  chat_prompt_shadow_classifier_v1      INTEGER NOT NULL DEFAULT 0,
   created_at                            TEXT    NOT NULL DEFAULT '',
   updated_at                            TEXT    NOT NULL DEFAULT ''
 );
@@ -666,25 +665,22 @@ CREATE INDEX IF NOT EXISTS idx_web_cache_term
 -- reply_text for sticker kind stores the cqCode string, not natural-language text.
 -- Internal-only table; no export endpoint. Same precedent as bot_replies.
 CREATE TABLE IF NOT EXISTS chat_decision_events (
-  id                              INTEGER PRIMARY KEY AUTOINCREMENT,
-  group_id                        TEXT    NOT NULL,
-  trigger_msg_id                  TEXT,
-  target_msg_id                   TEXT,
-  trigger_user_id                 TEXT,
-  result_kind                     TEXT    NOT NULL,
-  reason_code                     TEXT    NOT NULL,
-  decision_path                   TEXT,
-  guard_path                      TEXT,
-  prompt_variant                  TEXT,
-  utterance_act                   TEXT,
-  sent_bot_reply_id               INTEGER,
-  reply_text                      TEXT,
-  used_fact_ids                   TEXT,
-  used_voice_count                INTEGER,
-  captured_at_sec                 INTEGER NOT NULL,
-  utterance_act_shadow            TEXT,
-  utterance_act_shadow_conf       REAL,
-  utterance_act_shadow_latency_ms INTEGER
+  id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id             TEXT    NOT NULL,
+  trigger_msg_id       TEXT,
+  target_msg_id        TEXT,
+  trigger_user_id      TEXT,
+  result_kind          TEXT    NOT NULL,
+  reason_code          TEXT    NOT NULL,
+  decision_path        TEXT,
+  guard_path           TEXT,
+  prompt_variant       TEXT,
+  utterance_act        TEXT,
+  sent_bot_reply_id    INTEGER,
+  reply_text           TEXT,
+  used_fact_ids        TEXT,
+  used_voice_count     INTEGER,
+  captured_at_sec      INTEGER NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_cde_group_kind
