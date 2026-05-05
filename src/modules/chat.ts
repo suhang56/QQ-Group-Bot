@@ -68,6 +68,7 @@ import { isBotNotAddresseeReplied } from './guards/scope-addressee-guard.js';
 import { runSendGuardChain, buildSendGuards, type SendGuardCtx } from '../utils/send-guard-chain.js';
 import { IDENTITY_DEFLECTIONS } from '../utils/identity-deflections.js';
 import { isAntiMetaDirect } from '../utils/anti-meta-direct.js';
+import { hasOnlyOtherUserAtMention, parseAtTargets } from '../utils/at-mention-parse.js';
 import { isLayeringV2Enabled } from '../config/prompt-layering.js';
 import { assemblePromptV2 } from './prompt-assembler.js';
 
@@ -1829,6 +1830,42 @@ export class ChatModule implements IChatModule {
     // be silenced. No LLM call, no deflection pool, no regen on hit.
     if (isAntiMetaDirect(triggerMessage.content)) {
       return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'injection-refused' };
+    }
+
+    // Addressee-other guard: when the trigger explicitly @-targets a user that
+    // is NOT the bot AND there is no other bot-direction signal (no @-bot in
+    // targets, no reply-to-bot), default silent. Cheap structural read; no
+    // LLM call; runs before SF3 (line 1884+) — explicit @-target is a
+    // stronger signal than SF3 implicit-addressee + hasImageCQ exemption,
+    // catching cases SF3's image-bypass misses (e.g. live row #7085 below).
+    //
+    // Live evidence #7085 (2026-05-03 13:03:19): trigger
+    //   [CQ:at,qq=987326549] 你选个合照写个文案
+    // — 西瓜 asking 园田 (NOT bot) to write caption. TASK_REQUEST regex matched
+    // '写个文案' -> isAdversarial=true -> skipJudge bypassed preChatJudge ->
+    // addresseeIsOther signal never set -> react path -> _generateDeflection
+    // -> bot replied '没兴趣' to a question it wasn't asked.
+    // Per feedback_bot_outsider_voice_and_echo.md.
+    //
+    // hasOnlyOtherUserAtMention already excludes bot-in-targets and @all,
+    // so no separate _isMention check is needed; only _isReplyToBot must be
+    // checked explicitly (reply-to-bot has no CQ:at tag).
+    {
+      const onlyOtherAt = hasOnlyOtherUserAtMention(
+        triggerMessage.rawContent, this.botUserId ?? null,
+      );
+      if (onlyOtherAt && !this._isReplyToBot(triggerMessage)) {
+        this.logger.debug(
+          {
+            groupId,
+            userId: triggerMessage.userId,
+            atTargets: parseAtTargets(triggerMessage.rawContent),
+            tag: 'addressee-other',
+          },
+          'addressee-other guard — silent default',
+        );
+        return { kind: 'silent', meta: metaBuilder.buildBase('silent'), reasonCode: 'addressee-other' };
+      }
     }
 
     // Debounce timing gate (R2a: skipped for direct @/reply-to-bot).
