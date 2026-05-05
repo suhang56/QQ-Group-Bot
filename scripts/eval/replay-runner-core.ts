@@ -21,6 +21,10 @@ import type { GroupMessage } from '../../src/adapter/napcat.js';
 import { hasHarassmentTemplate } from '../../src/utils/output-hard-gate.js';
 import { hasSelfPersonaFabrication } from '../../src/utils/persona-fabrication-guard.js';
 import type { RealClaudeClientForReplay } from '../../src/ai/real-claude-client-for-replay.js';
+import { isReplyerLiteEnvOn } from '../../src/config/reply-planner.js';
+import { ReplyPlanner } from '../../src/modules/reply-planner.js';
+import type { IReplyPlanner } from '../../src/modules/reply-planner.js';
+import { createLogger } from '../../src/utils/logger.js';
 import type { GoldLabel } from './gold/types.js';
 import type {
   ReplayerArgs,
@@ -59,7 +63,7 @@ export function constructChatModule(args: {
   tmpDbPath: string;
   botQQ: string;
   mockClaude: IClaudeClient;
-}): { chat: ChatModule; db: Database } {
+}): { chat: ChatModule; db: Database; replyPlanner: IReplyPlanner | null } {
   if (!args.tmpDbPath.includes('.tmp') && !args.tmpDbPath.includes('synthetic')) {
     throw new Error(
       `constructChatModule refuses to open a DB path that does not look tmp/synthetic: ${args.tmpDbPath}`,
@@ -71,7 +75,30 @@ export function constructChatModule(args: {
     moodProactiveEnabled: false,
     deflectCacheEnabled: false,
   });
-  return { chat, db };
+
+  // R9: wire ReplyPlanner mirroring src/index.ts:629-637 production wiring,
+  // gated on the harness-readable env flag (lazy read so per-test
+  // beforeEach assignments take effect). Default-null arm preserves
+  // byte-identical pre-R9 harness behavior when the flag is unset.
+  // Reuses args.mockClaude as the IClaudeClient (one LLM client per run);
+  // RealClaudeClientForReplay in real mode already encapsulates Gemini
+  // routing + cost cap + retry. Fail-open on construct errors per
+  // src/index.ts:634-636 precedent.
+  let replyPlanner: IReplyPlanner | null = null;
+  if (isReplyerLiteEnvOn()) {
+    try {
+      replyPlanner = new ReplyPlanner(args.mockClaude, createLogger('reply-planner-replay'));
+      chat.setReplyPlanner(replyPlanner);
+    } catch (err) {
+      createLogger('replay-runner-core').warn(
+        { err: String(err) },
+        'R9 reply-planner not wired in harness — continuing without',
+      );
+      replyPlanner = null;
+    }
+  }
+
+  return { chat, db, replyPlanner };
 }
 
 interface BuildReplayRowArgs {
@@ -131,6 +158,7 @@ export function buildReplayRow(args: BuildReplayRowArgs): ReplayRow {
       replyText: null,
       promptVariant: null,
       violationTags: [...violationTags],
+      plannerSource: null,
       errorMessage: result.errorMessage,
       durationMs,
       ...usage,
@@ -151,6 +179,7 @@ export function buildReplayRow(args: BuildReplayRowArgs): ReplayRow {
       replyText: result.text,
       promptVariant: result.meta.promptVariant ?? null,
       violationTags: [...violationTags],
+      plannerSource: result.meta.plannerSource ?? null,
       errorMessage: null,
       durationMs,
       ...usage,
@@ -171,6 +200,7 @@ export function buildReplayRow(args: BuildReplayRowArgs): ReplayRow {
       replyText: result.cqCode,
       promptVariant: null,
       violationTags: [...violationTags],
+      plannerSource: result.meta.plannerSource ?? null,
       errorMessage: null,
       durationMs,
       ...usage,
@@ -191,6 +221,7 @@ export function buildReplayRow(args: BuildReplayRowArgs): ReplayRow {
       replyText: result.text,
       promptVariant: null,
       violationTags: [...violationTags],
+      plannerSource: result.meta.plannerSource ?? null,
       errorMessage: null,
       durationMs,
       ...usage,
@@ -211,6 +242,7 @@ export function buildReplayRow(args: BuildReplayRowArgs): ReplayRow {
     replyText: null,
     promptVariant: null,
     violationTags: [...violationTags],
+    plannerSource: result.meta.plannerSource ?? null,
     errorMessage: null,
     durationMs,
     ...usage,

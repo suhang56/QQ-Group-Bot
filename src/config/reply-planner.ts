@@ -7,17 +7,20 @@ import type { GroupConfig } from '../storage/db.js';
  *
  * Three precedence levels (highest first):
  * 1. per-group GroupConfig.chatPlannerLiteV1 = true
- * 2. process.env.R9_REPLYER_LITE_ENABLED = '1' (test/dev override)
+ * 2. process.env.R9_REPLYER_LITE_ENABLED = '1' (test/dev override; read lazily
+ *    at call-time so per-test env mutations take effect — module-load capture
+ *    would silently ignore beforeEach assignments)
  * 3. compile-time default = false
  */
-export const R9_REPLYER_LITE_ENV =
-  process.env['R9_REPLYER_LITE_ENABLED'] === '1';
+export function isReplyerLiteEnvOn(): boolean {
+  return process.env['R9_REPLYER_LITE_ENABLED'] === '1';
+}
 
 export function isReplyerLiteEnabled(
   groupConfig: GroupConfig | null | undefined,
 ): boolean {
   if (groupConfig?.chatPlannerLiteV1 === true) return true;
-  return R9_REPLYER_LITE_ENV;
+  return isReplyerLiteEnvOn();
 }
 
 export function replyerLiteScope(
