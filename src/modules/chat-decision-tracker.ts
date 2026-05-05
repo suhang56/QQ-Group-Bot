@@ -89,6 +89,11 @@ export class ChatDecisionTracker {
         utterance_act_shadow:            null,
         utterance_act_shadow_conf:       null,
         utterance_act_shadow_latency_ms: null,
+        directive_mode:                  meta.directiveMode ?? null,
+        directive_length_budget:         meta.directiveLengthBudget ?? null,
+        directive_json:                  meta.directiveJson ?? null,
+        planner_source:                  meta.plannerSource ?? null,
+        planner_latency_ms:              meta.plannerLatencyMs ?? null,
       });
 
       this.deps.effects.insertPlaceholder(eventId, ctx.groupId);

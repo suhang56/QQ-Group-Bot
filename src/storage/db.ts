@@ -574,6 +574,19 @@ export interface ChatDecisionEventRow {
   utterance_act_shadow_conf: number | null;
   /** R4.5: wall-clock ms from shadow promise creation to resolve. */
   utterance_act_shadow_latency_ms: number | null;
+  /** R9: directive.mode for analytics (flat for cheap GROUP BY); null when
+   * wiring did not run. */
+  directive_mode: string | null;
+  /** R9: directive.lengthBudget bucket for analytics. */
+  directive_length_budget: string | null;
+  /** R9: full canonical-key-ordered Directive JSON (snake_case). Verbatim
+   * shape preserved for offline replay. */
+  directive_json: string | null;
+  /** R9: source path — 'llm-planner' | 'rule-fallback' | 'no-planner-skipped'. */
+  planner_source: string | null;
+  /** R9: ms spent in Planner LLM call + parse + validate. 0 for rule-fallback
+   * / no-planner-skipped. */
+  planner_latency_ms: number | null;
 }
 
 export interface ChatDecisionEffectRow {
@@ -3503,13 +3516,17 @@ class ChatDecisionEventRepository implements IChatDecisionEventRepository {
          result_kind, reason_code, decision_path, guard_path, prompt_variant,
          utterance_act,
          sent_bot_reply_id, reply_text, used_fact_ids, used_voice_count, captured_at_sec,
-         utterance_act_shadow, utterance_act_shadow_conf, utterance_act_shadow_latency_ms)
+         utterance_act_shadow, utterance_act_shadow_conf, utterance_act_shadow_latency_ms,
+         directive_mode, directive_length_budget, directive_json,
+         planner_source, planner_latency_ms)
       VALUES
         (@group_id, @trigger_msg_id, @target_msg_id, @trigger_user_id,
          @result_kind, @reason_code, @decision_path, @guard_path, @prompt_variant,
          @utterance_act,
          @sent_bot_reply_id, @reply_text, @used_fact_ids, @used_voice_count, @captured_at_sec,
-         @utterance_act_shadow, @utterance_act_shadow_conf, @utterance_act_shadow_latency_ms)
+         @utterance_act_shadow, @utterance_act_shadow_conf, @utterance_act_shadow_latency_ms,
+         @directive_mode, @directive_length_budget, @directive_json,
+         @planner_source, @planner_latency_ms)
     `);
     this._getById = db.prepare(`SELECT * FROM chat_decision_events WHERE id = ?`);
     this._updateShadow = db.prepare(`
@@ -4411,7 +4428,12 @@ export class Database {
       captured_at_sec                 INTEGER NOT NULL,
       utterance_act_shadow            TEXT,
       utterance_act_shadow_conf       REAL,
-      utterance_act_shadow_latency_ms INTEGER
+      utterance_act_shadow_latency_ms INTEGER,
+      directive_mode                  TEXT,
+      directive_length_budget         TEXT,
+      directive_json                  TEXT,
+      planner_source                  TEXT,
+      planner_latency_ms              INTEGER
     )`);
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_cde_group_kind ON chat_decision_events(group_id, result_kind, captured_at_sec DESC)`);
     this._db.exec(`CREATE INDEX IF NOT EXISTS idx_cde_guard ON chat_decision_events(guard_path, captured_at_sec DESC)`);
@@ -4426,6 +4448,14 @@ export class Database {
     try { this._db.exec(`ALTER TABLE chat_decision_events ADD COLUMN utterance_act_shadow TEXT`); } catch { /* already exists */ }
     try { this._db.exec(`ALTER TABLE chat_decision_events ADD COLUMN utterance_act_shadow_conf REAL`); } catch { /* already exists */ }
     try { this._db.exec(`ALTER TABLE chat_decision_events ADD COLUMN utterance_act_shadow_latency_ms INTEGER`); } catch { /* already exists */ }
+
+    // R9: directive telemetry columns on chat_decision_events. Flat top-level
+    // for cheap GROUP BY analytics + raw directive_json for replay/debug.
+    try { this._db.exec(`ALTER TABLE chat_decision_events ADD COLUMN directive_mode TEXT`); } catch { /* already exists */ }
+    try { this._db.exec(`ALTER TABLE chat_decision_events ADD COLUMN directive_length_budget TEXT`); } catch { /* already exists */ }
+    try { this._db.exec(`ALTER TABLE chat_decision_events ADD COLUMN directive_json TEXT`); } catch { /* already exists */ }
+    try { this._db.exec(`ALTER TABLE chat_decision_events ADD COLUMN planner_source TEXT`); } catch { /* already exists */ }
+    try { this._db.exec(`ALTER TABLE chat_decision_events ADD COLUMN planner_latency_ms INTEGER`); } catch { /* already exists */ }
 
     this._db.exec(`CREATE TABLE IF NOT EXISTS chat_decision_effects (
       id                         INTEGER PRIMARY KEY AUTOINCREMENT,
