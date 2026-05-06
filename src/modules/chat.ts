@@ -2016,7 +2016,7 @@ export class ChatModule implements IChatModule {
       // heuristic so reply-to-bot detection matches _isReplyToBot semantics.
       const isReplyToBot = this._isReplyToBot(triggerMessage);
       const isDirectBroad = isBotAt || isReplyToBot || isDirectForGateBypass;
-      const factCandidates = extractCandidateTerms(stripped);
+      const factCandidates = extractCandidateTerms(stripped, groupId, this.db.memeGraph);
       const hasFactTerm = factCandidates.some(t => isValidStructuredTerm(t));
 
       // SF1 — direct-path only (at-or-reply-to-bot). Skip when fact-term
@@ -2428,7 +2428,7 @@ export class ChatModule implements IChatModule {
     let hasKnownFactMatch = false;
     if (engagementDecision.strength === 'react' && this.db.learnedFacts && !isAdversarial) {
       try {
-        const candidates = extractCandidateTerms(triggerMessage.content);
+        const candidates = extractCandidateTerms(triggerMessage.content, groupId, this.db.memeGraph);
         if (candidates.length > 0) {
           const activeFacts = this.db.learnedFacts.listActive(groupId, 500);
           hasKnownFactMatch = candidates.some(term => {
@@ -2941,7 +2941,7 @@ export class ChatModule implements IChatModule {
     let webLookupBlock = '';
     if (this.webLookup) {
       const knownTerms = this._getKnownTermsSet(groupId);
-      const candidates = extractCandidateTerms(triggerMessage.content);
+      const candidates = extractCandidateTerms(triggerMessage.content, groupId, this.db.memeGraph);
       const unknownForWeb = candidates
         .filter(t => !onDemandFoundTerms.has(t))
         .filter(t => shouldLookupTerm(t, triggerMessage.content, knownTerms, DEFAULT_COMMON_WORDS));
@@ -4743,7 +4743,7 @@ ${isAtTrigger && /sb|傻逼|你妈|操|废物|智障|滚|煞笔/.test(triggerMes
     userId: string,
   ): Promise<{ block: string; foundTerms: ReadonlySet<string>; foundFactIds: ReadonlyArray<number> }> {
     if (!this.onDemandLookup) return { block: '', foundTerms: new Set(), foundFactIds: [] };
-    let candidates = extractCandidateTerms(content);
+    let candidates = extractCandidateTerms(content, groupId, this.db.memeGraph);
     // Drop non-structured candidates before any lookup — prevents grammar fragments
     // like "现在策略" reaching the weak path and leaking as LLM-fabricated definitions.
     candidates = candidates

@@ -1,8 +1,22 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { extractCandidateTerms } from '../src/utils/extract-candidate-terms.js';
 import { OnDemandLookup } from '../src/modules/on-demand-lookup.js';
-import type { ILearnedFactsRepository, IMessageRepository } from '../src/storage/db.js';
+import type { ILearnedFactsRepository, IMessageRepository, IMemeGraphRepo } from '../src/storage/db.js';
 import type { Logger } from 'pino';
+
+const noopMemeGraph: IMemeGraphRepo = {
+  insert: () => 0,
+  update: () => {},
+  findByCanonical: () => null,
+  findByVariant: () => [],
+  listActive: () => [],
+  findSimilarActive: () => [],
+  listActiveWithEmbeddings: () => [],
+  listNullEmbedding: () => [],
+  listAllNullEmbedding: () => [],
+  findById: () => null,
+  adminEdit: () => {},
+};
 
 // ---- Stub helpers ----
 
@@ -85,31 +99,31 @@ const FIVE_ROWS: SearchFtsRow[] = [
 
 describe('extractCandidateTerms', () => {
   it('case 1: extracts unknown terms from casual message', () => {
-    const result = extractCandidateTerms('xtt bandori');
+    const result = extractCandidateTerms('xtt bandori', 'g1', noopMemeGraph);
     expect(result).toContain('xtt');
     expect(result.length).toBeGreaterThanOrEqual(1);
   });
 
   it('case 2: knownFacts param removed — terms are NOT filtered out', () => {
-    const result = extractCandidateTerms('xtt bandori');
+    const result = extractCandidateTerms('xtt bandori', 'g1', noopMemeGraph);
     expect(result).toContain('xtt');
   });
 
   it('case 3: returns at most 3 candidates', () => {
-    const result = extractCandidateTerms('aaa bbb ccc ddd eee');
+    const result = extractCandidateTerms('aaa bbb ccc ddd eee', 'g1', noopMemeGraph);
     expect(result.length).toBeLessThanOrEqual(3);
   });
 
   it('case 4: empty message returns empty array', () => {
-    expect(extractCandidateTerms('')).toEqual([]);
+    expect(extractCandidateTerms('', 'g1', noopMemeGraph)).toEqual([]);
   });
 
   it('case 4b: filters question fragments from direct term questions', () => {
-    expect(extractCandidateTerms('xtt是啥')).toEqual(['xtt']);
-    expect(extractCandidateTerms('什么是xtt')).toEqual(['xtt']);
-    expect(extractCandidateTerms('请问什么是xtt')).toEqual(['xtt']);
-    expect(extractCandidateTerms('请问ygfn是谁')).toEqual(['ygfn']);
-    expect(extractCandidateTerms('xtt什么意思')).toEqual(['xtt']);
+    expect(extractCandidateTerms('xtt是啥', 'g1', noopMemeGraph)).toEqual(['xtt']);
+    expect(extractCandidateTerms('什么是xtt', 'g1', noopMemeGraph)).toEqual(['xtt']);
+    expect(extractCandidateTerms('请问什么是xtt', 'g1', noopMemeGraph)).toEqual(['xtt']);
+    expect(extractCandidateTerms('请问ygfn是谁', 'g1', noopMemeGraph)).toEqual(['ygfn']);
+    expect(extractCandidateTerms('xtt什么意思', 'g1', noopMemeGraph)).toEqual(['xtt']);
   });
 });
 

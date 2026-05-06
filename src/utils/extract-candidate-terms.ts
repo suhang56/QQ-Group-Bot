@@ -1,3 +1,4 @@
+import type { IMemeGraphRepo } from '../storage/db.js';
 import { extractTokens } from '../modules/honest-gaps.js';
 import { hasJailbreakPattern } from './prompt-sanitize.js';
 
@@ -103,7 +104,15 @@ function isQuestionScaffolding(tok: string): boolean {
   return false;
 }
 
-export function extractCandidateTerms(content: string): string[] {
+// Matches a Latin shortform token eligible for meme_graph variant lookup:
+// all-alpha, 2-6 chars. Digits, underscores, hyphens, CJK — all disqualify.
+const SHORTFORM_RE = /^[A-Za-z]{2,6}$/;
+
+export function extractCandidateTerms(
+  content: string,
+  groupId: string,
+  memeGraph: IMemeGraphRepo,
+): string[] {
   const candidates: string[] = [];
 
   // Priority pass: pure-Chinese "X是谁 / X怎么样" style queries where the
@@ -114,8 +123,25 @@ export function extractCandidateTerms(content: string): string[] {
     candidates.push(cjkTerm);
   }
 
-  // Fallback pass: regular tokenization + scaffolding filter.
+  // Tokenization pass: split on ASCII/CJK boundaries and whitespace.
   const tokens = extractTokens(content);
+
+  // Shortform expansion pass: for each all-alpha 2-6 char token, look up
+  // meme_graph variants and insert CJK canonicals before the raw Latin token.
+  // Q4 lock: toLowerCase before findByVariant (JS .includes is case-sensitive).
+  for (const tok of tokens) {
+    if (SHORTFORM_RE.test(tok)) {
+      const lookupTerm = tok.toLowerCase();
+      const hits = memeGraph.findByVariant(groupId, lookupTerm);
+      for (const hit of hits) {
+        if (!candidates.includes(hit.canonical) && !hasJailbreakPattern(hit.canonical)) {
+          candidates.push(hit.canonical);
+        }
+      }
+    }
+  }
+
+  // Fallback pass: regular tokenization + scaffolding filter.
   for (const tok of tokens) {
     if (candidates.includes(tok)) continue;
     if (isQuestionScaffolding(tok)) continue;
