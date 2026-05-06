@@ -2911,8 +2911,8 @@ import type { SelfLearningModule } from '../src/modules/self-learning.js';
 
 function makeMockSelfLearning(factsOutput: string | { text: string; injectedFactIds: number[] } = ''): SelfLearningModule {
   const normalized = typeof factsOutput === 'string'
-    ? { text: factsOutput, injectedFactIds: [], matchedFactIds: [], pinnedOnly: false }
-    : { matchedFactIds: [], pinnedOnly: false, ...factsOutput };
+    ? { text: factsOutput, injectedFactIds: [], matchedFactIds: [], pinnedOnly: false, matchedFacts: [] }
+    : { matchedFactIds: [], pinnedOnly: false, matchedFacts: [], ...factsOutput };
   return {
     detectCorrection: vi.fn().mockResolvedValue(null),
     harvestPassiveKnowledge: vi.fn().mockResolvedValue(null),
