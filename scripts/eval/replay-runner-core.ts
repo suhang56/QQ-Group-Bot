@@ -24,6 +24,7 @@ import type { RealClaudeClientForReplay } from '../../src/ai/real-claude-client-
 import { isReplyerLiteEnvOn } from '../../src/config/reply-planner.js';
 import { ReplyPlanner } from '../../src/modules/reply-planner.js';
 import type { IReplyPlanner } from '../../src/modules/reply-planner.js';
+import { SelfLearningModule } from '../../src/modules/self-learning.js';
 import { createLogger } from '../../src/utils/logger.js';
 import type { GoldLabel } from './gold/types.js';
 import type {
@@ -63,17 +64,48 @@ export function constructChatModule(args: {
   tmpDbPath: string;
   botQQ: string;
   mockClaude: IClaudeClient;
-}): { chat: ChatModule; db: Database; replyPlanner: IReplyPlanner | null } {
+}): {
+  chat: ChatModule;
+  db: Database;
+  replyPlanner: IReplyPlanner | null;
+  selfLearning: SelfLearningModule | null;
+} {
   if (!args.tmpDbPath.includes('.tmp') && !args.tmpDbPath.includes('synthetic')) {
     throw new Error(
       `constructChatModule refuses to open a DB path that does not look tmp/synthetic: ${args.tmpDbPath}`,
     );
   }
   const db = new Database(args.tmpDbPath);
+
+  // Wire SelfLearningModule mirroring src/index.ts:239-243 production wiring,
+  // with embedder=null (Phase 2 sub-PR adds embedder) and researchEnabled=false
+  // (harness-only, no online network calls). Fail-open on construct error
+  // mirrors the R9 ReplyPlanner block below — harness keeps running so other
+  // tests still get coverage. Closes the chat.ts:2882-2884 silent-noop trap
+  // identified in r9-retrieval-signal-audit-2026-05-05.md.
+  let selfLearning: SelfLearningModule | null = null;
+  try {
+    selfLearning = new SelfLearningModule({
+      db,
+      claude: args.mockClaude,
+      botUserId: args.botQQ,
+      embeddingService: null,
+      researchEnabled: false,
+      logger: createLogger('self-learning-replay'),
+    });
+  } catch (err) {
+    createLogger('replay-runner-core').warn(
+      { err: String(err) },
+      'selfLearning not wired in harness — continuing without',
+    );
+    selfLearning = null;
+  }
+
   const chat = new ChatModule(args.mockClaude, db, {
     botUserId: args.botQQ,
     moodProactiveEnabled: false,
     deflectCacheEnabled: false,
+    selfLearning: selfLearning ?? undefined,
   });
 
   // R9: wire ReplyPlanner mirroring src/index.ts:629-637 production wiring,
@@ -98,7 +130,7 @@ export function constructChatModule(args: {
     }
   }
 
-  return { chat, db, replyPlanner };
+  return { chat, db, replyPlanner, selfLearning };
 }
 
 interface BuildReplayRowArgs {
