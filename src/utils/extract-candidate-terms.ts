@@ -115,12 +115,20 @@ export function extractCandidateTerms(
 ): string[] {
   const candidates: string[] = [];
 
-  // Priority pass: pure-Chinese "X是谁 / X怎么样" style queries where the
-  // tokenizer would leave the whole sentence as one token. Pull the term
-  // out via suffix regex and seed candidates with it first.
+  // Priority pass: pure-Chinese "X是谁 / X怎么样" style queries. Pull the term
+  // via suffix regex, then run CJK-variant expansion (C-3): look up meme_graph
+  // variants so a typo like 羊宫妃那 resolves to canonical 羊宫妃娜 before raw push.
   const cjkTerm = deriveCjkTerm(content);
   if (cjkTerm && !hasJailbreakPattern(cjkTerm)) {
-    candidates.push(cjkTerm);
+    const cjkHits = memeGraph.findByVariant(groupId, cjkTerm);
+    for (const hit of cjkHits) {
+      if (!candidates.includes(hit.canonical) && !hasJailbreakPattern(hit.canonical)) {
+        candidates.push(hit.canonical);
+      }
+    }
+    if (!candidates.includes(cjkTerm)) {
+      candidates.push(cjkTerm);
+    }
   }
 
   // Tokenization pass: split on ASCII/CJK boundaries and whitespace.
