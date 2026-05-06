@@ -56,29 +56,113 @@ export function extractTokens(content: string): Set<string> {
   return result;
 }
 
+// CN question-tail whitelist — sorted longest-first (ARCH Q3 lock)
+const CN_TAIL_WHITELIST: readonly string[] = [
+  '是啥意思',
+  '是什么意思',
+  '是哪一个',
+  '是哪一位',
+  '怎么回事',
+  '是什么啊',
+  '是谁啊',
+  '是谁呀',
+  '是谁呢',
+  '啥意思',
+  '什么意思',
+  '是哪个',
+  '是哪位',
+  '是什么',
+  '是谁',
+  '谁啊',
+  '是啥',
+];
+
+// CN leading-demonstrative whitelist — sorted longest-first (ARCH Q3 lock)
+const CN_LEAD_WHITELIST: readonly string[] = [
+  '那啥',
+  '这个',
+  '那个',
+  '这位',
+  '那位',
+];
+
+// Union set for post-wrap whitelist-collapse check (ARCH Q1 option a)
+const CN_WHITELIST_UNION: ReadonlySet<string> = new Set([
+  ...CN_TAIL_WHITELIST,
+  ...CN_LEAD_WHITELIST,
+]);
+
 /**
  * Sanitize raw user text into a FTS5-safe MATCH query.
- * Strategy: strip FTS5 operator chars, split on whitespace, drop bare
- * boolean keywords, wrap each remaining token in double quotes (phrase-literal
- * so unicode61 tokenizer never interprets them as operators), join with space
- * (implicit AND).
+ * Strategy: strip FTS5 operator chars, strip CJK question tails and leading
+ * demonstratives (trigram tokenizer — phrase-literal wrapping), split on
+ * whitespace, drop bare boolean keywords, wrap each remaining token in double
+ * quotes (implicit AND), join with space.
  *
  *   '偶像大师'       -> '"偶像大师"'
+ *   '高松灯是谁'     -> '"高松灯"'         // tail stripped
+ *   '这个高松灯是谁' -> '"高松灯"'         // demonstrative + tail stripped
  *   'foo-bar baz'   -> '"foobar" "baz"'   // hyphen stripped
- *   'live "ticket"' -> '"live" "ticket"'
  *   '*'             -> ''                  // empty after strip
  */
 export function sanitizeFtsQuery(raw: string): string {
   if (!raw || typeof raw !== 'string') return '';
-  // Strip FTS5 operator chars: " * : ^ ( ) - +
-  const cleaned = raw.replace(/["*:^()\-+]/g, '').trim();
-  if (!cleaned) return '';
-  const tokens = cleaned
+
+  // Step 2: strip FTS5 operator chars: " * : ^ ( ) - +
+  let s = raw.replace(/["*:^()\-+]/g, '').trim();
+  if (!s) return '';
+
+  // Step 3: strip trailing CJK punctuation
+  s = s.replace(/[？！。，]+$/, '');
+
+  // Step 4: CN question-tail strip (suffix, longest-first, ≥2-char leftover guard)
+  for (const tail of CN_TAIL_WHITELIST) {
+    if (s.endsWith(tail)) {
+      const leftover = s.slice(0, s.length - tail.length);
+      if (leftover.length >= 2) {
+        s = leftover;
+      }
+      break;
+    }
+  }
+
+  // Step 5: CN leading-demonstrative strip (prefix, longest-first, ≥2-char leftover guard)
+  for (const lead of CN_LEAD_WHITELIST) {
+    if (s.startsWith(lead)) {
+      const leftover = s.slice(lead.length);
+      if (leftover.length >= 2) {
+        s = leftover;
+      }
+      break;
+    }
+  }
+
+  // Step 6: trailing CJK punctuation re-run (idempotent)
+  s = s.replace(/[？！。，]+$/, '');
+
+  // Step 7: empty/whitespace guard
+  if (!s.trim()) return '';
+
+  // Step 8: split on whitespace, drop bool keywords, filter empty tokens
+  const tokens = s
     .split(/\s+/)
     .map(t => t.replace(/^(AND|OR|NOT|NEAR)$/i, ''))
     .filter(t => t.length > 0);
+
+  // Step 9: empty tokens guard
   if (tokens.length === 0) return '';
-  return tokens.map(t => `"${t}"`).join(' ');
+
+  // Step 10: wrap each token in phrase-literal quotes, join (implicit AND)
+  const result = tokens.map(t => `"${t}"`).join(' ');
+
+  // ARCH Q1 option (a): post-wrap whitelist-collapse — if the entire output is
+  // a single whitelist entry wrapped in quotes, the input was tail/demonstrative-only;
+  // return '' so callers treat as 0-hit (A5 acceptance criterion).
+  if (tokens.length === 1 && CN_WHITELIST_UNION.has(tokens[0]!)) {
+    return '';
+  }
+
+  return result;
 }
 
 /** Extract meaningful keywords from a message for corpus retrieval. */
