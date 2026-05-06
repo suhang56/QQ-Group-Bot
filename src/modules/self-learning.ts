@@ -115,8 +115,8 @@ const MIN_CORRECTION_LENGTH = 3;
  * store. First-5 valid structured terms in source order, NOT trust-sorted.
  * Cap of 5 keeps overhead bounded (≤5 indexed DB reads per call).
  */
-function extractCandidateTermsForFacts(text: string): string[] {
-  const tokens = extractCandidateTerms(text);
+function extractCandidateTermsForFacts(text: string, groupId: string, memeGraph: IMemeGraphRepo): string[] {
+  const tokens = extractCandidateTerms(text, groupId, memeGraph);
   const out: string[] = [];
   const seen = new Set<string>();
   for (const t of tokens) {
@@ -405,7 +405,7 @@ export class SelfLearningModule {
     // NOT trust-sorted — we want fan-out, dedup happens in the fuse merge below.
     const exactPrePassIds = new Set<number>();
     const exactPrePassFacts: LearnedFact[] = [];
-    for (const term of extractCandidateTermsForFacts(triggerText)) {
+    for (const term of extractCandidateTermsForFacts(triggerText, groupId, this.db.memeGraph)) {
       const rows = this.db.learnedFacts.findActiveByTopicTerm(groupId, term);
       for (const row of rows) {
         if (!exactPrePassIds.has(row.id)) {

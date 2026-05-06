@@ -46,6 +46,9 @@ function makeMockDb(): Database {
     jargon: {
       listActive: vi.fn().mockReturnValue([]),
     },
+    memeGraph: {
+      findByVariant: vi.fn().mockReturnValue([]),
+    },
     rawDb: {} as never,
   } as unknown as Database;
 }

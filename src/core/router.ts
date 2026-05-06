@@ -763,7 +763,7 @@ export class Router implements IRouter {
           let skipStickerFirst = skipTimingAndSticker
             || isDirectQuestion(msg.content) || isGroundedOpinionQuestion(msg.content);
           if (!skipStickerFirst) {
-            const cands = extractCandidateTerms(msg.content)
+            const cands = extractCandidateTerms(msg.content, msg.groupId, this.db.memeGraph)
               .filter(isValidStructuredTerm)
               .slice(0, 3);
             for (const term of cands) {
@@ -1191,7 +1191,7 @@ export class Router implements IRouter {
 
   // P5: cheap DB probe for known fact terms (≤3 candidates, no BM25/vector)
   private _hasKnownFactTermPreview(groupId: string, content: string): boolean {
-    const cands = extractCandidateTerms(content).filter(isValidStructuredTerm).slice(0, 3);
+    const cands = extractCandidateTerms(content, groupId, this.db.memeGraph).filter(isValidStructuredTerm).slice(0, 3);
     for (const term of cands) {
       try {
         if (this.db.learnedFacts.findActiveByTopicTerm(groupId, term).length > 0) return true;
